@@ -23,6 +23,8 @@ type Client struct {
 	pollInterval   time.Duration
 	enqueueRetries int           // extra Enqueue attempts after the first on transient failure
 	enqueueBackoff time.Duration // initial delay between Enqueue retries (doubles each time)
+	searchRetries  int           // extra Search attempts when a search returns zero results
+	searchBackoff  time.Duration // delay between empty-result search retries
 }
 
 // New constructs a slskd client for the given base URL and API key.
@@ -34,6 +36,8 @@ func New(baseURL, apiKey string) *Client {
 		pollInterval:   time.Second,
 		enqueueRetries: 3,
 		enqueueBackoff: 500 * time.Millisecond,
+		searchRetries:  2,
+		searchBackoff:  time.Second,
 	}
 }
 
@@ -202,10 +206,32 @@ type searchResponse struct {
 	Files             []Result `json:"files"`
 }
 
-// Search starts an async slskd search, polls until it completes or timeout, then
-// returns the peers' result files (locked files skipped), each enriched with its
-// peer's upload-availability signals. The search is deleted from slskd afterward.
+// Search runs a slskd search, retrying when it comes back empty. slskd's search
+// database intermittently drops every response — an internal concurrency error
+// that surfaces as zero results, not an HTTP error, so the same query succeeds
+// moments later. Up to searchRetries extra attempts are made on an empty result
+// before concluding the query genuinely has no matches. A non-empty result or a
+// real error returns immediately; the caller's context bounds the total time.
 func (c *Client) Search(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
+	var out []Result
+	var err error
+	for attempt := 0; ; attempt++ {
+		out, err = c.searchOnce(ctx, query, timeout)
+		if err != nil || len(out) > 0 || attempt >= c.searchRetries || ctx.Err() != nil {
+			return out, err
+		}
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(c.searchBackoff):
+		}
+	}
+}
+
+// searchOnce starts one async slskd search, polls until it completes or timeout,
+// then returns the peers' result files (locked files skipped), each enriched with
+// its peer's upload-availability signals. The search is deleted from slskd after.
+func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

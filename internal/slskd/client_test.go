@@ -155,6 +155,79 @@ func TestSearchPollsThenReturnsFlattenedResults(t *testing.T) {
 	}
 }
 
+func TestSearchRetriesOnEmptyResults(t *testing.T) {
+	var posts, respCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			posts++
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			respCalls++
+			// slskd's search DB intermittently drops all responses: first search
+			// comes back empty, a retry of the same query succeeds.
+			if respCalls == 1 {
+				w.Write([]byte(`[]`))
+			} else {
+				w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,
+				  "files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+			}
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = time.Millisecond
+	c.searchBackoff = time.Millisecond
+	got, err := c.Search(context.Background(), "q", time.Second)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected retry to recover results, got %d", len(got))
+	}
+	if posts < 2 {
+		t.Errorf("expected a second search after an empty result, posts=%d", posts)
+	}
+}
+
+func TestSearchGivesUpAfterRetriesWhenEmpty(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			posts++
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			w.Write([]byte(`[]`)) // genuinely no matches: stays empty every attempt
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = time.Millisecond
+	c.searchBackoff = time.Millisecond
+	got, err := c.Search(context.Background(), "q", time.Second)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty result, got %d", len(got))
+	}
+	// Default is 2 retries → 3 total attempts, then give up (assume no matches).
+	if posts != 3 {
+		t.Errorf("expected 3 total search attempts, got %d", posts)
+	}
+}
+
 func TestSearchReturnsPartialOnTimeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
