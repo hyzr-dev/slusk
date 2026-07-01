@@ -1,0 +1,99 @@
+name: Release
+
+# Auto-tagging based on conventional commits since the last tag.
+#   feat: → minor bump  (1.2.9 → 1.3.0)
+#   fix:  → patch bump  (1.2.9 → 1.2.10)
+#   "!:" or "BREAKING CHANGE" → major bump (1.2.9 → 2.0.0)
+# Other prefixes (chore:, docs:, ci:, refactor:, style:, test:) do not bump.
+# Skipped quietly when no releasable commits are found.
+#
+# This is a Go repo with no package.json to hold the version — so the current
+# version is read from the latest v* git tag and only a new tag is pushed
+# (no version-file commit).
+#
+# Pushing the tag triggers deploy.yml (PACKAGES_TOKEN is a PAT so cross-workflow
+# triggers fire).
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "Release Bot"
+          git config user.email "noreply@shcizo.se"
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          set -euo pipefail
+
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            RANGE=""
+            echo "No previous v* tag found — scanning all commits."
+          else
+            RANGE="${LAST_TAG}..HEAD"
+            echo "Scanning commits since ${LAST_TAG}."
+          fi
+
+          BUMP="none"
+          while IFS= read -r subject; do
+            [ -z "$subject" ] && continue
+            if echo "$subject" | grep -qE "^[a-z]+(\([^)]+\))?!:|BREAKING[ -]CHANGE"; then
+              BUMP="major"
+              break
+            elif echo "$subject" | grep -qE "^feat(\([^)]+\))?:"; then
+              [ "$BUMP" != "major" ] && BUMP="minor"
+            elif echo "$subject" | grep -qE "^fix(\([^)]+\))?:"; then
+              [ "$BUMP" = "none" ] && BUMP="patch"
+            fi
+            # --format (tformat) terminates every line with a newline. Plain
+            # --pretty=format omits the trailing newline, so `read` silently drops
+            # the last commit — which zeroed the bump whenever the range was a
+            # single commit (the usual case for a clean one-feature merge).
+          done < <(git log ${RANGE} --no-merges --format=%s)
+
+          echo "Determined bump: ${BUMP}"
+          echo "bump=${BUMP}" >> "$GITHUB_OUTPUT"
+          echo "last_tag=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute new version
+        if: steps.bump.outputs.bump != 'none'
+        id: version
+        run: |
+          set -euo pipefail
+          LAST_TAG="${{ steps.bump.outputs.last_tag }}"
+          CURRENT="${LAST_TAG#v}"
+          CURRENT="${CURRENT:-0.0.0}"
+          IFS=. read -r MAJ MIN PAT <<< "$CURRENT"
+          case "${{ steps.bump.outputs.bump }}" in
+            major) NEW="$((MAJ+1)).0.0" ;;
+            minor) NEW="${MAJ}.$((MIN+1)).0" ;;
+            patch) NEW="${MAJ}.${MIN}.$((PAT+1))" ;;
+          esac
+          echo "Bumping ${CURRENT} → ${NEW}"
+          echo "new=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push
+        if: steps.bump.outputs.bump != 'none'
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.version.outputs.new }}"
+          git tag "v${NEW}"
+          git push origin "v${NEW}"
+
+      - name: No-op summary
+        if: steps.bump.outputs.bump == 'none'
+        run: echo "No feat/fix/breaking commits since last tag — no release."
