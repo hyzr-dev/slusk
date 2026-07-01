@@ -116,6 +116,8 @@ func (d *Discoverer) startNewJobs(ctx context.Context, now time.Time) error {
 // candidate budget is exhausted.
 func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.Time) error {
 	if job.CandidatesTried >= d.p.MaxCandidates {
+		d.log().Info("candidates exhausted, marking album failed",
+			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID, "candidates_tried", job.CandidatesTried)
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateFailed, now)
 	}
 	// Which usernames have we already tried for this album?
@@ -137,6 +139,9 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 		return err
 	}
 	candidates := d.p.Ranker.Rank(results)
+	d.log().Info("searched album",
+		"album_job", job.ID, "query", album.ArtistName+" "+album.Title,
+		"results", len(results), "candidates", len(candidates))
 	for _, cand := range candidates {
 		if tried[cand.Username] {
 			continue
@@ -166,11 +171,16 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 		if err := d.p.Store.IncrementCandidatesTried(ctx, job.ID, now); err != nil {
 			return err
 		}
+		d.log().Info("enqueued candidate, downloading",
+			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID,
+			"user", cand.Username, "files", len(cand.Files))
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateDownloading, now)
 	}
 	// No untried candidate available now: count this exhausted tick toward the
 	// candidate budget and back off. Once the budget is spent, the next tick's
 	// budget check (top of startJob) marks the album FAILED.
+	d.log().Info("no untried candidate available, cooling down",
+		"album_job", job.ID, "candidates_tried", job.CandidatesTried+1)
 	if err := d.p.Store.IncrementCandidatesTried(ctx, job.ID, now); err != nil {
 		return err
 	}
@@ -224,6 +234,7 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 		}
 		switch {
 		case anyFailed:
+			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
 			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.CandidateBackoff), now); err != nil {
 				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
 			}
@@ -231,6 +242,7 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
 			}
 		case allDone:
+			d.log().Info("download complete, verifying", "album_job", job.ID)
 			_ = d.p.Store.AdvanceJobState(ctx, job.ID, core.StateVerifying, now)
 		}
 	}
@@ -296,6 +308,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		if err := d.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 			return err
 		}
+		d.log().Info("imported album, completed", "album_job", job.ID, "files", len(importable))
 		_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 		if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
 			d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)

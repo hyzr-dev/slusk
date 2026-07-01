@@ -34,12 +34,19 @@ func NewReconciler(peers PeerNetwork, store JobStore) *Reconciler {
 func mapSlskdState(s string) core.TransferState {
 	l := strings.ToLower(s)
 	switch {
-	case strings.Contains(l, "completed") && strings.Contains(l, "succeeded"):
-		return core.TransferCompleted
-	case strings.Contains(l, "errored"), strings.Contains(l, "failed"):
-		return core.TransferErrored
-	case strings.Contains(l, "cancelled"), strings.Contains(l, "canceled"):
-		return core.TransferCancelled
+	case strings.Contains(l, "completed"):
+		// slskd reports every terminal outcome as "Completed, <Outcome>": Succeeded,
+		// Cancelled, TimedOut, Errored, Rejected, or Aborted. Only Succeeded is a win;
+		// Cancelled is our/its cancellation; everything else (timed out, rejected,
+		// aborted, errored) is a terminal failure.
+		switch {
+		case strings.Contains(l, "succeeded"):
+			return core.TransferCompleted
+		case strings.Contains(l, "cancelled"), strings.Contains(l, "canceled"):
+			return core.TransferCancelled
+		default:
+			return core.TransferErrored
+		}
 	case strings.Contains(l, "inprogress"):
 		return core.TransferInProgress
 	default:
