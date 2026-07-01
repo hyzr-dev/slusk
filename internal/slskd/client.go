@@ -171,6 +171,11 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	for {
 		var st searchState
 		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(started.ID), nil, &st); err != nil {
+			// If the timeout/cancel fired during the poll GET, return whatever
+			// responses exist rather than a bare context error.
+			if ctx.Err() != nil {
+				return c.searchResponses(context.Background(), started.ID)
+			}
 			return nil, err
 		}
 		if st.IsComplete {

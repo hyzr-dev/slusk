@@ -95,3 +95,29 @@ func TestSearchPollsThenReturnsFlattenedResults(t *testing.T) {
 		t.Errorf("per-user reliability fields not propagated: %+v", got[0])
 	}
 }
+
+func TestSearchReturnsPartialOnTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			// never completes -> forces the timeout path
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+	got, err := c.Search(context.Background(), "q", 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("timeout should return partial results, not error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected partial results on timeout, got %d", len(got))
+	}
+}
