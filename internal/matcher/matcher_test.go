@@ -9,9 +9,9 @@ import (
 
 func TestRankPrefersHigherBitrateFlac(t *testing.T) {
 	w := config.Weights{Format: 1.0, Bitrate: 1.0, Reliability: 0, FileCount: 1.0}
-	s := NewWeighted(w)
+	s := NewWeighted(w, 192)
 	results := []slskd.Result{
-		{Username: "low", Filename: "a.mp3", BitRate: 128},
+		{Username: "low", Filename: "a.mp3", BitRate: 200},
 		{Username: "high", Filename: "a.flac", BitRate: 1000},
 	}
 	ranked := s.Rank(results)
@@ -24,7 +24,7 @@ func TestRankPrefersHigherBitrateFlac(t *testing.T) {
 }
 
 func TestRankGroupsByUser(t *testing.T) {
-	s := NewWeighted(config.Weights{Format: 1, FileCount: 1})
+	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
 	results := []slskd.Result{
 		{Username: "bob", Filename: "01.flac", BitRate: 900},
 		{Username: "bob", Filename: "02.flac", BitRate: 900},
@@ -35,5 +35,34 @@ func TestRankGroupsByUser(t *testing.T) {
 	}
 	if len(ranked[0].Files) != 2 {
 		t.Errorf("expected 2 files for bob, got %d", len(ranked[0].Files))
+	}
+}
+
+func TestRankDropsBelowBitrateFloor(t *testing.T) {
+	s := NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 192)
+	results := []slskd.Result{
+		{Username: "lowmp3", Filename: "a.mp3", BitRate: 128}, // below floor -> dropped
+		{Username: "flac", Filename: "a.flac", BitRate: 0},    // lossless -> kept even with 0 bitrate
+	}
+	ranked := s.Rank(results)
+	for _, c := range ranked {
+		if c.Username == "lowmp3" {
+			t.Errorf("128kbps mp3 should be dropped by the 192 floor")
+		}
+	}
+	if len(ranked) != 1 || ranked[0].Username != "flac" {
+		t.Fatalf("expected only the flac candidate, got %+v", ranked)
+	}
+}
+
+func TestRankRewardsReliableUploader(t *testing.T) {
+	s := NewWeighted(config.Weights{Format: 1, Bitrate: 0, Reliability: 10, FileCount: 1}, 192)
+	results := []slskd.Result{
+		{Username: "busy", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: false, QueueLength: 20},
+		{Username: "free", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: true, QueueLength: 0},
+	}
+	ranked := s.Rank(results)
+	if ranked[0].Username != "free" {
+		t.Errorf("free-slot uploader should rank first, got %q", ranked[0].Username)
 	}
 }

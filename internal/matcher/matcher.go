@@ -23,14 +23,16 @@ type Scorer interface {
 	Rank(results []slskd.Result) []Candidate
 }
 
-// NewWeighted returns a Scorer that scores by format, bitrate, and file count
-// using the supplied weights. (Reliability is wired for future per-user history.)
-func NewWeighted(w config.Weights) Scorer {
-	return &weighted{w: w}
+// NewWeighted returns a Scorer that drops files below the quality floor (lossless
+// always kept; lossy kept only if bitRate >= minBitrate) and scores the rest by
+// format, bitrate, file count, and the peer's upload reliability.
+func NewWeighted(w config.Weights, minBitrate int) Scorer {
+	return &weighted{w: w, minBitrate: minBitrate}
 }
 
 type weighted struct {
-	w config.Weights
+	w          config.Weights
+	minBitrate int
 }
 
 // formatScore returns a 0..1 quality score for a filename's extension.
@@ -46,9 +48,33 @@ func formatScore(filename string) float64 {
 	}
 }
 
+// passesFloor reports whether a file meets the quality floor. Lossless formats
+// (score 1.0) are always kept; lossy files need bitRate >= minBitrate.
+func (x *weighted) passesFloor(r slskd.Result) bool {
+	if formatScore(r.Filename) >= 1.0 {
+		return true
+	}
+	return r.BitRate >= x.minBitrate
+}
+
+// reliabilityScore maps a peer's upload signals to a 0..1 factor.
+func reliabilityScore(r slskd.Result) float64 {
+	score := 0.0
+	if r.HasFreeUploadSlot {
+		score += 0.7
+	}
+	if r.QueueLength == 0 {
+		score += 0.3
+	}
+	return score
+}
+
 func (x *weighted) Rank(results []slskd.Result) []Candidate {
 	byUser := map[string][]slskd.Result{}
 	for _, r := range results {
+		if !x.passesFloor(r) {
+			continue
+		}
 		byUser[r.Username] = append(byUser[r.Username], r)
 	}
 	var candidates []Candidate
@@ -59,6 +85,7 @@ func (x *weighted) Rank(results []slskd.Result) []Candidate {
 			score += x.w.Bitrate * (float64(f.BitRate) / 1000.0)
 		}
 		score += x.w.FileCount * float64(len(files))
+		score += x.w.Reliability * reliabilityScore(files[0]) // per-user, same across files
 		candidates = append(candidates, Candidate{Username: user, Files: files, Score: score})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
