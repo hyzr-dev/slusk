@@ -15,7 +15,13 @@ stall_timeout = "5m"
 search_timeout = "30s"
 min_bitrate = 192
 max_concurrent_searches = 2
+# Wait before re-searching an album when NO untried candidate is left (nothing
+# new to try soon).
 candidate_backoff = "10m"
+# Wait before trying the NEXT candidate after one fails to download or is rejected
+# on import. Kept short: other candidates are usually available immediately, so a
+# single peer timeout should not stall the album for long.
+failed_candidate_backoff = "30s"
 failed_retry_after = "24h"
 
 [engine.weights]

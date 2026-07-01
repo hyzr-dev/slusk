@@ -164,7 +164,8 @@ func newDiscoParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (Discov
 		Music: music, Peers: peers, Store: st, Ranker: matcher.NewWeighted(defaultWeights(), 192),
 		CompleteDir: "/music/slskd-downloads", SearchTimeout: time.Second,
 		TransferDeadline: 30 * time.Minute, CandidateBackoff: 10 * time.Minute,
-		FailedRetryAfter: 24 * time.Hour, MaxCandidates: 3, Batch: 10,
+		FailedCandidateBackoff: 30 * time.Second,
+		FailedRetryAfter:       24 * time.Hour, MaxCandidates: 3, Batch: 10,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}, st
 }
@@ -269,6 +270,15 @@ func TestDiscoverFailedTransferCooldowns(t *testing.T) {
 	for _, j := range jobs {
 		if j.ID == jobID {
 			found = true
+			// A failed candidate must use the SHORT backoff: there are usually
+			// more untried candidates to try immediately, so we should not wait
+			// the long "nothing new to try" backoff before the next attempt.
+			if j.NextAttemptAt == nil {
+				t.Fatalf("cooldown job missing next_attempt_at")
+			}
+			if got := j.NextAttemptAt.Sub(now); got != p.FailedCandidateBackoff {
+				t.Errorf("failed candidate should cool down for the short backoff %v, got %v", p.FailedCandidateBackoff, got)
+			}
 		}
 	}
 	if !found {
@@ -336,6 +346,14 @@ func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
 	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
 		t.Fatalf("exhausted-candidate tick should increment candidates_tried to 1 and cooldown, got %+v", jobs)
+	}
+	// No untried candidate is available, so this uses the LONG backoff: there is
+	// nothing new to try, so re-searching soon would just waste search budget.
+	if jobs[0].NextAttemptAt == nil {
+		t.Fatalf("cooldown job missing next_attempt_at")
+	}
+	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
+		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
 	}
 }
 
