@@ -66,3 +66,24 @@ func TestRankRewardsReliableUploader(t *testing.T) {
 		t.Errorf("free-slot uploader should rank first, got %q", ranked[0].Username)
 	}
 }
+
+func TestRankGroupsPerReleaseNotPerUser(t *testing.T) {
+	// One user sharing two releases of the same album (FLAC + MP3) must yield TWO
+	// candidates (one per directory), so we never enqueue both versions at once.
+	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
+	results := []slskd.Result{
+		{Username: "tau", Filename: `music\Belvedere\Seven Years FLAC\01.flac`, BitRate: 900},
+		{Username: "tau", Filename: `music\Belvedere\Seven Years FLAC\02.flac`, BitRate: 900},
+		{Username: "tau", Filename: `music\Belvedere\Seven Years MP3\01.mp3`, BitRate: 320},
+		{Username: "tau", Filename: `music\Belvedere\Seven Years MP3\02.mp3`, BitRate: 320},
+	}
+	ranked := s.Rank(results)
+	if len(ranked) != 2 {
+		t.Fatalf("expected 2 candidates (one per release directory), got %d", len(ranked))
+	}
+	for _, c := range ranked {
+		if len(c.Files) != 2 {
+			t.Errorf("each release candidate should have 2 files, got %d", len(c.Files))
+		}
+	}
+}
