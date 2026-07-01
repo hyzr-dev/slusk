@@ -1,0 +1,9 @@
+# Secrets — never commit real config with API keys
+config.toml
+.env
+
+# Local database and build artifacts
+*.db
+*.db-wal
+*.db-shm
+/slskdarr
