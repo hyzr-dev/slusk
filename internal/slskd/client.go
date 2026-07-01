@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,15 +17,47 @@ import (
 
 // Client talks to a slskd instance.
 type Client struct {
-	baseURL      string
-	apiKey       string
-	http         *http.Client
-	pollInterval time.Duration
+	baseURL        string
+	apiKey         string
+	http           *http.Client
+	pollInterval   time.Duration
+	enqueueRetries int           // extra Enqueue attempts after the first on transient failure
+	enqueueBackoff time.Duration // initial delay between Enqueue retries (doubles each time)
 }
 
 // New constructs a slskd client for the given base URL and API key.
 func New(baseURL, apiKey string) *Client {
-	return &Client{baseURL: baseURL, apiKey: apiKey, http: &http.Client{Timeout: 30 * time.Second}, pollInterval: time.Second}
+	return &Client{
+		baseURL:        baseURL,
+		apiKey:         apiKey,
+		http:           &http.Client{Timeout: 30 * time.Second},
+		pollInterval:   time.Second,
+		enqueueRetries: 3,
+		enqueueBackoff: 500 * time.Millisecond,
+	}
+}
+
+// apiError is a non-2xx HTTP response from slskd. It carries the status code so
+// callers can distinguish retryable server errors (5xx) from permanent client
+// errors (4xx).
+type apiError struct {
+	method, path string
+	status       int
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("slskd %s %s: status %d", e.method, e.path, e.status)
+}
+
+// isRetryable reports whether an error from do is worth retrying: transport
+// errors (timeouts, refused connections) and slskd 5xx responses are transient;
+// a 4xx is our own bad request and will never succeed on retry.
+func isRetryable(err error) bool {
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return ae.status >= 500
+	}
+	return true
 }
 
 // Result is one search result file offered by a peer, enriched with the peer's
@@ -73,7 +106,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("slskd %s %s: status %d", method, path, resp.StatusCode)
+		return &apiError{method: method, path: path, status: resp.StatusCode}
 	}
 	if out != nil {
 		// Tolerate an empty body (e.g. 201 Created with no content): EOF is not
@@ -90,13 +123,35 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // and a zero size makes every transfer fail immediately (TimedOut/Cancelled).
 // The id may be empty if slskd's response carries no body; the reconciler then
 // backfills it via the (username, filename) fallback key.
+//
+// Transient failures (request timeout, slskd 5xx) are retried with exponential
+// backoff so one flaky POST does not doom an otherwise-good candidate — slskd
+// stalls enqueues under load, and abandoning the whole release for a single
+// stall is wasteful. Retry can duplicate a request whose response was lost after
+// slskd already accepted it, but slskd keys downloads by (username, filename) so
+// a duplicate resolves to the same transfer; the reconciler's fallback key does
+// the same on our side. The caller's context bounds the total wait.
 func (c *Client) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
+	body := []map[string]any{{"filename": filename, "size": size}}
+	path := "/api/v0/transfers/downloads/" + url.PathEscape(username)
+	backoff := c.enqueueBackoff
 	var resp struct {
 		ID string `json:"id"`
 	}
-	body := []map[string]any{{"filename": filename, "size": size}}
-	err := c.do(ctx, http.MethodPost, "/api/v0/transfers/downloads/"+url.PathEscape(username), body, &resp)
-	return resp.ID, err
+	var err error
+	for attempt := 0; ; attempt++ {
+		resp.ID = ""
+		err = c.do(ctx, http.MethodPost, path, body, &resp)
+		if err == nil || attempt >= c.enqueueRetries || !isRetryable(err) {
+			return resp.ID, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
 }
 
 // downloadsResponse mirrors slskd's grouped-by-user download listing.
