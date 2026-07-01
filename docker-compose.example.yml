@@ -1,47 +1,49 @@
-# Example docker-compose service for slskdarr.
-# Copy the relevant bits into your existing arr-stack compose, or run this file
-# standalone. slskdarr never touches the media files (it only passes the
-# completed-downloads path to Lidarr's import API), so it needs NO media mount.
+# docker-compose for slskdarr.
+# slskdarr never touches the media files (it only passes the completed-downloads
+# path to Lidarr's import API), so it needs NO media mount — just config + a small
+# volume for its SQLite DB + network access to Lidarr/slskd.
+#
+# The DB lives in a NAMED VOLUME (not a host bind mount): bind mounts fail on
+# Docker Desktop for Mac (virtiofs UID mapping), and a fresh named volume is
+# root-owned. The init service below chowns the volume so slskdarr can run as a
+# non-root UID. This works on both Docker Desktop and a Linux server.
 
 services:
+  # One-shot: make the data volume writable by the non-root slskdarr user, then exit.
+  slskdarr-init:
+    image: busybox
+    command: chown -R 1000:1000 /data
+    volumes:
+      - slskdarr-data:/data
+
   slskdarr:
-    # Build the image from this repo (works on the target arch, incl. arm64):
     build: .
-    # ...or, if you build/pull separately, replace `build: .` with:
-    # image: slskdarr:latest
+    # ...or, if you build/pull separately: image: slskdarr:latest
     container_name: slskdarr
     restart: unless-stopped
 
-    # The distroless image runs as UID 65532 by default. Override it to a UID
-    # that owns ./data below (e.g. your usual arr PUID). The binary is static and
-    # needs no user account, so any UID works.
+    # Non-root. Set this to your usual arr PUID:PGID; must match the init chown above.
     user: "1000:1000"
 
+    depends_on:
+      slskdarr-init:
+        condition: service_completed_successfully
+
     volumes:
-      # Your real config with API keys, mounted read-only:
       - ./config.toml:/config/config.toml:ro
-      # SQLite job/transfer state lives here — must be writable by `user` above.
-      # Create it first:  mkdir -p data && sudo chown 1000:1000 data
-      - ./data:/data
+      - slskdarr-data:/data
 
     ports:
       # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
       - "9090:9090"
 
-    # No media/downloads mount is required.
+volumes:
+  slskdarr-data:
 
-# --- Option: run it inside your existing arr-stack compose ---
-# If slskd and lidarr are services in the SAME compose project, put slskdarr on
-# their network and use service-name URLs in config.toml instead of LAN IPs:
-#
-#   [lidarr]
-#   url = "http://lidarr:8686"
-#   [slskd]
-#   url = "http://slskd:5030"
-#
-# and add:
-#   networks:
-#     - arr
+# --- Option: run inside your existing arr-stack compose ---
+# If slskd/lidarr are services in the SAME compose project, put slskdarr on their
+# network and use service-name URLs in config.toml (http://lidarr:8686, etc.):
+#   networks: [arr]
 # networks:
 #   arr:
-#     external: true   # or however your stack defines it
+#     external: true
