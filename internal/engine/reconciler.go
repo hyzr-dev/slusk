@@ -64,15 +64,52 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		liveByFallback[t.Username+"\x00"+t.Filename] = t
 	}
 
+	// matchLive finds the live slskd transfer for one of our persisted rows,
+	// preferring the strong key (slskd id) and falling back to (username, filename).
+	matchLive := func(tr core.Transfer) (slskd.Transfer, bool) {
+		if tr.SlskdID != "" {
+			if lt, ok := liveByID[tr.SlskdID]; ok {
+				return lt, true
+			}
+		}
+		lt, ok := liveByFallback[tr.Username+"\x00"+tr.Filename]
+		return lt, ok
+	}
+
+	// Deadline enforcement runs FIRST: a past-deadline transfer must be cancelled
+	// regardless of what the live list says, and taking it here keeps the active
+	// loop from also processing (and double-counting) the same row.
+	handled := map[int64]bool{}
+	overdue, err := r.store.TransfersPastDeadline(ctx, now)
+	if err != nil {
+		return stats, err
+	}
+	for _, tr := range overdue {
+		// It is ours even if the cancel fails, so it is never counted as unknown.
+		if lt, ok := matchLive(tr); ok {
+			ourIDs[lt.ID] = true
+		}
+		if tr.SlskdID != "" {
+			if err := r.peers.Cancel(ctx, tr.Username, tr.SlskdID); err != nil {
+				// Cancel failed: leave the row non-terminal so the next pass retries.
+				continue
+			}
+		}
+		_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, tr.BytesDone, tr.BytesTotal, now)
+		stats.Cancelled++
+		handled[tr.ID] = true
+	}
+
+	// Active reconciliation for everything not already resolved by the deadline pass.
 	active, err := r.store.ActiveTransfers(ctx)
 	if err != nil {
 		return stats, err
 	}
 	for _, tr := range active {
-		lt, ok := liveByID[tr.SlskdID]
-		if !ok && tr.SlskdID == "" {
-			lt, ok = liveByFallback[tr.Username+"\x00"+tr.Filename]
+		if handled[tr.ID] {
+			continue
 		}
+		lt, ok := matchLive(tr)
 		if !ok {
 			// In our DB, gone from slskd: lost.
 			_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
@@ -88,19 +125,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		default:
 			stats.Adopted++
 		}
-	}
-
-	// Deadline enforcement: cancel overdue transfers in slskd.
-	overdue, err := r.store.TransfersPastDeadline(ctx, now)
-	if err != nil {
-		return stats, err
-	}
-	for _, tr := range overdue {
-		if tr.SlskdID != "" {
-			_ = r.peers.Cancel(ctx, tr.Username, tr.SlskdID)
-		}
-		_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, tr.BytesDone, tr.BytesTotal, now)
-		stats.Cancelled++
 	}
 
 	// Count transfers slskd knows about that are not ours (left untouched).
