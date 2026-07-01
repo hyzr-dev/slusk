@@ -135,7 +135,9 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 			slskdID, err := d.p.Peers.Enqueue(ctx, cand.Username, f.Filename)
 			if err != nil {
 				d.log().Error("enqueue failed", "user", cand.Username, "file", f.Filename, "err", err)
-				_ = d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now)
+				if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
+					d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+				}
 				continue
 			}
 			_ = d.p.Store.AttachTransferID(ctx, tid, slskdID, now)
@@ -241,6 +243,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// were already imported (e.g. a crash between a prior successful
 			// ExecuteManualImport and this state write). Treat it as done so
 			// advanceImporting is idempotent across restarts.
+			d.log().Info("empty folder treated as already imported", "album_job", job.ID, "folder", folder)
 			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
 				d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)

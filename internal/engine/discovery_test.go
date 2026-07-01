@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -35,14 +36,18 @@ func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []lidarr.Manu
 }
 
 type fakeSearcher struct {
-	results  []slskd.Result
-	enqueued []string
+	results    []slskd.Result
+	enqueued   []string
+	enqueueErr error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
 	return f.results, nil
 }
 func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string) (string, error) {
+	if f.enqueueErr != nil {
+		return "", f.enqueueErr
+	}
 	f.enqueued = append(f.enqueued, filename)
 	return "slskd-" + filename, nil
 }
@@ -273,5 +278,30 @@ func TestDiscoverExhaustedCandidatesFails(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateFailed, 10)
 	if len(jobs) != 1 {
 		t.Errorf("job past the candidate budget should be FAILED, got %d", len(jobs))
+	}
+}
+
+func TestDiscoverEnqueueFailureMarksTransferErrored(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 77, Title: "A", ArtistName: "X", TrackCount: 1}}}
+	peers := &fakeSearcher{
+		results:    []slskd.Result{{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true}},
+		enqueueErr: errors.New("peer offline"),
+	}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	d := NewDiscoverer(p)
+	// Tick 1: search + enqueue-fail -> job DOWNLOADING with its transfer marked ERRORED
+	// (synchronously, not left to wait out the deadline).
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce 1: %v", err)
+	}
+	// Tick 2: advanceDownloading sees the errored transfer -> COOLDOWN.
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce 2: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) == 0 {
+		t.Errorf("enqueue failure should mark the transfer errored and lead to COOLDOWN, got no cooldown jobs")
 	}
 }
