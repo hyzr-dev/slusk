@@ -135,6 +135,7 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 			slskdID, err := d.p.Peers.Enqueue(ctx, cand.Username, f.Filename)
 			if err != nil {
 				d.log().Error("enqueue failed", "user", cand.Username, "file", f.Filename, "err", err)
+				_ = d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now)
 				continue
 			}
 			_ = d.p.Store.AttachTransferID(ctx, tid, slskdID, now)
@@ -195,8 +196,12 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 		}
 		switch {
 		case anyFailed:
-			_ = d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.CandidateBackoff), now)
-			_ = d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now)
+			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.CandidateBackoff), now); err != nil {
+				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
+			}
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now); err != nil {
+				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+			}
 		case allDone:
 			_ = d.p.Store.AdvanceJobState(ctx, job.ID, core.StateVerifying, now)
 		}
@@ -231,6 +236,17 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		if err != nil {
 			return err
 		}
+		if len(items) == 0 {
+			// Empty folder on a job whose transfers all completed means the files
+			// were already imported (e.g. a crash between a prior successful
+			// ExecuteManualImport and this state write). Treat it as done so
+			// advanceImporting is idempotent across restarts.
+			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
+			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
+				d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
+			}
+			continue
+		}
 		var importable []lidarr.ManualImportItem
 		blocked := false
 		for _, it := range items {
@@ -240,19 +256,21 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 				blocked = true
 			}
 		}
-		if len(importable) == 0 || blocked {
-			// Rejected (quality/no match): fail this candidate and back off to retry
-			// with the next candidate.
+		if blocked || len(importable) == 0 {
 			d.log().Info("import rejected", "album_job", job.ID, "folder", folder)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.CandidateBackoff), now)
-			_ = d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now)
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now); err != nil {
+				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+			}
 			continue
 		}
 		if err := d.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 			return err
 		}
 		_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
-		_ = d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now)
+		if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
+			d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
+		}
 	}
 	return nil
 }

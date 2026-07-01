@@ -95,6 +95,34 @@ func (b *discoBackedStore) seedVerifyingJob(t *testing.T, now time.Time) {
 	}
 }
 
+// seedDownloadingJobWithFailedTransfer creates a DISCOVERED job for album 2, moves
+// it to DOWNLOADING, creates a candidate attempt, and records a transfer that is
+// then marked ERRORED - the state advanceDownloading's anyFailed branch expects.
+func (b *discoBackedStore) seedDownloadingJobWithFailedTransfer(t *testing.T, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	job, err := b.UpsertDiscoveredJob(ctx, 2, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if err := b.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	attemptID, err := b.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	deadline := now.Add(30 * time.Minute)
+	transferID, err := b.RecordEnqueueIntent(ctx, attemptID, "bob", `A\01.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := b.UpdateTransferProgress(ctx, transferID, core.TransferErrored, 0, 0, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	return job.ID
+}
+
 // defaultWeights returns representative matcher weights for tests.
 func defaultWeights() config.Weights {
 	return config.Weights{Format: 1, Bitrate: 1, Reliability: 1, FileCount: 1}
@@ -185,5 +213,65 @@ func TestDiscoverRejectedImportFailsCandidate(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
 	if len(jobs) != 1 {
 		t.Errorf("rejected import should put the job in COOLDOWN, got %d", len(jobs))
+	}
+}
+
+func TestDiscoverEmptyFolderCompletes(t *testing.T) {
+	music := &fakeMusic{candidates: nil} // empty -> already imported
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedVerifyingJob(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(music.imported) != 0 {
+		t.Errorf("must not call ExecuteManualImport on an empty folder")
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCompleted, 10)
+	if len(jobs) != 1 {
+		t.Errorf("empty folder on a verifying job should complete it, got %d completed", len(jobs))
+	}
+}
+
+func TestDiscoverFailedTransferCooldowns(t *testing.T) {
+	p, st := newDiscoParams(t, &fakeMusic{}, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID := st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	found := false
+	for _, j := range jobs {
+		if j.ID == jobID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a job with a failed transfer should move to COOLDOWN")
+	}
+}
+
+func TestDiscoverExhaustedCandidatesFails(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 55, Title: "A", ArtistName: "X"}}}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := st.UpsertDiscoveredJob(ctx, 55, now)
+	for i := 0; i < p.MaxCandidates; i++ {
+		_ = st.IncrementCandidatesTried(ctx, job.ID, now)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateFailed, 10)
+	if len(jobs) != 1 {
+		t.Errorf("job past the candidate budget should be FAILED, got %d", len(jobs))
 	}
 }
