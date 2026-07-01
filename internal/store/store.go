@@ -21,14 +21,12 @@ type Store struct {
 
 // Open opens (creating if needed) the SQLite database at path and applies the
 // schema idempotently. WAL mode is enabled for safer concurrent reads.
+// Foreign key constraints are enforced on every connection.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set pragmas: %w", err)
 	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()

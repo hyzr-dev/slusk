@@ -19,14 +19,34 @@ func newTestStore(t *testing.T) *Store {
 
 func TestOpenAppliesSchema(t *testing.T) {
 	s := newTestStore(t)
-	var count int
-	err := s.db.QueryRow(
-		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='album_jobs'`,
-	).Scan(&count)
-	if err != nil {
-		t.Fatalf("query schema: %v", err)
+
+	// Check that all three required tables exist
+	tables := []string{"album_jobs", "candidate_attempts", "transfers"}
+	for _, table := range tables {
+		var count int
+		err := s.db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			table,
+		).Scan(&count)
+		if err != nil {
+			t.Fatalf("query schema for %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s table not created", table)
+		}
 	}
-	if count != 1 {
-		t.Errorf("album_jobs table not created")
+}
+
+func TestForeignKeysEnforced(t *testing.T) {
+	s := newTestStore(t)
+
+	// Try to insert a candidate_attempts row with a non-existent album_job_id.
+	// With foreign key enforcement enabled, this should fail.
+	_, err := s.db.Exec(
+		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at)
+		 VALUES (999, 'testuser', 1.0, 'PENDING', datetime('now'))`,
+	)
+	if err == nil {
+		t.Fatal("expected foreign key violation, got nil error")
 	}
 }
