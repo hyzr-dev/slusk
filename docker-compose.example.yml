@@ -1,0 +1,47 @@
+# Example docker-compose service for slskdarr.
+# Copy the relevant bits into your existing arr-stack compose, or run this file
+# standalone. slskdarr never touches the media files (it only passes the
+# completed-downloads path to Lidarr's import API), so it needs NO media mount.
+
+services:
+  slskdarr:
+    # Build the image from this repo (works on the target arch, incl. arm64):
+    build: .
+    # ...or, if you build/pull separately, replace `build: .` with:
+    # image: slskdarr:latest
+    container_name: slskdarr
+    restart: unless-stopped
+
+    # The distroless image runs as UID 65532 by default. Override it to a UID
+    # that owns ./data below (e.g. your usual arr PUID). The binary is static and
+    # needs no user account, so any UID works.
+    user: "1000:1000"
+
+    volumes:
+      # Your real config with API keys, mounted read-only:
+      - ./config.toml:/config/config.toml:ro
+      # SQLite job/transfer state lives here — must be writable by `user` above.
+      # Create it first:  mkdir -p data && sudo chown 1000:1000 data
+      - ./data:/data
+
+    ports:
+      # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
+      - "9090:9090"
+
+    # No media/downloads mount is required.
+
+# --- Option: run it inside your existing arr-stack compose ---
+# If slskd and lidarr are services in the SAME compose project, put slskdarr on
+# their network and use service-name URLs in config.toml instead of LAN IPs:
+#
+#   [lidarr]
+#   url = "http://lidarr:8686"
+#   [slskd]
+#   url = "http://slskd:5030"
+#
+# and add:
+#   networks:
+#     - arr
+# networks:
+#   arr:
+#     external: true   # or however your stack defines it
