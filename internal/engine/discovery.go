@@ -48,6 +48,9 @@ func (d *Discoverer) RunOnce(ctx context.Context, now time.Time) error {
 	if err := d.syncWanted(ctx, now); err != nil {
 		return err
 	}
+	if err := d.retryFailedJobs(ctx, now); err != nil {
+		return err
+	}
 	if err := d.startNewJobs(ctx, now); err != nil {
 		return err
 	}
@@ -67,6 +70,24 @@ func (d *Discoverer) syncWanted(ctx context.Context, now time.Time) error {
 		if _, err := d.p.Store.UpsertDiscoveredJob(ctx, a.ID, now); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// retryFailedJobs returns FAILED albums to DISCOVERED once failed_retry_after has
+// elapsed since they failed, so a still-wanted album gets another chance later.
+func (d *Discoverer) retryFailedJobs(ctx context.Context, now time.Time) error {
+	cutoff := now.Add(-d.p.FailedRetryAfter)
+	jobs, err := d.p.Store.DueFailedJobs(ctx, cutoff, d.p.Batch)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if err := d.p.Store.ResetJobForRetry(ctx, job.ID, now); err != nil {
+			d.log().Error("reset failed job for retry", "album_job", job.ID, "err", err)
+			continue
+		}
+		d.log().Info("retrying failed album after cooldown", "album_job", job.ID)
 	}
 	return nil
 }
@@ -147,7 +168,12 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 		}
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateDownloading, now)
 	}
-	// No untried candidate available now: back off.
+	// No untried candidate available now: count this exhausted tick toward the
+	// candidate budget and back off. Once the budget is spent, the next tick's
+	// budget check (top of startJob) marks the album FAILED.
+	if err := d.p.Store.IncrementCandidatesTried(ctx, job.ID, now); err != nil {
+		return err
+	}
 	return d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now)
 }
 

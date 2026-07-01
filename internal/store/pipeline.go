@@ -119,3 +119,42 @@ func (s *Store) IncrementCandidatesTried(ctx context.Context, jobID int64, now t
 	}
 	return nil
 }
+
+// DueFailedJobs returns up to limit FAILED jobs whose updated_at is at or before
+// cutoff — used to retry failed albums after failed_retry_after has elapsed.
+func (s *Store) DueFailedJobs(ctx context.Context, cutoff time.Time, limit int) ([]core.AlbumJob, error) {
+	rows, err := s.db.QueryContext(ctx,
+		jobSelect+` WHERE state = ? AND updated_at <= ? ORDER BY updated_at LIMIT ?`,
+		string(core.StateFailed), cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanJobs(rows)
+}
+
+// ResetJobForRetry gives a failed album a fresh start: it deletes the job's prior
+// attempts (and their now-terminal transfers) in a transaction and returns the job
+// to DISCOVERED with a zero candidate count. Clearing attempts frees the
+// (username, filename) transfer keys and lets previously-tried peers be retried.
+func (s *Store) ResetJobForRetry(ctx context.Context, jobID int64, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidate_attempts WHERE album_job_id = ?)`, jobID); err != nil {
+		return fmt.Errorf("delete transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM candidate_attempts WHERE album_job_id = ?`, jobID); err != nil {
+		return fmt.Errorf("delete attempts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = ?, candidates_tried = 0, next_attempt_at = NULL, updated_at = ? WHERE id = ?`,
+		string(core.StateDiscovered), now, jobID); err != nil {
+		return fmt.Errorf("reset job: %w", err)
+	}
+	return tx.Commit()
+}

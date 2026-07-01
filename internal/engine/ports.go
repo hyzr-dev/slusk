@@ -56,6 +56,8 @@ type DiscoveryStore interface {
 	SucceedAttempt(ctx context.Context, attemptID int64, now time.Time) error
 	SetJobCooldown(ctx context.Context, jobID int64, nextAttemptAt, now time.Time) error
 	IncrementCandidatesTried(ctx context.Context, jobID int64, now time.Time) error
+	DueFailedJobs(ctx context.Context, cutoff time.Time, limit int) ([]core.AlbumJob, error)
+	ResetJobForRetry(ctx context.Context, jobID int64, now time.Time) error
 }
 
 // Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).

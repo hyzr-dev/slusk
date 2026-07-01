@@ -128,6 +128,20 @@ func (b *discoBackedStore) seedDownloadingJobWithFailedTransfer(t *testing.T, no
 	return job.ID
 }
 
+// seedFailedJob creates a DISCOVERED job for albumID and advances it straight to
+// FAILED at time at, as if its candidate budget had already been exhausted.
+func (b *discoBackedStore) seedFailedJob(t *testing.T, albumID int64, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := b.UpsertDiscoveredJob(ctx, albumID, at)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if err := b.AdvanceJobState(ctx, job.ID, core.StateFailed, at); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+}
+
 // defaultWeights returns representative matcher weights for tests.
 func defaultWeights() config.Weights {
 	return config.Weights{Format: 1, Bitrate: 1, Reliability: 1, FileCount: 1}
@@ -303,5 +317,48 @@ func TestDiscoverEnqueueFailureMarksTransferErrored(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
 	if len(jobs) == 0 {
 		t.Errorf("enqueue failure should mark the transfer errored and lead to COOLDOWN, got no cooldown jobs")
+	}
+}
+
+func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "A", ArtistName: "X"}}}
+	peers := &fakeSearcher{} // no results -> no candidate
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
+		t.Fatalf("exhausted-candidate tick should increment candidates_tried to 1 and cooldown, got %+v", jobs)
+	}
+}
+
+func TestDiscoverRetriesFailedAlbumAfterWindow(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 88, Title: "A", ArtistName: "X", TrackCount: 1}}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	failedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedFailedJob(t, 88, failedAt)
+	now := failedAt.Add(p.FailedRetryAfter + time.Hour)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	failed, _ := st.JobsInState(ctx, core.StateFailed, 10)
+	if len(failed) != 0 {
+		t.Errorf("failed album past the retry window should have been retried, still FAILED")
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("retried album with a good candidate should reach DOWNLOADING, got %d", len(downloading))
 	}
 }
