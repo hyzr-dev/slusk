@@ -37,3 +37,19 @@ func TestLoadRejectsMissingDuration(t *testing.T) {
 		t.Errorf("error should name the missing field: %v", err)
 	}
 }
+
+func TestLoadValidHasPipelineFields(t *testing.T) {
+	cfg, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine.MinBitrate != 192 {
+		t.Errorf("MinBitrate = %d", cfg.Engine.MinBitrate)
+	}
+	if cfg.Engine.SearchTimeout.Duration.Seconds() != 30 {
+		t.Errorf("SearchTimeout = %v", cfg.Engine.SearchTimeout.Duration)
+	}
+	if cfg.Paths.SlskdCompleteDir != "/music/slskd-downloads" {
+		t.Errorf("SlskdCompleteDir = %q", cfg.Paths.SlskdCompleteDir)
+	}
+}

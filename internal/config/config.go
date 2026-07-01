@@ -18,6 +18,7 @@ type Config struct {
 	Engine EngineConfig `toml:"engine"`
 	Store  StoreConfig  `toml:"store"`
 	Observ ObservConfig `toml:"observ"`
+	Paths  PathsConfig  `toml:"paths"`
 }
 
 // LidarrConfig is the Lidarr music server integration configuration.
@@ -39,6 +40,11 @@ type EngineConfig struct {
 	MaxCandidatesPerAlbum int      `toml:"max_candidates_per_album"`
 	TransferDeadline      Duration `toml:"transfer_deadline"`
 	StallTimeout          Duration `toml:"stall_timeout"`
+	SearchTimeout         Duration `toml:"search_timeout"`
+	MinBitrate            int      `toml:"min_bitrate"`
+	MaxConcurrentSearches int      `toml:"max_concurrent_searches"`
+	CandidateBackoff      Duration `toml:"candidate_backoff"`
+	FailedRetryAfter      Duration `toml:"failed_retry_after"`
 	Weights               Weights  `toml:"weights"`
 }
 
@@ -58,6 +64,11 @@ type StoreConfig struct {
 // ObservConfig is the observability configuration.
 type ObservConfig struct {
 	ListenAddr string `toml:"listen_addr"`
+}
+
+// PathsConfig holds filesystem paths shared with the arr-stack.
+type PathsConfig struct {
+	SlskdCompleteDir string `toml:"slskd_complete_dir"`
 }
 
 // Duration wraps time.Duration so TOML strings like "5m" decode directly.
@@ -121,6 +132,24 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.StallTimeout.Duration <= 0 {
 		problems = append(problems, "engine.stall_timeout must be > 0")
+	}
+	if c.Engine.SearchTimeout.Duration <= 0 {
+		problems = append(problems, "engine.search_timeout must be > 0")
+	}
+	if c.Engine.MinBitrate <= 0 {
+		problems = append(problems, "engine.min_bitrate must be > 0")
+	}
+	if c.Engine.MaxConcurrentSearches <= 0 {
+		problems = append(problems, "engine.max_concurrent_searches must be > 0")
+	}
+	if c.Engine.CandidateBackoff.Duration <= 0 {
+		problems = append(problems, "engine.candidate_backoff must be > 0")
+	}
+	if c.Engine.FailedRetryAfter.Duration <= 0 {
+		problems = append(problems, "engine.failed_retry_after must be > 0")
+	}
+	if c.Paths.SlskdCompleteDir == "" {
+		problems = append(problems, "paths.slskd_complete_dir is required")
 	}
 	if c.Store.Path == "" {
 		problems = append(problems, "store.path is required")
