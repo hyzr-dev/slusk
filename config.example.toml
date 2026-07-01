@@ -1,0 +1,26 @@
+[lidarr]
+url = "http://lidarr:8686"
+api_key = "CHANGEME"
+poll_interval = "5m"
+
+[slskd]
+url = "http://slskd:5030"
+api_key = "CHANGEME"
+status_poll_interval = "15s"
+
+[engine]
+max_candidates_per_album = 5
+transfer_deadline = "30m"
+stall_timeout = "5m"
+
+[engine.weights]
+format = 1.0
+bitrate = 0.5
+reliability = 0.8
+file_count = 1.0
+
+[store]
+path = "/data/slskdarr.db"
+
+[observ]
+listen_addr = "0.0.0.0:9090"
