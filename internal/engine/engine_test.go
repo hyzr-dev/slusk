@@ -1,0 +1,40 @@
+package engine
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// TestRunReconcilesThenStopsOnContextCancel verifies the loop ticks at least
+// once and returns promptly when the context is cancelled (graceful shutdown).
+func TestRunReconcilesThenStopsOnContextCancel(t *testing.T) {
+	store := &fakeStore{}
+	peers := &fakePeers{}
+	r := NewReconciler(peers, store)
+
+	eng := New(Params{
+		Reconciler: r,
+		StatusPoll: 10 * time.Millisecond,
+		LidarrPoll: time.Hour, // irrelevant to this test
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+
+	time.Sleep(25 * time.Millisecond) // allow at least one tick
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after context cancel (no graceful shutdown)")
+	}
+	if eng.ReconcileCount() == 0 {
+		t.Errorf("expected at least one reconcile tick")
+	}
+}
