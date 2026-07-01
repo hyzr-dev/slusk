@@ -1,6 +1,7 @@
-// Package observ provides structured logging, Prometheus metrics, and a
-// read-only JSON status API. It receives simple counters/values and does not
-// depend back on engine or store.
+// Package observ provides Prometheus metrics and a read-only JSON status API.
+// It receives simple counters/values and does not depend back on engine or
+// store. Structured logging is configured by the daemon entrypoint (cmd), not
+// here.
 package observ
 
 import (
