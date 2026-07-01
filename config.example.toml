@@ -12,6 +12,11 @@ status_poll_interval = "15s"
 max_candidates_per_album = 5
 transfer_deadline = "30m"
 stall_timeout = "5m"
+search_timeout = "30s"
+min_bitrate = 192
+max_concurrent_searches = 2
+candidate_backoff = "10m"
+failed_retry_after = "24h"
 
 [engine.weights]
 format = 1.0
@@ -24,3 +29,6 @@ path = "/data/slskdarr.db"
 
 [observ]
 listen_addr = "0.0.0.0:9090"
+
+[paths]
+slskd_complete_dir = "/music/slskd-downloads"

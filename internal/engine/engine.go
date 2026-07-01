@@ -18,6 +18,7 @@ type MetricsSink interface {
 // Params configures an Engine.
 type Params struct {
 	Reconciler *Reconciler
+	Discoverer *Discoverer // nil → discovery loop is disabled
 	StatusPoll time.Duration
 	LidarrPoll time.Duration
 	Logger     *slog.Logger // nil → reconcile errors are not logged
@@ -28,6 +29,7 @@ type Params struct {
 type Engine struct {
 	p              Params
 	reconcileCount atomic.Int64
+	discoverCount  atomic.Int64
 }
 
 // New constructs an Engine.
@@ -40,15 +42,25 @@ func (e *Engine) ReconcileCount() int64 {
 	return e.reconcileCount.Load()
 }
 
-// Run starts the reconcile loop (and, later, the discovery loop) and blocks
-// until ctx is cancelled, at which point it returns nil. In-flight downloads
-// are left in slskd and re-adopted on the next start via reconciliation, so no
-// draining is required for a clean shutdown.
+// DiscoverCount reports how many discovery passes have run.
+func (e *Engine) DiscoverCount() int64 { return e.discoverCount.Load() }
+
+// Run starts the reconcile loop and, when a Discoverer is configured, the
+// discovery loop, then blocks until ctx is cancelled, at which point it
+// returns nil. In-flight downloads are left in slskd and re-adopted on the
+// next start via reconciliation, so no draining is required for a clean
+// shutdown.
 func (e *Engine) Run(ctx context.Context) error {
 	statusTicker := time.NewTicker(e.p.StatusPoll)
 	defer statusTicker.Stop()
 
-	// Reconcile once immediately on startup before entering the loop.
+	var lidarrC <-chan time.Time
+	if e.p.Discoverer != nil {
+		lidarrTicker := time.NewTicker(e.p.LidarrPoll)
+		defer lidarrTicker.Stop()
+		lidarrC = lidarrTicker.C
+		e.discoverOnce(ctx) // run once immediately on startup
+	}
 	e.reconcileOnce(ctx)
 
 	for {
@@ -57,8 +69,19 @@ func (e *Engine) Run(ctx context.Context) error {
 			return nil
 		case <-statusTicker.C:
 			e.reconcileOnce(ctx)
+		case <-lidarrC:
+			e.discoverOnce(ctx)
 		}
 	}
+}
+
+func (e *Engine) discoverOnce(ctx context.Context) {
+	if err := e.p.Discoverer.RunOnce(ctx, time.Now().UTC()); err != nil {
+		if e.p.Logger != nil {
+			e.p.Logger.Error("discovery failed", "err", err)
+		}
+	}
+	e.discoverCount.Add(1)
 }
 
 func (e *Engine) reconcileOnce(ctx context.Context) {

@@ -16,6 +16,8 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/engine"
+	"github.com/samuelenocsson/slskdarr/internal/lidarr"
+	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/observ"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
@@ -42,10 +44,24 @@ func main() {
 
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	reconciler := engine.NewReconciler(peers, st)
+	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
+	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
+	discoverer := engine.NewDiscoverer(engine.DiscovererParams{
+		Music: lidarrClient, Peers: peers, Store: st, Ranker: scorer,
+		CompleteDir:      cfg.Paths.SlskdCompleteDir,
+		SearchTimeout:    cfg.Engine.SearchTimeout.Duration,
+		TransferDeadline: cfg.Engine.TransferDeadline.Duration,
+		CandidateBackoff: cfg.Engine.CandidateBackoff.Duration,
+		FailedRetryAfter: cfg.Engine.FailedRetryAfter.Duration,
+		MaxCandidates:    cfg.Engine.MaxCandidatesPerAlbum,
+		Batch:            cfg.Engine.MaxConcurrentSearches,
+		Logger:           logger,
+	})
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
 	eng := engine.New(engine.Params{
 		Reconciler: reconciler,
+		Discoverer: discoverer,
 		StatusPoll: cfg.Slskd.StatusPollInterval.Duration,
 		LidarrPoll: cfg.Lidarr.PollInterval.Duration,
 		Logger:     logger,

@@ -38,3 +38,36 @@ func TestRunReconcilesThenStopsOnContextCancel(t *testing.T) {
 		t.Errorf("expected at least one reconcile tick")
 	}
 }
+
+// TestRunTicksDiscoveryLoop verifies the discovery loop ticks independently
+// of the reconcile loop when a Discoverer is configured.
+func TestRunTicksDiscoveryLoop(t *testing.T) {
+	store := &fakeStore{}
+	peers := &fakePeers{}
+	rec := NewReconciler(peers, store)
+
+	music := &fakeMusic{}
+	searcher := &fakeSearcher{}
+	dp, _ := newDiscoParams(t, music, searcher)
+	disco := NewDiscoverer(dp)
+
+	eng := New(Params{
+		Reconciler: rec,
+		Discoverer: disco,
+		StatusPoll: time.Hour,
+		LidarrPoll: 10 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop")
+	}
+	if eng.DiscoverCount() == 0 {
+		t.Error("expected at least one discovery tick")
+	}
+}
