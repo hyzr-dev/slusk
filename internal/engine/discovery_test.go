@@ -305,6 +305,31 @@ func TestDiscoverExhaustedCandidatesFails(t *testing.T) {
 	}
 }
 
+func TestDiscoverAlbumNoLongerWantedCancels(t *testing.T) {
+	// The job exists but its album is absent from Lidarr's wanted list, so
+	// albumFor cannot resolve it. The job must be cancelled, not retried forever.
+	music := &fakeMusic{wanted: nil}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 5151, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	cancelled, _ := st.JobsInState(ctx, core.StateCancelled, 10)
+	if len(cancelled) != 1 {
+		t.Fatalf("job for an unwanted album should be CANCELLED, got %d", len(cancelled))
+	}
+	// It must not linger in DISCOVERED where the next tick would retry it.
+	discovered, _ := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if len(discovered) != 0 {
+		t.Errorf("cancelled job should not remain DISCOVERED, got %d", len(discovered))
+	}
+}
+
 func TestDiscoverEnqueueFailureMarksTransferErrored(t *testing.T) {
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 77, Title: "A", ArtistName: "X", TrackCount: 1}}}
 	peers := &fakeSearcher{

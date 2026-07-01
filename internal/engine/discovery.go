@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -9,6 +10,10 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 )
+
+// errAlbumNoLongerWanted signals that a job's album has left Lidarr's wanted
+// list, so the job should be cancelled rather than retried indefinitely.
+var errAlbumNoLongerWanted = errors.New("album no longer wanted")
 
 // DiscovererParams configures a Discoverer.
 type DiscovererParams struct {
@@ -133,6 +138,13 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 
 	album, err := d.albumFor(ctx, job)
 	if err != nil {
+		// The album left Lidarr's wanted list (already sourced, unmonitored, etc.):
+		// cancel the job so it stops being retried every tick.
+		if errors.Is(err, errAlbumNoLongerWanted) {
+			d.log().Info("album no longer wanted, cancelling job",
+				"album_job", job.ID, "lidarr_album", job.LidarrAlbumID)
+			return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCancelled, now)
+		}
 		return err
 	}
 	results, err := d.p.Peers.Search(ctx, album.ArtistName+" "+album.Title, d.p.SearchTimeout)
@@ -199,7 +211,7 @@ func (d *Discoverer) albumFor(ctx context.Context, job core.AlbumJob) (lidarr.Wa
 			return a, nil
 		}
 	}
-	return lidarr.WantedAlbum{}, fmt.Errorf("album %d no longer wanted", job.LidarrAlbumID)
+	return lidarr.WantedAlbum{}, fmt.Errorf("album %d: %w", job.LidarrAlbumID, errAlbumNoLongerWanted)
 }
 
 // advanceDownloading moves DOWNLOADING jobs to VERIFYING when all their active
