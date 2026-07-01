@@ -32,40 +32,67 @@ type WantedAlbum struct {
 	TrackCount int
 }
 
-// WantedMissing fetches the wanted/missing album records.
-func (c *Client) WantedMissing(ctx context.Context) ([]WantedAlbum, error) {
+// wantedMissingPage is one page of Lidarr's wanted/missing response.
+type wantedMissingPage struct {
+	Page         int `json:"page"`
+	PageSize     int `json:"pageSize"`
+	TotalRecords int `json:"totalRecords"`
+	Records      []struct {
+		ID     int64  `json:"id"`
+		Title  string `json:"title"`
+		Artist struct {
+			ArtistName string `json:"artistName"`
+		} `json:"artist"`
+		Statistics struct {
+			TrackCount int `json:"trackCount"`
+		} `json:"statistics"`
+	} `json:"records"`
+}
+
+// fetchWantedMissingPage fetches a single page of wanted/missing records.
+func (c *Client) fetchWantedMissingPage(ctx context.Context, page int) (wantedMissingPage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/v1/wanted/missing?pageSize=100", nil)
+		fmt.Sprintf("%s/api/v1/wanted/missing?page=%d&pageSize=100", c.baseURL, page), nil)
 	if err != nil {
-		return nil, err
+		return wantedMissingPage{}, err
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return wantedMissingPage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("lidarr wanted/missing: status %d", resp.StatusCode)
+		return wantedMissingPage{}, fmt.Errorf("lidarr wanted/missing: status %d", resp.StatusCode)
 	}
-	var body struct {
-		Records []struct {
-			ID     int64  `json:"id"`
-			Title  string `json:"title"`
-			Artist struct {
-				ArtistName string `json:"artistName"`
-			} `json:"artist"`
-			Statistics struct {
-				TrackCount int `json:"trackCount"`
-			} `json:"statistics"`
-		} `json:"records"`
-	}
+	var body wantedMissingPage
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, err
+		return wantedMissingPage{}, err
 	}
-	out := make([]WantedAlbum, 0, len(body.Records))
-	for _, r := range body.Records {
-		out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, TrackCount: r.Statistics.TrackCount})
+	return body, nil
+}
+
+// WantedMissing fetches every wanted/missing album record, paging through
+// Lidarr's results until all totalRecords have been collected.
+func (c *Client) WantedMissing(ctx context.Context) ([]WantedAlbum, error) {
+	var out []WantedAlbum
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		body, err := c.fetchWantedMissingPage(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		if len(body.Records) == 0 {
+			break
+		}
+		for _, r := range body.Records {
+			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, TrackCount: r.Statistics.TrackCount})
+		}
+		if len(out) >= body.TotalRecords {
+			break
+		}
 	}
 	return out, nil
 }

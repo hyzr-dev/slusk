@@ -41,6 +41,40 @@ func TestJobsInStateAndCooldown(t *testing.T) {
 	}
 }
 
+func TestCountJobsInStates(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	if _, err := s.UpsertDiscoveredJob(ctx, 300, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	downloading, _ := s.UpsertDiscoveredJob(ctx, 301, now)
+	if err := s.AdvanceJobState(ctx, downloading.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	verifying, _ := s.UpsertDiscoveredJob(ctx, 302, now)
+	if err := s.AdvanceJobState(ctx, verifying.ID, core.StateVerifying, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	count, err := s.CountJobsInStates(ctx, core.StateDownloading, core.StateVerifying)
+	if err != nil {
+		t.Fatalf("CountJobsInStates: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 jobs in DOWNLOADING/VERIFYING, got %d", count)
+	}
+
+	countDiscovered, err := s.CountJobsInStates(ctx, core.StateDiscovered)
+	if err != nil {
+		t.Fatalf("CountJobsInStates: %v", err)
+	}
+	if countDiscovered != 1 {
+		t.Errorf("expected 1 job in DISCOVERED, got %d", countDiscovered)
+	}
+}
+
 func TestAttemptsAndTransfersForJob(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
