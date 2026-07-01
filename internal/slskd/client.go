@@ -86,13 +86,15 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 }
 
 // Enqueue starts a download of one file from a user and returns slskd's id. The
-// id may be empty if slskd's response carries no body; the reconciler then
+// size is REQUIRED — slskd requests the file from the peer by (filename, size),
+// and a zero size makes every transfer fail immediately (TimedOut/Cancelled).
+// The id may be empty if slskd's response carries no body; the reconciler then
 // backfills it via the (username, filename) fallback key.
-func (c *Client) Enqueue(ctx context.Context, username, filename string) (string, error) {
+func (c *Client) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	var resp struct {
 		ID string `json:"id"`
 	}
-	body := []map[string]string{{"filename": filename}}
+	body := []map[string]any{{"filename": filename, "size": size}}
 	err := c.do(ctx, http.MethodPost, "/api/v0/transfers/downloads/"+url.PathEscape(username), body, &resp)
 	return resp.ID, err
 }

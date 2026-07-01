@@ -44,7 +44,7 @@ type fakeSearcher struct {
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
 	return f.results, nil
 }
-func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string) (string, error) {
+func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	if f.enqueueErr != nil {
 		return "", f.enqueueErr
 	}

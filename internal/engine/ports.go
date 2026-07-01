@@ -37,7 +37,7 @@ type MusicSource interface {
 // PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.
 type PeerSearcher interface {
 	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
-	Enqueue(ctx context.Context, username, filename string) (string, error)
+	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
 }
 
 // DiscoveryStore is the slice of the store the discoverer needs.

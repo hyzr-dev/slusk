@@ -158,7 +158,7 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 			if err != nil {
 				return err
 			}
-			slskdID, err := d.p.Peers.Enqueue(ctx, cand.Username, f.Filename)
+			slskdID, err := d.p.Peers.Enqueue(ctx, cand.Username, f.Filename, f.Size)
 			if err != nil {
 				d.log().Error("enqueue failed", "user", cand.Username, "file", f.Filename, "err", err)
 				if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {

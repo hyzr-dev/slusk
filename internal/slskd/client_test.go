@@ -9,22 +9,32 @@ import (
 	"time"
 )
 
-func TestEnqueueReturnsID(t *testing.T) {
+func TestEnqueueSendsFilenameAndSize(t *testing.T) {
+	var body []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-API-Key") != "k" {
 			t.Errorf("missing api key header")
 		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		json.NewEncoder(w).Encode(map[string]string{"id": "guid-123"})
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "k")
-	id, err := c.Enqueue(context.Background(), "bob", "album/01.flac")
+	id, err := c.Enqueue(context.Background(), "bob", "album/01.flac", 12345)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if id != "guid-123" {
 		t.Errorf("id = %q, want guid-123", id)
+	}
+	// slskd needs the size to request the file — a missing/zero size fails every
+	// transfer. Assert both fields are sent.
+	if len(body) != 1 || body[0]["filename"] != "album/01.flac" {
+		t.Fatalf("filename not sent: %+v", body)
+	}
+	if body[0]["size"] != float64(12345) { // JSON numbers decode to float64
+		t.Errorf("size not sent, got %v", body[0]["size"])
 	}
 }
 
