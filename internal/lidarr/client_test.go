@@ -27,3 +27,35 @@ func TestWantedMissing(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
+
+func TestManualImportCandidatesParsesRejections(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/manualimport" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		w.Write([]byte(`[
+		  {"id":1,"path":"/music/slskd-downloads/A/01.flac","folderName":"A","artistId":5,"albumId":9,"rejections":[]},
+		  {"id":2,"path":"/music/slskd-downloads/A/02.mp3","folderName":"A","artistId":5,"albumId":9,
+		   "rejections":[{"reason":"Quality Unknown not in profile","type":"permanent"}]}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	items, err := c.ManualImportCandidates(context.Background(), "/music/slskd-downloads/A")
+	if err != nil {
+		t.Fatalf("ManualImportCandidates: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if !items[0].Importable {
+		t.Errorf("item 0 has no rejections, should be importable")
+	}
+	if items[1].Importable {
+		t.Errorf("item 1 has a rejection, should not be importable")
+	}
+	if items[1].Rejections[0] != "Quality Unknown not in profile" {
+		t.Errorf("rejection reason not parsed: %v", items[1].Rejections)
+	}
+}
