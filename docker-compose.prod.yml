@@ -1,0 +1,67 @@
+# Production docker-compose for slskdarr.
+#
+# Unlike docker-compose.example.yml (which builds locally with `build: .`), this
+# PULLS the pre-built image from the Gitea registry. That image is published by
+# .gitea/workflows/deploy.yml on every v* tag (release.yml auto-tags main from
+# conventional commits), tagged both :latest and :vX.Y.Z.
+#
+# slskdarr never touches the media files — it only hands Lidarr the completed-
+# downloads path via its import API — so it needs NO media mount. Just config, a
+# small named volume for its SQLite DB, and network access to Lidarr/slskd.
+#
+# The DB lives in a NAMED VOLUME (not a host bind mount): a fresh named volume is
+# root-owned, so the one-shot init service below chowns it to the non-root run
+# UID. Set PUID/PGID to your arr-stack's user (default 1000:1000); the init chown
+# and the run user are kept in sync from the same variables.
+#
+# --- Prerequisites ---
+#   1. docker login gitea.shcizo.se        (registry auth; the package is private)
+#   2. A config.toml next to this file      (copy config.example.toml, fill in
+#      your Lidarr/slskd URLs + API keys — reachable from the container, e.g.
+#      LAN IPs like http://192.168.86.33:5030 or arr-network service names).
+#
+# --- Deploy / update ---
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Pin a release with SLSKDARR_TAG=v1.2.3 (env or .env file); omit for :latest.
+# The homelab package-updater-action redeploys automatically on new tags.
+
+services:
+  # One-shot: make the data volume writable by the non-root run user, then exit.
+  slskdarr-init:
+    image: busybox
+    command: chown -R ${PUID:-1000}:${PGID:-1000} /data
+    volumes:
+      - slskdarr-data:/data
+
+  slskdarr:
+    image: gitea.shcizo.se/shcizo/slskdarr:${SLSKDARR_TAG:-latest}
+    container_name: slskdarr
+    restart: unless-stopped
+
+    # Non-root. Must match the init chown above (driven by the same variables).
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    depends_on:
+      slskdarr-init:
+        condition: service_completed_successfully
+
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - slskdarr-data:/data
+
+    ports:
+      # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
+      - "9090:9090"
+
+volumes:
+  slskdarr-data:
+
+# --- Option: run inside your existing arr-stack network ---
+# If slskd/lidarr are on a shared Docker network, attach slskdarr to it and use
+# service-name URLs in config.toml (http://lidarr:8686, http://slskd:5030). Add
+# `networks: [arr]` to the slskdarr service and declare the external network:
+# networks:
+#   arr:
+#     external: true
