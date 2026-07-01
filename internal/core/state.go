@@ -15,12 +15,14 @@ const (
 	StateCompleted   AlbumJobState = "COMPLETED"
 	StateCooldown    AlbumJobState = "COOLDOWN"
 	StateFailed      AlbumJobState = "FAILED"
+	StateCancelled   AlbumJobState = "CANCELLED"
 )
 
 // Terminal reports whether the state is an end state that needs no further work
-// this cycle. COOLDOWN is not terminal: it is retried after a backoff.
+// this cycle. COOLDOWN is not terminal: it is retried after a backoff. CANCELLED
+// is terminal: the album left Lidarr's wanted list, so there is nothing to do.
 func (s AlbumJobState) Terminal() bool {
-	return s == StateCompleted || s == StateFailed
+	return s == StateCompleted || s == StateFailed || s == StateCancelled
 }
 
 // TransferState mirrors slskd's transfer states, plus STALLED which slskdarr
