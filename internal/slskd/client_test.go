@@ -38,6 +38,55 @@ func TestEnqueueSendsFilenameAndSize(t *testing.T) {
 	}
 }
 
+func TestEnqueueRetriesOnServerError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		// Fail with a transient 503 the first two times, then succeed. slskd can
+		// briefly reject/stall enqueues under load; a good candidate must not be
+		// abandoned because of that.
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"id": "guid-ok"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.enqueueBackoff = time.Millisecond // keep the test fast
+	id, err := c.Enqueue(context.Background(), "bob", "album/01.flac", 12345)
+	if err != nil {
+		t.Fatalf("Enqueue should retry through transient 503s: %v", err)
+	}
+	if id != "guid-ok" {
+		t.Errorf("id = %q, want guid-ok", id)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 attempts (2 failures + 1 success), got %d", calls)
+	}
+}
+
+func TestEnqueueDoesNotRetryClientError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		// A 4xx is our fault (bad request) — retrying cannot help, so it must fail fast.
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.enqueueBackoff = time.Millisecond
+	_, err := c.Enqueue(context.Background(), "bob", "album/01.flac", 12345)
+	if err == nil {
+		t.Fatal("expected error on 400")
+	}
+	if calls != 1 {
+		t.Errorf("4xx must not be retried; expected 1 attempt, got %d", calls)
+	}
+}
+
 func TestListDownloadsFlattens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[
