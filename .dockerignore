@@ -1,4 +1,12 @@
+# Secrets — must never enter the build context / image layers
+config.toml
+.env
+
+# Not needed in the image
 docs/
 *.db
+*.db-wal
+*.db-shm
 *.md
 .git/
+.superpowers/
