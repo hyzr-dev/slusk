@@ -29,6 +29,7 @@ type DiscovererParams struct {
 	FailedRetryAfter time.Duration
 	MaxCandidates    int
 	Batch            int
+	MaxActive        int
 	Logger           *slog.Logger
 }
 
@@ -51,13 +52,21 @@ func (d *Discoverer) log() *slog.Logger {
 // each job one transition forward. Every stage is bounded and idempotent, so a
 // crash mid-tick loses nothing.
 func (d *Discoverer) RunOnce(ctx context.Context, now time.Time) error {
-	if err := d.syncWanted(ctx, now); err != nil {
+	albums, err := d.p.Music.WantedMissing(ctx)
+	if err != nil {
+		return fmt.Errorf("wanted missing: %w", err)
+	}
+	wanted := make(map[int64]lidarr.WantedAlbum, len(albums))
+	for _, a := range albums {
+		wanted[a.ID] = a
+	}
+	if err := d.syncWanted(ctx, albums, now); err != nil {
 		return err
 	}
 	if err := d.retryFailedJobs(ctx, now); err != nil {
 		return err
 	}
-	if err := d.startNewJobs(ctx, now); err != nil {
+	if err := d.startNewJobs(ctx, wanted, now); err != nil {
 		return err
 	}
 	if err := d.advanceDownloading(ctx, now); err != nil {
@@ -67,11 +76,7 @@ func (d *Discoverer) RunOnce(ctx context.Context, now time.Time) error {
 }
 
 // syncWanted upserts every wanted Lidarr album as a DISCOVERED job (idempotent).
-func (d *Discoverer) syncWanted(ctx context.Context, now time.Time) error {
-	albums, err := d.p.Music.WantedMissing(ctx)
-	if err != nil {
-		return fmt.Errorf("wanted missing: %w", err)
-	}
+func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum, now time.Time) error {
 	for _, a := range albums {
 		if _, err := d.p.Store.UpsertDiscoveredJob(ctx, a.ID, now); err != nil {
 			return err
@@ -98,18 +103,36 @@ func (d *Discoverer) retryFailedJobs(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-// startNewJobs searches and enqueues for DISCOVERED jobs and due COOLDOWN jobs.
-func (d *Discoverer) startNewJobs(ctx context.Context, now time.Time) error {
-	jobs, err := d.p.Store.JobsInState(ctx, core.StateDiscovered, d.p.Batch)
+// startNewJobs searches and enqueues for DISCOVERED jobs and due COOLDOWN jobs,
+// capped so the number of newly-started jobs never pushes the total count of
+// active (searching/downloading/importing) jobs past MaxActive.
+func (d *Discoverer) startNewJobs(ctx context.Context, wanted map[int64]lidarr.WantedAlbum, now time.Time) error {
+	active, err := d.p.Store.CountJobsInStates(ctx,
+		core.StateSearching, core.StateSelecting, core.StateDownloading, core.StateVerifying, core.StateImporting)
 	if err != nil {
 		return err
 	}
-	due, err := d.p.Store.DueCooldownJobs(ctx, now, d.p.Batch)
+	available := d.p.MaxActive - active
+	if available <= 0 {
+		return nil
+	}
+	batch := d.p.Batch
+	if available < batch {
+		batch = available
+	}
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateDiscovered, batch)
 	if err != nil {
 		return err
 	}
-	for _, job := range append(jobs, due...) {
-		if err := d.startJob(ctx, job, now); err != nil {
+	if remaining := available - len(jobs); remaining > 0 {
+		due, err := d.p.Store.DueCooldownJobs(ctx, now, remaining)
+		if err != nil {
+			return err
+		}
+		jobs = append(jobs, due...)
+	}
+	for _, job := range jobs {
+		if err := d.startJob(ctx, job, wanted, now); err != nil {
 			d.log().Error("start job failed", "album_job", job.ID, "err", err)
 		}
 	}
@@ -120,7 +143,7 @@ func (d *Discoverer) startNewJobs(ctx context.Context, now time.Time) error {
 // the quality floor, write-ahead enqueues its files, and moves the job to
 // DOWNLOADING. If no candidate remains it goes to COOLDOWN, or FAILED once the
 // candidate budget is exhausted.
-func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.Time) error {
+func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map[int64]lidarr.WantedAlbum, now time.Time) error {
 	if job.CandidatesTried >= d.p.MaxCandidates {
 		d.log().Info("candidates exhausted, marking album failed",
 			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID, "candidates_tried", job.CandidatesTried)
@@ -136,7 +159,7 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 		tried[a.Username] = true
 	}
 
-	album, err := d.albumFor(ctx, job)
+	album, err := d.albumFor(job, wanted)
 	if err != nil {
 		// The album left Lidarr's wanted list (already sourced, unmonitored, etc.):
 		// cancel the job so it stops being retried every tick.
@@ -200,16 +223,11 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, now time.T
 	return d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now)
 }
 
-// albumFor returns the Lidarr album matching a job (by lidarr_album_id).
-func (d *Discoverer) albumFor(ctx context.Context, job core.AlbumJob) (lidarr.WantedAlbum, error) {
-	albums, err := d.p.Music.WantedMissing(ctx)
-	if err != nil {
-		return lidarr.WantedAlbum{}, err
-	}
-	for _, a := range albums {
-		if a.ID == job.LidarrAlbumID {
-			return a, nil
-		}
+// albumFor returns the Lidarr album matching a job (by lidarr_album_id) from
+// the wanted map fetched once per RunOnce tick.
+func (d *Discoverer) albumFor(job core.AlbumJob, wanted map[int64]lidarr.WantedAlbum) (lidarr.WantedAlbum, error) {
+	if a, ok := wanted[job.LidarrAlbumID]; ok {
+		return a, nil
 	}
 	return lidarr.WantedAlbum{}, fmt.Errorf("album %d: %w", job.LidarrAlbumID, errAlbumNoLongerWanted)
 }

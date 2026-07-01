@@ -43,6 +43,7 @@ type EngineConfig struct {
 	SearchTimeout         Duration `toml:"search_timeout"`
 	MinBitrate            int      `toml:"min_bitrate"`
 	MaxConcurrentSearches int      `toml:"max_concurrent_searches"`
+	MaxConcurrentActive   int      `toml:"max_concurrent_active"`
 	CandidateBackoff       Duration `toml:"candidate_backoff"`
 	FailedCandidateBackoff Duration `toml:"failed_candidate_backoff"`
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
@@ -142,6 +143,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.MaxConcurrentSearches <= 0 {
 		problems = append(problems, "engine.max_concurrent_searches must be > 0")
+	}
+	if c.Engine.MaxConcurrentActive <= 0 {
+		problems = append(problems, "engine.max_concurrent_active must be > 0")
 	}
 	if c.Engine.CandidateBackoff.Duration <= 0 {
 		problems = append(problems, "engine.candidate_backoff must be > 0")

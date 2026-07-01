@@ -2,6 +2,7 @@ package lidarr
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,6 +26,46 @@ func TestWantedMissing(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != 11 || got[0].ArtistName != "Artist X" {
 		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestWantedMissingPaginates(t *testing.T) {
+	const total = 5
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		switch page {
+		case "1", "":
+			w.Write([]byte(fmt.Sprintf(`{"page":1,"pageSize":2,"totalRecords":%d,"records":[
+			  {"id":1,"title":"A1","artist":{"artistName":"Artist"}},
+			  {"id":2,"title":"A2","artist":{"artistName":"Artist"}}
+			]}`, total)))
+		case "2":
+			w.Write([]byte(fmt.Sprintf(`{"page":2,"pageSize":2,"totalRecords":%d,"records":[
+			  {"id":3,"title":"A3","artist":{"artistName":"Artist"}},
+			  {"id":4,"title":"A4","artist":{"artistName":"Artist"}}
+			]}`, total)))
+		case "3":
+			w.Write([]byte(fmt.Sprintf(`{"page":3,"pageSize":2,"totalRecords":%d,"records":[
+			  {"id":5,"title":"A5","artist":{"artistName":"Artist"}}
+			]}`, total)))
+		default:
+			w.Write([]byte(`{"page":4,"pageSize":2,"totalRecords":5,"records":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	got, err := c.WantedMissing(context.Background())
+	if err != nil {
+		t.Fatalf("WantedMissing: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("expected %d records across pages, got %d: %+v", total, len(got), got)
+	}
+	for i, want := range []int64{1, 2, 3, 4, 5} {
+		if got[i].ID != want {
+			t.Errorf("record %d: ID = %d, want %d", i, got[i].ID, want)
+		}
 	}
 }
 

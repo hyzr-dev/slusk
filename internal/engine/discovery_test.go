@@ -165,7 +165,7 @@ func newDiscoParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (Discov
 		CompleteDir: "/music/slskd-downloads", SearchTimeout: time.Second,
 		TransferDeadline: 30 * time.Minute, CandidateBackoff: 10 * time.Minute,
 		FailedCandidateBackoff: 30 * time.Second,
-		FailedRetryAfter:       24 * time.Hour, MaxCandidates: 3, Batch: 10,
+		FailedRetryAfter:       24 * time.Hour, MaxCandidates: 3, Batch: 10, MaxActive: 10,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}, st
 }
@@ -379,6 +379,66 @@ func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
 	}
 	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
 		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
+	}
+}
+
+func TestDiscoverRespectsMaxActiveCeiling(t *testing.T) {
+	// Three DISCOVERED jobs, each searchable, but MaxActive only allows 2 total
+	// active jobs at once: only 2 should be started this tick.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{
+		{ID: 501, Title: "A", ArtistName: "X"},
+		{ID: 502, Title: "B", ArtistName: "X"},
+		{ID: 503, Title: "C", ArtistName: "X"},
+	}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	p.MaxActive = 2
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 2 {
+		t.Fatalf("expected only 2 jobs started under MaxActive=2, got %d", len(downloading))
+	}
+	discovered, _ := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if len(discovered) != 1 {
+		t.Errorf("expected 1 job left DISCOVERED (ceiling reached), got %d", len(discovered))
+	}
+}
+
+func TestDiscoverNoNewJobsWhenAtCeiling(t *testing.T) {
+	// One job already DOWNLOADING (active) with MaxActive=1: a second DISCOVERED
+	// job must not be started this tick.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{
+		{ID: 601, Title: "A", ArtistName: "X"},
+		{ID: 602, Title: "B", ArtistName: "X"},
+	}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	p.MaxActive = 1
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, err := st.UpsertDiscoveredJob(ctx, 601, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	discovered, _ := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if len(discovered) != 1 {
+		t.Errorf("expected album 602 to remain DISCOVERED (ceiling already reached), got %d", len(discovered))
 	}
 }
 

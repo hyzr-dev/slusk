@@ -44,6 +44,7 @@ type PeerSearcher interface {
 type DiscoveryStore interface {
 	UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error)
 	JobsInState(ctx context.Context, state core.AlbumJobState, limit int) ([]core.AlbumJob, error)
+	CountJobsInStates(ctx context.Context, states ...core.AlbumJobState) (int, error)
 	DueCooldownJobs(ctx context.Context, now time.Time, limit int) ([]core.AlbumJob, error)
 	AttemptsForJob(ctx context.Context, jobID int64) ([]core.CandidateAttempt, error)
 	TransfersForAttempt(ctx context.Context, attemptID int64) ([]core.Transfer, error)

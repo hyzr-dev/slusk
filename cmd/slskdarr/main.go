@@ -56,6 +56,7 @@ func main() {
 		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
 		MaxCandidates:    cfg.Engine.MaxCandidatesPerAlbum,
 		Batch:            cfg.Engine.MaxConcurrentSearches,
+		MaxActive:        cfg.Engine.MaxConcurrentActive,
 		Logger:           logger,
 	})
 	reg := prometheus.NewRegistry()

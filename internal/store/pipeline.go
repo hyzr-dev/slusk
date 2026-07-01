@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -33,6 +34,26 @@ func (s *Store) JobsInState(ctx context.Context, state core.AlbumJobState, limit
 	}
 	defer rows.Close()
 	return scanJobs(rows)
+}
+
+// CountJobsInStates returns the total number of jobs currently in any of the
+// given states, used to enforce the global cap on concurrently active jobs.
+func (s *Store) CountJobsInStates(ctx context.Context, states ...core.AlbumJobState) (int, error) {
+	if len(states) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(states))
+	args := make([]any, len(states))
+	for i, st := range states {
+		placeholders[i] = "?"
+		args[i] = string(st)
+	}
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM album_jobs WHERE state IN (%s)`, strings.Join(placeholders, ","))
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count jobs in states: %w", err)
+	}
+	return count, nil
 }
 
 // DueCooldownJobs returns up to limit COOLDOWN jobs whose next_attempt_at has passed.

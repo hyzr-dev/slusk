@@ -15,6 +15,7 @@ stall_timeout = "5m"
 search_timeout = "30s"
 min_bitrate = 192
 max_concurrent_searches = 2
+max_concurrent_active = 20
 candidate_backoff = "10m"
 failed_candidate_backoff = "30s"
 failed_retry_after = "24h"
