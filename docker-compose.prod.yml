@@ -39,6 +39,9 @@ services:
     image: gitea.shcizo.se/shcizo/slskdarr:${SLSKDARR_TAG:-latest}
     container_name: slskdarr
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - "se.shcizo.auto-update=true"
 
     # Non-root. Must match the init chown above (driven by the same variables).
     user: "${PUID:-1000}:${PGID:-1000}"

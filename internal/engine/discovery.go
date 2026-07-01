@@ -19,7 +19,8 @@ type DiscovererParams struct {
 	CompleteDir      string
 	SearchTimeout    time.Duration
 	TransferDeadline time.Duration
-	CandidateBackoff time.Duration
+	CandidateBackoff       time.Duration
+	FailedCandidateBackoff time.Duration
 	FailedRetryAfter time.Duration
 	MaxCandidates    int
 	Batch            int
@@ -234,11 +235,14 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 		}
 		switch {
 		case anyFailed:
+			// A candidate failed, but other untried candidates usually remain, so
+			// use the short backoff to try the next one soon rather than the long
+			// "nothing new to try" backoff.
 			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
-			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.CandidateBackoff), now); err != nil {
+			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
 			}
-			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now); err != nil {
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
 			}
 		case allDone:
@@ -298,9 +302,11 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			}
 		}
 		if blocked || len(importable) == 0 {
+			// Rejected like a failed download: other candidates usually remain, so
+			// use the short backoff to try the next one soon.
 			d.log().Info("import rejected", "album_job", job.ID, "folder", folder)
-			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.CandidateBackoff), now)
-			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now); err != nil {
+			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.FailedCandidateBackoff), now)
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
 			}
 			continue
