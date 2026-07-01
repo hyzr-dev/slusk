@@ -1,0 +1,3 @@
+[lidarr]
+url = "http://lidarr:8686"
+apikey = "abc"
