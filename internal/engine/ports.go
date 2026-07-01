@@ -22,4 +22,5 @@ type JobStore interface {
 	ActiveTransfers(ctx context.Context) ([]core.Transfer, error)
 	TransfersPastDeadline(ctx context.Context, now time.Time) ([]core.Transfer, error)
 	UpdateTransferProgress(ctx context.Context, id int64, state core.TransferState, done, total int64, now time.Time) error
+	AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error
 }

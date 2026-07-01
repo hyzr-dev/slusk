@@ -30,6 +30,7 @@ type fakeStore struct {
 	active   []core.Transfer
 	overdue  []core.Transfer
 	progress map[int64]core.TransferState
+	attached map[int64]string
 }
 
 func (f *fakeStore) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
@@ -43,6 +44,13 @@ func (f *fakeStore) UpdateTransferProgress(ctx context.Context, id int64, state 
 		f.progress = map[int64]core.TransferState{}
 	}
 	f.progress[id] = state
+	return nil
+}
+func (f *fakeStore) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
+	if f.attached == nil {
+		f.attached = map[int64]string{}
+	}
+	f.attached[transferID] = slskdID
 	return nil
 }
 func (f *fakeStore) FindTransferByFallback(ctx context.Context, username, filename string) (core.Transfer, bool, error) {
@@ -160,5 +168,49 @@ func TestReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 	}
 	if _, marked := store.progress[2]; marked {
 		t.Errorf("transfer 2 must not be marked terminal after cancel failure, got %v", store.progress[2])
+	}
+}
+
+// A persisted transfer whose slskd id was lost (empty) but is still live gets its
+// id backfilled when matched by (username, filename) in the active pass.
+func TestReconcileBackfillsMissingID(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "", Username: "bob", Filename: "a.flac", State: core.TransferInProgress},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 20},
+	}}
+	r := NewReconciler(peers, store)
+	if _, err := r.Reconcile(context.Background(), now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if store.attached[1] != "g-recovered" {
+		t.Errorf("expected slskd id backfilled to g-recovered, got %q", store.attached[1])
+	}
+}
+
+// An empty-slskd_id transfer that is past deadline AND still live must be cancelled
+// in slskd via the backfilled id — not silently marked cancelled (which would orphan it).
+func TestReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	tr := core.Transfer{ID: 2, SlskdID: "", Username: "eve", Filename: "b.flac", State: core.TransferQueued}
+	store := &fakeStore{overdue: []core.Transfer{tr}, active: []core.Transfer{tr}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g-live", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100},
+	}}
+	r := NewReconciler(peers, store)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if store.attached[2] != "g-live" {
+		t.Errorf("expected backfill to g-live before cancel, got %q", store.attached[2])
+	}
+	if len(peers.cancelled) != 1 || peers.cancelled[0] != "g-live" {
+		t.Errorf("expected cancel via backfilled live id g-live, got %v", peers.cancelled)
+	}
+	if stats.Cancelled != 1 {
+		t.Errorf("Cancelled = %d, want 1", stats.Cancelled)
 	}
 }

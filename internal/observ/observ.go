@@ -37,6 +37,15 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 	return m
 }
 
+// IncReconcile counts one reconciliation pass.
+func (m *Metrics) IncReconcile() { m.ReconcileTotal.Inc() }
+
+// SetUnknownTransfers records the current count of slskd transfers not tracked by slskdarr.
+func (m *Metrics) SetUnknownTransfers(n int) { m.UnknownTransfers.Set(float64(n)) }
+
+// SetDownloadsActive records the current count of active downloads.
+func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) }
+
 // StatusReport is the read-only snapshot served at /status.
 type StatusReport struct {
 	Queued   int `json:"queued"`

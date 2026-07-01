@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -83,5 +84,52 @@ func Load(path string) (Config, error) {
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		return Config{}, fmt.Errorf("unknown config keys: %v", undecoded)
 	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// Validate reports the first set of missing or non-positive required fields.
+// It runs as part of Load so a missing key fails loudly at startup, just like
+// an unknown key does.
+func (c Config) Validate() error {
+	var problems []string
+	if c.Lidarr.URL == "" {
+		problems = append(problems, "lidarr.url is required")
+	}
+	if c.Lidarr.APIKey == "" {
+		problems = append(problems, "lidarr.api_key is required")
+	}
+	if c.Lidarr.PollInterval.Duration <= 0 {
+		problems = append(problems, "lidarr.poll_interval must be > 0")
+	}
+	if c.Slskd.URL == "" {
+		problems = append(problems, "slskd.url is required")
+	}
+	if c.Slskd.APIKey == "" {
+		problems = append(problems, "slskd.api_key is required")
+	}
+	if c.Slskd.StatusPollInterval.Duration <= 0 {
+		problems = append(problems, "slskd.status_poll_interval must be > 0")
+	}
+	if c.Engine.MaxCandidatesPerAlbum <= 0 {
+		problems = append(problems, "engine.max_candidates_per_album must be > 0")
+	}
+	if c.Engine.TransferDeadline.Duration <= 0 {
+		problems = append(problems, "engine.transfer_deadline must be > 0")
+	}
+	if c.Engine.StallTimeout.Duration <= 0 {
+		problems = append(problems, "engine.stall_timeout must be > 0")
+	}
+	if c.Store.Path == "" {
+		problems = append(problems, "store.path is required")
+	}
+	if c.Observ.ListenAddr == "" {
+		problems = append(problems, "observ.listen_addr is required")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }

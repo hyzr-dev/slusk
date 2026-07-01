@@ -42,14 +42,15 @@ func main() {
 
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	reconciler := engine.NewReconciler(peers, st)
+	reg := prometheus.NewRegistry()
+	metrics := observ.NewMetrics(reg)
 	eng := engine.New(engine.Params{
 		Reconciler: reconciler,
 		StatusPoll: cfg.Slskd.StatusPollInterval.Duration,
 		LidarrPoll: cfg.Lidarr.PollInterval.Duration,
+		Logger:     logger,
+		Metrics:    metrics,
 	})
-
-	reg := prometheus.NewRegistry()
-	_ = observ.NewMetrics(reg)
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
 		active, err := st.ActiveTransfers(ctx)
 		if err != nil {

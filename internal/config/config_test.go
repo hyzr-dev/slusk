@@ -27,3 +27,13 @@ func TestLoadRejectsUnknownKey(t *testing.T) {
 		t.Errorf("error should mention unknown key: %v", err)
 	}
 }
+
+func TestLoadRejectsMissingDuration(t *testing.T) {
+	_, err := Load("testdata/missing_duration.toml")
+	if err == nil {
+		t.Fatal("expected error for missing status_poll_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "status_poll_interval") {
+		t.Errorf("error should name the missing field: %v", err)
+	}
+}

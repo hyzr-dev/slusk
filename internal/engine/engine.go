@@ -2,15 +2,26 @@ package engine
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 )
+
+// MetricsSink receives reconciliation metrics. A nil sink is a no-op, so the
+// engine never depends on the observ package directly.
+type MetricsSink interface {
+	IncReconcile()
+	SetUnknownTransfers(n int)
+	SetDownloadsActive(n int)
+}
 
 // Params configures an Engine.
 type Params struct {
 	Reconciler *Reconciler
 	StatusPoll time.Duration
 	LidarrPoll time.Duration
+	Logger     *slog.Logger // nil → reconcile errors are not logged
+	Metrics    MetricsSink  // nil → metrics are not fed
 }
 
 // Engine runs the scheduler loops until its context is cancelled.
@@ -51,6 +62,17 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) reconcileOnce(ctx context.Context) {
-	_, _ = e.p.Reconciler.Reconcile(ctx, time.Now().UTC())
+	stats, err := e.p.Reconciler.Reconcile(ctx, time.Now().UTC())
+	if e.p.Metrics != nil {
+		e.p.Metrics.IncReconcile()
+	}
+	if err != nil {
+		if e.p.Logger != nil {
+			e.p.Logger.Error("reconcile failed", "err", err)
+		}
+	} else if e.p.Metrics != nil {
+		e.p.Metrics.SetUnknownTransfers(stats.Unknown)
+		e.p.Metrics.SetDownloadsActive(stats.Adopted)
+	}
 	e.reconcileCount.Add(1)
 }

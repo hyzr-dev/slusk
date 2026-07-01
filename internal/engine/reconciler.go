@@ -63,9 +63,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		liveByID[t.ID] = t
 		liveByFallback[t.Username+"\x00"+t.Filename] = t
 	}
-
-	// matchLive finds the live slskd transfer for one of our persisted rows,
-	// preferring the strong key (slskd id) and falling back to (username, filename).
 	matchLive := func(tr core.Transfer) (slskd.Transfer, bool) {
 		if tr.SlskdID != "" {
 			if lt, ok := liveByID[tr.SlskdID]; ok {
@@ -76,22 +73,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		return lt, ok
 	}
 
-	// Deadline enforcement runs FIRST: a past-deadline transfer must be cancelled
-	// regardless of what the live list says, and taking it here keeps the active
-	// loop from also processing (and double-counting) the same row.
+	// Deadline enforcement runs first; a past-deadline transfer must be cancelled
+	// and taking it here keeps the active loop from double-processing the same row.
 	handled := map[int64]bool{}
 	overdue, err := r.store.TransfersPastDeadline(ctx, now)
 	if err != nil {
 		return stats, err
 	}
 	for _, tr := range overdue {
-		// It is ours even if the cancel fails, so it is never counted as unknown.
-		if lt, ok := matchLive(tr); ok {
+		lt, matched := matchLive(tr)
+		effectiveID := tr.SlskdID
+		if matched {
 			ourIDs[lt.ID] = true
-		}
-		if tr.SlskdID != "" {
-			if err := r.peers.Cancel(ctx, tr.Username, tr.SlskdID); err != nil {
-				// Cancel failed: leave the row non-terminal so the next pass retries.
+			if effectiveID == "" && lt.ID != "" {
+				// Recover the id we lost in a crash so we can actually cancel it.
+				effectiveID = lt.ID
+				_ = r.store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+			}
+			// Still live in slskd: it MUST be cancelled there before we record it
+			// cancelled, otherwise we orphan an in-flight download.
+			if err := r.peers.Cancel(ctx, tr.Username, effectiveID); err != nil {
+				// Leave non-terminal; the next pass retries.
 				continue
 			}
 		}
@@ -100,7 +102,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		handled[tr.ID] = true
 	}
 
-	// Active reconciliation for everything not already resolved by the deadline pass.
 	active, err := r.store.ActiveTransfers(ctx)
 	if err != nil {
 		return stats, err
@@ -117,6 +118,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 			continue
 		}
 		ourIDs[lt.ID] = true
+		if tr.SlskdID == "" && lt.ID != "" {
+			// Recover from a crash between RecordEnqueueIntent and AttachTransferID.
+			_ = r.store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+		}
 		newState := mapSlskdState(lt.State)
 		_ = r.store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now)
 		switch newState {
@@ -127,7 +132,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		}
 	}
 
-	// Count transfers slskd knows about that are not ours (left untouched).
 	for _, t := range live {
 		if !ourIDs[t.ID] {
 			stats.Unknown++
