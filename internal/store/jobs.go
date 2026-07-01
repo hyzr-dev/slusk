@@ -46,17 +46,31 @@ func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username st
 	return res.LastInsertId()
 }
 
-// RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a
-// QUEUED transfer with no slskd id BEFORE slskd is called. Returns the row ID.
+// RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a QUEUED
+// transfer with no slskd id BEFORE slskd is called. It is idempotent on the
+// (username, filename) key: a re-enqueue updates the existing row's attempt and
+// deadline and returns that row, rather than violating the UNIQUE constraint.
 func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, username, filename string, deadline, now time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transfers (attempt_id, username, filename, state, deadline, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(username, filename) DO UPDATE SET
+		   attempt_id = excluded.attempt_id,
+		   state = excluded.state,
+		   deadline = excluded.deadline,
+		   slskd_id = '',
+		   bytes_done = 0,
+		   updated_at = excluded.updated_at`,
 		attemptID, username, filename, string(core.TransferQueued), deadline, now)
 	if err != nil {
-		return 0, fmt.Errorf("insert transfer intent: %w", err)
+		return 0, fmt.Errorf("upsert transfer intent: %w", err)
 	}
-	return res.LastInsertId()
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM transfers WHERE username = ? AND filename = ?`, username, filename).Scan(&id); err != nil {
+		return 0, fmt.Errorf("read transfer id: %w", err)
+	}
+	return id, nil
 }
 
 // AttachTransferID is step 2 of the write-ahead enqueue: it records the id slskd

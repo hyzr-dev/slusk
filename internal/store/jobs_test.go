@@ -72,6 +72,28 @@ func TestTransfersPastDeadline(t *testing.T) {
 	}
 }
 
+func TestRecordEnqueueIntentIsConflictSafe(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := s.UpsertDiscoveredJob(ctx, 300, now)
+	a1, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+
+	id1, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("first intent: %v", err)
+	}
+	// A later attempt re-enqueues the same (username, filename) — must not error,
+	// and must return the existing row rather than creating a duplicate.
+	id2, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(2*time.Hour), now)
+	if err != nil {
+		t.Fatalf("second intent (conflict) errored: %v", err)
+	}
+	if id1 != id2 {
+		t.Errorf("expected same transfer row on conflict, got %d and %d", id1, id2)
+	}
+}
+
 func TestUpsertDiscoveredJobIsIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
