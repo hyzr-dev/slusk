@@ -15,19 +15,23 @@ type ReconcileStats struct {
 	Completed int
 	Cancelled int
 	Lost      int
+	Retried   int
 	Unknown   int
 }
 
 // Reconciler compares slskdarr's persisted transfers against slskd's live list
 // and reconciles the differences. It runs identically at startup and on a timer.
 type Reconciler struct {
-	peers PeerNetwork
-	store JobStore
+	peers      PeerNetwork
+	store      JobStore
+	maxRetries int
 }
 
-// NewReconciler constructs a Reconciler.
-func NewReconciler(peers PeerNetwork, store JobStore) *Reconciler {
-	return &Reconciler{peers: peers, store: store}
+// NewReconciler constructs a Reconciler. maxRetries bounds how many times a
+// transfer rejected for a transient reason (e.g. a peer's queued-megabyte
+// limit) is re-queued before it is finally errored.
+func NewReconciler(peers PeerNetwork, store JobStore, maxRetries int) *Reconciler {
+	return &Reconciler{peers: peers, store: store, maxRetries: maxRetries}
 }
 
 // mapSlskdState translates a slskd transfer state string to our TransferState.
@@ -52,6 +56,21 @@ func mapSlskdState(s string) core.TransferState {
 	default:
 		return core.TransferQueued
 	}
+}
+
+// isRetryable reports whether a slskd failure reason is transient (worth
+// re-queueing) rather than permanent. Permanent reasons - the peer will never
+// serve this file - are matched by a denylist; everything else, including a
+// peer's "Too many megabytes" queue-limit rejection, is treated as retryable.
+// An empty reason is retryable: the bounded retry count keeps it from looping.
+func isRetryable(exception string) bool {
+	e := strings.ToLower(exception)
+	for _, permanent := range []string{"file not shared", "not shared", "banned"} {
+		if strings.Contains(e, permanent) {
+			return false
+		}
+	}
+	return true
 }
 
 // Reconcile performs one pass: adopt live transfers, advance terminal ones,
@@ -130,6 +149,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 			_ = r.store.AttachTransferID(ctx, tr.ID, lt.ID, now)
 		}
 		newState := mapSlskdState(lt.State)
+		// A transient rejection (e.g. a peer's "Too many megabytes" queue limit)
+		// with retries left goes back to PENDING for a later resend rather than
+		// failing the whole attempt and discarding a peer that has the album.
+		if newState == core.TransferErrored && tr.Retries < r.maxRetries && isRetryable(lt.Exception) {
+			_ = r.store.RetryTransfer(ctx, tr.ID, now)
+			stats.Retried++
+			continue
+		}
 		_ = r.store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now)
 		switch newState {
 		case core.TransferCompleted:

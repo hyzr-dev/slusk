@@ -38,6 +38,7 @@ type Transfer struct {
 	State          TransferState
 	BytesDone      int64
 	BytesTotal     int64
+	Retries        int
 	Deadline       time.Time
 	LastProgressAt *time.Time
 	UpdatedAt      time.Time

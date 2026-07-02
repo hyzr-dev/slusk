@@ -17,6 +17,7 @@ min_bitrate = 192
 max_concurrent_searches = 2
 max_concurrent_active = 20
 max_inflight_per_peer = 3
+max_transfer_retries = 3
 candidate_backoff = "10m"
 failed_candidate_backoff = "30s"
 failed_retry_after = "24h"

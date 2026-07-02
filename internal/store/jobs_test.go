@@ -94,6 +94,47 @@ func TestRecordEnqueueIntentIsConflictSafe(t *testing.T) {
 	}
 }
 
+func TestRetryTransferAccumulatesAndSurvivesResend(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := s.UpsertDiscoveredJob(ctx, 500, now)
+	a, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+
+	only := func() core.Transfer {
+		t.Helper()
+		trs, err := s.TransfersForAttempt(ctx, a)
+		if err != nil || len(trs) != 1 {
+			t.Fatalf("TransfersForAttempt: %v (n=%d)", err, len(trs))
+		}
+		return trs[0]
+	}
+
+	if err := s.RecordPendingTransfer(ctx, a, "bob", "t.flac", 42, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+
+	// Peer rejected it: retry sends it back to PENDING and bumps the count.
+	if err := s.RetryTransfer(ctx, only().ID, now); err != nil {
+		t.Fatalf("RetryTransfer: %v", err)
+	}
+	if tr := only(); tr.State != core.TransferPending || tr.Retries != 1 {
+		t.Fatalf("after retry: state=%v retries=%d, want PENDING/1", tr.State, tr.Retries)
+	}
+
+	// Resending must NOT reset the retry count, or the bound is never reached and
+	// a rejection loops forever.
+	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(2*time.Hour), now); err != nil {
+		t.Fatalf("resend RecordEnqueueIntent: %v", err)
+	}
+	if tr := only(); tr.Retries != 1 || tr.State != core.TransferQueued {
+		t.Errorf("after resend: state=%v retries=%d, want QUEUED/1", tr.State, tr.Retries)
+	}
+}
+
 func TestUpsertDiscoveredJobIsIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

@@ -46,6 +46,13 @@ func (f *fakeStore) UpdateTransferProgress(ctx context.Context, id int64, state 
 	f.progress[id] = state
 	return nil
 }
+func (f *fakeStore) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
+	if f.progress == nil {
+		f.progress = map[int64]core.TransferState{}
+	}
+	f.progress[transferID] = core.TransferPending
+	return nil
+}
 func (f *fakeStore) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
 	if f.attached == nil {
 		f.attached = map[int64]string{}
@@ -81,7 +88,7 @@ func TestReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 			{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100, BytesTransferred: 0},
 		},
 	}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -109,7 +116,7 @@ func TestReconcileMarksLostWhenAbsentFromSlskd(t *testing.T) {
 		},
 	}
 	peers := &fakePeers{downloads: nil} // slskd forgot everything
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -132,7 +139,7 @@ func TestReconcileOverlapCountedOnce(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 10},
 	}}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -158,7 +165,7 @@ func TestReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 		downloads: []slskd.Transfer{{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100}},
 		cancelErr: errors.New("peer offline"),
 	}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -181,7 +188,7 @@ func TestReconcileBackfillsMissingID(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 20},
 	}}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	if _, err := r.Reconcile(context.Background(), now); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -199,7 +206,7 @@ func TestReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g-live", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100},
 	}}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -212,5 +219,71 @@ func TestReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 	}
 	if stats.Cancelled != 1 {
 		t.Errorf("Cancelled = %d, want 1", stats.Cancelled)
+	}
+}
+
+// A peer rejection with a retryable reason (e.g. "Too many megabytes" - the
+// peer's per-user queued-megabyte limit) and retries left must go back to
+// PENDING for a later resend, not ERRORED. Marking it ERRORED would fail the
+// whole attempt and discard a peer that actually has the album.
+func TestReconcileRetriesRejectedTransferWhenRetryable(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferQueued, Retries: 0},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
+			Size: 100, BytesTransferred: 0, Exception: "Too many megabytes"},
+	}}
+	r := NewReconciler(peers, store, 3)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if store.progress[1] != core.TransferPending {
+		t.Errorf("retryable rejection should be reset to PENDING, got %v", store.progress[1])
+	}
+	if stats.Retried != 1 {
+		t.Errorf("Retried = %d, want 1", stats.Retried)
+	}
+}
+
+// A rejection whose retry budget is spent must go terminal (ERRORED), so the
+// attempt eventually fails instead of retrying forever.
+func TestReconcileRejectedTransferErrorsWhenRetriesExhausted(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferQueued, Retries: 3},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
+			Size: 100, BytesTransferred: 0, Exception: "Too many megabytes"},
+	}}
+	r := NewReconciler(peers, store, 3)
+	if _, err := r.Reconcile(context.Background(), now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if store.progress[1] != core.TransferErrored {
+		t.Errorf("exhausted retries should error out, got %v", store.progress[1])
+	}
+}
+
+// A rejection whose reason is permanent (the peer will never serve the file)
+// must go terminal immediately, regardless of remaining retry budget.
+func TestReconcileRejectedTransferTerminalReasonDoesNotRetry(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferQueued, Retries: 0},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
+			Size: 100, BytesTransferred: 0, Exception: "File not shared."},
+	}}
+	r := NewReconciler(peers, store, 3)
+	if _, err := r.Reconcile(context.Background(), now); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if store.progress[1] != core.TransferErrored {
+		t.Errorf("permanent reason should error out without retrying, got %v", store.progress[1])
 	}
 }

@@ -45,7 +45,7 @@ func main() {
 	defer st.Close()
 
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
-	reconciler := engine.NewReconciler(peers, st)
+	reconciler := engine.NewReconciler(peers, st, cfg.Engine.MaxTransferRetries)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
 	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
 	discoverer := engine.NewDiscoverer(engine.DiscovererParams{

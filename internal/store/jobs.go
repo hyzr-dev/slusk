@@ -199,8 +199,23 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 	return nil
 }
 
+// RetryTransfer returns a transfer to PENDING for a later resend and bumps its
+// retry count, clearing the slskd id and byte progress. Used when a peer
+// rejected a download for a transient reason (e.g. its queued-megabyte limit):
+// the file waits in the pending pool and topUpAttempt sends it again once the
+// peer's queue has drained, rather than failing the whole attempt.
+func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, updated_at = ? WHERE id = ?`,
+		string(core.TransferPending), now, transferID)
+	if err != nil {
+		return fmt.Errorf("retry transfer: %w", err)
+	}
+	return nil
+}
+
 const transferSelect = `SELECT id, attempt_id, slskd_id, username, filename, state,
-	bytes_done, bytes_total, deadline, last_progress_at, updated_at FROM transfers`
+	bytes_done, bytes_total, retries, deadline, last_progress_at, updated_at FROM transfers`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
 type rowScanner interface {
@@ -211,7 +226,7 @@ func scanTransfer(r rowScanner) (core.Transfer, error) {
 	var t core.Transfer
 	var state string
 	err := r.Scan(&t.ID, &t.AttemptID, &t.SlskdID, &t.Username, &t.Filename, &state,
-		&t.BytesDone, &t.BytesTotal, &t.Deadline, &t.LastProgressAt, &t.UpdatedAt)
+		&t.BytesDone, &t.BytesTotal, &t.Retries, &t.Deadline, &t.LastProgressAt, &t.UpdatedAt)
 	t.State = core.TransferState(state)
 	return t, err
 }

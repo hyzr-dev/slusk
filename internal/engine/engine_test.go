@@ -11,7 +11,7 @@ import (
 func TestRunReconcilesThenStopsOnContextCancel(t *testing.T) {
 	store := &fakeStore{}
 	peers := &fakePeers{}
-	r := NewReconciler(peers, store)
+	r := NewReconciler(peers, store, 3)
 
 	eng := New(Params{
 		Reconciler: r,
@@ -44,7 +44,7 @@ func TestRunReconcilesThenStopsOnContextCancel(t *testing.T) {
 func TestRunTicksDiscoveryLoop(t *testing.T) {
 	store := &fakeStore{}
 	peers := &fakePeers{}
-	rec := NewReconciler(peers, store)
+	rec := NewReconciler(peers, store, 3)
 
 	music := &fakeMusic{}
 	searcher := &fakeSearcher{}
@@ -79,7 +79,7 @@ func TestRunTicksDiscoveryLoop(t *testing.T) {
 func TestRunAdvancesIndependentlyOfLidarrPoll(t *testing.T) {
 	store := &fakeStore{}
 	peers := &fakePeers{}
-	rec := NewReconciler(peers, store)
+	rec := NewReconciler(peers, store, 3)
 
 	music := &fakeMusic{}
 	searcher := &fakeSearcher{}

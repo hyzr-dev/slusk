@@ -26,6 +26,12 @@ max_concurrent_active = 30
 # on the overflow files (a fully-capable source then looks incomplete). Keep it
 # low (a handful) so the queued total stays under typical peer limits.
 max_inflight_per_peer = 3
+# How many times a download rejected for a transient reason (e.g. a peer's
+# "Too many megabytes" queue limit) is re-queued before it is given up on.
+# The file waits in the pending pool and is resent once the peer's queue drains,
+# instead of failing the whole candidate. Permanent reasons ("File not shared",
+# "Banned") are never retried. 0 disables retries (optional; defaults to 0).
+max_transfer_retries = 3
 # Wait before re-searching an album when NO untried candidate is left (nothing
 # new to try soon).
 candidate_backoff = "2m"
