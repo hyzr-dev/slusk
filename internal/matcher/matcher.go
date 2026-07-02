@@ -5,6 +5,7 @@ package matcher
 
 import (
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -77,6 +78,75 @@ func releaseDir(filename string) string {
 	return path.Dir(strings.ReplaceAll(filename, `\`, "/"))
 }
 
+// leadingTrackNumber matches a track number at the start of a base filename,
+// e.g. "01", "01 -", "01.". Peers commonly share multiple formats or naming
+// variants of the same album in a single directory (FLAC next to MP3, or
+// re-tagged duplicates); this lets dedupeTracks recognize the same track
+// across those variants.
+var leadingTrackNumber = regexp.MustCompile(`^(\d{1,3})\b`)
+
+// trackKey returns the track a file belongs to within its release directory,
+// used to deduplicate format/naming variants of the same track. Files without
+// a recognizable leading track number get a unique key (their own filename) so
+// they are never wrongly merged with an unrelated file.
+func trackKey(filename string) string {
+	base := path.Base(strings.ReplaceAll(filename, `\`, "/"))
+	if m := leadingTrackNumber.FindStringSubmatch(base); m != nil {
+		return m[1]
+	}
+	return base
+}
+
+// extOf returns a filename's lowercased extension, used to bucket a release's
+// files by format.
+func extOf(filename string) string {
+	return strings.ToLower(path.Ext(strings.ReplaceAll(filename, `\`, "/")))
+}
+
+// dedupeTracks collapses a release down to a single format (highest
+// formatScore; ties broken by larger bucket then extension name, for
+// determinism) and, within that format, the single file per track (as
+// identified by trackKey). A release is one format end to end: a track only
+// available in a losing format is dropped rather than mixed in, so Lidarr
+// never receives a part-FLAC, part-MP3 album from one candidate.
+func dedupeTracks(files []slskd.Result) []slskd.Result {
+	byExt := map[string][]slskd.Result{}
+	for _, f := range files {
+		ext := extOf(f.Filename)
+		byExt[ext] = append(byExt[ext], f)
+	}
+	var bestExt string
+	for ext, group := range byExt {
+		if bestExt == "" {
+			bestExt = ext
+			continue
+		}
+		score, bestScore := formatScore(group[0].Filename), formatScore(byExt[bestExt][0].Filename)
+		switch {
+		case score > bestScore:
+			bestExt = ext
+		case score == bestScore && len(group) > len(byExt[bestExt]):
+			bestExt = ext
+		case score == bestScore && len(group) == len(byExt[bestExt]) && ext < bestExt:
+			bestExt = ext
+		}
+	}
+	best := map[string]slskd.Result{}
+	order := make([]string, 0, len(byExt[bestExt]))
+	for _, f := range byExt[bestExt] {
+		k := trackKey(f.Filename)
+		if _, ok := best[k]; !ok {
+			order = append(order, k)
+			best[k] = f
+		}
+	}
+	out := make([]slskd.Result, 0, len(order))
+	for _, k := range order {
+		out = append(out, best[k])
+	}
+	return out
+}
+
 func (x *weighted) Rank(results []slskd.Result) []Candidate {
 	// Group by (username, release directory). A user who shares several releases of
 	// the same album (e.g. FLAC + MP3) must NOT become one candidate — that would
@@ -92,6 +162,7 @@ func (x *weighted) Rank(results []slskd.Result) []Candidate {
 	}
 	var candidates []Candidate
 	for k, files := range groups {
+		files = dedupeTracks(files)
 		var score float64
 		for _, f := range files {
 			score += x.w.Format * formatScore(f.Filename)

@@ -393,6 +393,11 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 			// use the short backoff to try the next one soon rather than the long
 			// "nothing new to try" backoff.
 			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
+			names := make([]string, 0, len(transfers))
+			for _, t := range transfers {
+				names = append(names, t.Filename)
+			}
+			d.cleanupAttempt(ctx, job.ID, names)
 			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
 			}
@@ -462,6 +467,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// Rejected like a failed download: other candidates usually remain, so
 			// use the short backoff to try the next one soon.
 			d.log().Info("import rejected", "album_job", job.ID, "folder", folder)
+			d.cleanupAttempt(ctx, job.ID, names)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
@@ -478,6 +484,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// Other candidates usually remain, so use the short backoff.
 			d.log().Info("incomplete download, rejecting", "album_job", job.ID, "folder", folder,
 				"covered", coverage(importable), "total", total)
+			d.cleanupAttempt(ctx, job.ID, names)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "incomplete download", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
@@ -493,6 +500,26 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		}
 	}
 	return nil
+}
+
+// cleanupAttempt best-effort deletes a failed attempt's leftover files from
+// slskd's downloads root, so they don't get mixed into the next candidate's
+// local folder (slskd names local subfolders after the remote peer's own leaf
+// directory name, so two different peers sharing an identically-named folder
+// can otherwise collide, corrupting Lidarr's later import scan). It skips the
+// delete entirely when filenames don't share one common remote directory
+// (commonLeaf == ""): that's ambiguous, and slskd's API only accepts one
+// relative subdirectory name, so guessing wrong risks deleting more than this
+// attempt wrote. A delete failure is logged and otherwise ignored — it must
+// not block the job from moving on to its next candidate.
+func (d *Discoverer) cleanupAttempt(ctx context.Context, jobID int64, filenames []string) {
+	leaf := commonLeaf(filenames)
+	if leaf == "" {
+		return
+	}
+	if err := d.p.Peers.DeleteDownloadFolder(ctx, leaf); err != nil {
+		d.log().Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
+	}
 }
 
 // coverage counts the distinct Lidarr track IDs covered by importable, used to

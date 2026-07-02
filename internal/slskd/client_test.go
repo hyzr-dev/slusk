@@ -2,6 +2,7 @@ package slskd
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,40 @@ func TestEnqueueDoesNotRetryClientError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("4xx must not be retried; expected 1 attempt, got %d", calls)
+	}
+}
+
+func TestDeleteDownloadFolderSendsBase64EncodedName(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	if err := c.DeleteDownloadFolder(context.Background(), "1000 Forms of Fear (2014)"); err != nil {
+		t.Fatalf("DeleteDownloadFolder: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method = %q, want DELETE", gotMethod)
+	}
+	wantPath := "/api/v0/files/downloads/directories/" + base64.StdEncoding.EncodeToString([]byte("1000 Forms of Fear (2014)"))
+	if gotPath != wantPath {
+		t.Errorf("path = %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestDeleteDownloadFolderReturnsErrorOnFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	if err := c.DeleteDownloadFolder(context.Background(), "A"); err == nil {
+		t.Fatal("expected error on non-2xx response")
 	}
 }
 

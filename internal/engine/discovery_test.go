@@ -42,10 +42,12 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 }
 
 type fakeSearcher struct {
-	results       []slskd.Result
-	enqueued      []string
-	enqueuedSizes map[string]int64
-	enqueueErr    error
+	results        []slskd.Result
+	enqueued       []string
+	enqueuedSizes  map[string]int64
+	enqueueErr     error
+	deletedFolders []string
+	deleteErr      error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
@@ -61,6 +63,10 @@ func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, s
 	}
 	f.enqueuedSizes[filename] = size
 	return "slskd-" + filename, nil
+}
+func (f *fakeSearcher) DeleteDownloadFolder(ctx context.Context, name string) error {
+	f.deletedFolders = append(f.deletedFolders, name)
+	return f.deleteErr
 }
 
 // discoBackedStore is a real store-backed DiscoveryStore for these tests
@@ -535,6 +541,104 @@ func TestDiscoverFailedTransferCooldowns(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("a job with a failed transfer should move to COOLDOWN")
+	}
+}
+
+func TestDiscoverFailedTransferDeletesDownloadedFolder(t *testing.T) {
+	// The failed transfer's filename `A\01.flac` shares one common remote
+	// directory ("A"), so the leaf is unambiguous: the leftover files that
+	// attempt already deposited in slskd's completeDir must be purged before
+	// the next candidate is tried, or they'd get mixed into a same-named
+	// folder from a different peer.
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("expected DeleteDownloadFolder(\"A\"), got %+v", peers.deletedFolders)
+	}
+}
+
+func TestDiscoverRejectedImportDeletesDownloadedFolder(t *testing.T) {
+	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
+		{ID: 1, Path: "/music/slskd-downloads/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
+	}}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	// seedVerifyingJob's transfer filename is `A\01.flac` -> leaf "A".
+	st.seedVerifyingJob(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("expected DeleteDownloadFolder(\"A\") on rejected import, got %+v", peers.deletedFolders)
+	}
+}
+
+func TestDiscoverAmbiguousFolderSkipsDelete(t *testing.T) {
+	// A failed attempt whose transfers don't share a single common directory is
+	// ambiguous: deleting could be interpreted as the whole downloads root, so
+	// no delete call must be made at all.
+	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
+		{ID: 1, Path: "/music/slskd-downloads/a/1.mp3", Rejections: []string{"bad"}, Importable: false},
+	}}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := st.UpsertDiscoveredJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	attemptID, err := st.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	deadline := now.Add(30 * time.Minute)
+	// Two transfers in different remote directories -> commonLeaf == "".
+	t1, err := st.RecordEnqueueIntent(ctx, attemptID, "bob", `a\1.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := st.AttachTransferID(ctx, t1, "slskd-1", now); err != nil {
+		t.Fatalf("AttachTransferID: %v", err)
+	}
+	if err := st.UpdateTransferProgress(ctx, t1, core.TransferCompleted, 100, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	t2, err := st.RecordEnqueueIntent(ctx, attemptID, "bob", `b\2.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := st.AttachTransferID(ctx, t2, "slskd-2", now); err != nil {
+		t.Fatalf("AttachTransferID: %v", err)
+	}
+	if err := st.UpdateTransferProgress(ctx, t2, core.TransferCompleted, 100, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateVerifying, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("ambiguous folder must not trigger DeleteDownloadFolder, got %+v", peers.deletedFolders)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 {
+		t.Errorf("rejected import should still put the job in COOLDOWN, got %d", len(jobs))
 	}
 }
 

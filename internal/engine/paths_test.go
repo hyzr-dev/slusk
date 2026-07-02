@@ -40,3 +40,26 @@ func TestAlbumFolderFallsBackToRoot(t *testing.T) {
 		t.Errorf("no common dir should fall back to root, got %q", got)
 	}
 }
+
+func TestCommonLeaf(t *testing.T) {
+	files := []string{
+		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
+		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
+	}
+	got := commonLeaf(files)
+	want := "1000 Forms of Fear (2014)"
+	if got != want {
+		t.Errorf("commonLeaf = %q, want %q", got, want)
+	}
+}
+
+func TestCommonLeafEmptyWhenAmbiguous(t *testing.T) {
+	if got := commonLeaf(nil); got != "" {
+		t.Errorf("empty filenames should yield \"\", got %q", got)
+	}
+	// No common directory -> ambiguous.
+	files := []string{`a\1.flac`, `b\2.flac`}
+	if got := commonLeaf(files); got != "" {
+		t.Errorf("no common dir should yield \"\", got %q", got)
+	}
+}
