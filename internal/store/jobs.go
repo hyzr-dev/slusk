@@ -34,6 +34,19 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	return j, nil
 }
 
+// UpdateJobMetadata refreshes the cached title/artist_name for a job. It is
+// called every discovery pass so display metadata stays current even if
+// Lidarr renames an album/artist after the job was first discovered.
+func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET title = ?, artist_name = ?, updated_at = ? WHERE id = ?`,
+		title, artistName, now, jobID)
+	if err != nil {
+		return fmt.Errorf("update job metadata: %w", err)
+	}
+	return nil
+}
+
 // CreateAttempt inserts a PENDING candidate attempt and returns its ID.
 func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
