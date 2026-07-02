@@ -8,11 +8,13 @@ CREATE TABLE IF NOT EXISTS album_jobs (
     updated_at       DATETIME NOT NULL,
     title            TEXT NOT NULL DEFAULT '',
     artist_name      TEXT NOT NULL DEFAULT '',
+    release_date     TEXT NOT NULL DEFAULT '',
     UNIQUE(lidarr_album_id)
 );
 
 ALTER TABLE album_jobs ADD COLUMN title TEXT NOT NULL DEFAULT '';
 ALTER TABLE album_jobs ADD COLUMN artist_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE album_jobs ADD COLUMN release_date TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS candidate_attempts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -41,6 +41,43 @@ func TestJobsInStateAndCooldown(t *testing.T) {
 	}
 }
 
+func TestJobsInStateOrdersDiscoveredByReleaseDateDesc(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	older, _ := s.UpsertDiscoveredJob(ctx, 400, now)
+	if err := s.UpdateJobMetadata(ctx, older.ID, "Older", "Artist", "2020-01-01", now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+	newest, _ := s.UpsertDiscoveredJob(ctx, 401, now)
+	if err := s.UpdateJobMetadata(ctx, newest.ID, "Newest", "Artist", "2026-06-01", now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+	blank, _ := s.UpsertDiscoveredJob(ctx, 402, now)
+	middle, _ := s.UpsertDiscoveredJob(ctx, 403, now)
+	if err := s.UpdateJobMetadata(ctx, middle.ID, "Middle", "Artist", "2023-05-15", now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+
+	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(jobs) != 4 {
+		t.Fatalf("expected 4 discovered jobs, got %d", len(jobs))
+	}
+	// Newest release date first, then descending; blank release_date sorts
+	// last (empty string is lexicographically smallest) and falls back to
+	// oldest-updated-first among ties.
+	want := []int64{newest.ID, middle.ID, older.ID, blank.ID}
+	for i, id := range want {
+		if jobs[i].ID != id {
+			t.Errorf("jobs[%d].ID = %d, want %d (order: %+v)", i, jobs[i].ID, id, jobs)
+		}
+	}
+}
+
 func TestCountJobsInStates(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

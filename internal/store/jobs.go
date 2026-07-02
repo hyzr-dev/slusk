@@ -34,28 +34,30 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	return j, nil
 }
 
-// UpdateJobMetadata refreshes the cached title/artist_name for a job. It is
-// called every discovery pass so display metadata stays current even if
-// Lidarr renames an album/artist after the job was first discovered.
-func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName string, now time.Time) error {
+// UpdateJobMetadata refreshes the cached title/artist_name/release_date for a
+// job. It is called every discovery pass so display metadata and release-date
+// ordering stay current even if Lidarr renames an album/artist or corrects a
+// release date after the job was first discovered.
+func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName, releaseDate string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ?, updated_at = ? WHERE id = ?`,
-		title, artistName, now, jobID)
+		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, updated_at = ? WHERE id = ?`,
+		title, artistName, releaseDate, now, jobID)
 	if err != nil {
 		return fmt.Errorf("update job metadata: %w", err)
 	}
 	return nil
 }
 
-// BackfillJobMetadataIfEmpty sets title/artist_name only if either is
-// currently empty (e.g. a job created before metadata caching existed, or
-// before this job's first DISCOVERED pass). Unlike UpdateJobMetadata, it does
-// not touch updated_at, since that column drives retry-cooldown timing for
-// jobs already past DISCOVERED (see Discoverer.syncWanted).
-func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName string) error {
+// BackfillJobMetadataIfEmpty sets title/artist_name/release_date only if any
+// of them is currently empty (e.g. a job created before metadata caching
+// existed, or before this job's first DISCOVERED pass). Unlike
+// UpdateJobMetadata, it does not touch updated_at, since that column drives
+// retry-cooldown timing for jobs already past DISCOVERED (see
+// Discoverer.syncWanted).
+func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName, releaseDate string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ? WHERE id = ? AND (title = '' OR artist_name = '')`,
-		title, artistName, jobID)
+		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ? WHERE id = ? AND (title = '' OR artist_name = '' OR release_date = '')`,
+		title, artistName, releaseDate, jobID)
 	if err != nil {
 		return fmt.Errorf("backfill job metadata: %w", err)
 	}

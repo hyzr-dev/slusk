@@ -15,7 +15,7 @@ func TestWantedMissing(t *testing.T) {
 			t.Errorf("missing api key")
 		}
 		w.Write([]byte(`{"records":[
-		  {"id":11,"title":"Album A","artist":{"artistName":"Artist X"}}
+		  {"id":11,"title":"Album A","releaseDate":"2024-03-15T00:00:00Z","artist":{"artistName":"Artist X"}}
 		]}`))
 	}))
 	defer srv.Close()
@@ -25,7 +25,7 @@ func TestWantedMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WantedMissing: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != 11 || got[0].ArtistName != "Artist X" {
+	if len(got) != 1 || got[0].ID != 11 || got[0].ArtistName != "Artist X" || got[0].ReleaseDate != "2024-03-15T00:00:00Z" {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
