@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
@@ -64,6 +65,55 @@ func TestRankRewardsReliableUploader(t *testing.T) {
 	ranked := s.Rank(results)
 	if ranked[0].Username != "free" {
 		t.Errorf("free-slot uploader should rank first, got %q", ranked[0].Username)
+	}
+}
+
+func TestRankDedupesTracksWithinSameDirectory(t *testing.T) {
+	// A peer's share directory can itself mix formats of the same album (e.g. FLAC
+	// and MP3 side by side, not split into subfolders). Since these share one
+	// (user, dir) group they become ONE candidate — but every track must appear
+	// only once, keeping the best-scoring format, or Lidarr rejects the whole
+	// album as "has unmatched tracks".
+	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
+	results := []slskd.Result{
+		{Username: "tau", Filename: `music\Eden\01 First Light.flac`, BitRate: 900},
+		{Username: "tau", Filename: `music\Eden\01 First Light.mp3`, BitRate: 320},
+		{Username: "tau", Filename: `music\Eden\02 Second Light.flac`, BitRate: 900},
+		{Username: "tau", Filename: `music\Eden\02 Second Light.mp3`, BitRate: 320},
+	}
+	ranked := s.Rank(results)
+	if len(ranked) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(ranked))
+	}
+	if len(ranked[0].Files) != 2 {
+		t.Fatalf("expected 2 files (one per track, dedup'd), got %d: %+v", len(ranked[0].Files), ranked[0].Files)
+	}
+	for _, f := range ranked[0].Files {
+		if !strings.HasSuffix(f.Filename, ".flac") {
+			t.Errorf("expected the FLAC variant to win per track, got %q", f.Filename)
+		}
+	}
+}
+
+func TestRankDedupeKeepsWholeReleaseOneFormat(t *testing.T) {
+	// If the winning format (FLAC) doesn't cover every track, the MP3 fallback for
+	// the missing track must NOT be kept either -- one release means one format,
+	// even at the cost of a gap, so Lidarr never receives a mixed-format album.
+	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
+	results := []slskd.Result{
+		{Username: "tau", Filename: `music\Eden\01 First Light.flac`, BitRate: 900},
+		{Username: "tau", Filename: `music\Eden\01 First Light.mp3`, BitRate: 320},
+		{Username: "tau", Filename: `music\Eden\02 Second Light.mp3`, BitRate: 320}, // no FLAC counterpart
+	}
+	ranked := s.Rank(results)
+	if len(ranked) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(ranked))
+	}
+	if len(ranked[0].Files) != 1 {
+		t.Fatalf("expected only the 1 FLAC track (MP3-only track dropped), got %d: %+v", len(ranked[0].Files), ranked[0].Files)
+	}
+	if !strings.HasSuffix(ranked[0].Files[0].Filename, "01 First Light.flac") {
+		t.Errorf("expected the surviving track to be the FLAC one, got %q", ranked[0].Files[0].Filename)
 	}
 }
 
