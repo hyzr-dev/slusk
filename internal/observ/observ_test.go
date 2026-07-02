@@ -12,6 +12,15 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
+// newTestHandler builds a NewServer with no-op status/jobs/cancel funcs, for
+// tests that only care about routes unrelated to those three.
+func newTestHandler(reg *prometheus.Registry) http.Handler {
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
+	return NewServer(reg, status, jobs, cancel)
+}
+
 func TestStatusEndpointReturnsReport(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) {

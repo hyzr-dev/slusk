@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slskdarr</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --accent:#35c48f; --active:#4f9dfb; --stalled:#e5b93d; --done:#35c48f;
+    --queued:#5f6672; --orphaned:#e5595d; --failed:#e5595d;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:#0b0d10;font-family:'IBM Plex Sans',sans-serif;color:#dfe2e8;}
+  .app{display:flex;min-height:100vh;}
+  aside{width:220px;flex:0 0 220px;background:#101317;border-right:1px solid #1e222a;display:flex;flex-direction:column;height:100vh;position:sticky;top:0;}
+  .brand{display:flex;align-items:center;gap:10px;padding:18px;}
+  .brand-mark{width:32px;height:32px;border-radius:8px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:600;color:#08130d;}
+  nav{padding:6px 12px;display:flex;flex-direction:column;gap:2px;}
+  nav button{display:flex;align-items:center;gap:9px;padding:9px 10px;border:none;background:transparent;color:#8a919d;font-size:13px;border-radius:8px;cursor:pointer;text-align:left;}
+  nav button.active{background:rgba(53,196,143,0.12);color:var(--accent);}
+  main{flex:1;min-width:0;padding:22px 26px 48px;}
+  h1{margin:0 0 4px;font-size:18px;font-weight:600;}
+  .view{display:none;}
+  .view.active{display:block;}
+  .stat-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:16px;}
+  .card{background:#14171c;border:1px solid #21252e;border-radius:11px;padding:14px 15px;}
+  .card .label{font-size:12px;color:#8a919d;}
+  .card .value{font-family:'IBM Plex Mono',monospace;font-size:28px;font-weight:600;margin-top:6px;}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;}
+  th{text-align:left;padding:9px 14px;font-size:11px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;}
+  td{padding:10px 14px;border-bottom:1px solid #191d24;}
+  tr.job-row{cursor:pointer;}
+  tr.job-row:hover{background:#181c22;}
+  .pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600;}
+  .pill.queued{background:rgba(95,102,114,0.18);color:var(--queued);}
+  .pill.active{background:rgba(79,157,251,0.15);color:var(--active);}
+  .pill.stalled{background:rgba(229,185,61,0.15);color:var(--stalled);}
+  .pill.done{background:rgba(53,196,143,0.15);color:var(--done);}
+  .pill.failed{background:rgba(229,89,93,0.15);color:var(--failed);}
+  .bar{height:5px;border-radius:3px;background:#22262e;overflow:hidden;}
+  .bar-fill{height:100%;background:var(--accent);}
+  .detail-row{background:#0e1115;}
+  .detail-row td{padding:16px 20px;}
+  button.action{padding:6px 12px;border-radius:7px;border:1px solid rgba(229,89,93,0.28);background:rgba(229,89,93,0.09);color:var(--orphaned);font-size:12px;cursor:pointer;}
+  #search{padding:8px 10px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;margin-bottom:12px;width:260px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="brand-mark">sl</div>
+      <div>
+        <div style="font-weight:600;">slskdarr</div>
+        <div style="font-size:11px;color:#5f6672;">Lidarr → slskd</div>
+      </div>
+    </div>
+    <nav>
+      <button data-view="overview" class="active">Översikt</button>
+      <button data-view="queue">Kö</button>
+    </nav>
+  </aside>
+  <main>
+    <div id="view-overview" class="view active">
+      <h1>Översikt</h1>
+      <div id="stat-cards" class="stat-cards"></div>
+      <table>
+        <thead><tr><th>Album / Artist</th><th>Peer</th><th>Progress</th></tr></thead>
+        <tbody id="overview-active-body"></tbody>
+      </table>
+    </div>
+    <div id="view-queue" class="view">
+      <h1>Kö</h1>
+      <input id="search" type="text" placeholder="Sök artist, album, peer…">
+      <table>
+        <thead>
+          <tr><th>Status</th><th>Album / Artist</th><th>Peer</th><th>Progress</th><th></th></tr>
+        </thead>
+        <tbody id="queue-body"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script src="/dashboard.js"></script>
+</body>
+</html>

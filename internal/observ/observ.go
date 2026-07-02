@@ -158,5 +158,7 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
+	mux.HandleFunc("/", dashboardHandler)
+	mux.HandleFunc("/dashboard.js", dashboardJSHandler)
 	return mux
 }
