@@ -34,7 +34,15 @@ type DiscovererParams struct {
 	Batch                  int
 	MaxActive              int
 	MaxInflightPerPeer     int
-	Logger                 *slog.Logger
+	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
+	// album's known Lidarr track count by more than this multiple (e.g. 2 means
+	// a candidate offering more than 2x the expected tracks is skipped). Guards
+	// against a Soulseek share that dumps an artist's whole discography into one
+	// flat folder being mistaken for a single album. Ignored when the album's
+	// expected track count is unknown (0), since Lidarr is the final arbiter of
+	// import correctness downstream.
+	MaxCandidateFileRatio float64
+	Logger                *slog.Logger
 }
 
 // Discoverer drives AlbumJobs through the pipeline, one transition per tick.
@@ -231,8 +239,28 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 	d.log().Info("searched album",
 		"album_job", job.ID, "query", album.ArtistName+" "+album.Title,
 		"results", len(results), "candidates", len(candidates))
+	// Fetch the album's expected track count once per startJob call (not per
+	// candidate) to size-sanity-check candidates below. total == 0 means Lidarr
+	// has no reliable count for this album right now, so the check is skipped
+	// entirely rather than risk rejecting a legitimate candidate on bad data.
+	_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+	if err != nil {
+		return err
+	}
 	for _, cand := range candidates {
 		if tried[cand.Username] {
+			continue
+		}
+		if total > 0 && float64(len(cand.Files)) > float64(total)*d.p.MaxCandidateFileRatio {
+			// A share this oversized for the expected album is almost certainly not
+			// a single release (e.g. an artist's whole discography dumped into one
+			// flat folder) - skip it like an already-tried candidate rather than
+			// attempt it. Not counted toward CandidatesTried individually: if no
+			// other candidate exists this tick, the budget is still spent exactly
+			// once via the "no untried candidate available" path below, the same as
+			// if this candidate had never appeared at all.
+			d.log().Info("candidate file count implausible for album, skipping",
+				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
 			continue
 		}
 		// Prefer candidates offering at least the expected track count, but accept

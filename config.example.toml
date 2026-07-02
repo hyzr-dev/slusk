@@ -49,6 +49,12 @@ import_confirm_timeout = "3m"
 # lidarr.poll_interval, which only controls how often the wanted list is
 # refreshed from Lidarr.
 tick_interval = "30s"
+# Reject a candidate whose file count exceeds the album's known Lidarr track
+# count by more than this multiple, e.g. 2.0 rejects a candidate offering more
+# than 2x the expected tracks. Guards against a Soulseek share dumping an
+# artist's whole discography into one flat folder being mistaken for a single
+# album. Ignored (no rejection) when Lidarr's expected track count is unknown.
+max_candidate_file_ratio = 2.0
 
 [engine.weights]
 format = 1.0
