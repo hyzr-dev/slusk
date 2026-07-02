@@ -47,6 +47,21 @@ func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artis
 	return nil
 }
 
+// BackfillJobMetadataIfEmpty sets title/artist_name only if either is
+// currently empty (e.g. a job created before metadata caching existed, or
+// before this job's first DISCOVERED pass). Unlike UpdateJobMetadata, it does
+// not touch updated_at, since that column drives retry-cooldown timing for
+// jobs already past DISCOVERED (see Discoverer.syncWanted).
+func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET title = ?, artist_name = ? WHERE id = ? AND (title = '' OR artist_name = '')`,
+		title, artistName, jobID)
+	if err != nil {
+		return fmt.Errorf("backfill job metadata: %w", err)
+	}
+	return nil
+}
+
 // CreateAttempt inserts a PENDING candidate attempt and returns its ID.
 func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,

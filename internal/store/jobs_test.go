@@ -136,3 +136,81 @@ func TestUpdateJobMetadataSetsTitleAndArtist(t *testing.T) {
 		t.Errorf("title/artist = %q / %q, want Untrue / Burial", jobs[0].Title, jobs[0].ArtistName)
 	}
 }
+
+func TestBackfillJobMetadataIfEmptyFillsBlankFields(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertDiscoveredJob(ctx, 50, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Title A", "Artist A"); err != nil {
+		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
+	}
+
+	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Title != "Title A" || jobs[0].ArtistName != "Artist A" {
+		t.Errorf("title/artist = %q / %q, want Title A / Artist A", jobs[0].Title, jobs[0].ArtistName)
+	}
+}
+
+func TestBackfillJobMetadataIfEmptyDoesNotOverwriteExisting(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 51, now)
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Original Title", "Original Artist", now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "New Title", "New Artist"); err != nil {
+		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
+	}
+
+	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if jobs[0].Title != "Original Title" || jobs[0].ArtistName != "Original Artist" {
+		t.Errorf("expected existing metadata preserved, got %q / %q", jobs[0].Title, jobs[0].ArtistName)
+	}
+}
+
+func TestBackfillJobMetadataIfEmptyDoesNotTouchUpdatedAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	createdAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 52, createdAt)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateFailed, createdAt); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Legacy Title", "Legacy Artist"); err != nil {
+		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
+	}
+
+	failed, err := s.JobsInState(ctx, core.StateFailed, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("expected 1 FAILED job, got %d", len(failed))
+	}
+	if !failed[0].UpdatedAt.Equal(createdAt) {
+		t.Errorf("updated_at = %v, want unchanged %v (must not reset the retry-cooldown clock)", failed[0].UpdatedAt, createdAt)
+	}
+	if failed[0].Title != "Legacy Title" || failed[0].ArtistName != "Legacy Artist" {
+		t.Errorf("title/artist = %q / %q, want Legacy Title / Legacy Artist", failed[0].Title, failed[0].ArtistName)
+	}
+}

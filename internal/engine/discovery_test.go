@@ -467,6 +467,37 @@ func TestSyncWantedCachesTitleAndArtist(t *testing.T) {
 	}
 }
 
+func TestSyncWantedBackfillsMetadataForNonDiscoveredJobWithoutResettingUpdatedAt(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{
+		{ID: 901, Title: "Legacy Album", ArtistName: "Legacy Artist", TrackCount: 8},
+	}}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	failedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedFailedJob(t, 901, failedAt) // pre-existing job: title/artist left empty, as prod jobs from before metadata caching are
+
+	d := NewDiscoverer(p)
+	later := failedAt.Add(time.Hour)
+	if err := d.syncWanted(ctx, music.wanted, later); err != nil {
+		t.Fatalf("syncWanted: %v", err)
+	}
+
+	failed, err := st.JobsInState(ctx, core.StateFailed, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("expected 1 FAILED job, got %d", len(failed))
+	}
+	job := failed[0]
+	if job.Title != "Legacy Album" || job.ArtistName != "Legacy Artist" {
+		t.Errorf("title/artist = %q / %q, want backfilled Legacy Album / Legacy Artist", job.Title, job.ArtistName)
+	}
+	if !job.UpdatedAt.Equal(failedAt) {
+		t.Errorf("updated_at = %v, want unchanged %v (must not reset the retry-cooldown clock)", job.UpdatedAt, failedAt)
+	}
+}
+
 func TestDiscoverRetriesFailedAlbumAfterWindow(t *testing.T) {
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 88, Title: "A", ArtistName: "X", TrackCount: 1}}}
 	peers := &fakeSearcher{results: []slskd.Result{
