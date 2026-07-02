@@ -20,6 +20,8 @@ func dashboardStatus(v core.JobView) string {
 			return "stalled"
 		case core.TransferInProgress:
 			return "active"
+		case core.TransferErrored, core.TransferCancelled:
+			return "failed"
 		}
 	}
 	return "queued"

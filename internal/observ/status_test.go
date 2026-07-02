@@ -53,6 +53,22 @@ func TestDashboardStatus(t *testing.T) {
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateCooldown}},
 			want: "queued",
 		},
+		{
+			name: "transfer errored is failed",
+			v: core.JobView{
+				Job:      core.AlbumJob{State: core.StateDownloading},
+				Transfer: &core.Transfer{State: core.TransferErrored},
+			},
+			want: "failed",
+		},
+		{
+			name: "transfer cancelled is failed",
+			v: core.JobView{
+				Job:      core.AlbumJob{State: core.StateDownloading},
+				Transfer: &core.Transfer{State: core.TransferCancelled},
+			},
+			want: "failed",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
