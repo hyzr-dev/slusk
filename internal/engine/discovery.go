@@ -10,6 +10,7 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
+	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 // errAlbumNoLongerWanted signals that a job's album has left Lidarr's wanted
@@ -91,10 +92,15 @@ func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.Wanted
 	if err := d.startNewJobs(ctx, wanted, now); err != nil {
 		return err
 	}
-	if err := d.topUpDownloads(ctx, now); err != nil {
+	// advanceDownloading must run before topUpDownloads: it settles any attempt
+	// that already has a failed transfer (e.g. from an earlier reconcile pass)
+	// and cleans up its folder. Topping up first would release that same
+	// attempt's still-PENDING siblings to slskd, into a folder advanceDownloading
+	// is about to delete moments later in this same tick.
+	if err := d.advanceDownloading(ctx, now); err != nil {
 		return err
 	}
-	if err := d.advanceDownloading(ctx, now); err != nil {
+	if err := d.topUpDownloads(ctx, now); err != nil {
 		return err
 	}
 	if err := d.advanceImporting(ctx, now); err != nil {
@@ -511,13 +517,20 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 // (commonLeaf == ""): that's ambiguous, and slskd's API only accepts one
 // relative subdirectory name, so guessing wrong risks deleting more than this
 // attempt wrote. A delete failure is logged and otherwise ignored — it must
-// not block the job from moving on to its next candidate.
+// not block the job from moving on to its next candidate. A 404 means the
+// attempt never wrote any bytes (e.g. it failed before any transfer started),
+// which is routine, so it's logged quietly rather than as an ERROR.
 func (d *Discoverer) cleanupAttempt(ctx context.Context, jobID int64, filenames []string) {
 	leaf := commonLeaf(filenames)
 	if leaf == "" {
 		return
 	}
-	if err := d.p.Peers.DeleteDownloadFolder(ctx, leaf); err != nil {
+	err := d.p.Peers.DeleteDownloadFolder(ctx, leaf)
+	switch {
+	case err == nil:
+	case slskd.IsNotFound(err):
+		d.log().Info("nothing to clean up for failed attempt", "album_job", jobID, "folder", leaf)
+	default:
 		d.log().Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
 	}
 }
