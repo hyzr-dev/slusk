@@ -446,7 +446,9 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		folder := AlbumFolder(d.p.CompleteDir, names)
 		items, err := d.p.Music.ManualImportCandidates(ctx, folder)
 		if err != nil {
-			return err
+			d.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)
+			d.escalateIfStuck(ctx, job, active.ID, names, "import candidates failed", now)
+			continue
 		}
 		if len(items) == 0 {
 			// Empty folder on a job whose transfers all completed means the files
@@ -482,7 +484,9 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		}
 		_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 		if err != nil {
-			return err
+			d.log().Error("album status failed", "album_job", job.ID, "err", err)
+			d.escalateIfStuck(ctx, job, active.ID, names, "album status check failed", now)
+			continue
 		}
 		if coverage(importable) < total {
 			// A source that can't complete the release is rejected outright rather
@@ -506,6 +510,27 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		}
 	}
 	return nil
+}
+
+// escalateIfStuck fails and cools down a VERIFYING job's active attempt once
+// it has been stuck (no state change) longer than ImportConfirmTimeout, so a
+// job whose Lidarr call (ManualImportCandidates or AlbumStatus) keeps
+// erroring every tick forever - e.g. Lidarr repeatedly timing out on a broken
+// folder - does not stay stuck in VERIFYING indefinitely, starving every
+// other job's discovery tick. Called after logging the triggering error;
+// within the timeout it is a no-op, so the job simply gets retried next tick.
+func (d *Discoverer) escalateIfStuck(ctx context.Context, job core.AlbumJob, attemptID int64, filenames []string, reason string, now time.Time) {
+	if now.Sub(job.UpdatedAt) <= d.p.ImportConfirmTimeout {
+		return
+	}
+	d.log().Info("verifying stuck past timeout, cooling down", "album_job", job.ID, "reason", reason)
+	d.cleanupAttempt(ctx, job.ID, filenames)
+	if err := d.p.Store.FailAttempt(ctx, attemptID, reason, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+		d.log().Error("fail attempt failed", "attempt", attemptID, "err", err)
+	}
+	if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+		d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+	}
 }
 
 // cleanupAttempt best-effort deletes a failed attempt's leftover files from
@@ -566,7 +591,15 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 		active := attempts[len(attempts)-1]
 		present, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 		if err != nil {
-			return err
+			d.log().Error("album status failed", "album_job", job.ID, "err", err)
+			if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
+				d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID)
+				_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
+				if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+					d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+				}
+			}
+			continue
 		}
 		if present >= total {
 			d.log().Info("import confirmed, completed", "album_job", job.ID)
