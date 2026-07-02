@@ -95,17 +95,17 @@ const timeFormat = "2006-01-02T15:04:05Z07:00"
 // store's ListJobsWithTransfer).
 type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 
-// cancelResult is the outcome of a CancelFunc call.
-type cancelResult int
+// CancelResult is the outcome of a CancelFunc call.
+type CancelResult int
 
 const (
-	cancelResultOK cancelResult = iota
-	cancelResultNotFound
-	cancelResultFailed
+	CancelResultOK CancelResult = iota
+	CancelResultNotFound
+	CancelResultFailed
 )
 
 // CancelFunc cancels a job by id, returning which outcome occurred.
-type CancelFunc func(ctx context.Context, jobID int64) (cancelResult, error)
+type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
 // NewServer returns an http.Handler exposing /metrics, /status, /api/jobs,
 // /api/jobs/{id}/cancel, and the dashboard UI at /.
@@ -146,9 +146,9 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 		}
 		result, err := cancel(r.Context(), jobID)
 		switch result {
-		case cancelResultNotFound:
+		case CancelResultNotFound:
 			http.Error(w, "job not found", http.StatusNotFound)
-		case cancelResultFailed:
+		case CancelResultFailed:
 			msg := "cancel failed"
 			if err != nil {
 				msg = err.Error()

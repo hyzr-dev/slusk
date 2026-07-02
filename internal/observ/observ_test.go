@@ -18,7 +18,7 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 		return StatusReport{Queued: 3, Active: 1, Stalled: 0, Orphaned: 2}, nil
 	}
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -42,7 +42,7 @@ func TestMetricsEndpointServes(t *testing.T) {
 	m := NewMetrics(reg)
 	m.ReconcileTotal.Inc()
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	h := NewServer(reg, func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -65,7 +65,7 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 			},
 		}, nil
 	}
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
@@ -100,7 +100,7 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, errors.New("db exploded") }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
@@ -117,9 +117,9 @@ func TestCancelEndpointSuccess(t *testing.T) {
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	var gotID int64
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) {
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) {
 		gotID = jobID
-		return cancelResultOK, nil
+		return CancelResultOK, nil
 	}
 	h := NewServer(reg, status, jobs, cancel)
 
@@ -139,7 +139,7 @@ func TestCancelEndpointNotFound(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultNotFound, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultNotFound, nil }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/999/cancel", nil)
@@ -155,7 +155,7 @@ func TestCancelEndpointStoreFailure(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultFailed, errors.New("advance failed") }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultFailed, errors.New("advance failed") }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/1/cancel", nil)
@@ -171,7 +171,7 @@ func TestCancelEndpointBadID(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	h := NewServer(reg, status, jobs, cancel)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/not-a-number/cancel", nil)
