@@ -9,7 +9,22 @@ func TestAlbumFolder(t *testing.T) {
 		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
 	}
 	got := AlbumFolder(complete, files)
-	want := "/music/slskd-downloads/music/Sia/1000 Forms of Fear (2014)"
+	want := "/music/slskd-downloads/1000 Forms of Fear (2014)"
+	if got != want {
+		t.Errorf("AlbumFolder = %q, want %q", got, want)
+	}
+}
+
+func TestAlbumFolderDeeplyNestedRemoteShare(t *testing.T) {
+	// slskd only recreates the leaf album folder locally, discarding the
+	// remote peer's own alphabetical share structure (Music/<letter>/<artist>/<album>).
+	complete := "/data/media/downloads-slskd"
+	files := []string{
+		`Music\B\Blut Aus Nord\2023 - Disharmonium - Nahab\01 - Track.flac`,
+		`Music\B\Blut Aus Nord\2023 - Disharmonium - Nahab\02 - Track.flac`,
+	}
+	got := AlbumFolder(complete, files)
+	want := "/data/media/downloads-slskd/2023 - Disharmonium - Nahab"
 	if got != want {
 		t.Errorf("AlbumFolder = %q, want %q", got, want)
 	}
