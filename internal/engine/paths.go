@@ -6,10 +6,13 @@ import (
 )
 
 // AlbumFolder computes the local folder Lidarr should scan for one album, from
-// the downloaded transfers' filenames. slskd filenames use "\" separators and a
-// leading directory; the common directory of all files (translated to "/") is
-// joined under completeDir. If there is no single common directory, it falls
-// back to completeDir so Lidarr scans the whole download root.
+// the downloaded transfers' filenames. filenames are the remote peer's full
+// share paths (slskd uses "\" separators and mirrors the peer's own directory
+// layout, e.g. "Music\B\Artist\Album\track.flac"); slskd itself only recreates
+// the leaf directory locally under completeDir, discarding the remote peer's
+// parent folders. So only the common directory's base name is joined under
+// completeDir. If there is no single common directory, it falls back to
+// completeDir so Lidarr scans the whole download root.
 func AlbumFolder(completeDir string, filenames []string) string {
 	if len(filenames) == 0 {
 		return completeDir
@@ -27,5 +30,5 @@ func AlbumFolder(completeDir string, filenames []string) string {
 	if common == "." || common == "/" || common == "" {
 		return completeDir
 	}
-	return path.Join(completeDir, common)
+	return path.Join(completeDir, path.Base(common))
 }
