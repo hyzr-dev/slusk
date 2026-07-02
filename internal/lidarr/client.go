@@ -120,14 +120,17 @@ func (c *Client) TriggerImport(ctx context.Context, path string) error {
 
 // ManualImportItem is one file Lidarr found in a folder, with any import rejections.
 type ManualImportItem struct {
-	ID         int64
-	Path       string
-	FolderName string
-	ArtistID   int64
-	AlbumID    int64
-	TrackIDs   []int64
-	Rejections []string
-	Importable bool // true when Rejections is empty
+	ID                      int64
+	Path                    string
+	ArtistID                int64
+	AlbumID                 int64
+	AlbumReleaseID          int64
+	TrackIDs                []int64
+	Quality                 json.RawMessage // echoed back to Lidarr as-is on import
+	IndexerFlags            int64
+	DisableReleaseSwitching bool
+	Rejections              []string
+	Importable              bool // true when Rejections is empty
 }
 
 // ManualImportCandidates asks Lidarr what it would import from folder, including
@@ -148,12 +151,19 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]M
 		return nil, fmt.Errorf("lidarr manualimport: status %d", resp.StatusCode)
 	}
 	var raw []struct {
-		ID         int64  `json:"id"`
-		Path       string `json:"path"`
-		FolderName string `json:"folderName"`
-		ArtistID   int64  `json:"artistId"`
-		AlbumID    int64  `json:"albumId"`
-		Tracks     []struct {
+		ID     int64  `json:"id"`
+		Path   string `json:"path"`
+		Artist struct {
+			ID int64 `json:"id"`
+		} `json:"artist"`
+		Album struct {
+			ID int64 `json:"id"`
+		} `json:"album"`
+		AlbumReleaseID          int64           `json:"albumReleaseId"`
+		Quality                 json.RawMessage `json:"quality"`
+		IndexerFlags            int64           `json:"indexerFlags"`
+		DisableReleaseSwitching bool            `json:"disableReleaseSwitching"`
+		Tracks                  []struct {
 			ID int64 `json:"id"`
 		} `json:"tracks"`
 		Rejections []struct {
@@ -174,9 +184,11 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]M
 			trackIDs = append(trackIDs, tr.ID)
 		}
 		out = append(out, ManualImportItem{
-			ID: it.ID, Path: it.Path, FolderName: it.FolderName,
-			ArtistID: it.ArtistID, AlbumID: it.AlbumID, TrackIDs: trackIDs,
-			Rejections: reasons, Importable: len(reasons) == 0,
+			ID: it.ID, Path: it.Path,
+			ArtistID: it.Artist.ID, AlbumID: it.Album.ID, AlbumReleaseID: it.AlbumReleaseID,
+			TrackIDs: trackIDs, Quality: it.Quality, IndexerFlags: it.IndexerFlags,
+			DisableReleaseSwitching: it.DisableReleaseSwitching,
+			Rejections:              reasons, Importable: len(reasons) == 0,
 		})
 	}
 	return out, nil
@@ -217,8 +229,17 @@ func (c *Client) ExecuteManualImport(ctx context.Context, items []ManualImportIt
 	files := make([]map[string]any, 0, len(items))
 	for _, it := range items {
 		files = append(files, map[string]any{
-			"path": it.Path, "folderName": it.FolderName,
-			"artistId": it.ArtistID, "albumId": it.AlbumID,
+			"id":                      it.ID,
+			"path":                    it.Path,
+			"artistId":                it.ArtistID,
+			"albumId":                 it.AlbumID,
+			"albumReleaseId":          it.AlbumReleaseID,
+			"trackIds":                it.TrackIDs,
+			"quality":                 it.Quality,
+			"indexerFlags":            it.IndexerFlags,
+			"additionalFile":          false,
+			"replaceExistingFiles":    true,
+			"disableReleaseSwitching": it.DisableReleaseSwitching,
 		})
 	}
 	body := map[string]any{"name": "ManualImport", "importMode": "move", "files": files}
