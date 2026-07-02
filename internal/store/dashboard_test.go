@@ -109,6 +109,60 @@ func TestListJobsWithTransferExcludesCancelled(t *testing.T) {
 	}
 }
 
+// TestListJobsWithTransferDedupesMultiTransferAttempt reproduces the
+// multi-track-album scenario: a single candidate_attempt gets one transfer
+// row per file (see engine.Discovery, one RecordEnqueueIntent call per
+// cand.Files entry). ListJobsWithTransfer must still return exactly one
+// JobView per job, picking the most recently updated transfer.
+func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 5, now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Multi Track Album", "Boards of Canada", now)
+
+	attempt, err := s.CreateAttempt(ctx, job.ID, "album_peer", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	// First file of the album.
+	if _, err := s.RecordEnqueueIntent(ctx, attempt, "album_peer", "track1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent track1: %v", err)
+	}
+
+	// Second file of the same album, same attempt, enqueued slightly later.
+	later := now.Add(time.Minute)
+	tid2, err := s.RecordEnqueueIntent(ctx, attempt, "album_peer", "track2.flac", later.Add(time.Hour), later)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track2: %v", err)
+	}
+	// Bump its updated_at further so it's unambiguously the most recent transfer.
+	evenLater := later.Add(time.Minute)
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferInProgress, 128, 1024, evenLater); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view (one job, not one per transfer), got %d", len(views))
+	}
+	v := views[0]
+	if v.Transfer == nil {
+		t.Fatalf("expected non-nil Transfer")
+	}
+	if v.Transfer.Filename != "track2.flac" {
+		t.Errorf("Transfer.Filename = %q, want track2.flac (the more recently updated transfer)", v.Transfer.Filename)
+	}
+	if v.Transfer.State != core.TransferInProgress || v.Transfer.BytesDone != 128 {
+		t.Errorf("Transfer = %+v, want state IN_PROGRESS bytesDone 128", v.Transfer)
+	}
+}
+
 func TestJobWithTransferNotFound(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
