@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -63,28 +64,50 @@ type StatusFunc func(ctx context.Context) (StatusReport, error)
 // view of core.JobView so the frontend never needs to know about the
 // engine's internal state machine.
 type jobDTO struct {
-	ID         int64  `json:"id"`
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	Status     string `json:"status"`
-	Peer       string `json:"peer"`
-	BytesDone  int64  `json:"bytesDone"`
-	BytesTotal int64  `json:"bytesTotal"`
-	UpdatedAt  string `json:"updatedAt"`
+	ID              int64  `json:"id"`
+	Title           string `json:"title"`
+	Artist          string `json:"artist"`
+	Status          string `json:"status"`
+	Peer            string `json:"peer"`
+	BytesDone       int64  `json:"bytesDone"`
+	BytesTotal      int64  `json:"bytesTotal"`
+	UpdatedAt       string `json:"updatedAt"`
+	State           string `json:"state"`
+	CandidatesTried int    `json:"candidatesTried"`
+	MaxCandidates   int    `json:"maxCandidates"`
+	FailReason      string `json:"failReason"`
+	NextAttemptAt   string `json:"nextAttemptAt"`
 }
 
-func toJobDTO(v core.JobView) jobDTO {
+// toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
+// failedRetryAfter and maxCandidates are engine config values threaded in from
+// NewServer, needed to compute nextAttemptAt for FAILED jobs and maxCandidates.
+func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int) jobDTO {
 	d := jobDTO{
-		ID:        v.Job.ID,
-		Title:     v.Job.Title,
-		Artist:    v.Job.ArtistName,
-		Status:    dashboardStatus(v),
-		Peer:      v.Peer,
-		UpdatedAt: v.Job.UpdatedAt.Format(timeFormat),
+		ID:              v.Job.ID,
+		Title:           v.Job.Title,
+		Artist:          v.Job.ArtistName,
+		Status:          dashboardStatus(v),
+		Peer:            v.Peer,
+		UpdatedAt:       v.Job.UpdatedAt.Format(timeFormat),
+		State:           string(v.Job.State),
+		CandidatesTried: v.Job.CandidatesTried,
+		MaxCandidates:   maxCandidates,
 	}
 	if v.Transfer != nil {
 		d.BytesDone = v.Transfer.BytesDone
 		d.BytesTotal = v.Transfer.BytesTotal
+	}
+	if v.Attempt != nil {
+		d.FailReason = v.Attempt.FailReason
+	}
+	switch v.Job.State {
+	case core.StateCooldown:
+		if v.Job.NextAttemptAt != nil {
+			d.NextAttemptAt = v.Job.NextAttemptAt.Format(timeFormat)
+		}
+	case core.StateFailed:
+		d.NextAttemptAt = v.Job.UpdatedAt.Add(failedRetryAfter).Format(timeFormat)
 	}
 	return d
 }
@@ -108,8 +131,10 @@ const (
 type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
 // NewServer returns an http.Handler exposing /metrics, /status, /api/jobs,
-// /api/jobs/{id}/cancel, and the dashboard UI at /.
-func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc) http.Handler {
+// /api/jobs/{id}/cancel, and the dashboard UI at /. failedRetryAfter and
+// maxCandidates are engine config values surfaced in /api/jobs so the
+// dashboard can show a job's retry ETA and candidate budget.
+func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +154,7 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 		}
 		dtos := make([]jobDTO, len(views))
 		for i, v := range views {
-			dtos[i] = toJobDTO(v)
+			dtos[i] = toJobDTO(v, failedRetryAfter, maxCandidates)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)

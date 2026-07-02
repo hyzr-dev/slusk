@@ -163,6 +163,68 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	}
 }
 
+func TestListJobsWithTransferPopulatesAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 6, now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Failed Album", "Some Artist", now)
+
+	attemptID, err := s.CreateAttempt(ctx, job.ID, "flaky_peer", 1.5, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	backoff := now.Add(time.Hour)
+	if err := s.FailAttempt(ctx, attemptID, "transfer failed", backoff, now); err != nil {
+		t.Fatalf("FailAttempt: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+	if v.Attempt == nil {
+		t.Fatalf("expected non-nil Attempt")
+	}
+	if v.Attempt.Username != "flaky_peer" {
+		t.Errorf("Attempt.Username = %q, want flaky_peer", v.Attempt.Username)
+	}
+	if v.Attempt.FailReason != "transfer failed" {
+		t.Errorf("Attempt.FailReason = %q, want %q", v.Attempt.FailReason, "transfer failed")
+	}
+	if v.Attempt.State != "FAILED" {
+		t.Errorf("Attempt.State = %q, want FAILED", v.Attempt.State)
+	}
+	if v.Attempt.BackoffUntil == nil || !v.Attempt.BackoffUntil.Equal(backoff) {
+		t.Errorf("Attempt.BackoffUntil = %v, want %v", v.Attempt.BackoffUntil, backoff)
+	}
+}
+
+func TestListJobsWithTransferNilAttemptWhenNoAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 7, now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "No Attempt Album", "Nobody", now)
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	if views[0].Attempt != nil {
+		t.Errorf("expected nil Attempt, got %+v", views[0].Attempt)
+	}
+}
+
 func TestJobWithTransferNotFound(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

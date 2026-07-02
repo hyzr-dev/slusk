@@ -1,7 +1,21 @@
 const STATUS_LABEL = { queued: 'Köad', active: 'Aktiv', stalled: 'Stannad', done: 'Klar', failed: 'Misslyckad' };
 
+const STATE_LABEL = {
+  DISCOVERED: 'Upptäckt',
+  SEARCHING: 'Söker',
+  SELECTING: 'Väljer kandidat',
+  DOWNLOADING: 'Laddar ner',
+  VERIFYING: 'Verifierar',
+  IMPORTING: 'Importerar',
+  COMPLETED: 'Klar',
+  COOLDOWN: 'Väntar',
+  FAILED: 'Misslyckad',
+  CANCELLED: 'Avbruten',
+};
+
 let jobs = [];
 let searchTerm = '';
+let statusFilter = '';
 
 function fmtBytes(n) {
   if (!n) return '0 MB';
@@ -51,18 +65,38 @@ function matchesSearch(j) {
   return hay.includes(searchTerm.toLowerCase());
 }
 
+function matchesStatusFilter(j) {
+  if (!statusFilter) return true;
+  return j.status === statusFilter;
+}
+
+function matchesFilters(j) {
+  return matchesSearch(j) && matchesStatusFilter(j);
+}
+
+function jobDetailLine(j) {
+  const parts = [];
+  if (j.failReason) parts.push(`Fel: ${escapeHtml(j.failReason)}`);
+  if (j.nextAttemptAt) parts.push(`Nästa försök: ${new Date(j.nextAttemptAt).toLocaleString('sv-SE')}`);
+  if (j.maxCandidates > 0 && (j.status === 'queued' || j.status === 'failed')) {
+    parts.push(`Kandidat ${j.candidatesTried}/${j.maxCandidates}`);
+  }
+  if (!parts.length) return '';
+  return `<br><span style="color:#7c828d;font-size:11.5px;">${parts.join(' · ')}</span>`;
+}
+
 let expandedId = null;
 
 function queueRows() {
-  const filtered = jobs.filter(matchesSearch);
+  const filtered = jobs.filter(matchesFilters);
   const body = document.getElementById('queue-body');
   body.innerHTML = filtered.map(j => {
     const rows = [`
       <tr class="job-row" data-id="${j.id}">
-        <td><span class="pill ${j.status}">${STATUS_LABEL[j.status] || j.status}</span></td>
-        <td>${escapeHtml(j.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(j.artist)}</span></td>
+        <td><span class="pill ${j.status}">${STATE_LABEL[j.state] || j.status}</span></td>
+        <td>${escapeHtml(j.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(j.artist)}</span>${jobDetailLine(j)}</td>
         <td>${escapeHtml(j.peer)}</td>
-        <td><div class="bar"><div class="bar-fill" style="width:${pct(j)}%"></div></div></td>
+        <td>${j.bytesTotal ? `<div style="font-size:11px;color:#7c828d;margin-bottom:3px;">${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>` : ''}<div class="bar"><div class="bar-fill" style="width:${pct(j)}%"></div></div></td>
         <td></td>
       </tr>
     `];
@@ -128,7 +162,16 @@ function setupSearch() {
   });
 }
 
+function setupStatusFilter() {
+  const select = document.getElementById('status-filter');
+  select.addEventListener('change', () => {
+    statusFilter = select.value;
+    queueRows();
+  });
+}
+
 setupNav();
 setupSearch();
+setupStatusFilter();
 fetchJobs();
 setInterval(fetchJobs, 3000);

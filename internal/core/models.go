@@ -48,6 +48,7 @@ type Transfer struct {
 // written back to the store.
 type JobView struct {
 	Job      AlbumJob
-	Transfer *Transfer // nil if the job has no attempt/transfer yet
-	Peer     string    // convenience copy of Transfer.Username; "" if Transfer is nil
+	Transfer *Transfer         // nil if the job has no attempt/transfer yet
+	Peer     string            // convenience copy of Transfer.Username; "" if Transfer is nil
+	Attempt  *CandidateAttempt // nil if the job has no attempt yet
 }

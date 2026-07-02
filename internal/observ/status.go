@@ -13,6 +13,10 @@ func dashboardStatus(v core.JobView) string {
 		return "done"
 	case core.StateFailed:
 		return "failed"
+	case core.StateDiscovered, core.StateCooldown:
+		return "queued"
+	case core.StateSearching, core.StateSelecting, core.StateVerifying, core.StateImporting:
+		return "active"
 	}
 	if v.Transfer != nil {
 		switch v.Transfer.State {

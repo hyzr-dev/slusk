@@ -18,9 +18,24 @@ func TestDashboardStatus(t *testing.T) {
 			want: "queued",
 		},
 		{
-			name: "searching with no transfer is queued",
+			name: "searching with no transfer is active",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateSearching}},
-			want: "queued",
+			want: "active",
+		},
+		{
+			name: "selecting is active",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateSelecting}},
+			want: "active",
+		},
+		{
+			name: "verifying is active",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateVerifying}},
+			want: "active",
+		},
+		{
+			name: "importing is active",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateImporting}},
+			want: "active",
 		},
 		{
 			name: "transfer in progress is active",
