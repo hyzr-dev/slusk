@@ -110,6 +110,23 @@ failed_retry_after = "2m"
 Återställ till produktionsvärden (t.ex. `poll_interval = "5m"`, `failed_retry_after = "24h"`)
 när allt gått igenom grönt.
 
+## Fas 8 — Dashboard-verifikation
+
+Webb-gränsnittet är nu serverat från samma `observ`-server som `/status` och `/metrics`.
+
+- [ ] Öppna `http://<observ.listen_addr>/` i en webbläsare (t.ex. `http://192.168.86.33:9090/`).
+- [ ] Sidan laddar med **mörktemat** och visar:
+  - [ ] Sidofält med nav-länkarna `Översikt` och `Kö`.
+  - [ ] **Översikt-vyn:** stat-kort för Köad, Aktiv, Stalled, Övergiven (även om de visar 0).
+  - [ ] **Kö-vyn:** tabell över jobb (tom om ingen är aktiv just nu).
+- [ ] Starta en eller flera nedladdningar (eller vänta tills existerande jobb dyker upp).
+- [ ] Kö-tabellen visar jobben med status, album-namn, artist, och antal försökta kandidater.
+- [ ] **Expandera en rad:** klicka på en jobbrad i tabellen → den expanderar och visar detaljinfo (peer, bytes, etc.).
+- [ ] **Avbryt-åtgärd:** expanderad rad visar en `Avbryt`-knapp. Klicka på den.
+  - [ ] En bekräftelse-dialog dyker upp.
+  - [ ] Bekräfta → efter nästa status-poll (~3s senare) uppdateras radens status till avbruten.
+  - [ ] I loggen (`docker logs slskdarr`) syns ett `cancel` entry för jobbet.
+
 ## Om något fastnar
 Kolla i ordning: `docker logs slskdarr` (JSON, sök `err`) → `curl $STATUS/status` →
 `album_jobs.state` i DB → slskd:s eget transfer-UI → Lidarrs egen aktivitetslogg.
