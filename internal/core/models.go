@@ -42,3 +42,12 @@ type Transfer struct {
 	LastProgressAt *time.Time
 	UpdatedAt      time.Time
 }
+
+// JobView is a read-only projection joining an AlbumJob with its most recent
+// transfer, for display purposes only (e.g. the dashboard). It is never
+// written back to the store.
+type JobView struct {
+	Job      AlbumJob
+	Transfer *Transfer // nil if the job has no attempt/transfer yet
+	Peer     string    // convenience copy of Transfer.Username; "" if Transfer is nil
+}
