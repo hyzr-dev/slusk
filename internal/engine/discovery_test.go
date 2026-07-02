@@ -1,10 +1,14 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +168,38 @@ func (b *discoBackedStore) seedDownloadingJobWithFailedTransfer(t *testing.T, no
 	}
 	if err := b.UpdateTransferProgress(ctx, transferID, core.TransferErrored, 0, 0, now); err != nil {
 		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	return job.ID
+}
+
+// seedDownloadingJobWithFailedAndPendingSibling creates a DISCOVERED job for
+// album 3, moves it to DOWNLOADING, and gives its one attempt two transfers in
+// the same remote directory ("A"): one already ERRORED, and one still PENDING
+// (never sent to slskd) - the state topUpAttempt would otherwise release.
+func (b *discoBackedStore) seedDownloadingJobWithFailedAndPendingSibling(t *testing.T, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	job, err := b.UpsertDiscoveredJob(ctx, 3, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if err := b.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	attemptID, err := b.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	deadline := now.Add(30 * time.Minute)
+	erroredID, err := b.RecordEnqueueIntent(ctx, attemptID, "bob", `A\01.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := b.UpdateTransferProgress(ctx, erroredID, core.TransferErrored, 0, 0, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	if err := b.RecordPendingTransfer(ctx, attemptID, "bob", `A\02.flac`, 10, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
 	}
 	return job.ID
 }
@@ -561,6 +597,75 @@ func TestDiscoverFailedTransferDeletesDownloadedFolder(t *testing.T) {
 	}
 	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
 		t.Errorf("expected DeleteDownloadFolder(\"A\"), got %+v", peers.deletedFolders)
+	}
+}
+
+func TestCleanupLogsNotFoundQuietly(t *testing.T) {
+	// A 404 from DeleteDownloadFolder means the attempt never wrote any bytes
+	// to disk (e.g. it failed before any transfer started) - a routine outcome
+	// for a best-effort cleanup, not a real failure worth an ERROR log line.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	var logBuf bytes.Buffer
+	p, st := newDiscoParams(t, &fakeMusic{}, nil)
+	p.Peers = slskd.New(srv.URL, "k")
+	p.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(context.Background(), now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "level=ERROR") {
+		t.Errorf("a 404 (nothing to clean up) must not be logged as ERROR, got:\n%s", logBuf.String())
+	}
+}
+
+func TestCleanupLogsOtherFailuresAsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	var logBuf bytes.Buffer
+	p, st := newDiscoParams(t, &fakeMusic{}, nil)
+	p.Peers = slskd.New(srv.URL, "k")
+	p.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(context.Background(), now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "level=ERROR") {
+		t.Errorf("a real cleanup failure (5xx) must still be logged as ERROR, got:\n%s", logBuf.String())
+	}
+}
+
+func TestAdvanceDoesNotTopUpAttemptAlreadyFailed(t *testing.T) {
+	// Reproduces a live race: topUpDownloads used to run before
+	// advanceDownloading in the same tick, so an attempt with one already-
+	// ERRORED transfer (recorded by an earlier reconcile pass) got its
+	// remaining PENDING sibling released to slskd in this tick, moments
+	// before advanceDownloading's anyFailed branch cleaned up and deleted
+	// the very folder that sibling was actively downloading into.
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedAndPendingSibling(t, now)
+	d := NewDiscoverer(p)
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if len(peers.enqueued) != 0 {
+		t.Errorf("an already-failed attempt's pending sibling must not be topped up, got enqueued %+v", peers.enqueued)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("expected the failed attempt's folder to be cleaned up, got %+v", peers.deletedFolders)
 	}
 }
 

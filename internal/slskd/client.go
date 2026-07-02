@@ -65,6 +65,15 @@ func isRetryable(err error) bool {
 	return true
 }
 
+// IsNotFound reports whether err is a 404 response from slskd, e.g. from
+// DeleteDownloadFolder when the folder never existed (a failed attempt whose
+// transfers never wrote any bytes to disk) - a routine outcome for a
+// best-effort cleanup, not a real failure.
+func IsNotFound(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && ae.status == http.StatusNotFound
+}
+
 // Result is one search result file offered by a peer, enriched with the peer's
 // upload-availability signals (copied from the per-user response group).
 type Result struct {

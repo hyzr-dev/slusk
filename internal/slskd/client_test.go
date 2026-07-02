@@ -122,6 +122,38 @@ func TestDeleteDownloadFolderReturnsErrorOnFailure(t *testing.T) {
 	}
 }
 
+func TestIsNotFoundRecognizesA404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	err := c.DeleteDownloadFolder(context.Background(), "A")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !IsNotFound(err) {
+		t.Errorf("IsNotFound(%v) = false, want true", err)
+	}
+}
+
+func TestIsNotFoundRejectsOtherStatuses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	err := c.DeleteDownloadFolder(context.Background(), "A")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if IsNotFound(err) {
+		t.Errorf("IsNotFound(%v) = true, want false", err)
+	}
+}
+
 func TestListDownloadsFlattens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[
