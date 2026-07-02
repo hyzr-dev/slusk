@@ -52,7 +52,7 @@ type wantedMissingPage struct {
 // fetchWantedMissingPage fetches a single page of wanted/missing records.
 func (c *Client) fetchWantedMissingPage(ctx context.Context, page int) (wantedMissingPage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/v1/wanted/missing?page=%d&pageSize=100", c.baseURL, page), nil)
+		fmt.Sprintf("%s/api/v1/wanted/missing?page=%d&pageSize=100&sortKey=releaseDate&sortDirection=descending", c.baseURL, page), nil)
 	if err != nil {
 		return wantedMissingPage{}, err
 	}
