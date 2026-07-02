@@ -42,9 +42,10 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 }
 
 type fakeSearcher struct {
-	results    []slskd.Result
-	enqueued   []string
-	enqueueErr error
+	results       []slskd.Result
+	enqueued      []string
+	enqueuedSizes map[string]int64
+	enqueueErr    error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
@@ -55,6 +56,10 @@ func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, s
 		return "", f.enqueueErr
 	}
 	f.enqueued = append(f.enqueued, filename)
+	if f.enqueuedSizes == nil {
+		f.enqueuedSizes = map[string]int64{}
+	}
+	f.enqueuedSizes[filename] = size
 	return "slskd-" + filename, nil
 }
 
@@ -195,7 +200,7 @@ func newDiscoParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (Discov
 		TransferDeadline: 30 * time.Minute, CandidateBackoff: 10 * time.Minute,
 		FailedCandidateBackoff: 30 * time.Second,
 		FailedRetryAfter:       24 * time.Hour, ImportConfirmTimeout: 3 * time.Minute,
-		MaxCandidates: 3, Batch: 10, MaxActive: 10,
+		MaxCandidates: 3, Batch: 10, MaxActive: 10, MaxInflightPerPeer: 3,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}, st
 }
@@ -218,6 +223,120 @@ func TestDiscoverStartsSearchAndEnqueues(t *testing.T) {
 	jobs, _ := st.JobsInState(context.Background(), core.StateDownloading, 10)
 	if len(jobs) != 1 {
 		t.Errorf("expected job in DOWNLOADING, got %d", len(jobs))
+	}
+}
+
+// transferStateCounts sums the transfer states across every attempt of the
+// DOWNLOADING job for lidarrAlbumID, so tests can assert how many files were
+// sent to slskd versus deferred as PENDING.
+func transferStateCounts(t *testing.T, st *discoBackedStore, lidarrAlbumID int64) map[core.TransferState]int {
+	t.Helper()
+	ctx := context.Background()
+	counts := map[core.TransferState]int{}
+	for _, state := range []core.AlbumJobState{core.StateDownloading, core.StateVerifying, core.StateImporting, core.StateCompleted} {
+		jobs, _ := st.JobsInState(ctx, state, 100)
+		for _, job := range jobs {
+			if job.LidarrAlbumID != lidarrAlbumID {
+				continue
+			}
+			attempts, _ := st.AttemptsForJob(ctx, job.ID)
+			for _, a := range attempts {
+				transfers, _ := st.TransfersForAttempt(ctx, a.ID)
+				for _, tr := range transfers {
+					counts[tr.State]++
+				}
+			}
+		}
+	}
+	return counts
+}
+
+func TestStartJobThrottlesEnqueuePerPeer(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X", TrackCount: 4}}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\02.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\03.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\04.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	p.MaxInflightPerPeer = 2
+	d := NewDiscoverer(p)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(context.Background(), now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	// Only the cap is sent to slskd immediately; the rest wait as PENDING so the
+	// peer's per-user queued-megabyte limit is not tripped by a burst.
+	if len(peers.enqueued) != 2 {
+		t.Fatalf("expected 2 files enqueued (cap), got %d", len(peers.enqueued))
+	}
+	counts := transferStateCounts(t, st, 1)
+	if counts[core.TransferPending] != 2 {
+		t.Errorf("expected 2 PENDING transfers, got %d", counts[core.TransferPending])
+	}
+	if counts[core.TransferQueued] != 2 {
+		t.Errorf("expected 2 sent (QUEUED) transfers, got %d", counts[core.TransferQueued])
+	}
+}
+
+// completeInflightTransfers marks every sent-but-unfinished transfer of the
+// DOWNLOADING job for lidarrAlbumID as COMPLETED, simulating slskd finishing the
+// current batch so the next tick can release more PENDING files.
+func completeInflightTransfers(t *testing.T, st *discoBackedStore, lidarrAlbumID int64, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	jobs, _ := st.JobsInState(ctx, core.StateDownloading, 100)
+	for _, job := range jobs {
+		if job.LidarrAlbumID != lidarrAlbumID {
+			continue
+		}
+		attempts, _ := st.AttemptsForJob(ctx, job.ID)
+		for _, a := range attempts {
+			transfers, _ := st.TransfersForAttempt(ctx, a.ID)
+			for _, tr := range transfers {
+				if tr.State == core.TransferQueued || tr.State == core.TransferInProgress {
+					_ = st.UpdateTransferProgress(ctx, tr.ID, core.TransferCompleted, tr.BytesTotal, tr.BytesTotal, now)
+				}
+			}
+		}
+	}
+}
+
+func TestTopUpDownloadsReleasesPendingAsInflightCompletes(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X", TrackCount: 4}}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\02.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\03.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\04.flac`, Size: 10, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	p.MaxInflightPerPeer = 2
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 2 {
+		t.Fatalf("first tick should send only the cap, got %d", len(peers.enqueued))
+	}
+	// The two in-flight downloads finish; the next tick must release the rest.
+	completeInflightTransfers(t, st, 1, now)
+	if err := d.RunOnce(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 4 {
+		t.Fatalf("second tick should release the remaining files, got %d enqueued", len(peers.enqueued))
+	}
+	if counts := transferStateCounts(t, st, 1); counts[core.TransferPending] != 0 {
+		t.Errorf("no PENDING transfers should remain, got %d", counts[core.TransferPending])
+	}
+	// A deferred file must be enqueued with the size persisted at PENDING time,
+	// not 0 - slskd rejects size-0 downloads (they time out immediately).
+	if got := peers.enqueuedSizes[`bob\A\04.flac`]; got != 10 {
+		t.Errorf("deferred file should be enqueued with its persisted size 10, got %d", got)
 	}
 }
 

@@ -30,6 +30,12 @@ func (s AlbumJobState) Terminal() bool {
 type TransferState string
 
 const (
+	// TransferPending is recorded before a file is sent to slskd: the intent is
+	// persisted so it survives a restart, but slskd has not been asked to
+	// download it yet. The engine promotes PENDING files to QUEUED a few at a
+	// time (see MaxInflightPerPeer) so a burst never trips a peer's per-user
+	// queued-megabyte limit. Reconciliation ignores PENDING transfers.
+	TransferPending    TransferState = "PENDING"
 	TransferQueued     TransferState = "QUEUED"
 	TransferInProgress TransferState = "IN_PROGRESS"
 	TransferCompleted  TransferState = "COMPLETED"

@@ -52,6 +52,7 @@ type DiscoveryStore interface {
 	AttemptsForJob(ctx context.Context, jobID int64) ([]core.CandidateAttempt, error)
 	TransfersForAttempt(ctx context.Context, attemptID int64) ([]core.Transfer, error)
 	CreateAttempt(ctx context.Context, jobID int64, username string, score float64, now time.Time) (int64, error)
+	RecordPendingTransfer(ctx context.Context, attemptID int64, username, filename string, size int64, now time.Time) error
 	RecordEnqueueIntent(ctx context.Context, attemptID int64, username, filename string, deadline, now time.Time) (int64, error)
 	AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, id int64, state core.TransferState, done, total int64, now time.Time) error

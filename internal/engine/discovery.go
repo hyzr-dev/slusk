@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -31,6 +32,7 @@ type DiscovererParams struct {
 	MaxCandidates          int
 	Batch                  int
 	MaxActive              int
+	MaxInflightPerPeer     int
 	Logger                 *slog.Logger
 }
 
@@ -87,6 +89,9 @@ func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.Wanted
 		return err
 	}
 	if err := d.startNewJobs(ctx, wanted, now); err != nil {
+		return err
+	}
+	if err := d.topUpDownloads(ctx, now); err != nil {
 		return err
 	}
 	if err := d.advanceDownloading(ctx, now); err != nil {
@@ -230,28 +235,27 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		if err != nil {
 			return err
 		}
-		deadline := now.Add(d.p.TransferDeadline)
+		// Write-ahead every file as PENDING (survives a restart), then hand only a
+		// bounded number to slskd now; the rest are promoted as in-flight
+		// transfers finish (topUpAttempt / topUpDownloads). Enqueuing a whole album
+		// at once trips Soulseek peers' per-user queued-megabyte limit, which they
+		// answer with "Too many megabytes" rejections on the overflow files.
 		for _, f := range cand.Files {
-			tid, err := d.p.Store.RecordEnqueueIntent(ctx, attemptID, cand.Username, f.Filename, deadline, now)
-			if err != nil {
+			if err := d.p.Store.RecordPendingTransfer(ctx, attemptID, cand.Username, f.Filename, f.Size, now); err != nil {
 				return err
 			}
-			slskdID, err := d.p.Peers.Enqueue(ctx, cand.Username, f.Filename, f.Size)
-			if err != nil {
-				d.log().Error("enqueue failed", "user", cand.Username, "file", f.Filename, "err", err)
-				if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
-					d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
-				}
-				continue
-			}
-			_ = d.p.Store.AttachTransferID(ctx, tid, slskdID, now)
 		}
 		if err := d.p.Store.IncrementCandidatesTried(ctx, job.ID, now); err != nil {
 			return err
 		}
+		sent, err := d.topUpAttempt(ctx, attemptID, now)
+		if err != nil {
+			return err
+		}
 		d.log().Info("enqueued candidate, downloading",
 			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID,
-			"user", cand.Username, "files", len(cand.Files))
+			"user", cand.Username, "files", len(cand.Files),
+			"sent", sent, "deferred", len(cand.Files)-sent)
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateDownloading, now)
 	}
 	// No untried candidate available now: count this exhausted tick toward the
@@ -263,6 +267,84 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		return err
 	}
 	return d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.CandidateBackoff), now)
+}
+
+// topUpAttempt hands an attempt's PENDING files to slskd until MaxInflightPerPeer
+// transfers are in flight, sending more only as earlier ones finish. Keeping the
+// queued count bounded stops the peer's per-user queued-megabyte limit from
+// rejecting a burst. PENDING files carry their size in bytes_total (set at
+// RecordPendingTransfer time) so they can be enqueued here without the search
+// result in hand. Files are sent in filename order for deterministic progress.
+func (d *Discoverer) topUpAttempt(ctx context.Context, attemptID int64, now time.Time) (int, error) {
+	transfers, err := d.p.Store.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		return 0, err
+	}
+	inflight := 0
+	var pending []core.Transfer
+	for _, tr := range transfers {
+		switch tr.State {
+		case core.TransferQueued, core.TransferInProgress, core.TransferStalled:
+			inflight++
+		case core.TransferPending:
+			pending = append(pending, tr)
+		}
+	}
+	sort.Slice(pending, func(i, j int) bool { return pending[i].Filename < pending[j].Filename })
+
+	deadline := now.Add(d.p.TransferDeadline)
+	sent := 0
+	for _, p := range pending {
+		if inflight >= d.p.MaxInflightPerPeer {
+			break
+		}
+		// Promote PENDING -> QUEUED with a real deadline, then hand it to slskd.
+		tid, err := d.p.Store.RecordEnqueueIntent(ctx, attemptID, p.Username, p.Filename, deadline, now)
+		if err != nil {
+			return sent, err
+		}
+		slskdID, err := d.p.Peers.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
+		if err != nil {
+			d.log().Error("enqueue failed", "user", p.Username, "file", p.Filename, "err", err)
+			if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
+				d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+			}
+			continue
+		}
+		_ = d.p.Store.AttachTransferID(ctx, tid, slskdID, now)
+		inflight++
+		sent++
+	}
+	return sent, nil
+}
+
+// topUpDownloads promotes more PENDING files for every DOWNLOADING job whose
+// in-flight count has dropped below MaxInflightPerPeer, so a throttled candidate
+// keeps making progress across ticks as its earlier files complete.
+func (d *Discoverer) topUpDownloads(ctx context.Context, now time.Time) error {
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.Batch)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		attempts, err := d.p.Store.AttemptsForJob(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		if len(attempts) == 0 {
+			continue
+		}
+		active := attempts[len(attempts)-1] // most recent
+		sent, err := d.topUpAttempt(ctx, active.ID, now)
+		if err != nil {
+			d.log().Error("top up downloads failed", "album_job", job.ID, "err", err)
+		}
+		if sent > 0 {
+			d.log().Info("released deferred downloads",
+				"album_job", job.ID, "user", active.Username, "sent", sent)
+		}
+	}
+	return nil
 }
 
 // albumFor returns the Lidarr album matching a job (by lidarr_album_id) from
