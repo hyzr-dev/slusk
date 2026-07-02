@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -243,7 +244,8 @@ func newDiscoParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (Discov
 		FailedCandidateBackoff: 30 * time.Second,
 		FailedRetryAfter:       24 * time.Hour, ImportConfirmTimeout: 3 * time.Minute,
 		MaxCandidates: 3, Batch: 10, MaxActive: 10, MaxInflightPerPeer: 3,
-		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		MaxCandidateFileRatio: 2,
+		Logger:                slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}, st
 }
 
@@ -265,6 +267,103 @@ func TestDiscoverStartsSearchAndEnqueues(t *testing.T) {
 	jobs, _ := st.JobsInState(context.Background(), core.StateDownloading, 10)
 	if len(jobs) != 1 {
 		t.Errorf("expected job in DOWNLOADING, got %d", len(jobs))
+	}
+}
+
+func TestStartJobRejectsGrosslyOversizedCandidate(t *testing.T) {
+	// Reproduces a live incident: a Soulseek user shared a flat, non-album
+	// folder containing an entire artist's discography (146 files: singles,
+	// remixes, and collaborations with other artists) for an album Lidarr
+	// expects to have far fewer tracks. Grouped by (username, dir), matcher.Rank
+	// treats this as one candidate; startJob must reject it as implausible
+	// rather than downloading the whole 146-file dump.
+	files := make([]slskd.Result, 0, 146)
+	for i := 0; i < 146; i++ {
+		files = append(files, slskd.Result{
+			Username: "mayamaya", Filename: fmt.Sprintf(`mayamaya\ILLENIUM\%03d track.flac`, i),
+			BitRate: 900, HasFreeUploadSlot: true,
+		})
+	}
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "ILLENIUM", ArtistName: "ILLENIUM"}},
+		albumTotal: 12, // Lidarr's known track count for the actual album
+	}
+	peers := &fakeSearcher{results: files}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 0 {
+		t.Fatalf("oversized candidate must not be enqueued, got %d files enqueued", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 0 {
+		t.Errorf("job must not reach DOWNLOADING off an oversized candidate, got %d", len(downloading))
+	}
+	cooldown, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(cooldown) != 1 {
+		t.Errorf("job should cool down when the only candidate is grossly oversized, got %d", len(cooldown))
+	}
+}
+
+func TestStartJobAcceptsNormalSizedCandidateWithAlbumTotalKnown(t *testing.T) {
+	// A candidate whose file count is plausible for the album must still
+	// proceed normally, even once Lidarr's expected track count is known and
+	// checked.
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 10,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\02.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 2 {
+		t.Fatalf("expected 2 files enqueued, got %d", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("normal-sized candidate should reach DOWNLOADING, got %d", len(downloading))
+	}
+}
+
+func TestStartJobDoesNotRejectOversizedWhenAlbumTotalUnknown(t *testing.T) {
+	// When Lidarr's track count for the album is unknown (AlbumStatus returns
+	// total == 0, e.g. transient Lidarr data gap), the size sanity check must
+	// not reject candidates outright -- Lidarr is the final arbiter of import
+	// correctness downstream, so an unreliable total must not block otherwise
+	// good candidates.
+	files := make([]slskd.Result, 0, 50)
+	for i := 0; i < 50; i++ {
+		files = append(files, slskd.Result{
+			Username: "bob", Filename: fmt.Sprintf(`bob\A\%03d.flac`, i), BitRate: 900, HasFreeUploadSlot: true,
+		})
+	}
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 0,
+	}
+	peers := &fakeSearcher{results: files}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("unknown album total should not block a candidate, got %d DOWNLOADING", len(downloading))
 	}
 }
 

@@ -23,6 +23,7 @@ failed_candidate_backoff = "30s"
 failed_retry_after = "24h"
 import_confirm_timeout = "3m"
 tick_interval = "30s"
+max_candidate_file_ratio = 2.0
 
 [engine.weights]
 format = 1.0

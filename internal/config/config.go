@@ -51,7 +51,13 @@ type EngineConfig struct {
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
 	ImportConfirmTimeout   Duration `toml:"import_confirm_timeout"`
 	TickInterval           Duration `toml:"tick_interval"`
-	Weights                Weights  `toml:"weights"`
+	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
+	// album's known Lidarr track count by more than this multiple (e.g. 2.0
+	// means a candidate offering more than 2x the expected tracks is skipped).
+	// Guards against a Soulseek share dumping an artist's whole discography into
+	// one flat folder being mistaken for a single album.
+	MaxCandidateFileRatio float64 `toml:"max_candidate_file_ratio"`
+	Weights               Weights `toml:"weights"`
 }
 
 // Weights are the tunable scoring weights for the matcher.
@@ -171,6 +177,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.TickInterval.Duration <= 0 {
 		problems = append(problems, "engine.tick_interval must be > 0")
+	}
+	if c.Engine.MaxCandidateFileRatio <= 0 {
+		problems = append(problems, "engine.max_candidate_file_ratio must be > 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")

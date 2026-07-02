@@ -61,6 +61,7 @@ func main() {
 		Batch:                  cfg.Engine.MaxConcurrentSearches,
 		MaxActive:              cfg.Engine.MaxConcurrentActive,
 		MaxInflightPerPeer:     cfg.Engine.MaxInflightPerPeer,
+		MaxCandidateFileRatio:  cfg.Engine.MaxCandidateFileRatio,
 		Logger:                 logger,
 	})
 	reg := prometheus.NewRegistry()
