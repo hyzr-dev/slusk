@@ -111,3 +111,74 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 		t.Fatalf("status code = %d, want 500", rec.Code)
 	}
 }
+
+func TestCancelEndpointSuccess(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	var gotID int64
+	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) {
+		gotID = jobID
+		return cancelResultOK, nil
+	}
+	h := NewServer(reg, status, jobs, cancel)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/42/cancel", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if gotID != 42 {
+		t.Errorf("cancel called with id %d, want 42", gotID)
+	}
+}
+
+func TestCancelEndpointNotFound(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultNotFound, nil }
+	h := NewServer(reg, status, jobs, cancel)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/999/cancel", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want 404", rec.Code)
+	}
+}
+
+func TestCancelEndpointStoreFailure(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultFailed, errors.New("advance failed") }
+	h := NewServer(reg, status, jobs, cancel)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/1/cancel", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want 502", rec.Code)
+	}
+}
+
+func TestCancelEndpointBadID(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(ctx context.Context, jobID int64) (cancelResult, error) { return cancelResultOK, nil }
+	h := NewServer(reg, status, jobs, cancel)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/not-a-number/cancel", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want 400", rec.Code)
+	}
+}

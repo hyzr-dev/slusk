@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -132,6 +133,30 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)
+	})
+	mux.HandleFunc("/api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		result, err := cancel(r.Context(), jobID)
+		switch result {
+		case cancelResultNotFound:
+			http.Error(w, "job not found", http.StatusNotFound)
+		case cancelResultFailed:
+			msg := "cancel failed"
+			if err != nil {
+				msg = err.Error()
+			}
+			http.Error(w, msg, http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
 	})
 	return mux
 }
