@@ -101,6 +101,32 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, userna
 	return id, nil
 }
 
+// RecordPendingTransfer persists a file the engine intends to download but has
+// not yet handed to slskd, as a PENDING transfer carrying its size in
+// bytes_total. The engine promotes a bounded number of these to QUEUED per peer
+// at a time (via RecordEnqueueIntent) so a burst never trips a peer's per-user
+// queued-megabyte limit. Idempotent on the (username, filename) key, mirroring
+// RecordEnqueueIntent. The deadline is a placeholder; the real one is set when
+// the file is actually sent, since PENDING transfers are never deadline-reaped.
+func (s *Store) RecordPendingTransfer(ctx context.Context, attemptID int64, username, filename string, size int64, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO transfers (attempt_id, username, filename, state, bytes_total, deadline, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(username, filename) DO UPDATE SET
+		   attempt_id = excluded.attempt_id,
+		   state = excluded.state,
+		   bytes_total = excluded.bytes_total,
+		   slskd_id = '',
+		   bytes_done = 0,
+		   deadline = excluded.deadline,
+		   updated_at = excluded.updated_at`,
+		attemptID, username, filename, string(core.TransferPending), size, now, now)
+	if err != nil {
+		return fmt.Errorf("record pending transfer: %w", err)
+	}
+	return nil
+}
+
 // AttachTransferID is step 2 of the write-ahead enqueue: it records the id slskd
 // returned so future reconciliation can match on the strong key.
 func (s *Store) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {

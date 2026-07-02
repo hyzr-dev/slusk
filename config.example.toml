@@ -19,6 +19,13 @@ max_concurrent_searches = 4
 # SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING), regardless of how
 # many are newly started per tick.
 max_concurrent_active = 30
+# Max files handed to a single peer at once. slskdarr records a candidate's whole
+# album up front but only sends this many to slskd at a time, releasing more as
+# each finishes. Enqueuing a whole album at once trips Soulseek peers' per-user
+# queued-megabyte limit, which they answer with "Too many megabytes" rejections
+# on the overflow files (a fully-capable source then looks incomplete). Keep it
+# low (a handful) so the queued total stays under typical peer limits.
+max_inflight_per_peer = 3
 # Wait before re-searching an album when NO untried candidate is left (nothing
 # new to try soon).
 candidate_backoff = "2m"
