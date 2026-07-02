@@ -44,6 +44,7 @@ type PeerSearcher interface {
 type DiscoveryStore interface {
 	UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error)
 	UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName string, now time.Time) error
+	BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName string) error
 	JobsInState(ctx context.Context, state core.AlbumJobState, limit int) ([]core.AlbumJob, error)
 	CountJobsInStates(ctx context.Context, states ...core.AlbumJobState) (int, error)
 	DueCooldownJobs(ctx context.Context, now time.Time, limit int) ([]core.AlbumJob, error)

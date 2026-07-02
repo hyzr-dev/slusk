@@ -97,11 +97,13 @@ func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.Wanted
 // syncWanted upserts every wanted Lidarr album as a DISCOVERED job (idempotent),
 // and refreshes the job's cached title/artist metadata every pass while it sits
 // in DISCOVERED, so a rename in Lidarr before the job is picked up still shows
-// up. Jobs already past DISCOVERED are left alone: UpdateJobMetadata also bumps
+// up. Jobs already past DISCOVERED only get a targeted backfill (title/artist
+// set only if currently empty, updated_at untouched): UpdateJobMetadata bumps
 // updated_at, and stores like DueFailedJobs key off updated_at to time state
-// transitions (e.g. the failed-retry cooldown), so touching it on every pass
-// for a still-wanted FAILED/DOWNLOADING/etc. job would keep resetting that
-// clock and starve retries.
+// transitions (e.g. the failed-retry cooldown), so a full refresh on every
+// pass for a still-wanted FAILED/DOWNLOADING/etc. job would keep resetting
+// that clock and starve retries. The backfill exists so jobs whose metadata
+// was never cached (e.g. created before this caching existed) self-heal.
 func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum, now time.Time) error {
 	for _, a := range albums {
 		job, err := d.p.Store.UpsertDiscoveredJob(ctx, a.ID, now)
@@ -109,6 +111,9 @@ func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum
 			return err
 		}
 		if job.State != core.StateDiscovered {
+			if err := d.p.Store.BackfillJobMetadataIfEmpty(ctx, job.ID, a.Title, a.ArtistName); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, now); err != nil {
