@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 // Metrics holds the Prometheus collectors slskdarr exports.
@@ -57,8 +58,57 @@ type StatusReport struct {
 // StatusFunc produces a current StatusReport (typically backed by the store).
 type StatusFunc func(ctx context.Context) (StatusReport, error)
 
-// NewServer returns an http.Handler exposing /metrics and /status.
-func NewServer(reg *prometheus.Registry, status StatusFunc) http.Handler {
+// jobDTO is the JSON shape served at /api/jobs — a flattened, display-ready
+// view of core.JobView so the frontend never needs to know about the
+// engine's internal state machine.
+type jobDTO struct {
+	ID         int64  `json:"id"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	Status     string `json:"status"`
+	Peer       string `json:"peer"`
+	BytesDone  int64  `json:"bytesDone"`
+	BytesTotal int64  `json:"bytesTotal"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
+func toJobDTO(v core.JobView) jobDTO {
+	d := jobDTO{
+		ID:        v.Job.ID,
+		Title:     v.Job.Title,
+		Artist:    v.Job.ArtistName,
+		Status:    dashboardStatus(v),
+		Peer:      v.Peer,
+		UpdatedAt: v.Job.UpdatedAt.Format(timeFormat),
+	}
+	if v.Transfer != nil {
+		d.BytesDone = v.Transfer.BytesDone
+		d.BytesTotal = v.Transfer.BytesTotal
+	}
+	return d
+}
+
+const timeFormat = "2006-01-02T15:04:05Z07:00"
+
+// JobsFunc produces the current list of job views (typically backed by the
+// store's ListJobsWithTransfer).
+type JobsFunc func(ctx context.Context) ([]core.JobView, error)
+
+// cancelResult is the outcome of a CancelFunc call.
+type cancelResult int
+
+const (
+	cancelResultOK cancelResult = iota
+	cancelResultNotFound
+	cancelResultFailed
+)
+
+// CancelFunc cancels a job by id, returning which outcome occurred.
+type CancelFunc func(ctx context.Context, jobID int64) (cancelResult, error)
+
+// NewServer returns an http.Handler exposing /metrics, /status, /api/jobs,
+// /api/jobs/{id}/cancel, and the dashboard UI at /.
+func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +119,19 @@ func NewServer(reg *prometheus.Registry, status StatusFunc) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(report)
+	})
+	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
+		views, err := jobs(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		dtos := make([]jobDTO, len(views))
+		for i, v := range views {
+			dtos[i] = toJobDTO(v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(dtos)
 	})
 	return mux
 }
