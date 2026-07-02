@@ -48,26 +48,27 @@ func main() {
 	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
 	discoverer := engine.NewDiscoverer(engine.DiscovererParams{
 		Music: lidarrClient, Peers: peers, Store: st, Ranker: scorer,
-		CompleteDir:      cfg.Paths.SlskdCompleteDir,
-		SearchTimeout:    cfg.Engine.SearchTimeout.Duration,
-		TransferDeadline: cfg.Engine.TransferDeadline.Duration,
+		CompleteDir:            cfg.Paths.SlskdCompleteDir,
+		SearchTimeout:          cfg.Engine.SearchTimeout.Duration,
+		TransferDeadline:       cfg.Engine.TransferDeadline.Duration,
 		CandidateBackoff:       cfg.Engine.CandidateBackoff.Duration,
 		FailedCandidateBackoff: cfg.Engine.FailedCandidateBackoff.Duration,
 		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
-		MaxCandidates:    cfg.Engine.MaxCandidatesPerAlbum,
-		Batch:            cfg.Engine.MaxConcurrentSearches,
-		MaxActive:        cfg.Engine.MaxConcurrentActive,
-		Logger:           logger,
+		MaxCandidates:          cfg.Engine.MaxCandidatesPerAlbum,
+		Batch:                  cfg.Engine.MaxConcurrentSearches,
+		MaxActive:              cfg.Engine.MaxConcurrentActive,
+		Logger:                 logger,
 	})
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
 	eng := engine.New(engine.Params{
-		Reconciler: reconciler,
-		Discoverer: discoverer,
-		StatusPoll: cfg.Slskd.StatusPollInterval.Duration,
-		LidarrPoll: cfg.Lidarr.PollInterval.Duration,
-		Logger:     logger,
-		Metrics:    metrics,
+		Reconciler:   reconciler,
+		Discoverer:   discoverer,
+		StatusPoll:   cfg.Slskd.StatusPollInterval.Duration,
+		LidarrPoll:   cfg.Lidarr.PollInterval.Duration,
+		TickInterval: cfg.Engine.TickInterval.Duration,
+		Logger:       logger,
+		Metrics:      metrics,
 	})
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
 		active, err := st.ActiveTransfers(ctx)
