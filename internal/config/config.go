@@ -45,6 +45,7 @@ type EngineConfig struct {
 	MaxConcurrentSearches  int      `toml:"max_concurrent_searches"`
 	MaxConcurrentActive    int      `toml:"max_concurrent_active"`
 	MaxInflightPerPeer     int      `toml:"max_inflight_per_peer"`
+	MaxTransferRetries     int      `toml:"max_transfer_retries"`
 	CandidateBackoff       Duration `toml:"candidate_backoff"`
 	FailedCandidateBackoff Duration `toml:"failed_candidate_backoff"`
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
@@ -152,6 +153,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.MaxInflightPerPeer <= 0 {
 		problems = append(problems, "engine.max_inflight_per_peer must be > 0")
+	}
+	if c.Engine.MaxTransferRetries < 0 {
+		problems = append(problems, "engine.max_transfer_retries must be >= 0")
 	}
 	if c.Engine.CandidateBackoff.Duration <= 0 {
 		problems = append(problems, "engine.candidate_backoff must be > 0")

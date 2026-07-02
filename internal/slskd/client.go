@@ -85,6 +85,10 @@ type Transfer struct {
 	State            string `json:"state"`
 	Size             int64  `json:"size"`
 	BytesTransferred int64  `json:"bytesTransferred"`
+	// Exception carries slskd's failure reason for a terminal transfer, e.g. the
+	// peer's "Too many megabytes" rejection. Used to decide whether a failure is
+	// worth retrying (transient) or terminal (e.g. "File not shared").
+	Exception string `json:"exception"`
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
