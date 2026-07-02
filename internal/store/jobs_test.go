@@ -162,7 +162,7 @@ func TestUpdateJobMetadataSetsTitleAndArtist(t *testing.T) {
 		t.Fatalf("expected empty title/artist before UpdateJobMetadata, got %q / %q", job.Title, job.ArtistName)
 	}
 
-	if err := s.UpdateJobMetadata(ctx, job.ID, "Untrue", "Burial", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Untrue", "Burial", "", now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 
@@ -188,7 +188,7 @@ func TestBackfillJobMetadataIfEmptyFillsBlankFields(t *testing.T) {
 		t.Fatalf("UpsertDiscoveredJob: %v", err)
 	}
 
-	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Title A", "Artist A"); err != nil {
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Title A", "Artist A", ""); err != nil {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 
@@ -210,11 +210,11 @@ func TestBackfillJobMetadataIfEmptyDoesNotOverwriteExisting(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, _ := s.UpsertDiscoveredJob(ctx, 51, now)
-	if err := s.UpdateJobMetadata(ctx, job.ID, "Original Title", "Original Artist", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Original Title", "Original Artist", "2020-01-01", now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 
-	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "New Title", "New Artist"); err != nil {
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "New Title", "New Artist", "2025-01-01"); err != nil {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 
@@ -222,8 +222,8 @@ func TestBackfillJobMetadataIfEmptyDoesNotOverwriteExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JobsInState: %v", err)
 	}
-	if jobs[0].Title != "Original Title" || jobs[0].ArtistName != "Original Artist" {
-		t.Errorf("expected existing metadata preserved, got %q / %q", jobs[0].Title, jobs[0].ArtistName)
+	if jobs[0].Title != "Original Title" || jobs[0].ArtistName != "Original Artist" || jobs[0].ReleaseDate != "2020-01-01" {
+		t.Errorf("expected existing metadata preserved, got %q / %q / %q", jobs[0].Title, jobs[0].ArtistName, jobs[0].ReleaseDate)
 	}
 }
 
@@ -237,7 +237,7 @@ func TestBackfillJobMetadataIfEmptyDoesNotTouchUpdatedAt(t *testing.T) {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 
-	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Legacy Title", "Legacy Artist"); err != nil {
+	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Legacy Title", "Legacy Artist", ""); err != nil {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 

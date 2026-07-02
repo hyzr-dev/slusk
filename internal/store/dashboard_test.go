@@ -17,7 +17,7 @@ func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertDiscoveredJob: %v", err)
 	}
-	if err := s.UpdateJobMetadata(ctx, job.ID, "Rounds", "Four Tet", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Rounds", "Four Tet", "", now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 
@@ -46,7 +46,7 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, _ := s.UpsertDiscoveredJob(ctx, 2, now)
-	_ = s.UpdateJobMetadata(ctx, job.ID, "Dummy", "Portishead", now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Dummy", "Portishead", "", now)
 
 	// First (older) attempt/transfer.
 	a1, err := s.CreateAttempt(ctx, job.ID, "peer_one", 1.0, now)
@@ -120,7 +120,7 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, _ := s.UpsertDiscoveredJob(ctx, 5, now)
-	_ = s.UpdateJobMetadata(ctx, job.ID, "Multi Track Album", "Boards of Canada", now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Multi Track Album", "Boards of Canada", "", now)
 
 	attempt, err := s.CreateAttempt(ctx, job.ID, "album_peer", 1.0, now)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestListJobsWithTransferPopulatesAttempt(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, _ := s.UpsertDiscoveredJob(ctx, 6, now)
-	_ = s.UpdateJobMetadata(ctx, job.ID, "Failed Album", "Some Artist", now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Failed Album", "Some Artist", "", now)
 
 	attemptID, err := s.CreateAttempt(ctx, job.ID, "flaky_peer", 1.5, now)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestListJobsWithTransferNilAttemptWhenNoAttempt(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, _ := s.UpsertDiscoveredJob(ctx, 7, now)
-	_ = s.UpdateJobMetadata(ctx, job.ID, "No Attempt Album", "Nobody", now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "No Attempt Album", "Nobody", "", now)
 
 	views, err := s.ListJobsWithTransfer(ctx)
 	if err != nil {

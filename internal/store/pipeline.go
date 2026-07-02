@@ -10,14 +10,14 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name FROM album_jobs`
+const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
 		var state string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName); err != nil {
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)
@@ -26,9 +26,17 @@ func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	return out, rows.Err()
 }
 
-// JobsInState returns up to limit jobs currently in the given state.
+// JobsInState returns up to limit jobs currently in the given state. For
+// DISCOVERED jobs, newest-released albums come first (falling back to
+// oldest-updated-first for ties or blank release dates) so freshly-released
+// albums get picked up before older backlog; every other state keeps the
+// oldest-updated-first order state transitions rely on elsewhere.
 func (s *Store) JobsInState(ctx context.Context, state core.AlbumJobState, limit int) ([]core.AlbumJob, error) {
-	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE state = ? ORDER BY updated_at LIMIT ?`, string(state), limit)
+	order := "ORDER BY updated_at"
+	if state == core.StateDiscovered {
+		order = "ORDER BY release_date DESC, updated_at"
+	}
+	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE state = ? `+order+` LIMIT ?`, string(state), limit)
 	if err != nil {
 		return nil, err
 	}

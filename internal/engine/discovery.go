@@ -126,12 +126,12 @@ func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum
 			return err
 		}
 		if job.State != core.StateDiscovered {
-			if err := d.p.Store.BackfillJobMetadataIfEmpty(ctx, job.ID, a.Title, a.ArtistName); err != nil {
+			if err := d.p.Store.BackfillJobMetadataIfEmpty(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, now); err != nil {
+		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate, now); err != nil {
 			return err
 		}
 	}
@@ -461,18 +461,18 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			continue
 		}
 		var importable []lidarr.ManualImportItem
-		blocked := false
+		var rejections []string
 		for _, it := range items {
 			if it.Importable {
 				importable = append(importable, it)
 			} else {
-				blocked = true
+				rejections = append(rejections, it.Rejections...)
 			}
 		}
-		if blocked || len(importable) == 0 {
+		if len(rejections) > 0 || len(importable) == 0 {
 			// Rejected like a failed download: other candidates usually remain, so
 			// use the short backoff to try the next one soon.
-			d.log().Info("import rejected", "album_job", job.ID, "folder", folder)
+			d.log().Info("import rejected", "album_job", job.ID, "folder", folder, "reasons", rejections)
 			d.cleanupAttempt(ctx, job.ID, names)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {

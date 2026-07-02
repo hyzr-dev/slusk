@@ -30,6 +30,8 @@ type WantedAlbum struct {
 	Title      string
 	ArtistName string
 	TrackCount int
+	// ReleaseDate is Lidarr's raw release date/datetime string for the album.
+	ReleaseDate string
 }
 
 // wantedMissingPage is one page of Lidarr's wanted/missing response.
@@ -38,9 +40,10 @@ type wantedMissingPage struct {
 	PageSize     int `json:"pageSize"`
 	TotalRecords int `json:"totalRecords"`
 	Records      []struct {
-		ID     int64  `json:"id"`
-		Title  string `json:"title"`
-		Artist struct {
+		ID          int64  `json:"id"`
+		Title       string `json:"title"`
+		ReleaseDate string `json:"releaseDate"`
+		Artist      struct {
 			ArtistName string `json:"artistName"`
 		} `json:"artist"`
 		Statistics struct {
@@ -52,7 +55,7 @@ type wantedMissingPage struct {
 // fetchWantedMissingPage fetches a single page of wanted/missing records.
 func (c *Client) fetchWantedMissingPage(ctx context.Context, page int) (wantedMissingPage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/v1/wanted/missing?page=%d&pageSize=100&sortKey=releaseDate&sortDirection=descending", c.baseURL, page), nil)
+		fmt.Sprintf("%s/api/v1/wanted/missing?page=%d&pageSize=100", c.baseURL, page), nil)
 	if err != nil {
 		return wantedMissingPage{}, err
 	}
@@ -88,7 +91,7 @@ func (c *Client) WantedMissing(ctx context.Context) ([]WantedAlbum, error) {
 			break
 		}
 		for _, r := range body.Records {
-			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, TrackCount: r.Statistics.TrackCount})
+			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, TrackCount: r.Statistics.TrackCount, ReleaseDate: r.ReleaseDate})
 		}
 		if len(out) >= body.TotalRecords {
 			break

@@ -13,6 +13,7 @@ type AlbumJob struct {
 	UpdatedAt       time.Time
 	Title           string // cached from Lidarr at discovery time, for display only
 	ArtistName      string // cached from Lidarr at discovery time, for display only
+	ReleaseDate     string // cached from Lidarr at discovery time, for display/ordering only
 }
 
 // CandidateAttempt is one ranked Soulseek user tried for an album.
