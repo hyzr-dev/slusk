@@ -19,9 +19,12 @@ import (
 // --- fakes ---
 
 type fakeMusic struct {
-	wanted     []lidarr.WantedAlbum
-	candidates []lidarr.ManualImportItem
-	imported   [][]lidarr.ManualImportItem
+	wanted         []lidarr.WantedAlbum
+	candidates     []lidarr.ManualImportItem
+	imported       [][]lidarr.ManualImportItem
+	albumPresent   int
+	albumTotal     int
+	albumStatusErr error
 }
 
 func (f *fakeMusic) WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error) {
@@ -33,6 +36,9 @@ func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) (
 func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error {
 	f.imported = append(f.imported, items)
 	return nil
+}
+func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error) {
+	return f.albumPresent, f.albumTotal, f.albumStatusErr
 }
 
 type fakeSearcher struct {
@@ -96,6 +102,29 @@ func (b *discoBackedStore) seedVerifyingJob(t *testing.T, now time.Time) {
 		t.Fatalf("UpdateTransferProgress: %v", err)
 	}
 	if err := b.AdvanceJobState(ctx, job.ID, core.StateVerifying, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+}
+
+// seedImportingJob creates a DISCOVERED job for album 1, a candidate attempt,
+// and advances the job straight to IMPORTING at time at - the state
+// confirmImports expects to find work in.
+func (b *discoBackedStore) seedImportingJob(t *testing.T, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := b.UpsertDiscoveredJob(ctx, 1, at)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	attemptID, err := b.CreateAttempt(ctx, job.ID, "bob", 1.0, at)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	deadline := at.Add(30 * time.Minute)
+	if _, err := b.RecordEnqueueIntent(ctx, attemptID, "bob", `A\01.flac`, deadline, at); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := b.AdvanceJobState(ctx, job.ID, core.StateImporting, at); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 }
@@ -165,7 +194,8 @@ func newDiscoParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (Discov
 		CompleteDir: "/music/slskd-downloads", SearchTimeout: time.Second,
 		TransferDeadline: 30 * time.Minute, CandidateBackoff: 10 * time.Minute,
 		FailedCandidateBackoff: 30 * time.Second,
-		FailedRetryAfter:       24 * time.Hour, MaxCandidates: 3, Batch: 10, MaxActive: 10,
+		FailedRetryAfter:       24 * time.Hour, ImportConfirmTimeout: 3 * time.Minute,
+		MaxCandidates: 3, Batch: 10, MaxActive: 10,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	}, st
 }
@@ -253,6 +283,109 @@ func TestDiscoverEmptyFolderCompletes(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateCompleted, 10)
 	if len(jobs) != 1 {
 		t.Errorf("empty folder on a verifying job should complete it, got %d completed", len(jobs))
+	}
+}
+
+func TestDiscoverIncompleteDownloadFailsCandidate(t *testing.T) {
+	music := &fakeMusic{
+		candidates: []lidarr.ManualImportItem{
+			{ID: 1, Path: "/music/slskd-downloads/A/01.flac", Importable: true, TrackIDs: []int64{101}},
+		},
+		albumTotal: 12,
+	}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedVerifyingJob(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(music.imported) != 0 {
+		t.Errorf("must not import a download that can't complete the release")
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 {
+		t.Errorf("incomplete download should put the job in COOLDOWN, got %d", len(jobs))
+	}
+}
+
+func TestDiscoverFullCoverageMovesToImportingNotYetConfirmed(t *testing.T) {
+	music := &fakeMusic{
+		candidates: []lidarr.ManualImportItem{
+			{ID: 1, Path: "/music/slskd-downloads/A/01.flac", Importable: true, TrackIDs: []int64{101, 102}},
+		},
+		albumTotal:   2,
+		albumPresent: 0, // Lidarr hasn't confirmed the async import yet
+	}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedVerifyingJob(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(music.imported) != 1 {
+		t.Fatalf("expected one ExecuteManualImport call, got %d", len(music.imported))
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateImporting, 10)
+	if len(jobs) != 1 {
+		t.Errorf("job with full coverage but unconfirmed import should be IMPORTING, got %d", len(jobs))
+	}
+	completed, _ := st.JobsInState(ctx, core.StateCompleted, 10)
+	if len(completed) != 0 {
+		t.Errorf("must not complete before Lidarr confirms the import, got %d completed", len(completed))
+	}
+}
+
+func TestConfirmImportsCompletesWhenAlbumIsFull(t *testing.T) {
+	music := &fakeMusic{albumPresent: 12, albumTotal: 12}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedImportingJob(t, now.Add(-time.Minute))
+	d := NewDiscoverer(p)
+	if err := d.confirmImports(ctx, now); err != nil {
+		t.Fatalf("confirmImports: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCompleted, 10)
+	if len(jobs) != 1 {
+		t.Errorf("album with present>=total should complete the job, got %d completed", len(jobs))
+	}
+}
+
+func TestConfirmImportsTimesOutWhenStillIncomplete(t *testing.T) {
+	music := &fakeMusic{albumPresent: 8, albumTotal: 12}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedImportingJob(t, now.Add(-p.ImportConfirmTimeout-time.Second))
+	d := NewDiscoverer(p)
+	if err := d.confirmImports(ctx, now); err != nil {
+		t.Fatalf("confirmImports: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 {
+		t.Errorf("import stuck incomplete past the timeout should cool down, got %d", len(jobs))
+	}
+}
+
+func TestConfirmImportsWaitsWithinTimeout(t *testing.T) {
+	music := &fakeMusic{albumPresent: 8, albumTotal: 12}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedImportingJob(t, now.Add(-time.Second)) // well within ImportConfirmTimeout
+	d := NewDiscoverer(p)
+	if err := d.confirmImports(ctx, now); err != nil {
+		t.Fatalf("confirmImports: %v", err)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateImporting, 10)
+	if len(jobs) != 1 {
+		t.Errorf("import still within the timeout should stay IMPORTING, got %d", len(jobs))
 	}
 }
 

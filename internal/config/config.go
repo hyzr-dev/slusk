@@ -47,6 +47,7 @@ type EngineConfig struct {
 	CandidateBackoff       Duration `toml:"candidate_backoff"`
 	FailedCandidateBackoff Duration `toml:"failed_candidate_backoff"`
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
+	ImportConfirmTimeout   Duration `toml:"import_confirm_timeout"`
 	TickInterval           Duration `toml:"tick_interval"`
 	Weights                Weights  `toml:"weights"`
 }
@@ -156,6 +157,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.FailedRetryAfter.Duration <= 0 {
 		problems = append(problems, "engine.failed_retry_after must be > 0")
+	}
+	if c.Engine.ImportConfirmTimeout.Duration <= 0 {
+		problems = append(problems, "engine.import_confirm_timeout must be > 0")
 	}
 	if c.Engine.TickInterval.Duration <= 0 {
 		problems = append(problems, "engine.tick_interval must be > 0")

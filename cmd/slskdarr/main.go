@@ -56,6 +56,7 @@ func main() {
 		CandidateBackoff:       cfg.Engine.CandidateBackoff.Duration,
 		FailedCandidateBackoff: cfg.Engine.FailedCandidateBackoff.Duration,
 		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
+		ImportConfirmTimeout:   cfg.Engine.ImportConfirmTimeout.Duration,
 		MaxCandidates:          cfg.Engine.MaxCandidatesPerAlbum,
 		Batch:                  cfg.Engine.MaxConcurrentSearches,
 		MaxActive:              cfg.Engine.MaxConcurrentActive,
