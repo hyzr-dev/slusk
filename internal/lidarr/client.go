@@ -125,6 +125,7 @@ type ManualImportItem struct {
 	FolderName string
 	ArtistID   int64
 	AlbumID    int64
+	TrackIDs   []int64
 	Rejections []string
 	Importable bool // true when Rejections is empty
 }
@@ -152,6 +153,9 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]M
 		FolderName string `json:"folderName"`
 		ArtistID   int64  `json:"artistId"`
 		AlbumID    int64  `json:"albumId"`
+		Tracks     []struct {
+			ID int64 `json:"id"`
+		} `json:"tracks"`
 		Rejections []struct {
 			Reason string `json:"reason"`
 		} `json:"rejections"`
@@ -165,13 +169,47 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]M
 		for _, r := range it.Rejections {
 			reasons = append(reasons, r.Reason)
 		}
+		trackIDs := make([]int64, 0, len(it.Tracks))
+		for _, tr := range it.Tracks {
+			trackIDs = append(trackIDs, tr.ID)
+		}
 		out = append(out, ManualImportItem{
 			ID: it.ID, Path: it.Path, FolderName: it.FolderName,
-			ArtistID: it.ArtistID, AlbumID: it.AlbumID,
+			ArtistID: it.ArtistID, AlbumID: it.AlbumID, TrackIDs: trackIDs,
 			Rejections: reasons, Importable: len(reasons) == 0,
 		})
 	}
 	return out, nil
+}
+
+// AlbumStatus reports how many of an album's tracks Lidarr currently has a
+// file for (present) out of the release's total track count (total), used to
+// judge whether a candidate download can complete the release.
+func (c *Client) AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/album/%d", c.baseURL, albumID), nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return 0, 0, fmt.Errorf("lidarr album: status %d", resp.StatusCode)
+	}
+	var body struct {
+		Statistics struct {
+			TrackFileCount int `json:"trackFileCount"`
+			TrackCount     int `json:"trackCount"`
+		} `json:"statistics"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, 0, err
+	}
+	return body.Statistics.TrackFileCount, body.Statistics.TrackCount, nil
 }
 
 // ExecuteManualImport tells Lidarr to import the given items (move mode).

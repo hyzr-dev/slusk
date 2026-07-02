@@ -19,6 +19,7 @@ max_concurrent_active = 20
 candidate_backoff = "10m"
 failed_candidate_backoff = "30s"
 failed_retry_after = "24h"
+import_confirm_timeout = "3m"
 tick_interval = "30s"
 
 [engine.weights]

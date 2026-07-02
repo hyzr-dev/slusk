@@ -27,6 +27,10 @@ candidate_backoff = "2m"
 # single peer timeout should not stall the album for long.
 failed_candidate_backoff = "20s"
 failed_retry_after = "24h"
+# How long an import may sit unconfirmed in IMPORTING (Lidarr's ManualImport
+# command is async) before it's treated as failed and rotated to the next
+# candidate.
+import_confirm_timeout = "3m"
 # How often the discovery pipeline advances jobs through the state machine
 # (retries, candidate starts, download/import progression). Independent of
 # lidarr.poll_interval, which only controls how often the wanted list is

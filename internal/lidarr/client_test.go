@@ -100,3 +100,49 @@ func TestManualImportCandidatesParsesRejections(t *testing.T) {
 		t.Errorf("rejection reason not parsed: %v", items[1].Rejections)
 	}
 }
+
+func TestManualImportCandidatesParsesTrackIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[
+		  {"id":1,"path":"/music/slskd-downloads/A/01.flac","folderName":"A","artistId":5,"albumId":9,
+		   "tracks":[{"id":101}],"rejections":[]},
+		  {"id":2,"path":"/music/slskd-downloads/A/02.flac","folderName":"A","artistId":5,"albumId":9,
+		   "tracks":[],"rejections":[]}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	items, err := c.ManualImportCandidates(context.Background(), "/music/slskd-downloads/A")
+	if err != nil {
+		t.Fatalf("ManualImportCandidates: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	if len(items[0].TrackIDs) != 1 || items[0].TrackIDs[0] != 101 {
+		t.Errorf("item 0 TrackIDs = %v, want [101]", items[0].TrackIDs)
+	}
+	if len(items[1].TrackIDs) != 0 {
+		t.Errorf("item 1 TrackIDs = %v, want empty", items[1].TrackIDs)
+	}
+}
+
+func TestAlbumStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/album/9" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"statistics":{"trackFileCount":8,"trackCount":12}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	present, total, err := c.AlbumStatus(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("AlbumStatus: %v", err)
+	}
+	if present != 8 || total != 12 {
+		t.Errorf("AlbumStatus = %d/%d, want 8/12", present, total)
+	}
+}

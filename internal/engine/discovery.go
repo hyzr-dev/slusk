@@ -27,6 +27,7 @@ type DiscovererParams struct {
 	CandidateBackoff       time.Duration
 	FailedCandidateBackoff time.Duration
 	FailedRetryAfter       time.Duration
+	ImportConfirmTimeout   time.Duration
 	MaxCandidates          int
 	Batch                  int
 	MaxActive              int
@@ -91,7 +92,10 @@ func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.Wanted
 	if err := d.advanceDownloading(ctx, now); err != nil {
 		return err
 	}
-	return d.advanceImporting(ctx, now)
+	if err := d.advanceImporting(ctx, now); err != nil {
+		return err
+	}
+	return d.confirmImports(ctx, now)
 }
 
 // syncWanted upserts every wanted Lidarr album as a DISCOVERED job (idempotent),
@@ -321,9 +325,12 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 	return nil
 }
 
-// advanceImporting handles VERIFYING and IMPORTING jobs: it asks Lidarr what it
-// would import from the album folder; a clean candidate is imported (COMPLETED),
-// a rejected one fails the candidate (COOLDOWN, retried with the next candidate).
+// advanceImporting is the VERIFYING gate: it asks Lidarr what it would import
+// from the album folder and decides whether to import at all. A candidate with
+// any rejection fails outright (COOLDOWN, retried with the next candidate). A
+// clean candidate that cannot cover the whole release is also failed, rather
+// than importing a partial album. A clean, complete candidate is imported and
+// the job moves to IMPORTING for confirmImports to confirm Lidarr accepted it.
 func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error {
 	jobs, err := d.p.Store.JobsInState(ctx, core.StateVerifying, d.p.Batch)
 	if err != nil {
@@ -379,13 +386,80 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			}
 			continue
 		}
+		_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+		if err != nil {
+			return err
+		}
+		if coverage(importable) < total {
+			// A source that can't complete the release is rejected outright rather
+			// than partially imported, to keep the library free of half albums.
+			// Other candidates usually remain, so use the short backoff.
+			d.log().Info("incomplete download, rejecting", "album_job", job.ID, "folder", folder,
+				"covered", coverage(importable), "total", total)
+			_ = d.p.Store.FailAttempt(ctx, active.ID, "incomplete download", now.Add(d.p.FailedCandidateBackoff), now)
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+			}
+			continue
+		}
 		if err := d.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 			return err
 		}
-		d.log().Info("imported album, completed", "album_job", job.ID, "files", len(importable))
-		_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
-		if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
-			d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
+		d.log().Info("import executed, awaiting confirmation", "album_job", job.ID, "files", len(importable))
+		if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
+			d.log().Error("advance to importing failed", "album_job", job.ID, "err", err)
+		}
+	}
+	return nil
+}
+
+// coverage counts the distinct Lidarr track IDs covered by importable, used to
+// judge whether a candidate can complete a release's full track count.
+func coverage(importable []lidarr.ManualImportItem) int {
+	seen := make(map[int64]struct{})
+	for _, it := range importable {
+		for _, id := range it.TrackIDs {
+			seen[id] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// confirmImports handles IMPORTING jobs: Lidarr's ManualImport command is
+// asynchronous, so rather than trusting the command's HTTP response, this
+// polls the album's completeness directly. A release that becomes complete is
+// COMPLETED; one that stays incomplete past ImportConfirmTimeout is failed
+// (COOLDOWN, retried with the next candidate) so a stuck or dropped async
+// import doesn't leave the job stranded in IMPORTING forever.
+func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateImporting, d.p.Batch)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		attempts, err := d.p.Store.AttemptsForJob(ctx, job.ID)
+		if err != nil || len(attempts) == 0 {
+			continue
+		}
+		active := attempts[len(attempts)-1]
+		present, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+		if err != nil {
+			return err
+		}
+		if present >= total {
+			d.log().Info("import confirmed, completed", "album_job", job.ID)
+			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
+			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
+				d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
+			}
+			continue
+		}
+		if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
+			d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID, "present", present, "total", total)
+			_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
+			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+			}
 		}
 	}
 	return nil
