@@ -17,20 +17,20 @@ var errAlbumNoLongerWanted = errors.New("album no longer wanted")
 
 // DiscovererParams configures a Discoverer.
 type DiscovererParams struct {
-	Music            MusicSource
-	Peers            PeerSearcher
-	Store            DiscoveryStore
-	Ranker           Ranker
-	CompleteDir      string
-	SearchTimeout    time.Duration
-	TransferDeadline time.Duration
+	Music                  MusicSource
+	Peers                  PeerSearcher
+	Store                  DiscoveryStore
+	Ranker                 Ranker
+	CompleteDir            string
+	SearchTimeout          time.Duration
+	TransferDeadline       time.Duration
 	CandidateBackoff       time.Duration
 	FailedCandidateBackoff time.Duration
-	FailedRetryAfter time.Duration
-	MaxCandidates    int
-	Batch            int
-	MaxActive        int
-	Logger           *slog.Logger
+	FailedRetryAfter       time.Duration
+	MaxCandidates          int
+	Batch                  int
+	MaxActive              int
+	Logger                 *slog.Logger
 }
 
 // Discoverer drives AlbumJobs through the pipeline, one transition per tick.
@@ -52,17 +52,36 @@ func (d *Discoverer) log() *slog.Logger {
 // each job one transition forward. Every stage is bounded and idempotent, so a
 // crash mid-tick loses nothing.
 func (d *Discoverer) RunOnce(ctx context.Context, now time.Time) error {
+	wanted, err := d.SyncWanted(ctx, now)
+	if err != nil {
+		return err
+	}
+	return d.Advance(ctx, wanted, now)
+}
+
+// SyncWanted fetches the current wanted-missing list from Lidarr, upserts each
+// as a DISCOVERED job (idempotent), and returns the albums keyed by Lidarr
+// album ID for use by Advance. It is intended to run on Lidarr's own poll
+// interval, independent of how often Advance ticks the state machine.
+func (d *Discoverer) SyncWanted(ctx context.Context, now time.Time) (map[int64]lidarr.WantedAlbum, error) {
 	albums, err := d.p.Music.WantedMissing(ctx)
 	if err != nil {
-		return fmt.Errorf("wanted missing: %w", err)
+		return nil, fmt.Errorf("wanted missing: %w", err)
 	}
 	wanted := make(map[int64]lidarr.WantedAlbum, len(albums))
 	for _, a := range albums {
 		wanted[a.ID] = a
 	}
 	if err := d.syncWanted(ctx, albums, now); err != nil {
-		return err
+		return nil, err
 	}
+	return wanted, nil
+}
+
+// Advance takes every job one transition forward using the most recently
+// synced wanted map. Every stage is bounded and idempotent, so a crash
+// mid-tick loses nothing.
+func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.WantedAlbum, now time.Time) error {
 	if err := d.retryFailedJobs(ctx, now); err != nil {
 		return err
 	}

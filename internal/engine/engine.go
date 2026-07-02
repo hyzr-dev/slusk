@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 )
 
 // MetricsSink receives reconciliation metrics. A nil sink is a no-op, so the
@@ -17,12 +19,13 @@ type MetricsSink interface {
 
 // Params configures an Engine.
 type Params struct {
-	Reconciler *Reconciler
-	Discoverer *Discoverer // nil → discovery loop is disabled
-	StatusPoll time.Duration
-	LidarrPoll time.Duration
-	Logger     *slog.Logger // nil → reconcile errors are not logged
-	Metrics    MetricsSink  // nil → metrics are not fed
+	Reconciler   *Reconciler
+	Discoverer   *Discoverer // nil → discovery loop is disabled
+	StatusPoll   time.Duration
+	LidarrPoll   time.Duration
+	TickInterval time.Duration
+	Logger       *slog.Logger // nil → reconcile errors are not logged
+	Metrics      MetricsSink  // nil → metrics are not fed
 }
 
 // Engine runs the scheduler loops until its context is cancelled.
@@ -30,6 +33,7 @@ type Engine struct {
 	p              Params
 	reconcileCount atomic.Int64
 	discoverCount  atomic.Int64
+	wanted         map[int64]lidarr.WantedAlbum // cached by syncWantedOnce, consumed by advanceOnce
 }
 
 // New constructs an Engine.
@@ -54,12 +58,16 @@ func (e *Engine) Run(ctx context.Context) error {
 	statusTicker := time.NewTicker(e.p.StatusPoll)
 	defer statusTicker.Stop()
 
-	var lidarrC <-chan time.Time
+	var lidarrC, tickC <-chan time.Time
 	if e.p.Discoverer != nil {
 		lidarrTicker := time.NewTicker(e.p.LidarrPoll)
 		defer lidarrTicker.Stop()
 		lidarrC = lidarrTicker.C
-		e.discoverOnce(ctx) // run once immediately on startup
+		discoveryTicker := time.NewTicker(e.p.TickInterval)
+		defer discoveryTicker.Stop()
+		tickC = discoveryTicker.C
+		e.syncWantedOnce(ctx) // run once immediately on startup
+		e.advanceOnce(ctx)
 	}
 	e.reconcileOnce(ctx)
 
@@ -70,15 +78,38 @@ func (e *Engine) Run(ctx context.Context) error {
 		case <-statusTicker.C:
 			e.reconcileOnce(ctx)
 		case <-lidarrC:
-			e.discoverOnce(ctx)
+			e.syncWantedOnce(ctx)
+		case <-tickC:
+			e.advanceOnce(ctx)
 		}
 	}
 }
 
-func (e *Engine) discoverOnce(ctx context.Context) {
-	if err := e.p.Discoverer.RunOnce(ctx, time.Now().UTC()); err != nil {
+// syncWantedOnce refreshes the cached wanted-missing list from Lidarr. It runs
+// on LidarrPoll, independent of how often the state machine advances.
+func (e *Engine) syncWantedOnce(ctx context.Context) {
+	wanted, err := e.p.Discoverer.SyncWanted(ctx, time.Now().UTC())
+	if err != nil {
 		if e.p.Logger != nil {
-			e.p.Logger.Error("discovery failed", "err", err)
+			e.p.Logger.Error("sync wanted failed", "err", err)
+		}
+		return
+	}
+	e.wanted = wanted
+}
+
+// advanceOnce takes every job one transition forward using the cached wanted
+// list. It runs on TickInterval, independent of how often Lidarr is polled.
+func (e *Engine) advanceOnce(ctx context.Context) {
+	if e.wanted == nil {
+		if e.p.Logger != nil {
+			e.p.Logger.Info("skipping advance, wanted list not yet synced")
+		}
+		return
+	}
+	if err := e.p.Discoverer.Advance(ctx, e.wanted, time.Now().UTC()); err != nil {
+		if e.p.Logger != nil {
+			e.p.Logger.Error("discovery advance failed", "err", err)
 		}
 	}
 	e.discoverCount.Add(1)

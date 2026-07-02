@@ -37,17 +37,18 @@ type SlskdConfig struct {
 
 // EngineConfig is the matching engine configuration.
 type EngineConfig struct {
-	MaxCandidatesPerAlbum int      `toml:"max_candidates_per_album"`
-	TransferDeadline      Duration `toml:"transfer_deadline"`
-	StallTimeout          Duration `toml:"stall_timeout"`
-	SearchTimeout         Duration `toml:"search_timeout"`
-	MinBitrate            int      `toml:"min_bitrate"`
-	MaxConcurrentSearches int      `toml:"max_concurrent_searches"`
-	MaxConcurrentActive   int      `toml:"max_concurrent_active"`
+	MaxCandidatesPerAlbum  int      `toml:"max_candidates_per_album"`
+	TransferDeadline       Duration `toml:"transfer_deadline"`
+	StallTimeout           Duration `toml:"stall_timeout"`
+	SearchTimeout          Duration `toml:"search_timeout"`
+	MinBitrate             int      `toml:"min_bitrate"`
+	MaxConcurrentSearches  int      `toml:"max_concurrent_searches"`
+	MaxConcurrentActive    int      `toml:"max_concurrent_active"`
 	CandidateBackoff       Duration `toml:"candidate_backoff"`
 	FailedCandidateBackoff Duration `toml:"failed_candidate_backoff"`
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
-	Weights               Weights  `toml:"weights"`
+	TickInterval           Duration `toml:"tick_interval"`
+	Weights                Weights  `toml:"weights"`
 }
 
 // Weights are the tunable scoring weights for the matcher.
@@ -155,6 +156,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.FailedRetryAfter.Duration <= 0 {
 		problems = append(problems, "engine.failed_retry_after must be > 0")
+	}
+	if c.Engine.TickInterval.Duration <= 0 {
+		problems = append(problems, "engine.tick_interval must be > 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")
