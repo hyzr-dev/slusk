@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS album_jobs (
     UNIQUE(lidarr_album_id)
 );
 
+ALTER TABLE album_jobs ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE album_jobs ADD COLUMN artist_name TEXT NOT NULL DEFAULT '';
+
 CREATE TABLE IF NOT EXISTS candidate_attempts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     album_job_id  INTEGER NOT NULL REFERENCES album_jobs(id),
