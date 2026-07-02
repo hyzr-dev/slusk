@@ -6,6 +6,7 @@ package slskd
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,6 +188,19 @@ func (c *Client) ListDownloads(ctx context.Context) ([]Transfer, error) {
 // Cancel cancels and removes a download by user and id.
 func (c *Client) Cancel(ctx context.Context, username, id string) error {
 	path := fmt.Sprintf("/api/v0/transfers/downloads/%s/%s", url.PathEscape(username), url.PathEscape(id))
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// DeleteDownloadFolder deletes a subdirectory (and its contents) from slskd's
+// downloads root, addressed by its name relative to that root (no path
+// separators). Used to purge a failed candidate attempt's leftover files
+// before the next attempt starts, so they don't get mixed into the next
+// attempt's local folder (slskd names local subfolders after the remote
+// peer's own leaf directory name, so two different peers sharing an
+// identically-named folder can otherwise collide).
+func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
+	encoded := base64.StdEncoding.EncodeToString([]byte(name))
+	path := fmt.Sprintf("/api/v0/files/downloads/directories/%s", encoded)
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 

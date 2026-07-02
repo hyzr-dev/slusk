@@ -39,6 +39,7 @@ type MusicSource interface {
 type PeerSearcher interface {
 	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
+	DeleteDownloadFolder(ctx context.Context, name string) error
 }
 
 // DiscoveryStore is the slice of the store the discoverer needs.
