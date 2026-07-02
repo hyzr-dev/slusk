@@ -10,14 +10,14 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at FROM album_jobs`
+const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
 		var state string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)

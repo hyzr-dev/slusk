@@ -11,6 +11,8 @@ type AlbumJob struct {
 	NextAttemptAt   *time.Time // set while in COOLDOWN
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	Title           string // cached from Lidarr at discovery time, for display only
+	ArtistName      string // cached from Lidarr at discovery time, for display only
 }
 
 // CandidateAttempt is one ranked Soulseek user tried for an album.
