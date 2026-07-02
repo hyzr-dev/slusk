@@ -107,3 +107,32 @@ func TestUpsertDiscoveredJobIsIdempotent(t *testing.T) {
 		t.Errorf("upsert created a duplicate job: %d != %d", a.ID, b.ID)
 	}
 }
+
+func TestUpdateJobMetadataSetsTitleAndArtist(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertDiscoveredJob(ctx, 42, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if job.Title != "" || job.ArtistName != "" {
+		t.Fatalf("expected empty title/artist before UpdateJobMetadata, got %q / %q", job.Title, job.ArtistName)
+	}
+
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Untrue", "Burial", now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+
+	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Title != "Untrue" || jobs[0].ArtistName != "Burial" {
+		t.Errorf("title/artist = %q / %q, want Untrue / Burial", jobs[0].Title, jobs[0].ArtistName)
+	}
+}

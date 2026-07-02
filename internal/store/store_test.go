@@ -50,3 +50,30 @@ func TestForeignKeysEnforced(t *testing.T) {
 		t.Fatal("expected foreign key violation, got nil error")
 	}
 }
+
+func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
+	s := newTestStore(t)
+
+	cols := map[string]bool{}
+	rows, err := s.db.Query(`PRAGMA table_info(album_jobs)`)
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma row: %v", err)
+		}
+		cols[name] = true
+	}
+	if !cols["title"] {
+		t.Error("album_jobs missing title column")
+	}
+	if !cols["artist_name"] {
+		t.Error("album_jobs missing artist_name column")
+	}
+}

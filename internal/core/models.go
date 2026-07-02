@@ -11,6 +11,8 @@ type AlbumJob struct {
 	NextAttemptAt   *time.Time // set while in COOLDOWN
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	Title           string // cached from Lidarr at discovery time, for display only
+	ArtistName      string // cached from Lidarr at discovery time, for display only
 }
 
 // CandidateAttempt is one ranked Soulseek user tried for an album.
@@ -39,4 +41,14 @@ type Transfer struct {
 	Deadline       time.Time
 	LastProgressAt *time.Time
 	UpdatedAt      time.Time
+}
+
+// JobView is a read-only projection joining an AlbumJob with its most recent
+// transfer, for display purposes only (e.g. the dashboard). It is never
+// written back to the store.
+type JobView struct {
+	Job      AlbumJob
+	Transfer *Transfer         // nil if the job has no attempt/transfer yet
+	Peer     string            // convenience copy of Transfer.Username; "" if Transfer is nil
+	Attempt  *CandidateAttempt // nil if the job has no attempt yet
 }

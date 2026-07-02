@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -28,11 +29,31 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := applySchema(db, schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// applySchema splits the schema SQL by semicolons and executes each statement,
+// gracefully handling duplicate column errors from idempotent ALTER TABLE statements.
+func applySchema(db *sql.DB, schemaSQL string) error {
+	statements := strings.Split(schemaSQL, ";")
+	for _, stmt := range statements {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if _, err := db.Exec(stmt); err != nil {
+			// Ignore "duplicate column name" errors from idempotent ALTER TABLE statements
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // Close closes the underlying database handle.

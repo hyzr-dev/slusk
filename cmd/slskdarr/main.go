@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/engine"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
@@ -77,7 +79,31 @@ func main() {
 		}
 		return observ.StatusReport{Active: len(active)}, nil
 	}
-	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn)}
+	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
+		return st.ListJobsWithTransfer(ctx)
+	}
+	// cancelFn cancels a job locally even if the remote slskd cancel call
+	// fails: the job's local state must advance to cancelled regardless, since
+	// any stale slskd-side entry gets cleaned up by the next reconcile pass.
+	cancelFn := func(ctx context.Context, jobID int64) (observ.CancelResult, error) {
+		view, found, err := st.JobWithTransfer(ctx, jobID)
+		if err != nil {
+			return observ.CancelResultFailed, err
+		}
+		if !found {
+			return observ.CancelResultNotFound, nil
+		}
+		if view.Transfer != nil && view.Transfer.SlskdID != "" {
+			if err := peers.Cancel(ctx, view.Transfer.Username, view.Transfer.SlskdID); err != nil {
+				logger.Warn("slskd cancel failed, still advancing job state", "job_id", jobID, "err", err)
+			}
+		}
+		if err := st.AdvanceJobState(ctx, jobID, core.StateCancelled, time.Now()); err != nil {
+			return observ.CancelResultFailed, err
+		}
+		return observ.CancelResultOK, nil
+	}
+	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn, cfg.Engine.FailedRetryAfter.Duration, cfg.Engine.MaxCandidatesPerAlbum)}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("status server", "err", err)

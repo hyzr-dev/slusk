@@ -94,10 +94,24 @@ func (d *Discoverer) Advance(ctx context.Context, wanted map[int64]lidarr.Wanted
 	return d.advanceImporting(ctx, now)
 }
 
-// syncWanted upserts every wanted Lidarr album as a DISCOVERED job (idempotent).
+// syncWanted upserts every wanted Lidarr album as a DISCOVERED job (idempotent),
+// and refreshes the job's cached title/artist metadata every pass while it sits
+// in DISCOVERED, so a rename in Lidarr before the job is picked up still shows
+// up. Jobs already past DISCOVERED are left alone: UpdateJobMetadata also bumps
+// updated_at, and stores like DueFailedJobs key off updated_at to time state
+// transitions (e.g. the failed-retry cooldown), so touching it on every pass
+// for a still-wanted FAILED/DOWNLOADING/etc. job would keep resetting that
+// clock and starve retries.
 func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum, now time.Time) error {
 	for _, a := range albums {
-		if _, err := d.p.Store.UpsertDiscoveredJob(ctx, a.ID, now); err != nil {
+		job, err := d.p.Store.UpsertDiscoveredJob(ctx, a.ID, now)
+		if err != nil {
+			return err
+		}
+		if job.State != core.StateDiscovered {
+			continue
+		}
+		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, now); err != nil {
 			return err
 		}
 	}

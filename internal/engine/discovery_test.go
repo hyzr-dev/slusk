@@ -442,6 +442,31 @@ func TestDiscoverNoNewJobsWhenAtCeiling(t *testing.T) {
 	}
 }
 
+func TestSyncWantedCachesTitleAndArtist(t *testing.T) {
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{
+		{ID: 900, Title: "Dummy", ArtistName: "Portishead", TrackCount: 11},
+	}}
+	p, st := newDiscoParams(t, music, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	d := NewDiscoverer(p)
+
+	if err := d.syncWanted(ctx, music.wanted, now); err != nil {
+		t.Fatalf("syncWanted: %v", err)
+	}
+
+	jobs, err := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if err != nil {
+		t.Fatalf("JobsInState: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Title != "Dummy" || jobs[0].ArtistName != "Portishead" {
+		t.Errorf("title/artist = %q / %q, want Dummy / Portishead", jobs[0].Title, jobs[0].ArtistName)
+	}
+}
+
 func TestDiscoverRetriesFailedAlbumAfterWindow(t *testing.T) {
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 88, Title: "A", ArtistName: "X", TrackCount: 1}}}
 	peers := &fakeSearcher{results: []slskd.Result{
