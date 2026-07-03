@@ -1890,3 +1890,59 @@ func TestDiscoverRetriesFailedAlbumAfterWindow(t *testing.T) {
 		t.Errorf("retried album with a good candidate should reach DOWNLOADING, got %d", len(downloading))
 	}
 }
+
+// TestAdvanceImportingRecordsSuccessOutcome verifies a clean, complete import
+// (advanceImporting's success path) writes the candidate's outcome to peer
+// reliability history, not just the transient candidate_attempts row -
+// candidate_attempts is deleted on a later ResetJobForRetry, so this is the
+// only place that survives.
+func TestAdvanceImportingRecordsSuccessOutcome(t *testing.T) {
+	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
+		{ID: 1, Path: "/music/slskd-downloads/A/01.flac", Importable: true},
+	}}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedVerifyingJob(t, now) // candidate attempt is for user "bob"
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rel, err := st.ReliabilityFor(ctx, 0, []string{"bob"})
+	if err != nil {
+		t.Fatalf("ReliabilityFor: %v", err)
+	}
+	if rel["bob"].Global.SuccessCount != 1 {
+		t.Errorf("bob's global success count = %d, want 1", rel["bob"].Global.SuccessCount)
+	}
+	if rel["bob"].Global.FailCount != 0 {
+		t.Errorf("bob's global fail count = %d, want 0", rel["bob"].Global.FailCount)
+	}
+}
+
+// TestAdvanceDownloadingRecordsFailOutcome verifies a failed transfer
+// (advanceDownloading's fail path) writes the candidate's outcome to peer
+// reliability history. This is what lets the fail side of the reliability
+// signal eventually suppress a consistently-bad peer, per the issue's
+// pipeline-review addendum.
+func TestAdvanceDownloadingRecordsFailOutcome(t *testing.T) {
+	p, st := newDiscoParams(t, &fakeMusic{}, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedTransfer(t, now) // candidate attempt is for user "bob"
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rel, err := st.ReliabilityFor(ctx, 0, []string{"bob"})
+	if err != nil {
+		t.Fatalf("ReliabilityFor: %v", err)
+	}
+	if rel["bob"].Global.FailCount != 1 {
+		t.Errorf("bob's global fail count = %d, want 1", rel["bob"].Global.FailCount)
+	}
+	if rel["bob"].Global.SuccessCount != 0 {
+		t.Errorf("bob's global success count = %d, want 0", rel["bob"].Global.SuccessCount)
+	}
+}

@@ -8,8 +8,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
@@ -20,9 +22,13 @@ type Candidate struct {
 	Score    float64
 }
 
-// Scorer ranks search results into candidates, best first.
+// Scorer ranks search results into candidates, best first. rel carries each
+// candidate username's known peer-reliability history (see
+// reliabilityHistoryScore); a username absent from rel is treated as having
+// no history. now is passed in explicitly (rather than read internally) so
+// the decay math stays deterministic and testable.
 type Scorer interface {
-	Rank(results []slskd.Result) []Candidate
+	Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []Candidate
 }
 
 // NewWeighted returns a Scorer that drops files below the quality floor (lossless
@@ -147,7 +153,7 @@ func dedupeTracks(files []slskd.Result) []slskd.Result {
 	return out
 }
 
-func (x *weighted) Rank(results []slskd.Result) []Candidate {
+func (x *weighted) Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []Candidate {
 	// Group by (username, release directory). A user who shares several releases of
 	// the same album (e.g. FLAC + MP3) must NOT become one candidate — that would
 	// enqueue every version at once. One candidate = one release from one user.
@@ -170,6 +176,7 @@ func (x *weighted) Rank(results []slskd.Result) []Candidate {
 		}
 		score += x.w.FileCount * float64(len(files))
 		score += x.w.Reliability * reliabilityScore(files[0]) // per-user, same across files
+		score += x.w.KnownUser * reliabilityHistoryScore(rel[k.user], now)
 		candidates = append(candidates, Candidate{Username: k.user, Files: files, Score: score})
 	}
 	sort.Slice(candidates, func(i, j int) bool {

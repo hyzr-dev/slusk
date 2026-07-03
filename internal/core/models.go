@@ -14,6 +14,11 @@ type AlbumJob struct {
 	Title           string // cached from Lidarr at discovery time, for display only
 	ArtistName      string // cached from Lidarr at discovery time, for display only
 	ReleaseDate     string // cached from Lidarr at discovery time, for display/ordering only
+	// ArtistID is Lidarr's artist id, cached alongside the display metadata. It
+	// keys per-artist peer reliability (artist_user_reliability) when an attempt
+	// completes, so the job needs it long after the wanted-list entry that
+	// supplied it is gone. 0 when unknown (e.g. an older job not yet backfilled).
+	ArtistID int64
 }
 
 // CandidateAttempt is one ranked Soulseek user tried for an album.
@@ -44,6 +49,33 @@ type Transfer struct {
 	Deadline       time.Time
 	LastProgressAt *time.Time
 	UpdatedAt      time.Time
+}
+
+// ReliabilityCounters is one peer's raw success/fail history at a single scope
+// (either global across all artists, or for one specific artist). The counters
+// and timestamps are stored as-is; decay/recency weighting is computed in Go at
+// ranking time (see matcher.reliabilityHistoryScore) rather than stored as a
+// pre-aged score, so no background job is needed to "age" the numbers. The zero
+// value (both counts 0, both timestamps nil) means no recorded history.
+type ReliabilityCounters struct {
+	SuccessCount  int
+	FailCount     int
+	LastSuccessAt *time.Time
+	LastFailAt    *time.Time
+}
+
+// PeerReliability bundles a Soulseek peer's history for one artist lookup: the
+// artist-specific record (the strong signal, preferred) and the global record
+// aggregated over every artist (a weak fallback used when there is no
+// artist-specific history). Either side may be a zero value when that peer has
+// no outcome recorded at that scope.
+//
+// These two records are the ONLY peer history that survives a failed-album
+// retry: ResetJobForRetry DELETEs candidate_attempts, so reliability must be
+// written incrementally at attempt completion, never recomputed from attempts.
+type PeerReliability struct {
+	Artist ReliabilityCounters
+	Global ReliabilityCounters
 }
 
 // JobView is a read-only projection joining an AlbumJob with its most recent

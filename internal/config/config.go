@@ -69,6 +69,12 @@ type Weights struct {
 	Bitrate     float64 `toml:"bitrate"`
 	Reliability float64 `toml:"reliability"`
 	FileCount   float64 `toml:"file_count"`
+	// KnownUser weights the peer's decayed artist/global success-fail history
+	// (0..1, see matcher.reliabilityHistoryScore) into the candidate score, so a
+	// peer who has previously delivered a complete, importable release for this
+	// artist (or is a known-good/known-bad peer in general) is boosted or
+	// suppressed relative to an unknown peer.
+	KnownUser float64 `toml:"known_user"`
 }
 
 // StoreConfig is the persistent store configuration.
@@ -183,6 +189,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.MaxCandidateFileRatio <= 0 {
 		problems = append(problems, "engine.max_candidate_file_ratio must be > 0")
+	}
+	if c.Engine.Weights.KnownUser < 0 {
+		problems = append(problems, "engine.weights.known_user must be >= 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")
