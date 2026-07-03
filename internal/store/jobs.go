@@ -191,10 +191,24 @@ func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 }
 
 // UpdateTransferProgress records new state and byte counts for a transfer.
+// last_progress_at only advances when the byte counter actually increased: the
+// reconciler calls this every poll pass, so stamping it unconditionally would
+// make a stalled transfer (reconciled repeatedly with unchanged bytes) always
+// look freshly progressing and defeat stall detection. It is also stamped on
+// the QUEUED→IN_PROGRESS transition (when last_progress_at is still NULL) so the
+// stall clock starts when the download actually begins rather than at enqueue.
 func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?, last_progress_at = ?, updated_at = ? WHERE id = ?`,
-		string(state), bytesDone, bytesTotal, now, now, transferID)
+		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?,
+			last_progress_at = CASE
+				WHEN ? > bytes_done THEN ?
+				WHEN ? = ? AND last_progress_at IS NULL THEN ?
+				ELSE last_progress_at END,
+			updated_at = ? WHERE id = ?`,
+		string(state), bytesDone, bytesTotal,
+		bytesDone, now,
+		string(state), string(core.TransferInProgress), now,
+		now, transferID)
 	if err != nil {
 		return fmt.Errorf("update transfer progress: %w", err)
 	}
@@ -202,13 +216,18 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 }
 
 // RetryTransfer returns a transfer to PENDING for a later resend and bumps its
-// retry count, clearing the slskd id and byte progress. Used when a peer
-// rejected a download for a transient reason (e.g. its queued-megabyte limit):
-// the file waits in the pending pool and topUpAttempt sends it again once the
-// peer's queue has drained, rather than failing the whole attempt.
+// retry count, clearing the slskd id, byte progress, and stall clock. Used when
+// a peer rejected a download for a transient reason (e.g. its queued-megabyte
+// limit): the file waits in the pending pool and topUpAttempt sends it again
+// once the peer's queue has drained, rather than failing the whole attempt.
+// last_progress_at must be cleared here: a stall-retried transfer would
+// otherwise carry its already-expired stall clock into the re-attempt and be
+// re-cancelled on its first IN_PROGRESS poll, burning the retry budget without
+// a genuine retry. UpdateTransferProgress stamps a fresh clock when the
+// re-sent transfer actually starts.
 func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, updated_at = ? WHERE id = ?`,
+		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = ? WHERE id = ?`,
 		string(core.TransferPending), now, transferID)
 	if err != nil {
 		return fmt.Errorf("retry transfer: %w", err)

@@ -131,10 +131,11 @@ func (e *Engine) reconcileOnce(ctx context.Context) {
 		}
 		// Log a heartbeat only when the pass actually changed something, so a quiet
 		// tick stays silent but real transfer activity is visible.
-		if e.p.Logger != nil && (stats.Adopted+stats.Completed+stats.Cancelled+stats.Lost) > 0 {
+		if e.p.Logger != nil && (stats.Adopted+stats.Completed+stats.Cancelled+stats.Lost+stats.Stalled) > 0 {
 			e.p.Logger.Info("reconciled transfers",
 				"adopted", stats.Adopted, "completed", stats.Completed,
-				"cancelled", stats.Cancelled, "lost", stats.Lost, "unknown", stats.Unknown)
+				"cancelled", stats.Cancelled, "lost", stats.Lost,
+				"stalled", stats.Stalled, "unknown", stats.Unknown)
 		}
 	}
 	e.reconcileCount.Add(1)
