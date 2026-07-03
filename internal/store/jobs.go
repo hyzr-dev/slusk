@@ -191,10 +191,24 @@ func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 }
 
 // UpdateTransferProgress records new state and byte counts for a transfer.
+// last_progress_at only advances when the byte counter actually increased: the
+// reconciler calls this every poll pass, so stamping it unconditionally would
+// make a stalled transfer (reconciled repeatedly with unchanged bytes) always
+// look freshly progressing and defeat stall detection. It is also stamped on
+// the QUEUED→IN_PROGRESS transition (when last_progress_at is still NULL) so the
+// stall clock starts when the download actually begins rather than at enqueue.
 func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?, last_progress_at = ?, updated_at = ? WHERE id = ?`,
-		string(state), bytesDone, bytesTotal, now, now, transferID)
+		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?,
+			last_progress_at = CASE
+				WHEN ? > bytes_done THEN ?
+				WHEN ? = ? AND last_progress_at IS NULL THEN ?
+				ELSE last_progress_at END,
+			updated_at = ? WHERE id = ?`,
+		string(state), bytesDone, bytesTotal,
+		bytesDone, now,
+		string(state), string(core.TransferInProgress), now,
+		now, transferID)
 	if err != nil {
 		return fmt.Errorf("update transfer progress: %w", err)
 	}

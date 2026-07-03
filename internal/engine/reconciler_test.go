@@ -88,7 +88,7 @@ func TestReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 			{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100, BytesTransferred: 0},
 		},
 	}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -116,7 +116,7 @@ func TestReconcileMarksLostWhenAbsentFromSlskd(t *testing.T) {
 		},
 	}
 	peers := &fakePeers{downloads: nil} // slskd forgot everything
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -139,7 +139,7 @@ func TestReconcileOverlapCountedOnce(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 10},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -165,7 +165,7 @@ func TestReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 		downloads: []slskd.Transfer{{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100}},
 		cancelErr: errors.New("peer offline"),
 	}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -188,7 +188,7 @@ func TestReconcileBackfillsMissingID(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 20},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	if _, err := r.Reconcile(context.Background(), now); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 	peers := &fakePeers{downloads: []slskd.Transfer{
 		{ID: "g-live", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -235,7 +235,7 @@ func TestReconcileRetriesRejectedTransferWhenRetryable(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
 			Size: 100, BytesTransferred: 0, Exception: "Too many megabytes"},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	stats, err := r.Reconcile(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -259,7 +259,7 @@ func TestReconcileRejectedTransferErrorsWhenRetriesExhausted(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
 			Size: 100, BytesTransferred: 0, Exception: "Too many megabytes"},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	if _, err := r.Reconcile(context.Background(), now); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -279,11 +279,133 @@ func TestReconcileRejectedTransferTerminalReasonDoesNotRetry(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected",
 			Size: 100, BytesTransferred: 0, Exception: "File not shared."},
 	}}
-	r := NewReconciler(peers, store, 3)
+	r := NewReconciler(peers, store, 3, time.Hour)
 	if _, err := r.Reconcile(context.Background(), now); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if store.progress[1] != core.TransferErrored {
 		t.Errorf("permanent reason should error out without retrying, got %v", store.progress[1])
+	}
+}
+
+// An IN_PROGRESS transfer whose last byte progress is older than the stall
+// timeout is dead: it must be cancelled in slskd and retried (within budget),
+// not left to wait out its enqueue-relative deadline.
+func TestReconcileStalledTransferCancelsAndRetries(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-2 * time.Hour)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac",
+			State: core.TransferInProgress, Retries: 0, LastProgressAt: &stale},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	}}
+	r := NewReconciler(peers, store, 3, time.Hour)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(peers.cancelled) != 1 || peers.cancelled[0] != "g1" {
+		t.Errorf("expected stalled transfer g1 cancelled, got %v", peers.cancelled)
+	}
+	if store.progress[1] != core.TransferPending {
+		t.Errorf("stalled transfer should be reset to PENDING, got %v", store.progress[1])
+	}
+	if stats.Stalled != 1 {
+		t.Errorf("Stalled = %d, want 1", stats.Stalled)
+	}
+	if stats.Adopted != 0 {
+		t.Errorf("Adopted = %d, want 0 (must not also adopt the stalled transfer)", stats.Adopted)
+	}
+}
+
+// A stalled transfer whose retry budget is spent must go terminal (ERRORED) so
+// the attempt fails and moves on to another candidate rather than retrying forever.
+func TestReconcileStalledTransferErrorsWhenRetriesExhausted(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-2 * time.Hour)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac",
+			State: core.TransferInProgress, Retries: 3, LastProgressAt: &stale},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	}}
+	r := NewReconciler(peers, store, 3, time.Hour)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(peers.cancelled) != 1 || peers.cancelled[0] != "g1" {
+		t.Errorf("expected stalled transfer g1 cancelled, got %v", peers.cancelled)
+	}
+	if store.progress[1] != core.TransferErrored {
+		t.Errorf("exhausted stall retries should error out, got %v", store.progress[1])
+	}
+	if stats.Stalled != 1 {
+		t.Errorf("Stalled = %d, want 1", stats.Stalled)
+	}
+}
+
+// A transfer that made byte progress within the stall timeout is healthy: it
+// must be adopted normally, never cancelled.
+func TestReconcileFreshProgressNotStalled(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-5 * time.Minute)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac",
+			State: core.TransferInProgress, LastProgressAt: &fresh},
+	}}
+	peers := &fakePeers{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	}}
+	r := NewReconciler(peers, store, 3, time.Hour)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(peers.cancelled) != 0 {
+		t.Errorf("healthy transfer must not be cancelled, got %v", peers.cancelled)
+	}
+	if stats.Stalled != 0 {
+		t.Errorf("Stalled = %d, want 0", stats.Stalled)
+	}
+	if stats.Adopted != 1 {
+		t.Errorf("Adopted = %d, want 1", stats.Adopted)
+	}
+	if store.progress[1] != core.TransferInProgress {
+		t.Errorf("healthy transfer should record IN_PROGRESS, got %v", store.progress[1])
+	}
+}
+
+// If cancelling a stalled transfer in slskd fails, it must be left untouched so
+// the next pass retries the cancel (no orphaned in-flight download).
+func TestReconcileStalledCancelFailureLeavesUntouched(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-2 * time.Hour)
+	store := &fakeStore{active: []core.Transfer{
+		{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac",
+			State: core.TransferInProgress, LastProgressAt: &stale},
+	}}
+	peers := &fakePeers{
+		downloads: []slskd.Transfer{
+			{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+		},
+		cancelErr: errors.New("peer offline"),
+	}
+	r := NewReconciler(peers, store, 3, time.Hour)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(peers.cancelled) != 1 {
+		t.Errorf("expected a cancel attempt, got %v", peers.cancelled)
+	}
+	if _, marked := store.progress[1]; marked {
+		t.Errorf("transfer must not be modified after cancel failure, got %v", store.progress[1])
+	}
+	if stats.Stalled != 0 {
+		t.Errorf("Stalled = %d, want 0 (cancel failed)", stats.Stalled)
 	}
 }
