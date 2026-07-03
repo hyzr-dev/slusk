@@ -14,7 +14,10 @@ transfer_deadline = "30m"
 stall_timeout = "5m"
 search_timeout = "20s"
 min_bitrate = 192
-max_concurrent_searches = 4
+# Per-tick batch size used across the discovery pipeline stages (retry, start,
+# top-up, downloading, verifying, importing). Not a concurrency limit: searches
+# within a batch run sequentially.
+batch = 4
 # Global cap on jobs simultaneously active (searching through importing:
 # SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING), regardless of how
 # many are newly started per tick.

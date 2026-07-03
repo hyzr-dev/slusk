@@ -58,7 +58,7 @@ func main() {
 		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
 		ImportConfirmTimeout:   cfg.Engine.ImportConfirmTimeout.Duration,
 		MaxCandidates:          cfg.Engine.MaxCandidatesPerAlbum,
-		Batch:                  cfg.Engine.MaxConcurrentSearches,
+		Batch:                  cfg.Engine.Batch,
 		MaxActive:              cfg.Engine.MaxConcurrentActive,
 		MaxInflightPerPeer:     cfg.Engine.MaxInflightPerPeer,
 		MaxCandidateFileRatio:  cfg.Engine.MaxCandidateFileRatio,
