@@ -107,12 +107,40 @@ func TestReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 	}
 }
 
-// A transfer we recorded but slskd no longer knows about is "lost".
-func TestReconcileMarksLostWhenAbsentFromSlskd(t *testing.T) {
+// A transfer we recorded but slskd no longer knows about is "lost" (e.g. a
+// slskd restart wiped its live list). With retry budget left, it goes back to
+// PENDING for a resend instead of failing the attempt outright.
+func TestReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	now := time.Now().UTC()
 	store := &fakeStore{
 		active: []core.Transfer{
-			{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress},
+			{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Retries: 0},
+		},
+	}
+	peers := &fakePeers{downloads: nil} // slskd forgot everything
+	r := NewReconciler(peers, store, 3, time.Hour)
+	stats, err := r.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if stats.Retried != 1 {
+		t.Errorf("Retried = %d, want 1", stats.Retried)
+	}
+	if stats.Lost != 0 {
+		t.Errorf("Lost = %d, want 0", stats.Lost)
+	}
+	if store.progress[1] != core.TransferPending {
+		t.Errorf("lost transfer with retries left should be requeued PENDING, got %v", store.progress[1])
+	}
+}
+
+// Once a lost transfer's retry budget is exhausted, it is finally marked
+// ERRORED instead of retrying forever.
+func TestReconcileMarksLostWhenAbsentFromSlskdAndRetriesExhausted(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeStore{
+		active: []core.Transfer{
+			{ID: 1, SlskdID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Retries: 3},
 		},
 	}
 	peers := &fakePeers{downloads: nil} // slskd forgot everything
@@ -124,8 +152,11 @@ func TestReconcileMarksLostWhenAbsentFromSlskd(t *testing.T) {
 	if stats.Lost != 1 {
 		t.Errorf("Lost = %d, want 1", stats.Lost)
 	}
+	if stats.Retried != 0 {
+		t.Errorf("Retried = %d, want 0", stats.Retried)
+	}
 	if store.progress[1] != core.TransferErrored {
-		t.Errorf("lost transfer should be marked ERRORED, got %v", store.progress[1])
+		t.Errorf("lost transfer with retries exhausted should be marked ERRORED, got %v", store.progress[1])
 	}
 }
 
