@@ -66,6 +66,12 @@ type fakeSearcher struct {
 	enqueueErr     error
 	deletedFolders []string
 	deleteErr      error
+
+	// enqueueErrForFile, if set, fails Enqueue only for the named file (once
+	// per entry, decremented on each failing call) while other files succeed
+	// normally. Lets tests reproduce a single transient enqueue failure amid
+	// otherwise-successful calls.
+	enqueueErrForFile map[string]int
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
@@ -74,6 +80,10 @@ func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Du
 func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	if f.enqueueErr != nil {
 		return "", f.enqueueErr
+	}
+	if f.enqueueErrForFile[filename] > 0 {
+		f.enqueueErrForFile[filename]--
+		return "", errors.New("transient enqueue failure")
 	}
 	f.enqueued = append(f.enqueued, filename)
 	if f.enqueuedSizes == nil {
@@ -1085,6 +1095,152 @@ func TestDiscoverEnqueueFailureMarksTransferErrored(t *testing.T) {
 	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
 	if len(jobs) == 0 {
 		t.Errorf("enqueue failure should mark the transfer errored and lead to COOLDOWN, got no cooldown jobs")
+	}
+}
+
+// seedDownloadingAttempt creates a DOWNLOADING job with one CandidateAttempt
+// and returns the attempt ID, so tests can drive topUpAttempt directly with
+// full control over which files are PENDING and their retry counts.
+func seedDownloadingAttempt(t *testing.T, st *discoBackedStore, lidarrAlbumID int64, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	job, err := st.UpsertDiscoveredJob(ctx, lidarrAlbumID, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	attemptID, err := st.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	return attemptID
+}
+
+func TestTopUpAttemptEnqueueFailureWithRetriesLeftReturnsToPendingAndResends(t *testing.T) {
+	// With retries remaining, a failed enqueue must return the transfer to
+	// PENDING (not ERRORED) with its retry count bumped, and the next tick
+	// (another topUpAttempt call) must attempt to resend it.
+	filename := `bob\A\01.flac`
+	peers := &fakeSearcher{enqueueErrForFile: map[string]int{filename: 1}} // fails once, then succeeds
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 1
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", filename, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	d := NewDiscoverer(p)
+
+	// Tick 1: enqueue fails -> transfer returned to PENDING with retries bumped.
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt 1: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("failed enqueue must not count as sent, got %d", sent)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferPending || transfers[0].Retries != 1 {
+		t.Fatalf("expected 1 PENDING transfer with retries == 1, got %+v", transfers)
+	}
+
+	// Tick 2: the retried transfer is resent and now succeeds.
+	sent, err = d.topUpAttempt(ctx, attemptID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("topUpAttempt 2: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("expected the retried transfer to be resent, got sent=%d", sent)
+	}
+	if len(peers.enqueued) != 1 || peers.enqueued[0] != filename {
+		t.Fatalf("expected the retried transfer to be resent, got %+v", peers.enqueued)
+	}
+	transfers, err = st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferQueued {
+		t.Fatalf("expected the resent transfer to be QUEUED, got %+v", transfers)
+	}
+}
+
+func TestTopUpAttemptEnqueueFailureWithRetriesExhaustedMarksErrored(t *testing.T) {
+	// Once the retry budget is exhausted, a failed enqueue must fall back to
+	// today's behavior: mark the transfer terminally ERRORED.
+	filename := `bob\A\01.flac`
+	peers := &fakeSearcher{enqueueErr: errors.New("peer offline")}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 0
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", filename, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	d := NewDiscoverer(p)
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 sent for an exhausted-retry enqueue failure, got %d", sent)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferErrored {
+		t.Fatalf("expected the transfer to be ERRORED once retries are exhausted, got %+v", transfers)
+	}
+}
+
+func TestTopUpAttemptEnqueueFailureForOneFileDoesNotBlockOthers(t *testing.T) {
+	// Within a single topUpAttempt loop, a failed enqueue for one file must not
+	// prevent other files from being sent.
+	failing := `bob\A\01.flac`
+	ok := `bob\A\02.flac`
+	peers := &fakeSearcher{enqueueErrForFile: map[string]int{failing: 1}}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 1
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", failing, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer (failing): %v", err)
+	}
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", ok, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer (ok): %v", err)
+	}
+	d := NewDiscoverer(p)
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("expected the succeeding file to still be sent despite the other's enqueue failure, got sent=%d", sent)
+	}
+	if len(peers.enqueued) != 1 || peers.enqueued[0] != ok {
+		t.Fatalf("expected only the succeeding file to be enqueued, got %+v", peers.enqueued)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	states := map[string]core.TransferState{}
+	for _, tr := range transfers {
+		states[tr.Filename] = tr.State
+	}
+	if states[ok] != core.TransferQueued {
+		t.Errorf("expected %q to be QUEUED, got %+v", ok, states)
+	}
+	if states[failing] != core.TransferPending {
+		t.Errorf("expected %q to be returned to PENDING for retry, got %+v", failing, states)
 	}
 }
 

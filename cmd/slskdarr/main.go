@@ -62,6 +62,7 @@ func main() {
 		MaxActive:              cfg.Engine.MaxConcurrentActive,
 		MaxInflightPerPeer:     cfg.Engine.MaxInflightPerPeer,
 		MaxCandidateFileRatio:  cfg.Engine.MaxCandidateFileRatio,
+		MaxTransferRetries:     cfg.Engine.MaxTransferRetries,
 		Logger:                 logger,
 	})
 	reg := prometheus.NewRegistry()
