@@ -42,7 +42,12 @@ type DiscovererParams struct {
 	// expected track count is unknown (0), since Lidarr is the final arbiter of
 	// import correctness downstream.
 	MaxCandidateFileRatio float64
-	Logger                *slog.Logger
+	// MaxTransferRetries bounds how many times a transfer can be returned to
+	// PENDING after a failed enqueue attempt before it is marked terminally
+	// ERRORED. Mirrors the retry budget the Reconciler enforces for transfers
+	// that reached slskd but then failed there.
+	MaxTransferRetries int
+	Logger             *slog.Logger
 }
 
 // Discoverer drives AlbumJobs through the pipeline, one transition per tick.
@@ -351,9 +356,16 @@ func (d *Discoverer) topUpAttempt(ctx context.Context, attemptID int64, now time
 		}
 		slskdID, err := d.p.Peers.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
 		if err != nil {
-			d.log().Error("enqueue failed", "user", p.Username, "file", p.Filename, "err", err)
-			if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
-				d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+			if p.Retries < d.p.MaxTransferRetries {
+				d.log().Info("enqueue failed, returning to pending", "user", p.Username, "file", p.Filename, "retries", p.Retries, "err", err)
+				if uerr := d.p.Store.RetryTransfer(ctx, tid, now); uerr != nil {
+					d.log().Error("retry transfer failed", "transfer", tid, "err", uerr)
+				}
+			} else {
+				d.log().Error("enqueue failed", "user", p.Username, "file", p.Filename, "err", err)
+				if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
+					d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+				}
 			}
 			continue
 		}
