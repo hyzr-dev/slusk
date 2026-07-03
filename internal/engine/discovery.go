@@ -404,6 +404,16 @@ func (d *Discoverer) albumFor(job core.AlbumJob, wanted map[int64]lidarr.WantedA
 
 // advanceDownloading moves DOWNLOADING jobs to VERIFYING when all their active
 // attempt's transfers are COMPLETED, or to COOLDOWN when any transfer failed.
+//
+// The fail path is two-phase: cancel first, clean up once everything is quiet.
+// When an attempt fails while some of its siblings are still QUEUED/IN_PROGRESS/
+// STALLED in slskd, cleaning up (deleting the attempt's download folder) would
+// race those live downloads - slskd keeps writing their bytes back into the
+// folder we just deleted, re-creating exactly the cross-peer collision
+// cleanupAttempt exists to prevent. So we first cancel the still-active siblings
+// in slskd (and mark never-sent PENDING siblings CANCELLED directly, since there
+// is nothing in slskd to cancel), then wait: cleanup, FailAttempt and the
+// cooldown are deferred to a later tick once every transfer is terminal.
 func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) error {
 	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.Batch)
 	if err != nil {
@@ -423,13 +433,19 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 			return err
 		}
 		allDone, anyFailed := len(transfers) > 0, false
+		var activeSiblings, pendingSiblings []core.Transfer
 		for _, t := range transfers {
 			switch t.State {
 			case core.TransferCompleted:
 			case core.TransferErrored, core.TransferCancelled:
 				anyFailed = true
 				allDone = false
-			default:
+			case core.TransferPending:
+				// Never sent to slskd; nothing to cancel there, but still not terminal.
+				pendingSiblings = append(pendingSiblings, t)
+				allDone = false
+			default: // QUEUED, IN_PROGRESS, STALLED: still live in slskd.
+				activeSiblings = append(activeSiblings, t)
 				allDone = false
 			}
 		}
@@ -438,6 +454,36 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 			// A candidate failed, but other untried candidates usually remain, so
 			// use the short backoff to try the next one soon rather than the long
 			// "nothing new to try" backoff.
+			//
+			// Two-phase fail: never-sent PENDING siblings are cancelled straight in
+			// the DB (nothing exists in slskd to cancel, and without this the attempt
+			// would never reach "all terminal"); still-active siblings are cancelled
+			// in slskd. While any sibling is still live we defer cleanup/FailAttempt/
+			// cooldown to a later tick - deleting the folder now would race those
+			// downloads. The branch re-runs every tick, so the job converges to
+			// "all terminal" within a few ticks.
+			for _, t := range pendingSiblings {
+				if err := d.p.Store.UpdateTransferProgress(ctx, t.ID, core.TransferCancelled, t.BytesDone, t.BytesTotal, now); err != nil {
+					d.log().Error("cancel pending sibling failed", "transfer", t.ID, "err", err)
+				}
+			}
+			if len(activeSiblings) > 0 {
+				d.log().Info("candidate failed, cancelling active siblings before cleanup",
+					"album_job", job.ID, "attempt", active.ID, "active", len(activeSiblings))
+				for _, t := range activeSiblings {
+					if t.SlskdID == "" {
+						// No slskd id yet (enqueue never returned one); the reconciler's
+						// fallback matching will terminate it. Leave it for a later tick.
+						continue
+					}
+					if err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID); err != nil {
+						// Leave it active; the next tick retries the cancel.
+						d.log().Error("cancel active sibling failed", "album_job", job.ID, "transfer", t.ID, "err", err)
+					}
+				}
+				continue
+			}
+			// Every transfer is terminal: safe to clean up and fail the attempt.
 			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
 			names := make([]string, 0, len(transfers))
 			for _, t := range transfers {

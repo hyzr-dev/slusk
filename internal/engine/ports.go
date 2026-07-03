@@ -40,6 +40,11 @@ type MusicSource interface {
 type PeerSearcher interface {
 	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
+	// Cancel cancels and removes a still-active slskd download, so a failed
+	// attempt's live sibling transfers stop writing into a folder that is about
+	// to be cleaned up. Same call the reconciler uses for deadline-overdue
+	// transfers.
+	Cancel(ctx context.Context, username, id string) error
 	DeleteDownloadFolder(ctx context.Context, name string) error
 }
 
