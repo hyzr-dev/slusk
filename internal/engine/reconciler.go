@@ -143,7 +143,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		}
 		lt, ok := matchLive(tr)
 		if !ok {
-			// In our DB, gone from slskd: lost.
+			// In our DB, gone from slskd's live list: lost. This is the path a slskd
+			// restart takes - it wipes its in-memory transfer list, so every transfer
+			// that was in flight looks "lost" even though nothing about the download
+			// itself failed. Since the peer is usually still willing to resend, treat
+			// this the same as a transient rejection: retry within the shared budget
+			// rather than failing the whole attempt outright. Bounded so a transfer
+			// that keeps vanishing (rather than recovering after a restart) still
+			// errors out instead of retrying forever.
+			if tr.Retries < r.maxRetries {
+				_ = r.store.RetryTransfer(ctx, tr.ID, now)
+				stats.Retried++
+				continue
+			}
 			_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 			stats.Lost++
 			continue
