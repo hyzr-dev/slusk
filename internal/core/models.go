@@ -26,6 +26,7 @@ type CandidateAttempt struct {
 	FailReason   string // timeout/errored/cancelled/incomplete
 	BackoffUntil *time.Time
 	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // Transfer is one slskd file download. SlskdID is empty until slskd accepts the

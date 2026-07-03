@@ -129,12 +129,16 @@ func TestAttemptsAndTransfersForJob(t *testing.T) {
 		t.Fatalf("TransfersForAttempt: %v %+v", err, transfers)
 	}
 
-	if err := s.FailAttempt(ctx, attemptID, "timeout", now.Add(10*time.Minute), now); err != nil {
+	failedAt := now.Add(10 * time.Minute)
+	if err := s.FailAttempt(ctx, attemptID, "timeout", now.Add(10*time.Minute), failedAt); err != nil {
 		t.Fatalf("FailAttempt: %v", err)
 	}
 	after, _ := s.AttemptsForJob(ctx, job.ID)
 	if after[0].State != "FAILED" || after[0].FailReason != "timeout" {
 		t.Errorf("attempt not marked failed: %+v", after[0])
+	}
+	if !after[0].UpdatedAt.Equal(failedAt) {
+		t.Errorf("UpdatedAt = %v, want %v after FailAttempt", after[0].UpdatedAt, failedAt)
 	}
 	if err := s.IncrementCandidatesTried(ctx, job.ID, now); err != nil {
 		t.Fatalf("IncrementCandidatesTried: %v", err)
@@ -142,5 +146,52 @@ func TestAttemptsAndTransfersForJob(t *testing.T) {
 	jobs, _ := s.JobsInState(ctx, core.StateDiscovered, 10)
 	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
 		t.Errorf("candidates_tried not incremented: %+v", jobs)
+	}
+}
+
+func TestFailAndSucceedAttemptBumpUpdatedAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := s.UpsertDiscoveredJob(ctx, 201, now)
+
+	// FailAttempt sets updated_at to the given now, not created_at.
+	failID, _ := s.CreateAttempt(ctx, job.ID, "alice", 1.0, now)
+	failedAt := now.Add(5 * time.Minute)
+	if err := s.FailAttempt(ctx, failID, "timeout", failedAt.Add(time.Hour), failedAt); err != nil {
+		t.Fatalf("FailAttempt: %v", err)
+	}
+	attempts, err := s.AttemptsForJob(ctx, job.ID)
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("AttemptsForJob: %v %+v", err, attempts)
+	}
+	if !attempts[0].CreatedAt.Equal(now) {
+		t.Errorf("CreatedAt = %v, want unchanged %v", attempts[0].CreatedAt, now)
+	}
+	if !attempts[0].UpdatedAt.Equal(failedAt) {
+		t.Errorf("UpdatedAt = %v, want %v after FailAttempt", attempts[0].UpdatedAt, failedAt)
+	}
+
+	// SucceedAttempt sets updated_at to the given now, not created_at.
+	succeedID, _ := s.CreateAttempt(ctx, job.ID, "bob", 2.0, now)
+	succeededAt := now.Add(10 * time.Minute)
+	if err := s.SucceedAttempt(ctx, succeedID, succeededAt); err != nil {
+		t.Fatalf("SucceedAttempt: %v", err)
+	}
+	attempts, err = s.AttemptsForJob(ctx, job.ID)
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("AttemptsForJob: %v %+v", err, attempts)
+	}
+	var succeeded core.CandidateAttempt
+	for _, a := range attempts {
+		if a.ID == succeedID {
+			succeeded = a
+		}
+	}
+	if succeeded.State != "SUCCEEDED" {
+		t.Errorf("State = %q, want SUCCEEDED", succeeded.State)
+	}
+	if !succeeded.UpdatedAt.Equal(succeededAt) {
+		t.Errorf("UpdatedAt = %v, want %v after SucceedAttempt", succeeded.UpdatedAt, succeededAt)
 	}
 }

@@ -79,7 +79,7 @@ func (s *Store) DueCooldownJobs(ctx context.Context, now time.Time, limit int) (
 // AttemptsForJob returns all candidate attempts for a job, oldest first.
 func (s *Store) AttemptsForJob(ctx context.Context, jobID int64) ([]core.CandidateAttempt, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, album_job_id, username, score, state, fail_reason, backoff_until, created_at
+		`SELECT id, album_job_id, username, score, state, fail_reason, backoff_until, created_at, updated_at
 		 FROM candidate_attempts WHERE album_job_id = ? ORDER BY created_at`, jobID)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func (s *Store) AttemptsForJob(ctx context.Context, jobID int64) ([]core.Candida
 	var out []core.CandidateAttempt
 	for rows.Next() {
 		var a core.CandidateAttempt
-		if err := rows.Scan(&a.ID, &a.AlbumJobID, &a.Username, &a.Score, &a.State, &a.FailReason, &a.BackoffUntil, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.AlbumJobID, &a.Username, &a.Score, &a.State, &a.FailReason, &a.BackoffUntil, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -109,8 +109,8 @@ func (s *Store) TransfersForAttempt(ctx context.Context, attemptID int64) ([]cor
 // FailAttempt marks a candidate attempt FAILED with a reason and a backoff time.
 func (s *Store) FailAttempt(ctx context.Context, attemptID int64, reason string, backoffUntil, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'FAILED', fail_reason = ?, backoff_until = ? WHERE id = ?`,
-		reason, backoffUntil, attemptID)
+		`UPDATE candidate_attempts SET state = 'FAILED', fail_reason = ?, backoff_until = ?, updated_at = ? WHERE id = ?`,
+		reason, backoffUntil, now, attemptID)
 	if err != nil {
 		return fmt.Errorf("fail attempt: %w", err)
 	}
@@ -120,7 +120,7 @@ func (s *Store) FailAttempt(ctx context.Context, attemptID int64, reason string,
 // SucceedAttempt marks a candidate attempt SUCCEEDED.
 func (s *Store) SucceedAttempt(ctx context.Context, attemptID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'SUCCEEDED' WHERE id = ?`, attemptID)
+		`UPDATE candidate_attempts SET state = 'SUCCEEDED', updated_at = ? WHERE id = ?`, now, attemptID)
 	if err != nil {
 		return fmt.Errorf("succeed attempt: %w", err)
 	}
