@@ -189,6 +189,56 @@ func TestUpdateTransferProgressLastProgressAtTracksBytes(t *testing.T) {
 	}
 }
 
+// A stall-retried transfer must get a FRESH stall clock on its re-attempt:
+// RetryTransfer clears last_progress_at, so the first IN_PROGRESS observation
+// of the re-sent transfer (still at 0 bytes) stamps a new timestamp instead of
+// keeping the already-expired one — which would re-trip the stall branch
+// immediately and burn the retry budget without a genuine retry.
+func TestRetryTransferResetsStallClock(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := s.UpsertDiscoveredJob(ctx, 901, t0)
+	a, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, t0)
+	tid, _ := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", t0.Add(time.Hour), t0)
+
+	read := func() core.Transfer {
+		t.Helper()
+		tr, found, err := s.FindTransferByFallback(ctx, "bob", "r.flac")
+		if err != nil || !found {
+			t.Fatalf("FindTransferByFallback found=%v err=%v", found, err)
+		}
+		return tr
+	}
+
+	// The transfer starts and makes some progress, then stalls.
+	if err := s.UpdateTransferProgress(ctx, tid, core.TransferInProgress, 40, 100, t0.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	// The reconciler detects the stall and retries the transfer.
+	tRetry := t0.Add(2 * time.Hour)
+	if err := s.RetryTransfer(ctx, tid, tRetry); err != nil {
+		t.Fatalf("RetryTransfer: %v", err)
+	}
+	if got := read().LastProgressAt; got != nil {
+		t.Fatalf("last_progress_at after retry = %v, want NULL (fresh stall clock)", got)
+	}
+
+	// topUpAttempt re-enqueues it and the download starts again at 0 bytes: the
+	// stall clock must restart from now, not from before the retry.
+	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", tRetry.Add(time.Hour), tRetry); err != nil {
+		t.Fatalf("re-enqueue RecordEnqueueIntent: %v", err)
+	}
+	tRestart := tRetry.Add(time.Minute)
+	if err := s.UpdateTransferProgress(ctx, tid, core.TransferInProgress, 0, 100, tRestart); err != nil {
+		t.Fatalf("UpdateTransferProgress restart: %v", err)
+	}
+	if got := read().LastProgressAt; got == nil || !got.Equal(tRestart) {
+		t.Fatalf("last_progress_at after restart = %v, want %v", got, tRestart)
+	}
+}
+
 func TestUpsertDiscoveredJobIsIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
