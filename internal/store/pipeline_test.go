@@ -47,16 +47,16 @@ func TestJobsInStateOrdersDiscoveredByReleaseDateDesc(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	older, _ := s.UpsertDiscoveredJob(ctx, 400, now)
-	if err := s.UpdateJobMetadata(ctx, older.ID, "Older", "Artist", "2020-01-01", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, older.ID, "Older", "Artist", "2020-01-01", 0, now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 	newest, _ := s.UpsertDiscoveredJob(ctx, 401, now)
-	if err := s.UpdateJobMetadata(ctx, newest.ID, "Newest", "Artist", "2026-06-01", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, newest.ID, "Newest", "Artist", "2026-06-01", 0, now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 	blank, _ := s.UpsertDiscoveredJob(ctx, 402, now)
 	middle, _ := s.UpsertDiscoveredJob(ctx, 403, now)
-	if err := s.UpdateJobMetadata(ctx, middle.ID, "Middle", "Artist", "2023-05-15", now); err != nil {
+	if err := s.UpdateJobMetadata(ctx, middle.ID, "Middle", "Artist", "2023-05-15", 0, now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 
