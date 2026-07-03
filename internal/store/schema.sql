@@ -54,6 +54,14 @@ ALTER TABLE transfers ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_transfers_slskd_id ON transfers(slskd_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON album_jobs(state);
 
+-- Covering indexes for the per-job "latest attempt" / "latest transfer"
+-- correlated subqueries (store/dashboard.go jobViewSelect) and the engine's
+-- AttemptsForJob/TransfersForAttempt lookups. Without these, each subquery is
+-- a full table scan executed once per album_jobs row, which at a few thousand
+-- jobs turned one dashboard /api/jobs request into tens of seconds of CPU.
+CREATE INDEX IF NOT EXISTS idx_attempts_job ON candidate_attempts(album_job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_transfers_attempt ON transfers(attempt_id, updated_at);
+
 -- known_users and artist_user_reliability hold the running success/fail history
 -- of Soulseek peers, used to score-boost known-good peers (and suppress
 -- consistently-failing ones) in future candidate ranking. CRITICAL: these two

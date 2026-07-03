@@ -153,3 +153,32 @@ func TestOpenMigratesPreExistingDBMissingUpdatedAt(t *testing.T) {
 		t.Fatalf("FailAttempt after migration: %v", err)
 	}
 }
+
+// TestJobViewQueryUsesIndexes guards against the dashboard's ListJobsWithTransfer
+// query falling back to full table scans of candidate_attempts/transfers inside
+// its correlated subqueries. Without covering indexes those scans run once per
+// album_jobs row, which at a few thousand jobs made a single /api/jobs request
+// take tens of seconds of CPU — and the dashboard polls it every 3 seconds, so
+// requests piled up and pinned multiple cores (the 300%-CPU incident).
+func TestJobViewQueryUsesIndexes(t *testing.T) {
+	s := newTestStore(t)
+
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + jobViewSelect + ` WHERE j.state != 'CANCELLED' ORDER BY j.updated_at DESC`)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		if detail == "SCAN candidate_attempts" || detail == "SCAN transfers" {
+			t.Errorf("query plan contains full table scan: %q (missing index)", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+}
