@@ -17,6 +17,11 @@ type MetricsSink interface {
 	SetDownloadsActive(n int)
 }
 
+// eventPruneInterval bounds how often the engine loop prunes old job_events
+// rows: at most once per hour, per issue #34's scope (fixed retention, no
+// configurable schedule).
+const eventPruneInterval = time.Hour
+
 // Params configures an Engine.
 type Params struct {
 	Reconciler   *Reconciler
@@ -26,6 +31,7 @@ type Params struct {
 	TickInterval time.Duration
 	Logger       *slog.Logger // nil → reconcile errors are not logged
 	Metrics      MetricsSink  // nil → metrics are not fed
+	EventPruner  EventPruner  // nil → job_events pruning is disabled
 }
 
 // Engine runs the scheduler loops until its context is cancelled.
@@ -71,6 +77,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.reconcileOnce(ctx)
 
+	var pruneC <-chan time.Time
+	if e.p.EventPruner != nil {
+		pruneTicker := time.NewTicker(eventPruneInterval)
+		defer pruneTicker.Stop()
+		pruneC = pruneTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,6 +94,18 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.syncWantedOnce(ctx)
 		case <-tickC:
 			e.advanceOnce(ctx)
+		case <-pruneC:
+			e.pruneEventsOnce(ctx)
+		}
+	}
+}
+
+// pruneEventsOnce deletes job_events rows past the retention window. Runs on
+// eventPruneInterval, independent of the reconcile/discovery loops.
+func (e *Engine) pruneEventsOnce(ctx context.Context) {
+	if err := e.p.EventPruner.PruneJobEvents(ctx, time.Now().UTC()); err != nil {
+		if e.p.Logger != nil {
+			e.p.Logger.Error("prune job events failed", "err", err)
 		}
 	}
 }

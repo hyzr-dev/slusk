@@ -260,3 +260,134 @@ func TestJobWithTransferFound(t *testing.T) {
 		t.Errorf("Peer = %q, want solo_peer", v.Peer)
 	}
 }
+
+func TestJobDetailNotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, found, err := s.JobDetail(ctx, 99999)
+	if err != nil {
+		t.Fatalf("JobDetail: %v", err)
+	}
+	if found {
+		t.Error("expected found=false for nonexistent job id")
+	}
+}
+
+// TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst reproduces the
+// dashboard's per-job detail panel: every candidate attempt made for the job
+// (not just the latest, unlike JobWithTransfer/ListJobsWithTransfer), newest
+// first, each with its own per-file transfers.
+func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertDiscoveredJob(ctx, 10, now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Album", "Artist", "", 0, now)
+
+	a1, err := s.CreateAttempt(ctx, job.ID, "peer_one", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt a1: %v", err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a1, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent a1/f1: %v", err)
+	}
+	if err := s.FailAttempt(ctx, a1, "transfer failed", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("FailAttempt a1: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	a2, err := s.CreateAttempt(ctx, job.ID, "peer_two", 2.0, later)
+	if err != nil {
+		t.Fatalf("CreateAttempt a2: %v", err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a2, "peer_two", "f2.flac", later.Add(time.Hour), later); err != nil {
+		t.Fatalf("RecordEnqueueIntent a2/f2: %v", err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a2, "peer_two", "f3.flac", later.Add(time.Hour), later); err != nil {
+		t.Fatalf("RecordEnqueueIntent a2/f3: %v", err)
+	}
+
+	d, found, err := s.JobDetail(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobDetail: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true")
+	}
+	if d.Job.Title != "Album" || d.Job.ArtistName != "Artist" {
+		t.Errorf("Job = %+v, want title/artist Album/Artist", d.Job)
+	}
+	if len(d.Attempts) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(d.Attempts))
+	}
+	if d.Attempts[0].Attempt.Username != "peer_two" {
+		t.Errorf("expected newest attempt (peer_two) first, got %q", d.Attempts[0].Attempt.Username)
+	}
+	if len(d.Attempts[0].Transfers) != 2 {
+		t.Errorf("expected 2 transfers for peer_two's attempt, got %d", len(d.Attempts[0].Transfers))
+	}
+	if d.Attempts[1].Attempt.Username != "peer_one" {
+		t.Errorf("expected oldest attempt (peer_one) last, got %q", d.Attempts[1].Attempt.Username)
+	}
+	if d.Attempts[1].Attempt.FailReason != "transfer failed" {
+		t.Errorf("FailReason = %q, want %q", d.Attempts[1].Attempt.FailReason, "transfer failed")
+	}
+	if len(d.Attempts[1].Transfers) != 1 {
+		t.Errorf("expected 1 transfer for peer_one's attempt, got %d", len(d.Attempts[1].Transfers))
+	}
+}
+
+func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := s.RecordAttemptOutcome(ctx, 1, "reliable_peer", true, now); err != nil {
+		t.Fatalf("RecordAttemptOutcome artist 1: %v", err)
+	}
+	if err := s.RecordAttemptOutcome(ctx, 2, "reliable_peer", false, now.Add(time.Hour)); err != nil {
+		t.Fatalf("RecordAttemptOutcome artist 2: %v", err)
+	}
+	if err := s.RecordAttemptOutcome(ctx, 0, "no_artist_peer", true, now); err != nil {
+		t.Fatalf("RecordAttemptOutcome no artist: %v", err)
+	}
+
+	rows, err := s.Peers(ctx)
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	byUsername := map[string]core.PeerRow{}
+	for _, r := range rows {
+		byUsername[r.Username] = r
+	}
+
+	rp, ok := byUsername["reliable_peer"]
+	if !ok {
+		t.Fatalf("expected reliable_peer in result, got %+v", rows)
+	}
+	if rp.Global.SuccessCount != 1 || rp.Global.FailCount != 1 {
+		t.Errorf("Global = %+v, want success=1 fail=1", rp.Global)
+	}
+	if len(rp.Artists) != 2 {
+		t.Fatalf("expected 2 artist-specific rows, got %d", len(rp.Artists))
+	}
+	if rp.Artists[1].SuccessCount != 1 || rp.Artists[1].FailCount != 0 {
+		t.Errorf("Artists[1] = %+v, want success=1 fail=0", rp.Artists[1])
+	}
+	if rp.Artists[2].SuccessCount != 0 || rp.Artists[2].FailCount != 1 {
+		t.Errorf("Artists[2] = %+v, want success=0 fail=1", rp.Artists[2])
+	}
+
+	np, ok := byUsername["no_artist_peer"]
+	if !ok {
+		t.Fatalf("expected no_artist_peer in result, got %+v", rows)
+	}
+	if np.Global.SuccessCount != 1 {
+		t.Errorf("no_artist_peer Global.SuccessCount = %d, want 1", np.Global.SuccessCount)
+	}
+	if len(np.Artists) != 0 {
+		t.Errorf("expected no artist-specific rows for artistID<=0, got %+v", np.Artists)
+	}
+}

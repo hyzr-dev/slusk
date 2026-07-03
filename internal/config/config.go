@@ -70,7 +70,7 @@ type Weights struct {
 	Reliability float64 `toml:"reliability"`
 	FileCount   float64 `toml:"file_count"`
 	// KnownUser weights the peer's decayed artist/global success-fail history
-	// (0..1, see matcher.reliabilityHistoryScore) into the candidate score, so a
+	// (0..1, see matcher.ReliabilityHistoryScore) into the candidate score, so a
 	// peer who has previously delivered a complete, importable release for this
 	// artist (or is a known-good/known-bad peer in general) is boosted or
 	// suppressed relative to an unknown peer.

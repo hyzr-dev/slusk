@@ -127,3 +127,105 @@ func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView,
 	}
 	return v, true, nil
 }
+
+// JobDetail returns a job plus every candidate attempt made for it (newest
+// first) and each attempt's per-file transfers, for the dashboard's per-job
+// detail panel (GET /api/jobs/{id}/detail). found is false if no job has that
+// id. Built from AttemptsForJob/TransfersForAttempt (one query per attempt)
+// rather than a single join, since the number of attempts per job is small
+// (bounded by MaxCandidatesPerAlbum) and this reuses the existing read paths
+// rather than a bespoke wide query.
+func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+	var job core.AlbumJob
+	var state string
+	err := s.db.QueryRowContext(ctx,
+		jobSelect+` WHERE id = ?`, jobID).
+		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return core.JobDetail{}, false, nil
+	}
+	if err != nil {
+		return core.JobDetail{}, false, fmt.Errorf("job detail: read job: %w", err)
+	}
+	job.State = core.AlbumJobState(state)
+
+	attempts, err := s.AttemptsForJob(ctx, jobID) // oldest first
+	if err != nil {
+		return core.JobDetail{}, false, fmt.Errorf("job detail: attempts: %w", err)
+	}
+	details := make([]core.AttemptDetail, len(attempts))
+	for i, a := range attempts {
+		transfers, err := s.TransfersForAttempt(ctx, a.ID)
+		if err != nil {
+			return core.JobDetail{}, false, fmt.Errorf("job detail: transfers for attempt %d: %w", a.ID, err)
+		}
+		details[i] = core.AttemptDetail{Attempt: a, Transfers: transfers}
+	}
+	// AttemptsForJob returns oldest first; the detail panel wants newest first.
+	for i, j := 0, len(details)-1; i < j; i, j = i+1, j-1 {
+		details[i], details[j] = details[j], details[i]
+	}
+	return core.JobDetail{Job: job, Attempts: details}, true, nil
+}
+
+// Peers returns every known Soulseek peer's global reliability plus their
+// per-artist rows, for the dashboard's Peers view (GET /api/peers). Ordered by
+// username for determinism; the dashboard sorts client-side. Score computation
+// (which needs "now" for decay) is left to the caller — see
+// matcher.ReliabilityHistoryScore — so this stays a plain read.
+func (s *Store) Peers(ctx context.Context) ([]core.PeerRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT username, success_count, fail_count, last_success_at, last_fail_at
+		 FROM known_users ORDER BY username`)
+	if err != nil {
+		return nil, fmt.Errorf("peers: query known_users: %w", err)
+	}
+	defer rows.Close()
+
+	byUsername := map[string]*core.PeerRow{}
+	var order []string
+	for rows.Next() {
+		var p core.PeerRow
+		if err := rows.Scan(&p.Username, &p.Global.SuccessCount, &p.Global.FailCount, &p.Global.LastSuccessAt, &p.Global.LastFailAt); err != nil {
+			return nil, fmt.Errorf("peers: scan known_users: %w", err)
+		}
+		byUsername[p.Username] = &p
+		order = append(order, p.Username)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	artistRows, err := s.db.QueryContext(ctx,
+		`SELECT ku.username, aur.artist_id, aur.success_count, aur.fail_count, aur.last_success_at, aur.last_fail_at
+		 FROM artist_user_reliability aur JOIN known_users ku ON ku.id = aur.user_id`)
+	if err != nil {
+		return nil, fmt.Errorf("peers: query artist_user_reliability: %w", err)
+	}
+	defer artistRows.Close()
+	for artistRows.Next() {
+		var username string
+		var artistID int64
+		var c core.ReliabilityCounters
+		if err := artistRows.Scan(&username, &artistID, &c.SuccessCount, &c.FailCount, &c.LastSuccessAt, &c.LastFailAt); err != nil {
+			return nil, fmt.Errorf("peers: scan artist_user_reliability: %w", err)
+		}
+		p, ok := byUsername[username]
+		if !ok {
+			continue
+		}
+		if p.Artists == nil {
+			p.Artists = map[int64]core.ReliabilityCounters{}
+		}
+		p.Artists[artistID] = c
+	}
+	if err := artistRows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]core.PeerRow, 0, len(order))
+	for _, u := range order {
+		out = append(out, *byUsername[u])
+	}
+	return out, nil
+}

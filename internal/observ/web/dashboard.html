@@ -47,6 +47,13 @@
   button.action{padding:6px 12px;border-radius:7px;border:1px solid rgba(229,89,93,0.28);background:rgba(229,89,93,0.09);color:var(--orphaned);font-size:12px;cursor:pointer;}
   #search{padding:8px 10px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;margin-bottom:12px;width:260px;}
   #status-filter{padding:8px 10px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;margin-bottom:12px;margin-left:8px;}
+  #event-filter{padding:8px 10px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;margin-bottom:12px;width:260px;}
+  th.sortable{cursor:pointer;user-select:none;}
+  th.sortable:hover{color:#a3aab5;}
+  .detail-attempt{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #1c2028;}
+  .detail-attempt:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
+  .detail-transfer{font-size:11.5px;color:#9aa0aa;padding:3px 0 3px 12px;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
 </style>
 </head>
 <body>
@@ -61,7 +68,9 @@
     </div>
     <nav>
       <button data-view="overview" class="active">Översikt</button>
-      <button data-view="queue">Kö</button>
+      <button data-view="queue">Jobb</button>
+      <button data-view="events">Händelser</button>
+      <button data-view="peers">Peers</button>
     </nav>
   </aside>
   <main>
@@ -74,7 +83,7 @@
       </table>
     </div>
     <div id="view-queue" class="view">
-      <h1>Kö</h1>
+      <h1>Jobb</h1>
       <input id="search" type="text" placeholder="Sök artist, album, peer…">
       <select id="status-filter">
         <option value="">Alla</option>
@@ -89,6 +98,30 @@
           <tr><th>Status</th><th>Album / Artist</th><th>Peer</th><th>Progress</th><th></th></tr>
         </thead>
         <tbody id="queue-body"></tbody>
+      </table>
+    </div>
+    <div id="view-events" class="view">
+      <h1>Händelser</h1>
+      <input id="event-filter" type="text" placeholder="Filtrera händelser…">
+      <table>
+        <thead>
+          <tr><th>Tid</th><th>Jobb</th><th>Händelse</th><th>Detalj</th></tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+    </div>
+    <div id="view-peers" class="view">
+      <h1>Peers</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>Peer</th>
+            <th class="sortable" data-sort="score">Poäng</th>
+            <th class="sortable" data-sort="successCount">Lyckade</th>
+            <th class="sortable" data-sort="failCount">Misslyckade</th>
+          </tr>
+        </thead>
+        <tbody id="peers-body"></tbody>
       </table>
     </div>
   </main>

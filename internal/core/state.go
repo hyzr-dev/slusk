@@ -43,3 +43,21 @@ const (
 	TransferCancelled  TransferState = "CANCELLED"
 	TransferStalled    TransferState = "STALLED"
 )
+
+// JobEventType identifies the kind of pipeline decision recorded in a job's
+// audit trail (see store.AddJobEvent), surfaced by the dashboard's per-job
+// detail panel and global event timeline.
+type JobEventType string
+
+const (
+	EventSearch            JobEventType = "search"
+	EventSearchFallback    JobEventType = "search_fallback"
+	EventCandidateSelected JobEventType = "candidate_selected"
+	EventCandidateRejected JobEventType = "candidate_rejected"
+	EventAttemptFailed     JobEventType = "attempt_failed"
+	EventAttemptSucceeded  JobEventType = "attempt_succeeded"
+	EventTransferStalled   JobEventType = "transfer_stalled"
+	EventImportOK          JobEventType = "import_ok"
+	EventImportRejected    JobEventType = "import_rejected"
+	EventJobFailed         JobEventType = "job_failed"
+)

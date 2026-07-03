@@ -72,7 +72,7 @@ type DiscoveryStore interface {
 	DueFailedJobs(ctx context.Context, cutoff time.Time, limit int) ([]core.AlbumJob, error)
 	ResetJobForRetry(ctx context.Context, jobID int64, now time.Time) error
 	// ReliabilityFor batch-looks-up known peer reliability history for a set of
-	// usernames against one artist (see matcher.reliabilityHistoryScore), for
+	// usernames against one artist (see matcher.ReliabilityHistoryScore), for
 	// use in Ranker.Rank.
 	ReliabilityFor(ctx context.Context, artistID int64, usernames []string) (map[string]core.PeerReliability, error)
 	// RecordAttemptOutcome writes a candidate attempt's terminal success/fail
@@ -80,9 +80,20 @@ type DiscoveryStore interface {
 	// completion (not derived from candidate_attempts), since ResetJobForRetry
 	// deletes that table's rows on every retry cycle.
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
+	// AddJobEvent appends one row to a job's audit trail (see store.AddJobEvent).
+	// Callers must treat write failures as best-effort: log and continue rather
+	// than propagate, since the audit trail must never block the pipeline.
+	AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error
 }
 
 // Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).
 type Ranker interface {
 	Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []matcher.Candidate
+}
+
+// EventPruner is the slice of the store the engine needs to prune old
+// job_events rows (see Store.PruneJobEvents). A nil EventPruner disables
+// pruning.
+type EventPruner interface {
+	PruneJobEvents(ctx context.Context, now time.Time) error
 }
