@@ -72,9 +72,27 @@ type fakeSearcher struct {
 	// normally. Lets tests reproduce a single transient enqueue failure amid
 	// otherwise-successful calls.
 	enqueueErrForFile map[string]int
+
+	// queries records every query Search was called with, in order, so tests
+	// can assert how many searches were issued and what they were.
+	queries []string
+	// resultsForQuery, when set, overrides results on a per-query basis
+	// (falling back to results for queries not present in the map). Used to
+	// give the primary and normalized fallback query different results.
+	resultsForQuery map[string][]slskd.Result
+	// searchErrForQuery injects a Search error for a specific query, so tests
+	// can fail e.g. only the fallback search while the primary succeeds.
+	searchErrForQuery map[string]error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
+	f.queries = append(f.queries, query)
+	if err, ok := f.searchErrForQuery[query]; ok {
+		return nil, err
+	}
+	if r, ok := f.resultsForQuery[query]; ok {
+		return r, nil
+	}
 	return f.results, nil
 }
 func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
@@ -1268,6 +1286,157 @@ func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
 	}
 	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
 		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
+	}
+}
+
+func TestStartJobFallsBackToNormalizedQueryWhenPrimaryEmpty(t *testing.T) {
+	// "Album (Deluxe Edition)" mirrors a real Lidarr title suffix that peers
+	// rarely share verbatim: the primary query gets zero raw results, so the
+	// normalized fallback ("X Album") should be tried and its results used.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	primaryQuery := "X Album (Deluxe Edition)"
+	fallbackQuery := normalizeQuery(primaryQuery)
+	peers := &fakeSearcher{
+		resultsForQuery: map[string][]slskd.Result{
+			fallbackQuery: {
+				{Username: "bob", Filename: `bob\Album\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+			},
+		},
+	}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + one fallback search, got queries=%v", peers.queries)
+	}
+	if peers.queries[0] != primaryQuery {
+		t.Errorf("expected primary query %q first, got %q", primaryQuery, peers.queries[0])
+	}
+	if peers.queries[1] != fallbackQuery {
+		t.Errorf("expected fallback query %q second, got %q", fallbackQuery, peers.queries[1])
+	}
+	if len(peers.enqueued) != 1 {
+		t.Fatalf("expected fallback result to be enqueued, got %d files", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("job should reach DOWNLOADING via the fallback query's candidate, got %d", len(downloading))
+	}
+}
+
+func TestStartJobSearchesOnceWhenPrimaryHasResults(t *testing.T) {
+	// Even though the title would normalize to a different string, the
+	// primary query already returned results, so no fallback search should
+	// be issued.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\Album\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 1 {
+		t.Fatalf("expected exactly one search when the primary query already has results, got queries=%v", peers.queries)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("expected job in DOWNLOADING, got %d", len(downloading))
+	}
+}
+
+func TestStartJobCooldownWhenPrimaryAndFallbackBothEmpty(t *testing.T) {
+	// Both the primary and the normalized fallback query return zero results:
+	// budget/cooldown semantics must be unchanged from today (a single
+	// candidate-budget increment, long backoff), not doubled by the extra search.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	peers := &fakeSearcher{} // both primary and fallback queries get zero results
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + one fallback search, got queries=%v", peers.queries)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
+		t.Fatalf("exhausted tick should increment candidates_tried to 1 exactly once and cooldown, got %+v", jobs)
+	}
+	if jobs[0].NextAttemptAt == nil {
+		t.Fatalf("cooldown job missing next_attempt_at")
+	}
+	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
+		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
+	}
+}
+
+func TestStartJobSkipsFallbackWhenNormalizedQueryIsEmpty(t *testing.T) {
+	// A query made entirely of bracketed groups normalizes to the empty
+	// string; searching Soulseek for "" is meaningless, so no fallback search
+	// must be issued and the job takes the ordinary cooldown path.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "[Untitled]", ArtistName: "(!!!)"}}}
+	peers := &fakeSearcher{} // primary query gets zero results
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 1 {
+		t.Fatalf("expected no fallback search when the normalized query is empty, got queries=%q", peers.queries)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
+		t.Fatalf("job should cool down with candidates_tried == 1, got %+v", jobs)
+	}
+}
+
+func TestStartJobFallbackSearchErrorPropagates(t *testing.T) {
+	// The fallback Search's error must propagate out of startJob like the
+	// primary's: startNewJobs logs and isolates it, so the job stays where it
+	// was with no candidate budget spent, and is retried on a later tick.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	fallbackQuery := normalizeQuery("X Album (Deluxe Edition)")
+	peers := &fakeSearcher{
+		searchErrForQuery: map[string]error{fallbackQuery: errors.New("slskd down")},
+	}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce should isolate the per-job error: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + fallback search, got queries=%q", peers.queries)
+	}
+	cooldown, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(cooldown) != 0 {
+		t.Errorf("errored fallback search must not spend budget or cool down, got %+v", cooldown)
+	}
+	discovered, _ := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if len(discovered) != 1 || discovered[0].CandidatesTried != 0 {
+		t.Fatalf("job should remain DISCOVERED with candidates_tried == 0, got %+v", discovered)
 	}
 }
 
