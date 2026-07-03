@@ -19,7 +19,7 @@ const jobViewSelect = `
 	SELECT
 		j.id, j.lidarr_album_id, j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name,
 		t.id, t.attempt_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
-		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.backoff_until, a.created_at
+		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.backoff_until, a.created_at, a.updated_at
 	FROM album_jobs j
 	LEFT JOIN candidate_attempts a ON a.id = (
 		SELECT id FROM candidate_attempts WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
@@ -39,12 +39,12 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var aID, aAlbumJobID sql.NullInt64
 	var aUsername, aState, aFailReason sql.NullString
 	var aScore sql.NullFloat64
-	var aBackoffUntil, aCreatedAt sql.NullTime
+	var aBackoffUntil, aCreatedAt, aUpdatedAt sql.NullTime
 
 	err := r.Scan(
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName,
 		&tID, &tAttemptID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
-		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aBackoffUntil, &aCreatedAt,
+		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aBackoffUntil, &aCreatedAt, &aUpdatedAt,
 	)
 	if err != nil {
 		return core.JobView{}, err
@@ -81,6 +81,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 			State:      aState.String,
 			FailReason: aFailReason.String,
 			CreatedAt:  aCreatedAt.Time,
+			UpdatedAt:  aUpdatedAt.Time,
 		}
 		if aBackoffUntil.Valid {
 			b := aBackoffUntil.Time

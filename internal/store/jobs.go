@@ -67,9 +67,9 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 // CreateAttempt inserts a PENDING candidate attempt and returns its ID.
 func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at)
-		 VALUES (?, ?, ?, 'PENDING', ?)`,
-		albumJobID, username, score, now)
+		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
+		 VALUES (?, ?, ?, 'PENDING', ?, ?)`,
+		albumJobID, username, score, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("insert attempt: %w", err)
 	}

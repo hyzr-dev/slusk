@@ -24,8 +24,12 @@ CREATE TABLE IF NOT EXISTS candidate_attempts (
     state         TEXT NOT NULL,
     fail_reason   TEXT NOT NULL DEFAULT '',
     backoff_until DATETIME,
-    created_at    DATETIME NOT NULL
+    created_at    DATETIME NOT NULL,
+    updated_at    DATETIME NOT NULL
 );
+
+ALTER TABLE candidate_attempts ADD COLUMN updated_at DATETIME;
+UPDATE candidate_attempts SET updated_at = created_at WHERE updated_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS transfers (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
