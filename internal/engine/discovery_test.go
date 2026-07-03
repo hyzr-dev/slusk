@@ -394,7 +394,7 @@ func TestStartJobAcceptsNormalSizedCandidateWithAlbumTotalKnown(t *testing.T) {
 	// checked.
 	music := &fakeMusic{
 		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
-		albumTotal: 10,
+		albumTotal: 2,
 	}
 	peers := &fakeSearcher{results: []slskd.Result{
 		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
@@ -443,6 +443,100 @@ func TestStartJobDoesNotRejectOversizedWhenAlbumTotalUnknown(t *testing.T) {
 	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
 	if len(downloading) != 1 {
 		t.Errorf("unknown album total should not block a candidate, got %d DOWNLOADING", len(downloading))
+	}
+}
+
+func TestStartJobSkipsUndercompleteCandidateAndPicksNextOne(t *testing.T) {
+	// A candidate with fewer files than the album's expected track count is
+	// guaranteed to be rejected by the VERIFYING completeness gate later, so
+	// startJob must skip it outright and fall through to the next candidate
+	// (from a different user) that can actually cover the album.
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 3,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		// alice only shares 1 of the 3 expected tracks - undercomplete.
+		{Username: "alice", Filename: `alice\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		// bob shares all 3 expected tracks - a viable candidate.
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\02.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\03.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	for _, f := range peers.enqueued {
+		if strings.HasPrefix(f, `alice\`) {
+			t.Errorf("undercomplete candidate's file %q must not be enqueued", f)
+		}
+	}
+	if len(peers.enqueued) != 3 {
+		t.Fatalf("expected the 3-file bob candidate to be enqueued, got %d files enqueued: %v", len(peers.enqueued), peers.enqueued)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("job should reach DOWNLOADING off the complete candidate, got %d", len(downloading))
+	}
+}
+
+func TestStartJobAcceptsUndercompleteCandidateWhenAlbumTotalUnknown(t *testing.T) {
+	// When Lidarr's track count for the album is unknown (total == 0), the
+	// under-complete check must be skipped entirely, same as the ratio check -
+	// an unreliable total must never block an otherwise viable candidate.
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 0,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 1 {
+		t.Fatalf("expected 1 file enqueued, got %d", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("unknown album total should not block an undercomplete candidate, got %d DOWNLOADING", len(downloading))
+	}
+}
+
+func TestStartJobAllUndercompleteCandidatesCoolsDown(t *testing.T) {
+	// If every candidate is undercomplete for the album, none may be enqueued;
+	// the job must fall through to the existing "no untried candidate
+	// available" path, cooling down with candidates_tried incremented by
+	// exactly 1 (not once per skipped candidate).
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 3,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "alice", Filename: `alice\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 0 {
+		t.Fatalf("no candidate should be enqueued when all are undercomplete, got %d", len(peers.enqueued))
+	}
+	cooldown, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(cooldown) != 1 || cooldown[0].CandidatesTried != 1 {
+		t.Fatalf("job should cool down with candidates_tried == 1, got %+v", cooldown)
 	}
 }
 

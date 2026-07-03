@@ -263,8 +263,20 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
 			continue
 		}
-		// Prefer candidates offering at least the expected track count, but accept
-		// any if none match (Lidarr is the final arbiter).
+		if total > 0 && len(cand.Files) < total {
+			// A candidate that can't even cover the expected track count is
+			// guaranteed to be rejected by the VERIFYING completeness gate
+			// (coverage(importable) < total) after burning a full download cycle,
+			// a candidate slot, and a cooldown - so downloading it is guaranteed
+			// wasted work. Skip it like an already-tried candidate rather than
+			// attempt it. Not counted toward CandidatesTried individually: if no
+			// other candidate exists this tick, the budget is still spent exactly
+			// once via the "no untried candidate available" path below, the same as
+			// if this candidate had never appeared at all.
+			d.log().Info("candidate has fewer files than expected tracks, skipping",
+				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			continue
+		}
 		attemptID, err := d.p.Store.CreateAttempt(ctx, job.ID, cand.Username, cand.Score, now)
 		if err != nil {
 			return err
