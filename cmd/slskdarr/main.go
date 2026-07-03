@@ -75,6 +75,7 @@ func main() {
 		TickInterval: cfg.Engine.TickInterval.Duration,
 		Logger:       logger,
 		Metrics:      metrics,
+		EventPruner:  st,
 	})
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
 		active, err := st.ActiveTransfers(ctx)
@@ -85,6 +86,18 @@ func main() {
 	}
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)
+	}
+	jobDetailFn := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+		return st.JobDetail(ctx, jobID)
+	}
+	jobEventsFn := func(ctx context.Context, jobID int64) ([]core.JobEvent, error) {
+		return st.JobEvents(ctx, jobID)
+	}
+	recentEventsFn := func(ctx context.Context, limit int) ([]core.JobEvent, error) {
+		return st.RecentEvents(ctx, limit)
+	}
+	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
+		return st.Peers(ctx)
 	}
 	// cancelFn cancels a job locally even if the remote slskd cancel call
 	// fails: the job's local state must advance to cancelled regardless, since
@@ -107,7 +120,9 @@ func main() {
 		}
 		return observ.CancelResultOK, nil
 	}
-	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn, cfg.Engine.FailedRetryAfter.Duration, cfg.Engine.MaxCandidatesPerAlbum)}
+	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn,
+		jobDetailFn, jobEventsFn, recentEventsFn, peersFn,
+		cfg.Engine.FailedRetryAfter.Duration, cfg.Engine.MaxCandidatesPerAlbum)}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("status server", "err", err)

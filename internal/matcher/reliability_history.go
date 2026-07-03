@@ -31,7 +31,7 @@ const reliabilityCountCap = 20.0
 const reliabilityGlobalInfluence = 0.5
 
 // reliabilitySigmoidScale sets how much decayed net history is needed for
-// reliabilityHistoryScore to approach its 0/1 extremes. It is a shape
+// ReliabilityHistoryScore to approach its 0/1 extremes. It is a shape
 // constant, not a tunable weight - the overall strength of the boost is
 // config.Weights.KnownUser, applied by the caller.
 const reliabilitySigmoidScale = 5.0
@@ -60,7 +60,7 @@ func decayedNet(c core.ReliabilityCounters, now time.Time) float64 {
 	return decayedCount(c.SuccessCount, c.LastSuccessAt, now) - decayedCount(c.FailCount, c.LastFailAt, now)
 }
 
-// reliabilityHistoryScore maps a peer's PeerReliability to a 0..1 factor,
+// ReliabilityHistoryScore maps a peer's PeerReliability to a 0..1 factor,
 // always in the open interval (0, 1): 0.5 for a peer with no recorded history
 // at either scope (a neutral baseline shared by every unknown peer, so it
 // does not change ranking among candidates nobody has history on), rising
@@ -73,7 +73,7 @@ func decayedNet(c core.ReliabilityCounters, now time.Time) float64 {
 // the global (cross-artist) scope always also contributes, but at
 // reliabilityGlobalInfluence (half) weight, acting as a fallback signal when
 // there is no artist-specific history and a secondary signal when there is.
-func reliabilityHistoryScore(rel core.PeerReliability, now time.Time) float64 {
+func ReliabilityHistoryScore(rel core.PeerReliability, now time.Time) float64 {
 	net := decayedNet(rel.Artist, now) + reliabilityGlobalInfluence*decayedNet(rel.Global, now)
 	return 1.0 / (1.0 + math.Exp(-net/reliabilitySigmoidScale))
 }

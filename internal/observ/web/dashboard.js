@@ -13,6 +13,19 @@ const STATE_LABEL = {
   CANCELLED: 'Avbruten',
 };
 
+const EVENT_LABEL = {
+  search: 'Sökte',
+  search_fallback: 'Sökte (fallback)',
+  candidate_selected: 'Kandidat vald',
+  candidate_rejected: 'Kandidat avvisad',
+  attempt_failed: 'Försök misslyckades',
+  attempt_succeeded: 'Försök lyckades',
+  transfer_stalled: 'Överföring stannade',
+  import_ok: 'Import genomförd',
+  import_rejected: 'Import avvisad',
+  job_failed: 'Jobb misslyckades',
+};
+
 let jobs = [];
 let searchTerm = '';
 let statusFilter = '';
@@ -86,6 +99,36 @@ function jobDetailLine(j) {
 }
 
 let expandedId = null;
+// jobDetails caches per-job detail (attempt/transfer history) fetched lazily
+// on expand, keyed by job id, so re-rendering while expanded doesn't refetch.
+const jobDetails = {};
+
+async function loadJobDetail(id) {
+  try {
+    const res = await fetch(`/api/jobs/${id}/detail`);
+    if (!res.ok) return;
+    jobDetails[id] = await res.json();
+    if (expandedId === id) queueRows();
+  } catch (e) {
+    // network error: leave any previously loaded detail in place
+  }
+}
+
+function attemptHistoryHtml(id) {
+  const detail = jobDetails[id];
+  if (!detail) return '<div style="color:#7c828d;">Laddar…</div>';
+  if (!detail.attempts || !detail.attempts.length) return '<div style="color:#7c828d;">Inga försök ännu.</div>';
+  return detail.attempts.map(a => `
+    <div class="detail-attempt">
+      <div><strong>${escapeHtml(a.username)}</strong> — ${escapeHtml(a.state)}${a.failReason ? ` (${escapeHtml(a.failReason)})` : ''}</div>
+      <div style="color:#7c828d;font-size:11px;">${new Date(a.createdAt).toLocaleString('sv-SE')} · ${a.fileCount} filer</div>
+      ${(a.transfers || []).map(t => `
+        <div class="detail-transfer mono">${escapeHtml(t.filename)} — ${escapeHtml(t.state)}
+          (${fmtBytes(t.bytesDone)} / ${fmtBytes(t.bytesTotal)}${t.retries ? `, ${t.retries} försök` : ''})</div>
+      `).join('')}
+    </div>
+  `).join('');
+}
 
 function queueRows() {
   const filtered = jobs.filter(matchesFilters);
@@ -107,6 +150,7 @@ function queueRows() {
             <div>Peer: ${escapeHtml(j.peer) || '—'}</div>
             <div>Nedladdat: ${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>
             <button class="action" data-cancel="${j.id}">Avbryt</button>
+            <div style="margin-top:12px;">${attemptHistoryHtml(j.id)}</div>
           </td>
         </tr>
       `);
@@ -117,7 +161,12 @@ function queueRows() {
   body.querySelectorAll('tr.job-row').forEach(tr => {
     tr.addEventListener('click', () => {
       const id = Number(tr.getAttribute('data-id'));
-      expandedId = expandedId === id ? null : id;
+      if (expandedId === id) {
+        expandedId = null;
+      } else {
+        expandedId = id;
+        if (!jobDetails[id]) loadJobDetail(id); // fetched lazily, once per expand
+      }
       queueRows();
     });
   });
@@ -131,9 +180,124 @@ function queueRows() {
   });
 }
 
+// --- Events (Händelser) ---
+
+let events = [];
+let eventFilterTerm = '';
+
+async function fetchEvents() {
+  try {
+    const res = await fetch('/api/events?limit=200');
+    if (!res.ok) return; // keep showing last-good data on a transient error
+    events = await res.json();
+    eventRows();
+  } catch (e) {
+    // network error: keep showing last-good data
+  }
+}
+
+function matchesEventFilter(e) {
+  if (!eventFilterTerm) return true;
+  const hay = (e.event + ' ' + e.detail + ' ' + e.jobId).toLowerCase();
+  return hay.includes(eventFilterTerm.toLowerCase());
+}
+
+function eventRows() {
+  const filtered = events.filter(matchesEventFilter);
+  const body = document.getElementById('events-body');
+  body.innerHTML = filtered.map(e => `
+    <tr>
+      <td class="mono" style="white-space:nowrap;">${new Date(e.createdAt).toLocaleString('sv-SE')}</td>
+      <td class="mono">#${e.jobId}</td>
+      <td>${escapeHtml(EVENT_LABEL[e.event] || e.event)}</td>
+      <td>${escapeHtml(e.detail)}</td>
+    </tr>
+  `).join('');
+}
+
+function setupEventFilter() {
+  const input = document.getElementById('event-filter');
+  input.addEventListener('input', () => {
+    eventFilterTerm = input.value;
+    eventRows();
+  });
+}
+
+// --- Peers ---
+
+let peers = [];
+let peerSortKey = 'score';
+let peerSortDesc = true;
+let expandedPeer = null;
+
+async function fetchPeers() {
+  try {
+    const res = await fetch('/api/peers');
+    if (!res.ok) return; // keep showing last-good data on a transient error
+    peers = await res.json();
+    peerRows();
+  } catch (e) {
+    // network error: keep showing last-good data
+  }
+}
+
+function peerRows() {
+  const sorted = [...peers].sort((a, b) => {
+    const d = (a[peerSortKey] || 0) - (b[peerSortKey] || 0);
+    return peerSortDesc ? -d : d;
+  });
+  const body = document.getElementById('peers-body');
+  body.innerHTML = sorted.map(p => {
+    const rows = [`
+      <tr class="job-row" data-peer="${escapeHtml(p.username)}">
+        <td>${escapeHtml(p.username)}</td>
+        <td class="mono">${p.score.toFixed(2)}</td>
+        <td class="mono">${p.successCount}</td>
+        <td class="mono">${p.failCount}</td>
+      </tr>
+    `];
+    if (expandedPeer === p.username) {
+      const artists = p.artists || [];
+      rows.push(`
+        <tr class="detail-row">
+          <td colspan="4">
+            ${artists.length ? artists.map(a => `
+              <div class="detail-transfer mono">Artist #${a.artistId} — poäng ${a.score.toFixed(2)}, ${a.successCount} lyckade, ${a.failCount} misslyckade</div>
+            `).join('') : '<div style="color:#7c828d;">Ingen artistspecifik historik.</div>'}
+          </td>
+        </tr>
+      `);
+    }
+    return rows.join('');
+  }).join('');
+
+  body.querySelectorAll('tr.job-row').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const username = tr.getAttribute('data-peer');
+      expandedPeer = expandedPeer === username ? null : username;
+      peerRows();
+    });
+  });
+}
+
+function setupPeerSort() {
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.getAttribute('data-sort');
+      if (peerSortKey === key) {
+        peerSortDesc = !peerSortDesc;
+      } else {
+        peerSortKey = key;
+        peerSortDesc = true;
+      }
+      peerRows();
+    });
+  });
+}
+
 function escapeHtml(s) {
   const div = document.createElement('div');
-  div.textContent = s || '';
+  div.textContent = s === undefined || s === null ? '' : String(s);
   return div.innerHTML;
 }
 
@@ -173,5 +337,11 @@ function setupStatusFilter() {
 setupNav();
 setupSearch();
 setupStatusFilter();
+setupEventFilter();
+setupPeerSort();
 fetchJobs();
+fetchEvents();
+fetchPeers();
 setInterval(fetchJobs, 3000);
+setInterval(fetchEvents, 3000);
+setInterval(fetchPeers, 5000);

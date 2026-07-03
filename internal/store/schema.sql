@@ -89,3 +89,18 @@ CREATE TABLE IF NOT EXISTS artist_user_reliability (
     updated_at      DATETIME NOT NULL,
     UNIQUE(artist_id, user_id)
 );
+
+-- job_events is an append-only audit trail of key pipeline decisions (search,
+-- candidate selection, attempt outcomes, imports), surfaced by the dashboard's
+-- Händelser (event timeline) tab and per-job detail panel. Pruned by the
+-- engine loop on a fixed retention window (see Store.PruneJobEvents).
+CREATE TABLE IF NOT EXISTS job_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    album_job_id  INTEGER NOT NULL,
+    event         TEXT NOT NULL,
+    detail        TEXT NOT NULL,
+    created_at    TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(album_job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_events_created ON job_events(created_at);

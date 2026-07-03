@@ -54,7 +54,7 @@ type Transfer struct {
 // ReliabilityCounters is one peer's raw success/fail history at a single scope
 // (either global across all artists, or for one specific artist). The counters
 // and timestamps are stored as-is; decay/recency weighting is computed in Go at
-// ranking time (see matcher.reliabilityHistoryScore) rather than stored as a
+// ranking time (see matcher.ReliabilityHistoryScore) rather than stored as a
 // pre-aged score, so no background job is needed to "age" the numbers. The zero
 // value (both counts 0, both timestamps nil) means no recorded history.
 type ReliabilityCounters struct {
@@ -86,4 +86,41 @@ type JobView struct {
 	Transfer *Transfer         // nil if the job has no attempt/transfer yet
 	Peer     string            // convenience copy of Transfer.Username; "" if Transfer is nil
 	Attempt  *CandidateAttempt // nil if the job has no attempt yet
+}
+
+// AttemptDetail bundles one candidate attempt with every transfer (one per
+// file) it produced, for the dashboard's per-job detail panel.
+type AttemptDetail struct {
+	Attempt   CandidateAttempt
+	Transfers []Transfer
+}
+
+// JobDetail is the full history of one job: the job itself plus every
+// candidate attempt made for it (newest first) and each attempt's per-file
+// transfers. Used by the dashboard's job detail panel (GET
+// /api/jobs/{id}/detail); never written back to the store.
+type JobDetail struct {
+	Job      AlbumJob
+	Attempts []AttemptDetail
+}
+
+// JobEvent is one row of a job's audit trail (see store.AddJobEvent),
+// surfaced by the dashboard's per-job detail panel and global event timeline.
+type JobEvent struct {
+	ID         int64
+	AlbumJobID int64
+	Event      JobEventType
+	Detail     string
+	CreatedAt  time.Time
+}
+
+// PeerRow is one Soulseek peer's global reliability plus every artist-specific
+// row recorded for them, read by the dashboard's Peers view (GET /api/peers).
+// Score computation is left to the caller (see matcher.ReliabilityHistoryScore)
+// so the dashboard reuses the exact formula the ranker uses rather than
+// duplicating it.
+type PeerRow struct {
+	Username string
+	Global   ReliabilityCounters
+	Artists  map[int64]ReliabilityCounters // keyed by artist_id
 }

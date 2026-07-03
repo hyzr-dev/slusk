@@ -935,6 +935,73 @@ func TestDiscoverFailedTransferCooldowns(t *testing.T) {
 	}
 }
 
+// TestDiscoverFailedTransferWritesAttemptFailedEvent verifies a failed
+// download attempt records an attempt_failed job event, alongside the
+// existing cooldown/backoff behaviour (see TestDiscoverFailedTransferCooldowns).
+func TestDiscoverFailedTransferWritesAttemptFailedEvent(t *testing.T) {
+	p, st := newDiscoParams(t, &fakeMusic{}, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID := st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	events, err := st.JobEvents(ctx, jobID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Event == core.EventAttemptFailed {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an attempt_failed event, got %+v", events)
+	}
+}
+
+// erroringEventStore wraps a DiscoveryStore and forces AddJobEvent to always
+// fail, to verify a job-event write failure never blocks the pipeline (see
+// Discoverer.recordEvent).
+type erroringEventStore struct {
+	DiscoveryStore
+}
+
+func (e *erroringEventStore) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
+	return errors.New("event store down")
+}
+
+// TestDiscoverAttemptFailedEventWriteErrorDoesNotBlockPipeline verifies that
+// when AddJobEvent fails, the job still advances through its normal
+// COOLDOWN/backoff transition rather than the failure propagating out of
+// RunOnce.
+func TestDiscoverAttemptFailedEventWriteErrorDoesNotBlockPipeline(t *testing.T) {
+	p, st := newDiscoParams(t, &fakeMusic{}, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID := st.seedDownloadingJobWithFailedTransfer(t, now)
+	p.Store = &erroringEventStore{DiscoveryStore: st}
+	d := NewDiscoverer(p)
+
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce must not fail when the event store errors: %v", err)
+	}
+
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	found := false
+	for _, j := range jobs {
+		if j.ID == jobID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("job should still reach COOLDOWN despite the event write failure")
+	}
+}
+
 func TestDiscoverFailedTransferDeletesDownloadedFolder(t *testing.T) {
 	// The failed transfer's filename `A\01.flac` shares one common remote
 	// directory ("A"), so the leaf is unambiguous: the leftover files that

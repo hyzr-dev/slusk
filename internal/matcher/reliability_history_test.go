@@ -13,7 +13,7 @@ func timePtr(t time.Time) *time.Time { return &t }
 
 func TestReliabilityHistoryScoreNoHistoryIsNeutral(t *testing.T) {
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	got := reliabilityHistoryScore(core.PeerReliability{}, now)
+	got := ReliabilityHistoryScore(core.PeerReliability{}, now)
 	if got != 0.5 {
 		t.Errorf("no-history score = %v, want 0.5 (neutral)", got)
 	}
@@ -24,7 +24,7 @@ func TestReliabilityHistoryScoreRecentSuccessScoresAboveNeutral(t *testing.T) {
 	rel := core.PeerReliability{
 		Artist: core.ReliabilityCounters{SuccessCount: 3, LastSuccessAt: timePtr(now.Add(-time.Hour))},
 	}
-	got := reliabilityHistoryScore(rel, now)
+	got := ReliabilityHistoryScore(rel, now)
 	if got <= 0.5 {
 		t.Errorf("recent success score = %v, want > 0.5", got)
 	}
@@ -35,7 +35,7 @@ func TestReliabilityHistoryScoreRecentFailScoresBelowNeutral(t *testing.T) {
 	rel := core.PeerReliability{
 		Artist: core.ReliabilityCounters{FailCount: 3, LastFailAt: timePtr(now.Add(-time.Hour))},
 	}
-	got := reliabilityHistoryScore(rel, now)
+	got := ReliabilityHistoryScore(rel, now)
 	if got >= 0.5 {
 		t.Errorf("recent fail score = %v, want < 0.5", got)
 	}
@@ -49,8 +49,8 @@ func TestReliabilityHistoryScoreAncientSuccessFadesTowardNeutral(t *testing.T) {
 	ancientSuccess := core.PeerReliability{
 		Artist: core.ReliabilityCounters{SuccessCount: 5, LastSuccessAt: timePtr(now.Add(-365 * 24 * time.Hour))},
 	}
-	recentScore := reliabilityHistoryScore(recentSuccess, now)
-	ancientScore := reliabilityHistoryScore(ancientSuccess, now)
+	recentScore := ReliabilityHistoryScore(recentSuccess, now)
+	ancientScore := ReliabilityHistoryScore(ancientSuccess, now)
 	if ancientScore >= recentScore {
 		t.Errorf("ancient success score %v should be lower than recent success score %v", ancientScore, recentScore)
 	}
@@ -71,7 +71,7 @@ func TestReliabilityHistoryScoreRecentFailOutweighsAncientSuccess(t *testing.T) 
 			FailCount: 2, LastFailAt: timePtr(now.Add(-time.Hour)),
 		},
 	}
-	got := reliabilityHistoryScore(rel, now)
+	got := ReliabilityHistoryScore(rel, now)
 	if got >= 0.5 {
 		t.Errorf("recent-fail-over-ancient-success score = %v, want < 0.5 (neutral)", got)
 	}
@@ -85,8 +85,8 @@ func TestReliabilityHistoryScoreGlobalIsFallbackAtHalfInfluence(t *testing.T) {
 	globalOnly := core.PeerReliability{
 		Global: core.ReliabilityCounters{SuccessCount: 4, LastSuccessAt: timePtr(now.Add(-time.Hour))},
 	}
-	artistScore := reliabilityHistoryScore(artistOnly, now)
-	globalScore := reliabilityHistoryScore(globalOnly, now)
+	artistScore := ReliabilityHistoryScore(artistOnly, now)
+	globalScore := ReliabilityHistoryScore(globalOnly, now)
 	if globalScore <= 0.5 {
 		t.Errorf("global-only score = %v, want > 0.5 (it should still boost)", globalScore)
 	}

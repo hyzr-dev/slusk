@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -63,6 +64,15 @@ func (d *Discoverer) log() *slog.Logger {
 		return d.p.Logger
 	}
 	return slog.Default()
+}
+
+// recordEvent best-effort appends one row to a job's audit trail (see
+// store.AddJobEvent). A write failure must never block the pipeline, so it is
+// logged at warn level and swallowed rather than propagated.
+func (d *Discoverer) recordEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) {
+	if err := d.p.Store.AddJobEvent(ctx, jobID, event, detail, now); err != nil {
+		d.log().Warn("record job event failed", "album_job", jobID, "event", event, "err", err)
+	}
 }
 
 // RunOnce performs one pipeline tick: sync wanted albums from Lidarr, then take
@@ -211,8 +221,9 @@ func (d *Discoverer) startNewJobs(ctx context.Context, wanted map[int64]lidarr.W
 // candidate budget is exhausted.
 func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map[int64]lidarr.WantedAlbum, now time.Time) error {
 	if job.CandidatesTried >= d.p.MaxCandidates {
-		d.log().Info("candidates exhausted, marking album failed",
-			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID, "candidates_tried", job.CandidatesTried)
+		detail := fmt.Sprintf("candidates exhausted (%d tried), marking album failed", job.CandidatesTried)
+		d.log().Info(detail, "album_job", job.ID, "lidarr_album", job.LidarrAlbumID, "candidates_tried", job.CandidatesTried)
+		d.recordEvent(ctx, job.ID, core.EventJobFailed, detail, now)
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateFailed, now)
 	}
 	// Which usernames have we already tried for this album?
@@ -251,8 +262,9 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		// (to avoid doubling search traffic for nothing) or reduces the query
 		// to nothing (searching for "" is meaningless).
 		if fallback := normalizeQuery(query); fallback != "" && fallback != query {
-			d.log().Info("primary search empty, trying normalized query",
-				"album_job", job.ID, "query", fallback)
+			fallbackDetail := fmt.Sprintf("primary search empty, trying normalized query %q", fallback)
+			d.log().Info(fallbackDetail, "album_job", job.ID, "query", fallback)
+			d.recordEvent(ctx, job.ID, core.EventSearchFallback, fallbackDetail, now)
 			results, err = d.p.Peers.Search(ctx, fallback, d.p.SearchTimeout)
 			if err != nil {
 				return err
@@ -265,9 +277,10 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		return err
 	}
 	candidates := d.p.Ranker.Rank(results, rel, now)
-	d.log().Info("searched album",
-		"album_job", job.ID, "query", query,
+	searchDetail := fmt.Sprintf("searched album, query=%q results=%d candidates=%d", query, len(results), len(candidates))
+	d.log().Info(searchDetail, "album_job", job.ID, "query", query,
 		"results", len(results), "candidates", len(candidates))
+	d.recordEvent(ctx, job.ID, core.EventSearch, searchDetail, now)
 	// Fetch the album's expected track count once per startJob call (not per
 	// candidate) to size-sanity-check candidates below. total == 0 means Lidarr
 	// has no reliable count for this album right now, so the check is skipped
@@ -288,8 +301,9 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 			// other candidate exists this tick, the budget is still spent exactly
 			// once via the "no untried candidate available" path below, the same as
 			// if this candidate had never appeared at all.
-			d.log().Info("candidate file count implausible for album, skipping",
-				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			detail := fmt.Sprintf("candidate %s file count implausible for album (%d files, expected %d), skipping", cand.Username, len(cand.Files), total)
+			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 			continue
 		}
 		if total > 0 && len(cand.Files) < total {
@@ -302,8 +316,9 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 			// other candidate exists this tick, the budget is still spent exactly
 			// once via the "no untried candidate available" path below, the same as
 			// if this candidate had never appeared at all.
-			d.log().Info("candidate has fewer files than expected tracks, skipping",
-				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			detail := fmt.Sprintf("candidate %s has fewer files than expected tracks (%d of %d), skipping", cand.Username, len(cand.Files), total)
+			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 			continue
 		}
 		attemptID, err := d.p.Store.CreateAttempt(ctx, job.ID, cand.Username, cand.Score, now)
@@ -327,10 +342,12 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		if err != nil {
 			return err
 		}
-		d.log().Info("enqueued candidate, downloading",
-			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID,
+		selectedDetail := fmt.Sprintf("enqueued candidate %s, downloading (%d files, %d sent, %d deferred)",
+			cand.Username, len(cand.Files), sent, len(cand.Files)-sent)
+		d.log().Info(selectedDetail, "album_job", job.ID, "lidarr_album", job.LidarrAlbumID,
 			"user", cand.Username, "files", len(cand.Files),
 			"sent", sent, "deferred", len(cand.Files)-sent)
+		d.recordEvent(ctx, job.ID, core.EventCandidateSelected, selectedDetail, now)
 		return d.p.Store.AdvanceJobState(ctx, job.ID, core.StateDownloading, now)
 	}
 	// No untried candidate available now: count this exhausted tick toward the
@@ -547,7 +564,9 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 				continue
 			}
 			// Every transfer is terminal: safe to clean up and fail the attempt.
-			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
+			failedDetail := fmt.Sprintf("candidate %s download failed, cooling down", active.Username)
+			d.log().Info(failedDetail, "album_job", job.ID, "attempt", active.ID)
+			d.recordEvent(ctx, job.ID, core.EventAttemptFailed, failedDetail, now)
 			names := make([]string, 0, len(transfers))
 			for _, t := range transfers {
 				names = append(names, t.Filename)
@@ -605,7 +624,9 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// were already imported (e.g. a crash between a prior successful
 			// ExecuteManualImport and this state write). Treat it as done so
 			// advanceImporting is idempotent across restarts.
-			d.log().Info("empty folder treated as already imported", "album_job", job.ID, "folder", folder)
+			emptyDetail := fmt.Sprintf("empty folder treated as already imported (folder %s)", folder)
+			d.log().Info(emptyDetail, "album_job", job.ID, "folder", folder)
+			d.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, emptyDetail, now)
 			d.recordOutcome(ctx, job, active.Username, true, now)
 			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
@@ -625,7 +646,9 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		if len(rejections) > 0 || len(importable) == 0 {
 			// Rejected like a failed download: other candidates usually remain, so
 			// use the short backoff to try the next one soon.
-			d.log().Info("import rejected", "album_job", job.ID, "folder", folder, "reasons", rejections)
+			rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
+			d.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
+			d.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
 			d.cleanupAttempt(ctx, job.ID, names)
 			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.FailedCandidateBackoff), now)
@@ -644,8 +667,10 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// A source that can't complete the release is rejected outright rather
 			// than partially imported, to keep the library free of half albums.
 			// Other candidates usually remain, so use the short backoff.
-			d.log().Info("incomplete download, rejecting", "album_job", job.ID, "folder", folder,
+			incompleteDetail := fmt.Sprintf("incomplete download, rejecting (folder %s, covered %d/%d)", folder, coverage(importable), total)
+			d.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
 				"covered", coverage(importable), "total", total)
+			d.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
 			d.cleanupAttempt(ctx, job.ID, names)
 			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "incomplete download", now.Add(d.p.FailedCandidateBackoff), now)
@@ -657,7 +682,9 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		if err := d.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 			return err
 		}
-		d.log().Info("import executed, awaiting confirmation", "album_job", job.ID, "files", len(importable))
+		importOKDetail := fmt.Sprintf("import executed, awaiting confirmation (%d files)", len(importable))
+		d.log().Info(importOKDetail, "album_job", job.ID, "files", len(importable))
+		d.recordEvent(ctx, job.ID, core.EventImportOK, importOKDetail, now)
 		if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
 			d.log().Error("advance to importing failed", "album_job", job.ID, "err", err)
 		}
@@ -676,7 +703,9 @@ func (d *Discoverer) escalateIfStuck(ctx context.Context, job core.AlbumJob, att
 	if now.Sub(job.UpdatedAt) <= d.p.ImportConfirmTimeout {
 		return
 	}
-	d.log().Info("verifying stuck past timeout, cooling down", "album_job", job.ID, "reason", reason)
+	stuckDetail := fmt.Sprintf("verifying stuck past timeout, cooling down (%s)", reason)
+	d.log().Info(stuckDetail, "album_job", job.ID, "reason", reason)
+	d.recordEvent(ctx, job.ID, core.EventAttemptFailed, stuckDetail, now)
 	d.cleanupAttempt(ctx, job.ID, filenames)
 	d.recordOutcome(ctx, job, username, false, now)
 	if err := d.p.Store.FailAttempt(ctx, attemptID, reason, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
@@ -747,7 +776,9 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 		if err != nil {
 			d.log().Error("album status failed", "album_job", job.ID, "err", err)
 			if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
-				d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID)
+				notConfirmedDetail := "import not confirmed in time (album status check failing), cooling down"
+				d.log().Info(notConfirmedDetail, "album_job", job.ID)
+				d.recordEvent(ctx, job.ID, core.EventAttemptFailed, notConfirmedDetail, now)
 				d.recordOutcome(ctx, job, active.Username, false, now)
 				_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
 				if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
@@ -757,7 +788,9 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 			continue
 		}
 		if present >= total {
-			d.log().Info("import confirmed, completed", "album_job", job.ID)
+			confirmedDetail := fmt.Sprintf("import confirmed, completed (%d/%d present)", present, total)
+			d.log().Info(confirmedDetail, "album_job", job.ID)
+			d.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, confirmedDetail, now)
 			d.recordOutcome(ctx, job, active.Username, true, now)
 			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
@@ -766,7 +799,9 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 			continue
 		}
 		if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
-			d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID, "present", present, "total", total)
+			notConfirmedDetail := fmt.Sprintf("import not confirmed in time (%d/%d present), cooling down", present, total)
+			d.log().Info(notConfirmedDetail, "album_job", job.ID, "present", present, "total", total)
+			d.recordEvent(ctx, job.ID, core.EventAttemptFailed, notConfirmedDetail, now)
 			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {

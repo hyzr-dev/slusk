@@ -24,7 +24,7 @@ type Candidate struct {
 
 // Scorer ranks search results into candidates, best first. rel carries each
 // candidate username's known peer-reliability history (see
-// reliabilityHistoryScore); a username absent from rel is treated as having
+// ReliabilityHistoryScore); a username absent from rel is treated as having
 // no history. now is passed in explicitly (rather than read internally) so
 // the decay math stays deterministic and testable.
 type Scorer interface {
@@ -176,7 +176,7 @@ func (x *weighted) Rank(results []slskd.Result, rel map[string]core.PeerReliabil
 		}
 		score += x.w.FileCount * float64(len(files))
 		score += x.w.Reliability * reliabilityScore(files[0]) // per-user, same across files
-		score += x.w.KnownUser * reliabilityHistoryScore(rel[k.user], now)
+		score += x.w.KnownUser * ReliabilityHistoryScore(rel[k.user], now)
 		candidates = append(candidates, Candidate{Username: k.user, Files: files, Score: score})
 	}
 	sort.Slice(candidates, func(i, j int) bool {

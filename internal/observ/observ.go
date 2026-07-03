@@ -131,10 +131,13 @@ const (
 type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
 // NewServer returns an http.Handler exposing /metrics, /status, /api/jobs,
-// /api/jobs/{id}/cancel, and the dashboard UI at /. failedRetryAfter and
+// /api/jobs/{id}/cancel, /api/jobs/{id}/detail, /api/jobs/{id}/events,
+// /api/events, /api/peers, and the dashboard UI at /. failedRetryAfter and
 // maxCandidates are engine config values surfaced in /api/jobs so the
 // dashboard can show a job's retry ETA and candidate budget.
-func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
+	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
+	failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +185,70 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
+	})
+	mux.HandleFunc("/api/jobs/{id}/detail", func(w http.ResponseWriter, r *http.Request) {
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		d, found, err := jobDetail(r.Context(), jobID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toJobDetailDTO(d))
+	})
+	mux.HandleFunc("/api/jobs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		events, err := jobEvents(r.Context(), jobID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toEventDTOs(events))
+	})
+	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
+		limit := eventsLimitDefault
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > eventsLimitMax {
+			limit = eventsLimitMax
+		}
+		events, err := recentEvents(r.Context(), limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toEventDTOs(events))
+	})
+	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+		rows, err := peers(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		now := time.Now()
+		dtos := make([]peerDTO, len(rows))
+		for i, row := range rows {
+			dtos[i] = toPeerDTO(row, now)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(dtos)
 	})
 	mux.HandleFunc("/", dashboardHandler)
 	mux.HandleFunc("/dashboard.js", dashboardJSHandler)
