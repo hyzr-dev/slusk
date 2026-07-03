@@ -24,6 +24,26 @@ func TestNormalizeQuery(t *testing.T) {
 			want:  "X Album",
 		},
 		{
+			name:  "strips nested groups fully",
+			input: "Album (Deluxe (Bonus Disc))",
+			want:  "Album",
+		},
+		{
+			name:  "dangling unmatched open paren leaves no stray brackets",
+			input: "X (A) (B",
+			want:  "X B",
+		},
+		{
+			name:  "lone closing bracket is removed",
+			input: "X] Album",
+			want:  "X Album",
+		},
+		{
+			name:  "query of only bracketed groups normalizes to empty",
+			input: "(!!!) [Untitled]",
+			want:  "",
+		},
+		{
 			name:  "replaces ampersand with and",
 			input: "Simon & Garfunkel Bridge",
 			want:  "Simon and Garfunkel Bridge",
@@ -62,6 +82,8 @@ func TestNormalizeQuery(t *testing.T) {
 func TestNormalizeQueryIsIdempotent(t *testing.T) {
 	inputs := []string{
 		"X Album (Deluxe Edition)",
+		"Album (Deluxe (Bonus Disc))",
+		"X (A) (B",
 		"Simon & Garfunkel Bridge",
 		"Guns N' Roses Don't Cry",
 		"Artist: Album, Vol. 1!  Really?",
