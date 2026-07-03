@@ -45,7 +45,7 @@ func main() {
 	defer st.Close()
 
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
-	reconciler := engine.NewReconciler(peers, st, cfg.Engine.MaxTransferRetries)
+	reconciler := engine.NewReconciler(peers, st, cfg.Engine.MaxTransferRetries, cfg.Engine.StallTimeout.Duration)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
 	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
 	discoverer := engine.NewDiscoverer(engine.DiscovererParams{
@@ -58,10 +58,11 @@ func main() {
 		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
 		ImportConfirmTimeout:   cfg.Engine.ImportConfirmTimeout.Duration,
 		MaxCandidates:          cfg.Engine.MaxCandidatesPerAlbum,
-		Batch:                  cfg.Engine.MaxConcurrentSearches,
+		Batch:                  cfg.Engine.Batch,
 		MaxActive:              cfg.Engine.MaxConcurrentActive,
 		MaxInflightPerPeer:     cfg.Engine.MaxInflightPerPeer,
 		MaxCandidateFileRatio:  cfg.Engine.MaxCandidateFileRatio,
+		MaxTransferRetries:     cfg.Engine.MaxTransferRetries,
 		Logger:                 logger,
 	})
 	reg := prometheus.NewRegistry()

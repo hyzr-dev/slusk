@@ -14,7 +14,10 @@ transfer_deadline = "30m"
 stall_timeout = "5m"
 search_timeout = "20s"
 min_bitrate = 192
-max_concurrent_searches = 4
+# Per-tick batch size used across the discovery pipeline stages (retry, start,
+# top-up, downloading, verifying, importing). Not a concurrency limit: searches
+# within a batch run sequentially.
+batch = 4
 # Global cap on jobs simultaneously active (searching through importing:
 # SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING), regardless of how
 # many are newly started per tick.
@@ -61,6 +64,11 @@ format = 1.0
 bitrate = 0.5
 reliability = 0.8
 file_count = 1.0
+# Weight for a peer's decayed known-good/known-bad history (per-artist,
+# falling back to global) - see internal/matcher/reliability_history.go. The
+# history factor is normalized to 0..1, so this is comparable in scale to the
+# other weights, not a multiplier on them.
+known_user = 1.0
 
 [store]
 path = "/data/slskdarr.db"

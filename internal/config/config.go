@@ -42,7 +42,6 @@ type EngineConfig struct {
 	StallTimeout           Duration `toml:"stall_timeout"`
 	SearchTimeout          Duration `toml:"search_timeout"`
 	MinBitrate             int      `toml:"min_bitrate"`
-	MaxConcurrentSearches  int      `toml:"max_concurrent_searches"`
 	MaxConcurrentActive    int      `toml:"max_concurrent_active"`
 	MaxInflightPerPeer     int      `toml:"max_inflight_per_peer"`
 	MaxTransferRetries     int      `toml:"max_transfer_retries"`
@@ -51,6 +50,10 @@ type EngineConfig struct {
 	FailedRetryAfter       Duration `toml:"failed_retry_after"`
 	ImportConfirmTimeout   Duration `toml:"import_confirm_timeout"`
 	TickInterval           Duration `toml:"tick_interval"`
+	// Batch bounds the per-tick batch size used across the discovery pipeline
+	// stages (retry, start, top-up, downloading, verifying, importing). It is
+	// not a concurrency limit: searches within a batch run sequentially.
+	Batch int `toml:"batch"`
 	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
 	// album's known Lidarr track count by more than this multiple (e.g. 2.0
 	// means a candidate offering more than 2x the expected tracks is skipped).
@@ -66,6 +69,12 @@ type Weights struct {
 	Bitrate     float64 `toml:"bitrate"`
 	Reliability float64 `toml:"reliability"`
 	FileCount   float64 `toml:"file_count"`
+	// KnownUser weights the peer's decayed artist/global success-fail history
+	// (0..1, see matcher.reliabilityHistoryScore) into the candidate score, so a
+	// peer who has previously delivered a complete, importable release for this
+	// artist (or is a known-good/known-bad peer in general) is boosted or
+	// suppressed relative to an unknown peer.
+	KnownUser float64 `toml:"known_user"`
 }
 
 // StoreConfig is the persistent store configuration.
@@ -151,8 +160,8 @@ func (c Config) Validate() error {
 	if c.Engine.MinBitrate <= 0 {
 		problems = append(problems, "engine.min_bitrate must be > 0")
 	}
-	if c.Engine.MaxConcurrentSearches <= 0 {
-		problems = append(problems, "engine.max_concurrent_searches must be > 0")
+	if c.Engine.Batch <= 0 {
+		problems = append(problems, "engine.batch must be > 0")
 	}
 	if c.Engine.MaxConcurrentActive <= 0 {
 		problems = append(problems, "engine.max_concurrent_active must be > 0")
@@ -180,6 +189,9 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.MaxCandidateFileRatio <= 0 {
 		problems = append(problems, "engine.max_candidate_file_ratio must be > 0")
+	}
+	if c.Engine.Weights.KnownUser < 0 {
+		problems = append(problems, "engine.weights.known_user must be >= 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")

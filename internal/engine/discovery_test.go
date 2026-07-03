@@ -66,14 +66,44 @@ type fakeSearcher struct {
 	enqueueErr     error
 	deletedFolders []string
 	deleteErr      error
+	// enqueueErrForFile, if set, fails Enqueue only for the named file (once
+	// per entry, decremented on each failing call) while other files succeed
+	// normally. Lets tests reproduce a single transient enqueue failure amid
+	// otherwise-successful calls.
+	enqueueErrForFile map[string]int
+
+	// queries records every query Search was called with, in order, so tests
+	// can assert how many searches were issued and what they were.
+	queries []string
+	// resultsForQuery, when set, overrides results on a per-query basis
+	// (falling back to results for queries not present in the map). Used to
+	// give the primary and normalized fallback query different results.
+	resultsForQuery map[string][]slskd.Result
+	// searchErrForQuery injects a Search error for a specific query, so tests
+	// can fail e.g. only the fallback search while the primary succeeds.
+	searchErrForQuery map[string]error
+
+	cancelled []string // slskd ids passed to Cancel
+	cancelErr error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
+	f.queries = append(f.queries, query)
+	if err, ok := f.searchErrForQuery[query]; ok {
+		return nil, err
+	}
+	if r, ok := f.resultsForQuery[query]; ok {
+		return r, nil
+	}
 	return f.results, nil
 }
 func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	if f.enqueueErr != nil {
 		return "", f.enqueueErr
+	}
+	if f.enqueueErrForFile[filename] > 0 {
+		f.enqueueErrForFile[filename]--
+		return "", errors.New("transient enqueue failure")
 	}
 	f.enqueued = append(f.enqueued, filename)
 	if f.enqueuedSizes == nil {
@@ -81,6 +111,13 @@ func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, s
 	}
 	f.enqueuedSizes[filename] = size
 	return "slskd-" + filename, nil
+}
+func (f *fakeSearcher) Cancel(ctx context.Context, username, id string) error {
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, id)
+	return nil
 }
 func (f *fakeSearcher) DeleteDownloadFolder(ctx context.Context, name string) error {
 	f.deletedFolders = append(f.deletedFolders, name)
@@ -259,6 +296,52 @@ func (b *discoBackedStore) seedDownloadingJobWithFailedAndPendingSibling(t *test
 	return job.ID
 }
 
+// seedDownloadingJobWithFailedActiveAndPendingSiblings creates a DISCOVERED job
+// for album 4, moves it to DOWNLOADING, and gives its one attempt three transfers
+// in the same remote directory ("A"): one already ERRORED, one still IN_PROGRESS
+// in slskd (with a slskd id, so it must be cancelled there), and one PENDING
+// (never sent). This is the mixed state advanceDownloading's two-phase fail path
+// must handle: cancel the active sibling, cancel the pending sibling in the DB,
+// and defer cleanup. It returns the job ID and the IN_PROGRESS transfer's DB id
+// (so a test can later drive it terminal).
+func (b *discoBackedStore) seedDownloadingJobWithFailedActiveAndPendingSiblings(t *testing.T, now time.Time) (jobID, inProgressID int64) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := b.UpsertDiscoveredJob(ctx, 4, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	if err := b.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	attemptID, err := b.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	deadline := now.Add(30 * time.Minute)
+	erroredID, err := b.RecordEnqueueIntent(ctx, attemptID, "bob", `A\01.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent errored: %v", err)
+	}
+	if err := b.UpdateTransferProgress(ctx, erroredID, core.TransferErrored, 0, 0, now); err != nil {
+		t.Fatalf("UpdateTransferProgress errored: %v", err)
+	}
+	inProgressID, err = b.RecordEnqueueIntent(ctx, attemptID, "bob", `A\02.flac`, deadline, now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent in-progress: %v", err)
+	}
+	if err := b.AttachTransferID(ctx, inProgressID, "slskd-inprog", now); err != nil {
+		t.Fatalf("AttachTransferID: %v", err)
+	}
+	if err := b.UpdateTransferProgress(ctx, inProgressID, core.TransferInProgress, 50, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress in-progress: %v", err)
+	}
+	if err := b.RecordPendingTransfer(ctx, attemptID, "bob", `A\03.flac`, 10, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	return job.ID, inProgressID
+}
+
 // seedFailedJob creates a DISCOVERED job for albumID and advances it straight to
 // FAILED at time at, as if its candidate budget had already been exhausted.
 func (b *discoBackedStore) seedFailedJob(t *testing.T, albumID int64, at time.Time) {
@@ -394,7 +477,7 @@ func TestStartJobAcceptsNormalSizedCandidateWithAlbumTotalKnown(t *testing.T) {
 	// checked.
 	music := &fakeMusic{
 		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
-		albumTotal: 10,
+		albumTotal: 2,
 	}
 	peers := &fakeSearcher{results: []slskd.Result{
 		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
@@ -443,6 +526,100 @@ func TestStartJobDoesNotRejectOversizedWhenAlbumTotalUnknown(t *testing.T) {
 	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
 	if len(downloading) != 1 {
 		t.Errorf("unknown album total should not block a candidate, got %d DOWNLOADING", len(downloading))
+	}
+}
+
+func TestStartJobSkipsUndercompleteCandidateAndPicksNextOne(t *testing.T) {
+	// A candidate with fewer files than the album's expected track count is
+	// guaranteed to be rejected by the VERIFYING completeness gate later, so
+	// startJob must skip it outright and fall through to the next candidate
+	// (from a different user) that can actually cover the album.
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 3,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		// alice only shares 1 of the 3 expected tracks - undercomplete.
+		{Username: "alice", Filename: `alice\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		// bob shares all 3 expected tracks - a viable candidate.
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\02.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\03.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	for _, f := range peers.enqueued {
+		if strings.HasPrefix(f, `alice\`) {
+			t.Errorf("undercomplete candidate's file %q must not be enqueued", f)
+		}
+	}
+	if len(peers.enqueued) != 3 {
+		t.Fatalf("expected the 3-file bob candidate to be enqueued, got %d files enqueued: %v", len(peers.enqueued), peers.enqueued)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("job should reach DOWNLOADING off the complete candidate, got %d", len(downloading))
+	}
+}
+
+func TestStartJobAcceptsUndercompleteCandidateWhenAlbumTotalUnknown(t *testing.T) {
+	// When Lidarr's track count for the album is unknown (total == 0), the
+	// under-complete check must be skipped entirely, same as the ratio check -
+	// an unreliable total must never block an otherwise viable candidate.
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 0,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 1 {
+		t.Fatalf("expected 1 file enqueued, got %d", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("unknown album total should not block an undercomplete candidate, got %d DOWNLOADING", len(downloading))
+	}
+}
+
+func TestStartJobAllUndercompleteCandidatesCoolsDown(t *testing.T) {
+	// If every candidate is undercomplete for the album, none may be enqueued;
+	// the job must fall through to the existing "no untried candidate
+	// available" path, cooling down with candidates_tried incremented by
+	// exactly 1 (not once per skipped candidate).
+	music := &fakeMusic{
+		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}},
+		albumTotal: 3,
+	}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "alice", Filename: `alice\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+		{Username: "bob", Filename: `bob\A\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.enqueued) != 0 {
+		t.Fatalf("no candidate should be enqueued when all are undercomplete, got %d", len(peers.enqueued))
+	}
+	cooldown, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(cooldown) != 1 || cooldown[0].CandidatesTried != 1 {
+		t.Fatalf("job should cool down with candidates_tried == 1, got %+v", cooldown)
 	}
 }
 
@@ -847,6 +1024,147 @@ func TestAdvanceDoesNotTopUpAttemptAlreadyFailed(t *testing.T) {
 	}
 }
 
+// transferStates returns the states of a job's most recent attempt's transfers,
+// keyed by filename, so tests can assert per-transfer outcomes.
+func transferStates(t *testing.T, st *discoBackedStore, jobID int64) map[string]core.TransferState {
+	t.Helper()
+	ctx := context.Background()
+	attempts, err := st.AttemptsForJob(ctx, jobID)
+	if err != nil || len(attempts) == 0 {
+		t.Fatalf("AttemptsForJob(%d): %v (n=%d)", jobID, err, len(attempts))
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attempts[len(attempts)-1].ID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	out := make(map[string]core.TransferState, len(transfers))
+	for _, tr := range transfers {
+		out[tr.Filename] = tr.State
+	}
+	return out
+}
+
+func TestAdvanceDownloadingCancelsActiveSiblingsBeforeCleanup(t *testing.T) {
+	// A failed attempt whose siblings are still IN_PROGRESS/PENDING must NOT be
+	// cleaned up yet: the live download would keep writing into the folder we
+	// just deleted. Tick 1 cancels the active sibling in slskd and marks the
+	// never-sent PENDING sibling CANCELLED, but defers cleanup/FailAttempt; the
+	// job stays DOWNLOADING. Once the cancelled sibling goes terminal, tick 2
+	// runs the real cleanup + FailAttempt + cooldown.
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID, inProgressID := st.seedDownloadingJobWithFailedActiveAndPendingSiblings(t, now)
+	d := NewDiscoverer(p)
+
+	// Tick 1: cancel active + pending, no cleanup, job stays DOWNLOADING.
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance tick 1: %v", err)
+	}
+	if len(peers.cancelled) != 1 || peers.cancelled[0] != "slskd-inprog" {
+		t.Errorf("expected the IN_PROGRESS sibling cancelled in slskd, got %+v", peers.cancelled)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("cleanup must not run while a sibling is still active, got %+v", peers.deletedFolders)
+	}
+	if got := jobState(t, st, jobID); got != core.StateDownloading {
+		t.Errorf("job should stay DOWNLOADING during cancellation, got %v", got)
+	}
+	states := transferStates(t, st, jobID)
+	if states[`A\03.flac`] != core.TransferCancelled {
+		t.Errorf("never-sent PENDING sibling should be CANCELLED, got %v", states[`A\03.flac`])
+	}
+	if states[`A\02.flac`] != core.TransferInProgress {
+		t.Errorf("IN_PROGRESS sibling stays non-terminal until slskd/reconciler confirms, got %v", states[`A\02.flac`])
+	}
+
+	// The reconciler picks up slskd's cancellation and marks the sibling terminal.
+	if err := st.UpdateTransferProgress(ctx, inProgressID, core.TransferCancelled, 50, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	// Tick 2: everything terminal -> cleanup + FailAttempt + COOLDOWN.
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance tick 2: %v", err)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("expected the failed attempt's folder cleaned up on tick 2, got %+v", peers.deletedFolders)
+	}
+	if got := jobState(t, st, jobID); got != core.StateCooldown {
+		t.Errorf("job should be COOLDOWN after all siblings terminal, got %v", got)
+	}
+	cool, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	for _, j := range cool {
+		if j.ID == jobID {
+			if j.NextAttemptAt == nil || j.NextAttemptAt.Sub(now) != p.FailedCandidateBackoff {
+				t.Errorf("failed candidate should use the short backoff %v, got %+v", p.FailedCandidateBackoff, j.NextAttemptAt)
+			}
+		}
+	}
+}
+
+func TestAdvanceDownloadingAllTerminalFailsFirstTick(t *testing.T) {
+	// An attempt whose transfers are all terminal (today's common case) has
+	// nothing to cancel, so it fails on the first tick exactly as before.
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID := st.seedDownloadingJobWithFailedTransfer(t, now)
+	d := NewDiscoverer(p)
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if len(peers.cancelled) != 0 {
+		t.Errorf("an all-terminal attempt has nothing to cancel, got %+v", peers.cancelled)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("an all-terminal failed attempt should be cleaned up on the first tick, got %+v", peers.deletedFolders)
+	}
+	if got := jobState(t, st, jobID); got != core.StateCooldown {
+		t.Errorf("an all-terminal failed attempt should COOLDOWN on the first tick, got %v", got)
+	}
+}
+
+func TestAdvanceDownloadingCancelErrorRetriesNextTick(t *testing.T) {
+	// If cancelling the active sibling in slskd fails, the transfer is left
+	// active (not marked terminal) and cleanup does not run; a later tick retries
+	// the cancel.
+	peers := &fakeSearcher{cancelErr: errors.New("slskd down")}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID, _ := st.seedDownloadingJobWithFailedActiveAndPendingSiblings(t, now)
+	d := NewDiscoverer(p)
+
+	// Tick 1: cancel fails -> nothing recorded cancelled, no cleanup, still DOWNLOADING.
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance tick 1: %v", err)
+	}
+	if len(peers.cancelled) != 0 {
+		t.Errorf("a failed Cancel must not be recorded as cancelled, got %+v", peers.cancelled)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("cleanup must not run while the active sibling is uncancelled, got %+v", peers.deletedFolders)
+	}
+	if got := jobState(t, st, jobID); got != core.StateDownloading {
+		t.Errorf("job should stay DOWNLOADING when the cancel failed, got %v", got)
+	}
+	if states := transferStates(t, st, jobID); states[`A\02.flac`] != core.TransferInProgress {
+		t.Errorf("the active sibling must stay non-terminal after a failed cancel, got %v", states[`A\02.flac`])
+	}
+
+	// Tick 2: slskd recovers, the cancel now succeeds.
+	peers.cancelErr = nil
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance tick 2: %v", err)
+	}
+	if len(peers.cancelled) != 1 || peers.cancelled[0] != "slskd-inprog" {
+		t.Errorf("the retried cancel should reach slskd, got %+v", peers.cancelled)
+	}
+}
+
 func TestDiscoverRejectedImportDeletesDownloadedFolder(t *testing.T) {
 	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
 		{ID: 1, Path: "/music/slskd-downloads/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
@@ -994,6 +1312,152 @@ func TestDiscoverEnqueueFailureMarksTransferErrored(t *testing.T) {
 	}
 }
 
+// seedDownloadingAttempt creates a DOWNLOADING job with one CandidateAttempt
+// and returns the attempt ID, so tests can drive topUpAttempt directly with
+// full control over which files are PENDING and their retry counts.
+func seedDownloadingAttempt(t *testing.T, st *discoBackedStore, lidarrAlbumID int64, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	job, err := st.UpsertDiscoveredJob(ctx, lidarrAlbumID, now)
+	if err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	attemptID, err := st.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	return attemptID
+}
+
+func TestTopUpAttemptEnqueueFailureWithRetriesLeftReturnsToPendingAndResends(t *testing.T) {
+	// With retries remaining, a failed enqueue must return the transfer to
+	// PENDING (not ERRORED) with its retry count bumped, and the next tick
+	// (another topUpAttempt call) must attempt to resend it.
+	filename := `bob\A\01.flac`
+	peers := &fakeSearcher{enqueueErrForFile: map[string]int{filename: 1}} // fails once, then succeeds
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 1
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", filename, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	d := NewDiscoverer(p)
+
+	// Tick 1: enqueue fails -> transfer returned to PENDING with retries bumped.
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt 1: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("failed enqueue must not count as sent, got %d", sent)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferPending || transfers[0].Retries != 1 {
+		t.Fatalf("expected 1 PENDING transfer with retries == 1, got %+v", transfers)
+	}
+
+	// Tick 2: the retried transfer is resent and now succeeds.
+	sent, err = d.topUpAttempt(ctx, attemptID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("topUpAttempt 2: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("expected the retried transfer to be resent, got sent=%d", sent)
+	}
+	if len(peers.enqueued) != 1 || peers.enqueued[0] != filename {
+		t.Fatalf("expected the retried transfer to be resent, got %+v", peers.enqueued)
+	}
+	transfers, err = st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferQueued {
+		t.Fatalf("expected the resent transfer to be QUEUED, got %+v", transfers)
+	}
+}
+
+func TestTopUpAttemptEnqueueFailureWithRetriesExhaustedMarksErrored(t *testing.T) {
+	// Once the retry budget is exhausted, a failed enqueue must fall back to
+	// today's behavior: mark the transfer terminally ERRORED.
+	filename := `bob\A\01.flac`
+	peers := &fakeSearcher{enqueueErr: errors.New("peer offline")}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 0
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", filename, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+	d := NewDiscoverer(p)
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 sent for an exhausted-retry enqueue failure, got %d", sent)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	if len(transfers) != 1 || transfers[0].State != core.TransferErrored {
+		t.Fatalf("expected the transfer to be ERRORED once retries are exhausted, got %+v", transfers)
+	}
+}
+
+func TestTopUpAttemptEnqueueFailureForOneFileDoesNotBlockOthers(t *testing.T) {
+	// Within a single topUpAttempt loop, a failed enqueue for one file must not
+	// prevent other files from being sent.
+	failing := `bob\A\01.flac`
+	ok := `bob\A\02.flac`
+	peers := &fakeSearcher{enqueueErrForFile: map[string]int{failing: 1}}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.MaxTransferRetries = 1
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	attemptID := seedDownloadingAttempt(t, st, 77, now)
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", failing, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer (failing): %v", err)
+	}
+	if err := st.RecordPendingTransfer(ctx, attemptID, "bob", ok, 100, now); err != nil {
+		t.Fatalf("RecordPendingTransfer (ok): %v", err)
+	}
+	d := NewDiscoverer(p)
+	sent, err := d.topUpAttempt(ctx, attemptID, now)
+	if err != nil {
+		t.Fatalf("topUpAttempt: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("expected the succeeding file to still be sent despite the other's enqueue failure, got sent=%d", sent)
+	}
+	if len(peers.enqueued) != 1 || peers.enqueued[0] != ok {
+		t.Fatalf("expected only the succeeding file to be enqueued, got %+v", peers.enqueued)
+	}
+	transfers, err := st.TransfersForAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatalf("TransfersForAttempt: %v", err)
+	}
+	states := map[string]core.TransferState{}
+	for _, tr := range transfers {
+		states[tr.Filename] = tr.State
+	}
+	if states[ok] != core.TransferQueued {
+		t.Errorf("expected %q to be QUEUED, got %+v", ok, states)
+	}
+	if states[failing] != core.TransferPending {
+		t.Errorf("expected %q to be returned to PENDING for retry, got %+v", failing, states)
+	}
+}
+
 func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "A", ArtistName: "X"}}}
 	peers := &fakeSearcher{} // no results -> no candidate
@@ -1018,6 +1482,157 @@ func TestDiscoverNoCandidateIncrementsBudget(t *testing.T) {
 	}
 	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
 		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
+	}
+}
+
+func TestStartJobFallsBackToNormalizedQueryWhenPrimaryEmpty(t *testing.T) {
+	// "Album (Deluxe Edition)" mirrors a real Lidarr title suffix that peers
+	// rarely share verbatim: the primary query gets zero raw results, so the
+	// normalized fallback ("X Album") should be tried and its results used.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	primaryQuery := "X Album (Deluxe Edition)"
+	fallbackQuery := normalizeQuery(primaryQuery)
+	peers := &fakeSearcher{
+		resultsForQuery: map[string][]slskd.Result{
+			fallbackQuery: {
+				{Username: "bob", Filename: `bob\Album\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+			},
+		},
+	}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + one fallback search, got queries=%v", peers.queries)
+	}
+	if peers.queries[0] != primaryQuery {
+		t.Errorf("expected primary query %q first, got %q", primaryQuery, peers.queries[0])
+	}
+	if peers.queries[1] != fallbackQuery {
+		t.Errorf("expected fallback query %q second, got %q", fallbackQuery, peers.queries[1])
+	}
+	if len(peers.enqueued) != 1 {
+		t.Fatalf("expected fallback result to be enqueued, got %d files", len(peers.enqueued))
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("job should reach DOWNLOADING via the fallback query's candidate, got %d", len(downloading))
+	}
+}
+
+func TestStartJobSearchesOnceWhenPrimaryHasResults(t *testing.T) {
+	// Even though the title would normalize to a different string, the
+	// primary query already returned results, so no fallback search should
+	// be issued.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	peers := &fakeSearcher{results: []slskd.Result{
+		{Username: "bob", Filename: `bob\Album\01.flac`, BitRate: 900, HasFreeUploadSlot: true},
+	}}
+	p, st := newDiscoParams(t, music, peers)
+	d := NewDiscoverer(p)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 1 {
+		t.Fatalf("expected exactly one search when the primary query already has results, got queries=%v", peers.queries)
+	}
+	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
+	if len(downloading) != 1 {
+		t.Errorf("expected job in DOWNLOADING, got %d", len(downloading))
+	}
+}
+
+func TestStartJobCooldownWhenPrimaryAndFallbackBothEmpty(t *testing.T) {
+	// Both the primary and the normalized fallback query return zero results:
+	// budget/cooldown semantics must be unchanged from today (a single
+	// candidate-budget increment, long backoff), not doubled by the extra search.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	peers := &fakeSearcher{} // both primary and fallback queries get zero results
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + one fallback search, got queries=%v", peers.queries)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
+		t.Fatalf("exhausted tick should increment candidates_tried to 1 exactly once and cooldown, got %+v", jobs)
+	}
+	if jobs[0].NextAttemptAt == nil {
+		t.Fatalf("cooldown job missing next_attempt_at")
+	}
+	if got := jobs[0].NextAttemptAt.Sub(now); got != p.CandidateBackoff {
+		t.Errorf("no-candidate cooldown should use the long backoff %v, got %v", p.CandidateBackoff, got)
+	}
+}
+
+func TestStartJobSkipsFallbackWhenNormalizedQueryIsEmpty(t *testing.T) {
+	// A query made entirely of bracketed groups normalizes to the empty
+	// string; searching Soulseek for "" is meaningless, so no fallback search
+	// must be issued and the job takes the ordinary cooldown path.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "[Untitled]", ArtistName: "(!!!)"}}}
+	peers := &fakeSearcher{} // primary query gets zero results
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(peers.queries) != 1 {
+		t.Fatalf("expected no fallback search when the normalized query is empty, got queries=%q", peers.queries)
+	}
+	jobs, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(jobs) != 1 || jobs[0].CandidatesTried != 1 {
+		t.Fatalf("job should cool down with candidates_tried == 1, got %+v", jobs)
+	}
+}
+
+func TestStartJobFallbackSearchErrorPropagates(t *testing.T) {
+	// The fallback Search's error must propagate out of startJob like the
+	// primary's: startNewJobs logs and isolates it, so the job stays where it
+	// was with no candidate budget spent, and is retried on a later tick.
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 91, Title: "Album (Deluxe Edition)", ArtistName: "X"}}}
+	fallbackQuery := normalizeQuery("X Album (Deluxe Edition)")
+	peers := &fakeSearcher{
+		searchErrForQuery: map[string]error{fallbackQuery: errors.New("slskd down")},
+	}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := st.UpsertDiscoveredJob(ctx, 91, now); err != nil {
+		t.Fatalf("UpsertDiscoveredJob: %v", err)
+	}
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce should isolate the per-job error: %v", err)
+	}
+	if len(peers.queries) != 2 {
+		t.Fatalf("expected primary + fallback search, got queries=%q", peers.queries)
+	}
+	cooldown, _ := st.JobsInState(ctx, core.StateCooldown, 10)
+	if len(cooldown) != 0 {
+		t.Errorf("errored fallback search must not spend budget or cool down, got %+v", cooldown)
+	}
+	discovered, _ := st.JobsInState(ctx, core.StateDiscovered, 10)
+	if len(discovered) != 1 || discovered[0].CandidatesTried != 0 {
+		t.Fatalf("job should remain DISCOVERED with candidates_tried == 0, got %+v", discovered)
 	}
 }
 
@@ -1154,7 +1769,7 @@ func TestAdvanceImportingSkipsFailingJobButProcessesOthers(t *testing.T) {
 	p, st := newDiscoParams(t, music, peers)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	st.seedVerifyingJobForAlbum(t, 10, now) // will error
+	st.seedVerifyingJobForAlbum(t, 10, now)          // will error
 	job20 := st.seedVerifyingJobForAlbum(t, 20, now) // must still be processed
 	d := NewDiscoverer(p)
 	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
@@ -1219,7 +1834,7 @@ func TestConfirmImportsSkipsFailingJobButProcessesOthers(t *testing.T) {
 	p, st := newDiscoParams(t, music, &fakeSearcher{})
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	st.seedImportingJobForAlbum(t, 10, now) // will error
+	st.seedImportingJobForAlbum(t, 10, now)          // will error
 	job20 := st.seedImportingJobForAlbum(t, 20, now) // must still be processed
 	d := NewDiscoverer(p)
 	if err := d.confirmImports(ctx, now); err != nil {
@@ -1273,5 +1888,61 @@ func TestDiscoverRetriesFailedAlbumAfterWindow(t *testing.T) {
 	downloading, _ := st.JobsInState(ctx, core.StateDownloading, 10)
 	if len(downloading) != 1 {
 		t.Errorf("retried album with a good candidate should reach DOWNLOADING, got %d", len(downloading))
+	}
+}
+
+// TestAdvanceImportingRecordsSuccessOutcome verifies a clean, complete import
+// (advanceImporting's success path) writes the candidate's outcome to peer
+// reliability history, not just the transient candidate_attempts row -
+// candidate_attempts is deleted on a later ResetJobForRetry, so this is the
+// only place that survives.
+func TestAdvanceImportingRecordsSuccessOutcome(t *testing.T) {
+	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
+		{ID: 1, Path: "/music/slskd-downloads/A/01.flac", Importable: true},
+	}}
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, music, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedVerifyingJob(t, now) // candidate attempt is for user "bob"
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rel, err := st.ReliabilityFor(ctx, 0, []string{"bob"})
+	if err != nil {
+		t.Fatalf("ReliabilityFor: %v", err)
+	}
+	if rel["bob"].Global.SuccessCount != 1 {
+		t.Errorf("bob's global success count = %d, want 1", rel["bob"].Global.SuccessCount)
+	}
+	if rel["bob"].Global.FailCount != 0 {
+		t.Errorf("bob's global fail count = %d, want 0", rel["bob"].Global.FailCount)
+	}
+}
+
+// TestAdvanceDownloadingRecordsFailOutcome verifies a failed transfer
+// (advanceDownloading's fail path) writes the candidate's outcome to peer
+// reliability history. This is what lets the fail side of the reliability
+// signal eventually suppress a consistently-bad peer, per the issue's
+// pipeline-review addendum.
+func TestAdvanceDownloadingRecordsFailOutcome(t *testing.T) {
+	p, st := newDiscoParams(t, &fakeMusic{}, &fakeSearcher{})
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	st.seedDownloadingJobWithFailedTransfer(t, now) // candidate attempt is for user "bob"
+	d := NewDiscoverer(p)
+	if err := d.RunOnce(ctx, now); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rel, err := st.ReliabilityFor(ctx, 0, []string{"bob"})
+	if err != nil {
+		t.Fatalf("ReliabilityFor: %v", err)
+	}
+	if rel["bob"].Global.FailCount != 1 {
+		t.Errorf("bob's global fail count = %d, want 1", rel["bob"].Global.FailCount)
+	}
+	if rel["bob"].Global.SuccessCount != 0 {
+		t.Errorf("bob's global success count = %d, want 0", rel["bob"].Global.SuccessCount)
 	}
 }

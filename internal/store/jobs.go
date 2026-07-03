@@ -24,9 +24,9 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	var j core.AlbumJob
 	var state string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at
+		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id
 		 FROM album_jobs WHERE lidarr_album_id = ?`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt)
+		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
 	}
@@ -34,30 +34,31 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	return j, nil
 }
 
-// UpdateJobMetadata refreshes the cached title/artist_name/release_date for a
-// job. It is called every discovery pass so display metadata and release-date
-// ordering stay current even if Lidarr renames an album/artist or corrects a
-// release date after the job was first discovered.
-func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName, releaseDate string, now time.Time) error {
+// UpdateJobMetadata refreshes the cached title/artist_name/release_date/artist_id
+// for a job. It is called every discovery pass so display metadata and
+// release-date ordering stay current even if Lidarr renames an album/artist or
+// corrects a release date after the job was first discovered.
+func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName, releaseDate string, artistID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, updated_at = ? WHERE id = ?`,
-		title, artistName, releaseDate, now, jobID)
+		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, artist_id = ?, updated_at = ? WHERE id = ?`,
+		title, artistName, releaseDate, artistID, now, jobID)
 	if err != nil {
 		return fmt.Errorf("update job metadata: %w", err)
 	}
 	return nil
 }
 
-// BackfillJobMetadataIfEmpty sets title/artist_name/release_date only if any
-// of them is currently empty (e.g. a job created before metadata caching
+// BackfillJobMetadataIfEmpty sets title/artist_name/release_date/artist_id only
+// if any of them is currently empty (e.g. a job created before metadata caching
 // existed, or before this job's first DISCOVERED pass). Unlike
 // UpdateJobMetadata, it does not touch updated_at, since that column drives
 // retry-cooldown timing for jobs already past DISCOVERED (see
 // Discoverer.syncWanted).
-func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName, releaseDate string) error {
+func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName, releaseDate string, artistID int64) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ? WHERE id = ? AND (title = '' OR artist_name = '' OR release_date = '')`,
-		title, artistName, releaseDate, jobID)
+		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, artist_id = ?
+		 WHERE id = ? AND (title = '' OR artist_name = '' OR release_date = '' OR artist_id = 0)`,
+		title, artistName, releaseDate, artistID, jobID)
 	if err != nil {
 		return fmt.Errorf("backfill job metadata: %w", err)
 	}
@@ -67,9 +68,9 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 // CreateAttempt inserts a PENDING candidate attempt and returns its ID.
 func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at)
-		 VALUES (?, ?, ?, 'PENDING', ?)`,
-		albumJobID, username, score, now)
+		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
+		 VALUES (?, ?, ?, 'PENDING', ?, ?)`,
+		albumJobID, username, score, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("insert attempt: %w", err)
 	}
@@ -191,10 +192,24 @@ func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 }
 
 // UpdateTransferProgress records new state and byte counts for a transfer.
+// last_progress_at only advances when the byte counter actually increased: the
+// reconciler calls this every poll pass, so stamping it unconditionally would
+// make a stalled transfer (reconciled repeatedly with unchanged bytes) always
+// look freshly progressing and defeat stall detection. It is also stamped on
+// the QUEUED→IN_PROGRESS transition (when last_progress_at is still NULL) so the
+// stall clock starts when the download actually begins rather than at enqueue.
 func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?, last_progress_at = ?, updated_at = ? WHERE id = ?`,
-		string(state), bytesDone, bytesTotal, now, now, transferID)
+		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?,
+			last_progress_at = CASE
+				WHEN ? > bytes_done THEN ?
+				WHEN ? = ? AND last_progress_at IS NULL THEN ?
+				ELSE last_progress_at END,
+			updated_at = ? WHERE id = ?`,
+		string(state), bytesDone, bytesTotal,
+		bytesDone, now,
+		string(state), string(core.TransferInProgress), now,
+		now, transferID)
 	if err != nil {
 		return fmt.Errorf("update transfer progress: %w", err)
 	}
@@ -202,13 +217,18 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 }
 
 // RetryTransfer returns a transfer to PENDING for a later resend and bumps its
-// retry count, clearing the slskd id and byte progress. Used when a peer
-// rejected a download for a transient reason (e.g. its queued-megabyte limit):
-// the file waits in the pending pool and topUpAttempt sends it again once the
-// peer's queue has drained, rather than failing the whole attempt.
+// retry count, clearing the slskd id, byte progress, and stall clock. Used when
+// a peer rejected a download for a transient reason (e.g. its queued-megabyte
+// limit): the file waits in the pending pool and topUpAttempt sends it again
+// once the peer's queue has drained, rather than failing the whole attempt.
+// last_progress_at must be cleared here: a stall-retried transfer would
+// otherwise carry its already-expired stall clock into the re-attempt and be
+// re-cancelled on its first IN_PROGRESS poll, burning the retry budget without
+// a genuine retry. UpdateTransferProgress stamps a fresh clock when the
+// re-sent transfer actually starts.
 func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, updated_at = ? WHERE id = ?`,
+		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = ? WHERE id = ?`,
 		string(core.TransferPending), now, transferID)
 	if err != nil {
 		return fmt.Errorf("retry transfer: %w", err)

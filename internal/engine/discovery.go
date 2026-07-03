@@ -42,7 +42,12 @@ type DiscovererParams struct {
 	// expected track count is unknown (0), since Lidarr is the final arbiter of
 	// import correctness downstream.
 	MaxCandidateFileRatio float64
-	Logger                *slog.Logger
+	// MaxTransferRetries bounds how many times a transfer can be returned to
+	// PENDING after a failed enqueue attempt before it is marked terminally
+	// ERRORED. Mirrors the retry budget the Reconciler enforces for transfers
+	// that reached slskd but then failed there.
+	MaxTransferRetries int
+	Logger             *slog.Logger
 }
 
 // Discoverer drives AlbumJobs through the pipeline, one transition per tick.
@@ -134,12 +139,12 @@ func (d *Discoverer) syncWanted(ctx context.Context, albums []lidarr.WantedAlbum
 			return err
 		}
 		if job.State != core.StateDiscovered {
-			if err := d.p.Store.BackfillJobMetadataIfEmpty(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate); err != nil {
+			if err := d.p.Store.BackfillJobMetadataIfEmpty(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate, a.ArtistID); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate, now); err != nil {
+		if err := d.p.Store.UpdateJobMetadata(ctx, job.ID, a.Title, a.ArtistName, a.ReleaseDate, a.ArtistID, now); err != nil {
 			return err
 		}
 	}
@@ -231,13 +236,37 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		}
 		return err
 	}
-	results, err := d.p.Peers.Search(ctx, album.ArtistName+" "+album.Title, d.p.SearchTimeout)
+	query := album.ArtistName + " " + album.Title
+	results, err := d.p.Peers.Search(ctx, query, d.p.SearchTimeout)
 	if err != nil {
 		return err
 	}
-	candidates := d.p.Ranker.Rank(results)
+	if len(results) == 0 {
+		// The primary query returned no raw results at all (not just no
+		// candidates after ranking/filtering - that's the results' fault, not
+		// the query's). Try once with a looser, normalized query: peers'
+		// shared folder names rarely carry suffixes like "(Deluxe Edition)" or
+		// characters like "&" verbatim, so stripping them can turn a zero-hit
+		// search into a match. Skipped entirely when normalizing is a no-op
+		// (to avoid doubling search traffic for nothing) or reduces the query
+		// to nothing (searching for "" is meaningless).
+		if fallback := normalizeQuery(query); fallback != "" && fallback != query {
+			d.log().Info("primary search empty, trying normalized query",
+				"album_job", job.ID, "query", fallback)
+			results, err = d.p.Peers.Search(ctx, fallback, d.p.SearchTimeout)
+			if err != nil {
+				return err
+			}
+			query = fallback
+		}
+	}
+	rel, err := d.p.Store.ReliabilityFor(ctx, job.ArtistID, uniqueUsernames(results))
+	if err != nil {
+		return err
+	}
+	candidates := d.p.Ranker.Rank(results, rel, now)
 	d.log().Info("searched album",
-		"album_job", job.ID, "query", album.ArtistName+" "+album.Title,
+		"album_job", job.ID, "query", query,
 		"results", len(results), "candidates", len(candidates))
 	// Fetch the album's expected track count once per startJob call (not per
 	// candidate) to size-sanity-check candidates below. total == 0 means Lidarr
@@ -263,8 +292,20 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
 			continue
 		}
-		// Prefer candidates offering at least the expected track count, but accept
-		// any if none match (Lidarr is the final arbiter).
+		if total > 0 && len(cand.Files) < total {
+			// A candidate that can't even cover the expected track count is
+			// guaranteed to be rejected by the VERIFYING completeness gate
+			// (coverage(importable) < total) after burning a full download cycle,
+			// a candidate slot, and a cooldown - so downloading it is guaranteed
+			// wasted work. Skip it like an already-tried candidate rather than
+			// attempt it. Not counted toward CandidatesTried individually: if no
+			// other candidate exists this tick, the budget is still spent exactly
+			// once via the "no untried candidate available" path below, the same as
+			// if this candidate had never appeared at all.
+			d.log().Info("candidate has fewer files than expected tracks, skipping",
+				"album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+			continue
+		}
 		attemptID, err := d.p.Store.CreateAttempt(ctx, job.ID, cand.Username, cand.Score, now)
 		if err != nil {
 			return err
@@ -339,9 +380,16 @@ func (d *Discoverer) topUpAttempt(ctx context.Context, attemptID int64, now time
 		}
 		slskdID, err := d.p.Peers.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
 		if err != nil {
-			d.log().Error("enqueue failed", "user", p.Username, "file", p.Filename, "err", err)
-			if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
-				d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+			if p.Retries < d.p.MaxTransferRetries {
+				d.log().Info("enqueue failed, returning to pending", "user", p.Username, "file", p.Filename, "retries", p.Retries, "err", err)
+				if uerr := d.p.Store.RetryTransfer(ctx, tid, now); uerr != nil {
+					d.log().Error("retry transfer failed", "transfer", tid, "err", uerr)
+				}
+			} else {
+				d.log().Error("enqueue failed", "user", p.Username, "file", p.Filename, "err", err)
+				if uerr := d.p.Store.UpdateTransferProgress(ctx, tid, core.TransferErrored, 0, 0, now); uerr != nil {
+					d.log().Error("mark transfer errored failed", "transfer", tid, "err", uerr)
+				}
 			}
 			continue
 		}
@@ -381,6 +429,33 @@ func (d *Discoverer) topUpDownloads(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// uniqueUsernames returns the distinct usernames present in results, in first-seen
+// order, used to batch-fetch reliability history for exactly the peers a search
+// actually returned rather than one query per candidate.
+func uniqueUsernames(results []slskd.Result) []string {
+	seen := make(map[string]bool, len(results))
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		if !seen[r.Username] {
+			seen[r.Username] = true
+			out = append(out, r.Username)
+		}
+	}
+	return out
+}
+
+// recordOutcome writes a candidate attempt's terminal success/fail outcome to
+// the peer reliability tables (see Store.RecordAttemptOutcome), so the history
+// survives even a subsequent ResetJobForRetry, which deletes candidate_attempts.
+// Best-effort: a failure to record must not block the job's own state
+// transition, so it is logged and swallowed rather than propagated.
+func (d *Discoverer) recordOutcome(ctx context.Context, job core.AlbumJob, username string, success bool, now time.Time) {
+	if err := d.p.Store.RecordAttemptOutcome(ctx, job.ArtistID, username, success, now); err != nil {
+		d.log().Error("record peer reliability outcome failed",
+			"album_job", job.ID, "user", username, "success", success, "err", err)
+	}
+}
+
 // albumFor returns the Lidarr album matching a job (by lidarr_album_id) from
 // the wanted map fetched once per RunOnce tick.
 func (d *Discoverer) albumFor(job core.AlbumJob, wanted map[int64]lidarr.WantedAlbum) (lidarr.WantedAlbum, error) {
@@ -392,6 +467,16 @@ func (d *Discoverer) albumFor(job core.AlbumJob, wanted map[int64]lidarr.WantedA
 
 // advanceDownloading moves DOWNLOADING jobs to VERIFYING when all their active
 // attempt's transfers are COMPLETED, or to COOLDOWN when any transfer failed.
+//
+// The fail path is two-phase: cancel first, clean up once everything is quiet.
+// When an attempt fails while some of its siblings are still QUEUED/IN_PROGRESS/
+// STALLED in slskd, cleaning up (deleting the attempt's download folder) would
+// race those live downloads - slskd keeps writing their bytes back into the
+// folder we just deleted, re-creating exactly the cross-peer collision
+// cleanupAttempt exists to prevent. So we first cancel the still-active siblings
+// in slskd (and mark never-sent PENDING siblings CANCELLED directly, since there
+// is nothing in slskd to cancel), then wait: cleanup, FailAttempt and the
+// cooldown are deferred to a later tick once every transfer is terminal.
 func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) error {
 	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.Batch)
 	if err != nil {
@@ -411,13 +496,19 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 			return err
 		}
 		allDone, anyFailed := len(transfers) > 0, false
+		var activeSiblings, pendingSiblings []core.Transfer
 		for _, t := range transfers {
 			switch t.State {
 			case core.TransferCompleted:
 			case core.TransferErrored, core.TransferCancelled:
 				anyFailed = true
 				allDone = false
-			default:
+			case core.TransferPending:
+				// Never sent to slskd; nothing to cancel there, but still not terminal.
+				pendingSiblings = append(pendingSiblings, t)
+				allDone = false
+			default: // QUEUED, IN_PROGRESS, STALLED: still live in slskd.
+				activeSiblings = append(activeSiblings, t)
 				allDone = false
 			}
 		}
@@ -426,12 +517,43 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 			// A candidate failed, but other untried candidates usually remain, so
 			// use the short backoff to try the next one soon rather than the long
 			// "nothing new to try" backoff.
+			//
+			// Two-phase fail: never-sent PENDING siblings are cancelled straight in
+			// the DB (nothing exists in slskd to cancel, and without this the attempt
+			// would never reach "all terminal"); still-active siblings are cancelled
+			// in slskd. While any sibling is still live we defer cleanup/FailAttempt/
+			// cooldown to a later tick - deleting the folder now would race those
+			// downloads. The branch re-runs every tick, so the job converges to
+			// "all terminal" within a few ticks.
+			for _, t := range pendingSiblings {
+				if err := d.p.Store.UpdateTransferProgress(ctx, t.ID, core.TransferCancelled, t.BytesDone, t.BytesTotal, now); err != nil {
+					d.log().Error("cancel pending sibling failed", "transfer", t.ID, "err", err)
+				}
+			}
+			if len(activeSiblings) > 0 {
+				d.log().Info("candidate failed, cancelling active siblings before cleanup",
+					"album_job", job.ID, "attempt", active.ID, "active", len(activeSiblings))
+				for _, t := range activeSiblings {
+					if t.SlskdID == "" {
+						// No slskd id yet (enqueue never returned one); the reconciler's
+						// fallback matching will terminate it. Leave it for a later tick.
+						continue
+					}
+					if err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID); err != nil {
+						// Leave it active; the next tick retries the cancel.
+						d.log().Error("cancel active sibling failed", "album_job", job.ID, "transfer", t.ID, "err", err)
+					}
+				}
+				continue
+			}
+			// Every transfer is terminal: safe to clean up and fail the attempt.
 			d.log().Info("candidate download failed, cooling down", "album_job", job.ID, "attempt", active.ID)
 			names := make([]string, 0, len(transfers))
 			for _, t := range transfers {
 				names = append(names, t.Filename)
 			}
 			d.cleanupAttempt(ctx, job.ID, names)
+			d.recordOutcome(ctx, job, active.Username, false, now)
 			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
 			}
@@ -475,7 +597,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		items, err := d.p.Music.ManualImportCandidates(ctx, folder)
 		if err != nil {
 			d.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)
-			d.escalateIfStuck(ctx, job, active.ID, names, "import candidates failed", now)
+			d.escalateIfStuck(ctx, job, active.ID, active.Username, names, "import candidates failed", now)
 			continue
 		}
 		if len(items) == 0 {
@@ -484,6 +606,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// ExecuteManualImport and this state write). Treat it as done so
 			// advanceImporting is idempotent across restarts.
 			d.log().Info("empty folder treated as already imported", "album_job", job.ID, "folder", folder)
+			d.recordOutcome(ctx, job, active.Username, true, now)
 			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
 				d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
@@ -504,6 +627,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			// use the short backoff to try the next one soon.
 			d.log().Info("import rejected", "album_job", job.ID, "folder", folder, "reasons", rejections)
 			d.cleanupAttempt(ctx, job.ID, names)
+			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import rejected", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
@@ -513,7 +637,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 		_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 		if err != nil {
 			d.log().Error("album status failed", "album_job", job.ID, "err", err)
-			d.escalateIfStuck(ctx, job, active.ID, names, "album status check failed", now)
+			d.escalateIfStuck(ctx, job, active.ID, active.Username, names, "album status check failed", now)
 			continue
 		}
 		if coverage(importable) < total {
@@ -523,6 +647,7 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 			d.log().Info("incomplete download, rejecting", "album_job", job.ID, "folder", folder,
 				"covered", coverage(importable), "total", total)
 			d.cleanupAttempt(ctx, job.ID, names)
+			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "incomplete download", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
@@ -547,12 +672,13 @@ func (d *Discoverer) advanceImporting(ctx context.Context, now time.Time) error 
 // folder - does not stay stuck in VERIFYING indefinitely, starving every
 // other job's discovery tick. Called after logging the triggering error;
 // within the timeout it is a no-op, so the job simply gets retried next tick.
-func (d *Discoverer) escalateIfStuck(ctx context.Context, job core.AlbumJob, attemptID int64, filenames []string, reason string, now time.Time) {
+func (d *Discoverer) escalateIfStuck(ctx context.Context, job core.AlbumJob, attemptID int64, username string, filenames []string, reason string, now time.Time) {
 	if now.Sub(job.UpdatedAt) <= d.p.ImportConfirmTimeout {
 		return
 	}
 	d.log().Info("verifying stuck past timeout, cooling down", "album_job", job.ID, "reason", reason)
 	d.cleanupAttempt(ctx, job.ID, filenames)
+	d.recordOutcome(ctx, job, username, false, now)
 	if err := d.p.Store.FailAttempt(ctx, attemptID, reason, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 		d.log().Error("fail attempt failed", "attempt", attemptID, "err", err)
 	}
@@ -622,6 +748,7 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 			d.log().Error("album status failed", "album_job", job.ID, "err", err)
 			if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
 				d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID)
+				d.recordOutcome(ctx, job, active.Username, false, now)
 				_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
 				if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 					d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
@@ -631,6 +758,7 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 		}
 		if present >= total {
 			d.log().Info("import confirmed, completed", "album_job", job.ID)
+			d.recordOutcome(ctx, job, active.Username, true, now)
 			_ = d.p.Store.SucceedAttempt(ctx, active.ID, now)
 			if err := d.p.Store.AdvanceJobState(ctx, job.ID, core.StateCompleted, now); err != nil {
 				d.log().Error("advance to completed failed", "album_job", job.ID, "err", err)
@@ -639,6 +767,7 @@ func (d *Discoverer) confirmImports(ctx context.Context, now time.Time) error {
 		}
 		if now.Sub(job.UpdatedAt) > d.p.ImportConfirmTimeout {
 			d.log().Info("import not confirmed in time, cooling down", "album_job", job.ID, "present", present, "total", total)
+			d.recordOutcome(ctx, job, active.Username, false, now)
 			_ = d.p.Store.FailAttempt(ctx, active.ID, "import not confirmed", now.Add(d.p.FailedCandidateBackoff), now)
 			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
 				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)

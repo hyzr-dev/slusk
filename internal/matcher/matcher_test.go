@@ -3,6 +3,7 @@ package matcher
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
@@ -15,7 +16,7 @@ func TestRankPrefersHigherBitrateFlac(t *testing.T) {
 		{Username: "low", Filename: "a.mp3", BitRate: 200},
 		{Username: "high", Filename: "a.flac", BitRate: 1000},
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if len(ranked) != 2 {
 		t.Fatalf("expected 2 candidates, got %d", len(ranked))
 	}
@@ -30,7 +31,7 @@ func TestRankGroupsByUser(t *testing.T) {
 		{Username: "bob", Filename: "01.flac", BitRate: 900},
 		{Username: "bob", Filename: "02.flac", BitRate: 900},
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if len(ranked) != 1 {
 		t.Fatalf("expected 1 candidate (grouped), got %d", len(ranked))
 	}
@@ -45,7 +46,7 @@ func TestRankDropsBelowBitrateFloor(t *testing.T) {
 		{Username: "lowmp3", Filename: "a.mp3", BitRate: 128}, // below floor -> dropped
 		{Username: "flac", Filename: "a.flac", BitRate: 0},    // lossless -> kept even with 0 bitrate
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	for _, c := range ranked {
 		if c.Username == "lowmp3" {
 			t.Errorf("128kbps mp3 should be dropped by the 192 floor")
@@ -62,7 +63,7 @@ func TestRankRewardsReliableUploader(t *testing.T) {
 		{Username: "busy", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: false, QueueLength: 20},
 		{Username: "free", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: true, QueueLength: 0},
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if ranked[0].Username != "free" {
 		t.Errorf("free-slot uploader should rank first, got %q", ranked[0].Username)
 	}
@@ -81,7 +82,7 @@ func TestRankDedupesTracksWithinSameDirectory(t *testing.T) {
 		{Username: "tau", Filename: `music\Eden\02 Second Light.flac`, BitRate: 900},
 		{Username: "tau", Filename: `music\Eden\02 Second Light.mp3`, BitRate: 320},
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if len(ranked) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(ranked))
 	}
@@ -105,7 +106,7 @@ func TestRankDedupeKeepsWholeReleaseOneFormat(t *testing.T) {
 		{Username: "tau", Filename: `music\Eden\01 First Light.mp3`, BitRate: 320},
 		{Username: "tau", Filename: `music\Eden\02 Second Light.mp3`, BitRate: 320}, // no FLAC counterpart
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if len(ranked) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(ranked))
 	}
@@ -127,7 +128,7 @@ func TestRankGroupsPerReleaseNotPerUser(t *testing.T) {
 		{Username: "tau", Filename: `music\Belvedere\Seven Years MP3\01.mp3`, BitRate: 320},
 		{Username: "tau", Filename: `music\Belvedere\Seven Years MP3\02.mp3`, BitRate: 320},
 	}
-	ranked := s.Rank(results)
+	ranked := s.Rank(results, nil, time.Now())
 	if len(ranked) != 2 {
 		t.Fatalf("expected 2 candidates (one per release directory), got %d", len(ranked))
 	}

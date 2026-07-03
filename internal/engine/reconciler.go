@@ -16,22 +16,27 @@ type ReconcileStats struct {
 	Cancelled int
 	Lost      int
 	Retried   int
+	Stalled   int
 	Unknown   int
 }
 
 // Reconciler compares slskdarr's persisted transfers against slskd's live list
 // and reconciles the differences. It runs identically at startup and on a timer.
 type Reconciler struct {
-	peers      PeerNetwork
-	store      JobStore
-	maxRetries int
+	peers        PeerNetwork
+	store        JobStore
+	maxRetries   int
+	stallTimeout time.Duration
 }
 
 // NewReconciler constructs a Reconciler. maxRetries bounds how many times a
 // transfer rejected for a transient reason (e.g. a peer's queued-megabyte
-// limit) is re-queued before it is finally errored.
-func NewReconciler(peers PeerNetwork, store JobStore, maxRetries int) *Reconciler {
-	return &Reconciler{peers: peers, store: store, maxRetries: maxRetries}
+// limit) is re-queued before it is finally errored. stallTimeout is how long an
+// IN_PROGRESS transfer may go without byte progress before it is cancelled and
+// retried, so a dead download is reclaimed early rather than waiting out its
+// (enqueue-relative) deadline.
+func NewReconciler(peers PeerNetwork, store JobStore, maxRetries int, stallTimeout time.Duration) *Reconciler {
+	return &Reconciler{peers: peers, store: store, maxRetries: maxRetries, stallTimeout: stallTimeout}
 }
 
 // mapSlskdState translates a slskd transfer state string to our TransferState.
@@ -138,7 +143,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		}
 		lt, ok := matchLive(tr)
 		if !ok {
-			// In our DB, gone from slskd: lost.
+			// In our DB, gone from slskd's live list: lost. This is the path a slskd
+			// restart takes - it wipes its in-memory transfer list, so every transfer
+			// that was in flight looks "lost" even though nothing about the download
+			// itself failed. Since the peer is usually still willing to resend, treat
+			// this the same as a transient rejection: retry within the shared budget
+			// rather than failing the whole attempt outright. Bounded so a transfer
+			// that keeps vanishing (rather than recovering after a restart) still
+			// errors out instead of retrying forever.
+			if tr.Retries < r.maxRetries {
+				_ = r.store.RetryTransfer(ctx, tr.ID, now)
+				stats.Retried++
+				continue
+			}
 			_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 			stats.Lost++
 			continue
@@ -155,6 +172,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, now time.Time) (ReconcileSta
 		if newState == core.TransferErrored && tr.Retries < r.maxRetries && isRetryable(lt.Exception) {
 			_ = r.store.RetryTransfer(ctx, tr.ID, now)
 			stats.Retried++
+			continue
+		}
+		// A transfer still IN_PROGRESS but making no byte progress for longer than
+		// stallTimeout is treated as dead: the peer stopped sending without
+		// disconnecting, so it would otherwise live on until its enqueue-relative
+		// deadline. Cancel it in slskd first (same must-cancel-before-record rule as
+		// the deadline path above), then retry within budget or error it out once the
+		// budget is spent, reclaiming the attempt early.
+		if newState == core.TransferInProgress && tr.LastProgressAt != nil &&
+			now.Sub(*tr.LastProgressAt) > r.stallTimeout {
+			if err := r.peers.Cancel(ctx, tr.Username, lt.ID); err != nil {
+				// Leave it non-terminal; the next pass retries the cancel.
+				continue
+			}
+			if tr.Retries < r.maxRetries {
+				_ = r.store.RetryTransfer(ctx, tr.ID, now)
+			} else {
+				_ = r.store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+			}
+			stats.Stalled++
 			continue
 		}
 		_ = r.store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now)
