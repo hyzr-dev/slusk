@@ -257,7 +257,10 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 
 // searchOnce starts one async slskd search, polls until it completes or timeout,
 // then returns the peers' result files (locked files skipped), each enriched with
-// its peer's upload-availability signals. The search is deleted from slskd after.
+// its peer's upload-availability signals. The search is left in slskd afterward —
+// deleting it here used to race slskd's own async finalize of the same search,
+// which surfaced as EF Core "affected 0 rows" errors and could drop responses;
+// slskd manages its own search history/retention, so we don't need to clean up.
 func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -269,12 +272,6 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 	if started.ID == "" {
 		return nil, fmt.Errorf("slskd search returned no id")
 	}
-	defer func() {
-		// Best-effort cleanup with a fresh short context (ctx may be done).
-		delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer delCancel()
-		_ = c.do(delCtx, http.MethodDelete, "/api/v0/searches/"+url.PathEscape(started.ID), nil, nil)
-	}()
 
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()

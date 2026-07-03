@@ -194,8 +194,6 @@ func TestSearchPollsThenReturnsFlattenedResults(t *testing.T) {
 			     {"filename":"@@x\\A\\locked.flac","size":100,"bitRate":900,"isLocked":true}
 			   ]}
 			]`))
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -241,8 +239,6 @@ func TestSearchRetriesOnEmptyResults(t *testing.T) {
 				w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,
 				  "files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
 			}
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
 	defer srv.Close()
@@ -273,8 +269,6 @@ func TestSearchGivesUpAfterRetriesWhenEmpty(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
 			w.Write([]byte(`[]`)) // genuinely no matches: stays empty every attempt
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
 	defer srv.Close()
@@ -305,8 +299,6 @@ func TestSearchReturnsPartialOnTimeout(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
 			w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
 	defer srv.Close()
