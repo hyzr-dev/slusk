@@ -231,13 +231,32 @@ func (d *Discoverer) startJob(ctx context.Context, job core.AlbumJob, wanted map
 		}
 		return err
 	}
-	results, err := d.p.Peers.Search(ctx, album.ArtistName+" "+album.Title, d.p.SearchTimeout)
+	query := album.ArtistName + " " + album.Title
+	results, err := d.p.Peers.Search(ctx, query, d.p.SearchTimeout)
 	if err != nil {
 		return err
 	}
+	if len(results) == 0 {
+		// The primary query returned no raw results at all (not just no
+		// candidates after ranking/filtering - that's the results' fault, not
+		// the query's). Try once with a looser, normalized query: peers'
+		// shared folder names rarely carry suffixes like "(Deluxe Edition)" or
+		// characters like "&" verbatim, so stripping them can turn a zero-hit
+		// search into a match. Skipped entirely when normalizing is a no-op,
+		// to avoid doubling search traffic for nothing.
+		if fallback := normalizeQuery(query); fallback != query {
+			d.log().Info("primary search empty, trying normalized query",
+				"album_job", job.ID, "query", fallback)
+			results, err = d.p.Peers.Search(ctx, fallback, d.p.SearchTimeout)
+			if err != nil {
+				return err
+			}
+			query = fallback
+		}
+	}
 	candidates := d.p.Ranker.Rank(results)
 	d.log().Info("searched album",
-		"album_job", job.ID, "query", album.ArtistName+" "+album.Title,
+		"album_job", job.ID, "query", query,
 		"results", len(results), "candidates", len(candidates))
 	// Fetch the album's expected track count once per startJob call (not per
 	// candidate) to size-sanity-check candidates below. total == 0 means Lidarr
