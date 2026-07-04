@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 )
@@ -128,97 +127,5 @@ func TestReliabilityForOmitsUsernamesWithNoHistory(t *testing.T) {
 	}
 	if _, ok := rel["known"]; !ok {
 		t.Errorf("expected 'known' present in the result")
-	}
-}
-
-// TestOpenMigratesPreExistingDBMissingReliabilityTables reproduces opening a
-// database created before artist_id and the known_users/artist_user_reliability
-// tables existed: Open must add the column and create the tables rather than
-// failing, and RecordAttemptOutcome/ReliabilityFor must work immediately after.
-func TestOpenMigratesPreExistingDBMissingReliabilityTables(t *testing.T) {
-	path := t.TempDir() + "/legacy_reliability.db"
-
-	legacyDB, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	if _, err := legacyDB.Exec(`CREATE TABLE album_jobs (
-		id               INTEGER PRIMARY KEY AUTOINCREMENT,
-		lidarr_album_id  INTEGER NOT NULL,
-		state            TEXT NOT NULL,
-		candidates_tried INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at  DATETIME,
-		created_at       DATETIME NOT NULL,
-		updated_at       DATETIME NOT NULL,
-		title            TEXT NOT NULL DEFAULT '',
-		artist_name      TEXT NOT NULL DEFAULT '',
-		release_date     TEXT NOT NULL DEFAULT '',
-		UNIQUE(lidarr_album_id)
-	)`); err != nil {
-		t.Fatalf("create legacy album_jobs: %v", err)
-	}
-	if _, err := legacyDB.Exec(`CREATE TABLE candidate_attempts (
-		id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		album_job_id  INTEGER NOT NULL REFERENCES album_jobs(id),
-		username      TEXT NOT NULL,
-		score         REAL NOT NULL,
-		state         TEXT NOT NULL,
-		fail_reason   TEXT NOT NULL DEFAULT '',
-		backoff_until DATETIME,
-		created_at    DATETIME NOT NULL,
-		updated_at    DATETIME NOT NULL
-	)`); err != nil {
-		t.Fatalf("create legacy candidate_attempts: %v", err)
-	}
-	if _, err := legacyDB.Exec(`CREATE TABLE transfers (
-		id               INTEGER PRIMARY KEY AUTOINCREMENT,
-		attempt_id       INTEGER NOT NULL REFERENCES candidate_attempts(id),
-		slskd_id         TEXT NOT NULL DEFAULT '',
-		username         TEXT NOT NULL,
-		filename         TEXT NOT NULL,
-		state            TEXT NOT NULL,
-		bytes_done       INTEGER NOT NULL DEFAULT 0,
-		bytes_total      INTEGER NOT NULL DEFAULT 0,
-		retries          INTEGER NOT NULL DEFAULT 0,
-		deadline         DATETIME,
-		last_progress_at DATETIME,
-		updated_at       DATETIME NOT NULL,
-		UNIQUE(username, filename)
-	)`); err != nil {
-		t.Fatalf("create legacy transfers: %v", err)
-	}
-	if _, err := legacyDB.Exec(
-		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at) VALUES (1, 'DISCOVERED', datetime('now'), datetime('now'))`); err != nil {
-		t.Fatalf("seed album_jobs: %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
-	}
-
-	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open on pre-migration db: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-
-	ctx := context.Background()
-	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	if err := s.RecordAttemptOutcome(ctx, 5, "migrated_peer", true, now); err != nil {
-		t.Fatalf("RecordAttemptOutcome after migration: %v", err)
-	}
-	rel, err := s.ReliabilityFor(ctx, 5, []string{"migrated_peer"})
-	if err != nil {
-		t.Fatalf("ReliabilityFor after migration: %v", err)
-	}
-	if rel["migrated_peer"].Artist.SuccessCount != 1 {
-		t.Errorf("artist success count = %d, want 1", rel["migrated_peer"].Artist.SuccessCount)
-	}
-
-	var artistID int64
-	if err := s.db.QueryRow(`SELECT artist_id FROM album_jobs WHERE id = 1`).Scan(&artistID); err != nil {
-		t.Fatalf("select migrated artist_id column: %v", err)
-	}
-	if artistID != 0 {
-		t.Errorf("artist_id = %d, want backfilled default 0", artistID)
 	}
 }

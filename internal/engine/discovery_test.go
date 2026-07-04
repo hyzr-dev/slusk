@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +19,14 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
+
+// TestMain starts one embedded Postgres instance for this package's
+// store-backed tests (see newBackedStore).
+func TestMain(m *testing.M) {
+	os.Exit(storetest.Run(m))
+}
 
 // --- fakes ---
 
@@ -130,11 +137,10 @@ type discoBackedStore struct {
 	*store.Store
 }
 
-// newBackedStore opens a fresh store in a temp dir, closed automatically.
+// newBackedStore opens a store against a fresh per-test database, closed automatically.
 func newBackedStore(t *testing.T) *discoBackedStore {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(path)
+	st, err := store.Open(storetest.DSN(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

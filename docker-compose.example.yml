@@ -1,20 +1,24 @@
 # docker-compose for slskdarr.
 # slskdarr never touches the media files (it only passes the completed-downloads
-# path to Lidarr's import API), so it needs NO media mount — just config + a small
-# volume for its SQLite DB + network access to Lidarr/slskd.
+# path to Lidarr's import API), so it needs NO media mount — just config and
+# network access to Lidarr/slskd/Postgres.
 #
-# The DB lives in a NAMED VOLUME (not a host bind mount): bind mounts fail on
-# Docker Desktop for Mac (virtiofs UID mapping), and a fresh named volume is
-# root-owned. The init service below chowns the volume so slskdarr can run as a
-# non-root UID. This works on both Docker Desktop and a Linux server.
+# State lives in PostgreSQL (store.dsn in config.toml), so slskdarr itself needs
+# no data volume. This example bundles a local Postgres for development; in
+# production you would typically point store.dsn at a shared external instance
+# instead (see docker-compose.prod.yml).
 
 services:
-  # One-shot: make the data volume writable by the non-root slskdarr user, then exit.
-  slskdarr-init:
-    image: busybox
-    command: chown -R 1000:1000 /data
+  postgres:
+    image: postgres:17-alpine
+    container_name: slskdarr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slskdarr
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: slskdarr
     volumes:
-      - slskdarr-data:/data
+      - slskdarr-pgdata:/var/lib/postgresql/data
 
   slskdarr:
     build: .
@@ -22,23 +26,21 @@ services:
     container_name: slskdarr
     restart: unless-stopped
 
-    # Non-root. Set this to your usual arr PUID:PGID; must match the init chown above.
+    # Non-root. Set this to your usual arr PUID:PGID.
     user: "1000:1000"
 
     depends_on:
-      slskdarr-init:
-        condition: service_completed_successfully
+      - postgres
 
     volumes:
       - ./config.toml:/config/config.toml:ro
-      - slskdarr-data:/data
 
     ports:
       # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
       - "9090:9090"
 
 volumes:
-  slskdarr-data:
+  slskdarr-pgdata:
 
 # --- Option: run inside your existing arr-stack compose ---
 # If slskd/lidarr are services in the SAME compose project, put slskdarr on their

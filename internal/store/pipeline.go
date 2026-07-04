@@ -36,7 +36,7 @@ func (s *Store) JobsInState(ctx context.Context, state core.AlbumJobState, limit
 	if state == core.StateDiscovered {
 		order = "ORDER BY release_date DESC, updated_at"
 	}
-	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE state = ? `+order+` LIMIT ?`, string(state), limit)
+	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE state = $1 `+order+` LIMIT $2`, string(state), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,7 @@ func (s *Store) CountJobsInStates(ctx context.Context, states ...core.AlbumJobSt
 	placeholders := make([]string, len(states))
 	args := make([]any, len(states))
 	for i, st := range states {
-		placeholders[i] = "?"
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = string(st)
 	}
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM album_jobs WHERE state IN (%s)`, strings.Join(placeholders, ","))
@@ -67,7 +67,7 @@ func (s *Store) CountJobsInStates(ctx context.Context, states ...core.AlbumJobSt
 // DueCooldownJobs returns up to limit COOLDOWN jobs whose next_attempt_at has passed.
 func (s *Store) DueCooldownJobs(ctx context.Context, now time.Time, limit int) ([]core.AlbumJob, error) {
 	rows, err := s.db.QueryContext(ctx,
-		jobSelect+` WHERE state = ? AND next_attempt_at IS NOT NULL AND next_attempt_at <= ? ORDER BY next_attempt_at LIMIT ?`,
+		jobSelect+` WHERE state = $1 AND next_attempt_at IS NOT NULL AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3`,
 		string(core.StateCooldown), now, limit)
 	if err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func (s *Store) DueCooldownJobs(ctx context.Context, now time.Time, limit int) (
 func (s *Store) AttemptsForJob(ctx context.Context, jobID int64) ([]core.CandidateAttempt, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, album_job_id, username, score, state, fail_reason, backoff_until, created_at, updated_at
-		 FROM candidate_attempts WHERE album_job_id = ? ORDER BY created_at`, jobID)
+		 FROM candidate_attempts WHERE album_job_id = $1 ORDER BY created_at`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (s *Store) AttemptsForJob(ctx context.Context, jobID int64) ([]core.Candida
 
 // TransfersForAttempt returns all transfers belonging to a candidate attempt.
 func (s *Store) TransfersForAttempt(ctx context.Context, attemptID int64) ([]core.Transfer, error) {
-	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE attempt_id = ?`, attemptID)
+	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE attempt_id = $1`, attemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ func (s *Store) TransfersForAttempt(ctx context.Context, attemptID int64) ([]cor
 // FailAttempt marks a candidate attempt FAILED with a reason and a backoff time.
 func (s *Store) FailAttempt(ctx context.Context, attemptID int64, reason string, backoffUntil, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'FAILED', fail_reason = ?, backoff_until = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE candidate_attempts SET state = 'FAILED', fail_reason = $1, backoff_until = $2, updated_at = $3 WHERE id = $4`,
 		reason, backoffUntil, now, attemptID)
 	if err != nil {
 		return fmt.Errorf("fail attempt: %w", err)
@@ -120,7 +120,7 @@ func (s *Store) FailAttempt(ctx context.Context, attemptID int64, reason string,
 // SucceedAttempt marks a candidate attempt SUCCEEDED.
 func (s *Store) SucceedAttempt(ctx context.Context, attemptID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'SUCCEEDED', updated_at = ? WHERE id = ?`, now, attemptID)
+		`UPDATE candidate_attempts SET state = 'SUCCEEDED', updated_at = $1 WHERE id = $2`, now, attemptID)
 	if err != nil {
 		return fmt.Errorf("succeed attempt: %w", err)
 	}
@@ -130,7 +130,7 @@ func (s *Store) SucceedAttempt(ctx context.Context, attemptID int64, now time.Ti
 // SetJobCooldown moves a job to COOLDOWN with the given next-attempt time.
 func (s *Store) SetJobCooldown(ctx context.Context, jobID int64, nextAttemptAt, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE album_jobs SET state = $1, next_attempt_at = $2, updated_at = $3 WHERE id = $4`,
 		string(core.StateCooldown), nextAttemptAt, now, jobID)
 	if err != nil {
 		return fmt.Errorf("set job cooldown: %w", err)
@@ -141,7 +141,7 @@ func (s *Store) SetJobCooldown(ctx context.Context, jobID int64, nextAttemptAt, 
 // IncrementCandidatesTried bumps the count of candidates tried for a job.
 func (s *Store) IncrementCandidatesTried(ctx context.Context, jobID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET candidates_tried = candidates_tried + 1, updated_at = ? WHERE id = ?`,
+		`UPDATE album_jobs SET candidates_tried = candidates_tried + 1, updated_at = $1 WHERE id = $2`,
 		now, jobID)
 	if err != nil {
 		return fmt.Errorf("increment candidates tried: %w", err)
@@ -153,7 +153,7 @@ func (s *Store) IncrementCandidatesTried(ctx context.Context, jobID int64, now t
 // cutoff — used to retry failed albums after failed_retry_after has elapsed.
 func (s *Store) DueFailedJobs(ctx context.Context, cutoff time.Time, limit int) ([]core.AlbumJob, error) {
 	rows, err := s.db.QueryContext(ctx,
-		jobSelect+` WHERE state = ? AND updated_at <= ? ORDER BY updated_at LIMIT ?`,
+		jobSelect+` WHERE state = $1 AND updated_at <= $2 ORDER BY updated_at LIMIT $3`,
 		string(core.StateFailed), cutoff, limit)
 	if err != nil {
 		return nil, err
@@ -173,15 +173,15 @@ func (s *Store) ResetJobForRetry(ctx context.Context, jobID int64, now time.Time
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidate_attempts WHERE album_job_id = ?)`, jobID); err != nil {
+		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidate_attempts WHERE album_job_id = $1)`, jobID); err != nil {
 		return fmt.Errorf("delete transfers: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM candidate_attempts WHERE album_job_id = ?`, jobID); err != nil {
+		`DELETE FROM candidate_attempts WHERE album_job_id = $1`, jobID); err != nil {
 		return fmt.Errorf("delete attempts: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = ?, candidates_tried = 0, next_attempt_at = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE album_jobs SET state = $1, candidates_tried = 0, next_attempt_at = NULL, updated_at = $2 WHERE id = $3`,
 		string(core.StateDiscovered), now, jobID); err != nil {
 		return fmt.Errorf("reset job: %w", err)
 	}

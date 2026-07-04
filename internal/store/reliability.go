@@ -37,12 +37,12 @@ func (s *Store) RecordAttemptOutcome(ctx context.Context, artistID int64, userna
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO known_users (username, success_count, fail_count, last_success_at, last_fail_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT(username) DO UPDATE SET
-		   success_count = success_count + excluded.success_count,
-		   fail_count = fail_count + excluded.fail_count,
-		   last_success_at = COALESCE(excluded.last_success_at, last_success_at),
-		   last_fail_at = COALESCE(excluded.last_fail_at, last_fail_at),
+		   success_count = known_users.success_count + excluded.success_count,
+		   fail_count = known_users.fail_count + excluded.fail_count,
+		   last_success_at = COALESCE(excluded.last_success_at, known_users.last_success_at),
+		   last_fail_at = COALESCE(excluded.last_fail_at, known_users.last_fail_at),
 		   updated_at = excluded.updated_at`,
 		username, successInc, failInc, successAt, failAt, now); err != nil {
 		return fmt.Errorf("upsert known_users: %w", err)
@@ -53,18 +53,18 @@ func (s *Store) RecordAttemptOutcome(ctx context.Context, artistID int64, userna
 	}
 
 	var userID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM known_users WHERE username = ?`, username).Scan(&userID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM known_users WHERE username = $1`, username).Scan(&userID); err != nil {
 		return fmt.Errorf("read known_users id: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO artist_user_reliability (artist_id, user_id, success_count, fail_count, last_success_at, last_fail_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT(artist_id, user_id) DO UPDATE SET
-		   success_count = success_count + excluded.success_count,
-		   fail_count = fail_count + excluded.fail_count,
-		   last_success_at = COALESCE(excluded.last_success_at, last_success_at),
-		   last_fail_at = COALESCE(excluded.last_fail_at, last_fail_at),
+		   success_count = artist_user_reliability.success_count + excluded.success_count,
+		   fail_count = artist_user_reliability.fail_count + excluded.fail_count,
+		   last_success_at = COALESCE(excluded.last_success_at, artist_user_reliability.last_success_at),
+		   last_fail_at = COALESCE(excluded.last_fail_at, artist_user_reliability.last_fail_at),
 		   updated_at = excluded.updated_at`,
 		artistID, userID, successInc, failInc, successAt, failAt, now); err != nil {
 		return fmt.Errorf("upsert artist_user_reliability: %w", err)
@@ -87,13 +87,18 @@ func (s *Store) ReliabilityFor(ctx context.Context, artistID int64, usernames []
 	if len(usernames) == 0 {
 		return out, nil
 	}
-	placeholders := make([]string, len(usernames))
+	// The global query uses $1..$N for the usernames; the artist-scoped query
+	// below prepends artist_id as $1, so its username placeholders shift to
+	// $2..$N+1 and need their own IN clause.
+	globalPlaceholders := make([]string, len(usernames))
+	artistPlaceholders := make([]string, len(usernames))
 	args := make([]any, len(usernames))
 	for i, u := range usernames {
-		placeholders[i] = "?"
+		globalPlaceholders[i] = fmt.Sprintf("$%d", i+1)
+		artistPlaceholders[i] = fmt.Sprintf("$%d", i+2)
 		args[i] = u
 	}
-	inClause := strings.Join(placeholders, ",")
+	inClause := strings.Join(globalPlaceholders, ",")
 
 	globalRows, err := s.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT username, success_count, fail_count, last_success_at, last_fail_at
@@ -123,7 +128,7 @@ func (s *Store) ReliabilityFor(ctx context.Context, artistID int64, usernames []
 		fmt.Sprintf(`SELECT ku.username, aur.success_count, aur.fail_count, aur.last_success_at, aur.last_fail_at
 		 FROM artist_user_reliability aur
 		 JOIN known_users ku ON ku.id = aur.user_id
-		 WHERE aur.artist_id = ? AND ku.username IN (%s)`, inClause), artistArgs...)
+		 WHERE aur.artist_id = $1 AND ku.username IN (%s)`, strings.Join(artistPlaceholders, ",")), artistArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("query artist_user_reliability: %w", err)
 	}

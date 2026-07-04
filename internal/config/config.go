@@ -79,7 +79,9 @@ type Weights struct {
 
 // StoreConfig is the persistent store configuration.
 type StoreConfig struct {
-	Path string `toml:"path"`
+	// DSN is the PostgreSQL connection string, e.g.
+	// postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable
+	DSN string `toml:"dsn"`
 }
 
 // ObservConfig is the observability configuration.
@@ -196,8 +198,8 @@ func (c Config) Validate() error {
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")
 	}
-	if c.Store.Path == "" {
-		problems = append(problems, "store.path is required")
+	if c.Store.DSN == "" {
+		problems = append(problems, "store.dsn is required")
 	}
 	if c.Observ.ListenAddr == "" {
 		problems = append(problems, "observ.listen_addr is required")

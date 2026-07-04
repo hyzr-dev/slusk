@@ -21,7 +21,7 @@ const jobEventRetention = 30 * 24 * time.Hour
 // AddJobEvent appends one row to a job's audit trail.
 func (s *Store) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO job_events (album_job_id, event, detail, created_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO job_events (album_job_id, event, detail, created_at) VALUES ($1, $2, $3, $4)`,
 		jobID, string(event), detail, now)
 	if err != nil {
 		return fmt.Errorf("add job event: %w", err)
@@ -47,7 +47,7 @@ func scanJobEvents(rows *sql.Rows) ([]core.JobEvent, error) {
 
 // JobEvents returns one job's audit trail, newest first.
 func (s *Store) JobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, error) {
-	rows, err := s.db.QueryContext(ctx, jobEventSelect+` WHERE album_job_id = ? ORDER BY created_at DESC, id DESC`, jobID)
+	rows, err := s.db.QueryContext(ctx, jobEventSelect+` WHERE album_job_id = $1 ORDER BY created_at DESC, id DESC`, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("job events: %w", err)
 	}
@@ -58,7 +58,7 @@ func (s *Store) JobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, er
 // RecentEvents returns the most recent events across every job, newest first,
 // capped at limit. Backs the dashboard's global event timeline (GET /api/events).
 func (s *Store) RecentEvents(ctx context.Context, limit int) ([]core.JobEvent, error) {
-	rows, err := s.db.QueryContext(ctx, jobEventSelect+` ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, jobEventSelect+` ORDER BY created_at DESC, id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("recent events: %w", err)
 	}
@@ -69,7 +69,7 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]core.JobEvent, e
 // PruneJobEvents deletes events older than jobEventRetention, called from the
 // engine loop at most once per hour.
 func (s *Store) PruneJobEvents(ctx context.Context, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM job_events WHERE created_at < ?`, now.Add(-jobEventRetention))
+	_, err := s.db.ExecContext(ctx, `DELETE FROM job_events WHERE created_at < $1`, now.Add(-jobEventRetention))
 	if err != nil {
 		return fmt.Errorf("prune job events: %w", err)
 	}

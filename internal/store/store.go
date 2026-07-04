@@ -1,15 +1,15 @@
-// Package store owns all SQLite persistence and is the only package that runs
-// SQL or opens transactions. All atomic state logic (write-ahead enqueue,
+// Package store owns all PostgreSQL persistence and is the only package that
+// runs SQL or opens transactions. All atomic state logic (write-ahead enqueue,
 // deadline checks, state transitions) lives here.
 package store
 
 import (
-	_ "embed"
 	"database/sql"
+	_ "embed"
 	"fmt"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed schema.sql
@@ -20,14 +20,17 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens (creating if needed) the SQLite database at path and applies the
-// schema idempotently. WAL mode is enabled for safer concurrent reads.
-// Foreign key constraints are enforced on every connection.
-func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
-	db, err := sql.Open("sqlite", dsn)
+// Open connects to the PostgreSQL database at dsn (a postgres:// URL or
+// key=value connection string), verifies the connection with a ping, and
+// applies the schema idempotently.
+func Open(dsn string) (*Store, error) {
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping db: %w", err)
 	}
 	if err := applySchema(db, schemaSQL); err != nil {
 		db.Close()
@@ -36,8 +39,8 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// applySchema splits the schema SQL by semicolons and executes each statement,
-// gracefully handling duplicate column errors from idempotent ALTER TABLE statements.
+// applySchema splits the schema SQL by semicolons and executes each statement.
+// Every statement is CREATE ... IF NOT EXISTS, so the apply is idempotent.
 func applySchema(db *sql.DB, schemaSQL string) error {
 	statements := strings.Split(schemaSQL, ";")
 	for _, stmt := range statements {
@@ -46,10 +49,6 @@ func applySchema(db *sql.DB, schemaSQL string) error {
 			continue
 		}
 		if _, err := db.Exec(stmt); err != nil {
-			// Ignore "duplicate column name" errors from idempotent ALTER TABLE statements
-			if strings.Contains(err.Error(), "duplicate column name") {
-				continue
-			}
 			return err
 		}
 	}

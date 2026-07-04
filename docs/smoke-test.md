@@ -7,14 +7,14 @@ och ner — varje fas bygger på den föregående.
 Nyttiga kommandon (byt ut värden mot dina):
 ```bash
 STATUS=http://192.168.86.33:9090        # observ.listen_addr
-DB=/data/slskdarr.db                    # store.path (i containern)
+PGDSN='postgres://slskdarr:password@localhost:5432/slskdarr'  # store.dsn
 docker logs -f slskdarr                 # strukturerad JSON-logg
 curl -s $STATUS/status | jq             # köade/aktiva/stalled/orphaned
 curl -s $STATUS/metrics | grep slskdarr # Prometheus-mätvärden
-docker exec slskdarr sh -c "sqlite3 $DB 'SELECT id,lidarr_album_id,state,candidates_tried FROM album_jobs'"
+psql "$PGDSN" -c 'SELECT id,lidarr_album_id,state,candidates_tried FROM album_jobs'
 ```
-(Distroless-imagen har ingen shell; kör `sqlite3` från host mot volymen, eller lägg
-en engångs-`alpine`-container på samma volym för DB-inspektion.)
+(Distroless-imagen har ingen shell; kör `psql` från host mot Postgres-instansen,
+eller `docker exec` in i Postgres-containern.)
 
 ---
 
@@ -24,7 +24,8 @@ en engångs-`alpine`-container på samma volym för DB-inspektion.)
       logg-rad och exit (testa: stava fel en nyckel → containern ska dö högljutt, inte
       tyst defaulta).
 - [ ] Containern kör som **oprivilegierad UID** (`docker inspect slskdarr` → `User: nonroot`).
-- [ ] SQLite-filen skapas på den persistenta volymen (`ls -l` på volymen).
+- [ ] Schemat skapas i Postgres-databasen vid start (`psql "$PGDSN" -c '\dt'` visar
+      `album_jobs`, `transfers` m.fl.).
 - [ ] Loggen visar `slskdarr started` med rätt `status_addr`.
 
 ## Fas 2 — Anslutning + observability

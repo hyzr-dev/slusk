@@ -15,7 +15,7 @@ import (
 func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error) {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at)
-		 VALUES (?, ?, ?, ?)
+		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT(lidarr_album_id) DO NOTHING`,
 		lidarrAlbumID, string(core.StateDiscovered), now, now)
 	if err != nil {
@@ -25,7 +25,7 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	var state string
 	err = s.db.QueryRowContext(ctx,
 		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id
-		 FROM album_jobs WHERE lidarr_album_id = ?`, lidarrAlbumID).
+		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
 		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
@@ -40,7 +40,7 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 // corrects a release date after the job was first discovered.
 func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artistName, releaseDate string, artistID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, artist_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE album_jobs SET title = $1, artist_name = $2, release_date = $3, artist_id = $4, updated_at = $5 WHERE id = $6`,
 		title, artistName, releaseDate, artistID, now, jobID)
 	if err != nil {
 		return fmt.Errorf("update job metadata: %w", err)
@@ -56,8 +56,8 @@ func (s *Store) UpdateJobMetadata(ctx context.Context, jobID int64, title, artis
 // Discoverer.syncWanted).
 func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, title, artistName, releaseDate string, artistID int64) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET title = ?, artist_name = ?, release_date = ?, artist_id = ?
-		 WHERE id = ? AND (title = '' OR artist_name = '' OR release_date = '' OR artist_id = 0)`,
+		`UPDATE album_jobs SET title = $1, artist_name = $2, release_date = $3, artist_id = $4
+		 WHERE id = $5 AND (title = '' OR artist_name = '' OR release_date = '' OR artist_id = 0)`,
 		title, artistName, releaseDate, artistID, jobID)
 	if err != nil {
 		return fmt.Errorf("backfill job metadata: %w", err)
@@ -67,14 +67,16 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 
 // CreateAttempt inserts a PENDING candidate attempt and returns its ID.
 func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	var id int64
+	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
-		 VALUES (?, ?, ?, 'PENDING', ?, ?)`,
-		albumJobID, username, score, now, now)
+		 VALUES ($1, $2, $3, 'PENDING', $4, $5)
+		 RETURNING id`,
+		albumJobID, username, score, now, now).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert attempt: %w", err)
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a QUEUED
@@ -84,7 +86,7 @@ func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username st
 func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, username, filename string, deadline, now time.Time) (int64, error) {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transfers (attempt_id, username, filename, state, deadline, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT(username, filename) DO UPDATE SET
 		   attempt_id = excluded.attempt_id,
 		   state = excluded.state,
@@ -98,7 +100,7 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, userna
 	}
 	var id int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM transfers WHERE username = ? AND filename = ?`, username, filename).Scan(&id); err != nil {
+		`SELECT id FROM transfers WHERE username = $1 AND filename = $2`, username, filename).Scan(&id); err != nil {
 		return 0, fmt.Errorf("read transfer id: %w", err)
 	}
 	return id, nil
@@ -114,7 +116,7 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, userna
 func (s *Store) RecordPendingTransfer(ctx context.Context, attemptID int64, username, filename string, size int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transfers (attempt_id, username, filename, state, bytes_total, deadline, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT(username, filename) DO UPDATE SET
 		   attempt_id = excluded.attempt_id,
 		   state = excluded.state,
@@ -134,7 +136,7 @@ func (s *Store) RecordPendingTransfer(ctx context.Context, attemptID int64, user
 // returned so future reconciliation can match on the strong key.
 func (s *Store) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET slskd_id = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE transfers SET slskd_id = $1, updated_at = $2 WHERE id = $3`,
 		slskdID, now, transferID)
 	if err != nil {
 		return fmt.Errorf("attach slskd id: %w", err)
@@ -146,7 +148,7 @@ func (s *Store) AttachTransferID(ctx context.Context, transferID int64, slskdID 
 // used after a crash between RecordEnqueueIntent and AttachTransferID.
 func (s *Store) FindTransferByFallback(ctx context.Context, username, filename string) (core.Transfer, bool, error) {
 	tr, err := scanTransfer(s.db.QueryRowContext(ctx,
-		transferSelect+` WHERE username = ? AND filename = ?`, username, filename))
+		transferSelect+` WHERE username = $1 AND filename = $2`, username, filename))
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Transfer{}, false, nil
 	}
@@ -159,7 +161,7 @@ func (s *Store) FindTransferByFallback(ctx context.Context, username, filename s
 // AdvanceJobState transitions a job to the target state.
 func (s *Store) AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJobState, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3`,
 		string(to), now, jobID)
 	if err != nil {
 		return fmt.Errorf("advance job: %w", err)
@@ -170,7 +172,7 @@ func (s *Store) AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJ
 // TransfersPastDeadline returns non-terminal transfers whose deadline has passed.
 func (s *Store) TransfersPastDeadline(ctx context.Context, now time.Time) ([]core.Transfer, error) {
 	rows, err := s.db.QueryContext(ctx,
-		transferSelect+` WHERE deadline < ? AND state IN (?, ?, ?)`,
+		transferSelect+` WHERE deadline < $1 AND state IN ($2, $3, $4)`,
 		now, string(core.TransferQueued), string(core.TransferInProgress), string(core.TransferStalled))
 	if err != nil {
 		return nil, err
@@ -182,7 +184,7 @@ func (s *Store) TransfersPastDeadline(ctx context.Context, now time.Time) ([]cor
 // ActiveTransfers returns every transfer not in a terminal state.
 func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 	rows, err := s.db.QueryContext(ctx,
-		transferSelect+` WHERE state IN (?, ?, ?)`,
+		transferSelect+` WHERE state IN ($1, $2, $3)`,
 		string(core.TransferQueued), string(core.TransferInProgress), string(core.TransferStalled))
 	if err != nil {
 		return nil, err
@@ -200,12 +202,12 @@ func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 // stall clock starts when the download actually begins rather than at enqueue.
 func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, bytes_done = ?, bytes_total = ?,
+		`UPDATE transfers SET state = $1, bytes_done = $2, bytes_total = $3,
 			last_progress_at = CASE
-				WHEN ? > bytes_done THEN ?
-				WHEN ? = ? AND last_progress_at IS NULL THEN ?
+				WHEN $4 > bytes_done THEN $5
+				WHEN $6::text = $7::text AND last_progress_at IS NULL THEN $8
 				ELSE last_progress_at END,
-			updated_at = ? WHERE id = ?`,
+			updated_at = $9 WHERE id = $10`,
 		string(state), bytesDone, bytesTotal,
 		bytesDone, now,
 		string(state), string(core.TransferInProgress), now,
@@ -228,7 +230,7 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 // re-sent transfer actually starts.
 func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = ?, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE transfers SET state = $1, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = $2 WHERE id = $3`,
 		string(core.TransferPending), now, transferID)
 	if err != nil {
 		return fmt.Errorf("retry transfer: %w", err)
