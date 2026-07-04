@@ -32,7 +32,7 @@ reliability = 0.8
 file_count = 1.0
 
 [store]
-path = "/data/slskdarr.db"
+dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 
 [observ]
 listen_addr = "127.0.0.1:9090"

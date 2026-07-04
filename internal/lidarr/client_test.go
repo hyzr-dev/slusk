@@ -178,8 +178,8 @@ func TestExecuteManualImportBuildsCorrectPayload(t *testing.T) {
 		{
 			ID: 1, Path: "/music/slskd-downloads/A/01.flac",
 			ArtistID: 5, AlbumID: 9, AlbumReleaseID: 13,
-			TrackIDs: []int64{101, 102},
-			Quality:  json.RawMessage(`{"quality":{"id":6,"name":"FLAC"}}`),
+			TrackIDs:     []int64{101, 102},
+			Quality:      json.RawMessage(`{"quality":{"id":6,"name":"FLAC"}}`),
 			IndexerFlags: 0, DisableReleaseSwitching: false,
 		},
 	}

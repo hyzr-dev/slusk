@@ -1,18 +1,22 @@
 package store
 
 import (
-	"context"
-	"database/sql"
-	"path/filepath"
+	"os"
 	"testing"
-	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
 
-// newTestStore opens a fresh store in a temp dir, closed automatically.
+// TestMain starts one embedded Postgres instance for the whole package; each
+// test gets its own database via newTestStore.
+func TestMain(m *testing.M) {
+	os.Exit(storetest.Run(m))
+}
+
+// newTestStore opens a store against a fresh per-test database, closed automatically.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
-	s, err := Open(path)
+	s, err := Open(storetest.DSN(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -23,12 +27,12 @@ func newTestStore(t *testing.T) *Store {
 func TestOpenAppliesSchema(t *testing.T) {
 	s := newTestStore(t)
 
-	// Check that all three required tables exist
+	// Check that all three core tables exist
 	tables := []string{"album_jobs", "candidate_attempts", "transfers"}
 	for _, table := range tables {
 		var count int
 		err := s.db.QueryRow(
-			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
 			table,
 		).Scan(&count)
 		if err != nil {
@@ -44,10 +48,10 @@ func TestForeignKeysEnforced(t *testing.T) {
 	s := newTestStore(t)
 
 	// Try to insert a candidate_attempts row with a non-existent album_job_id.
-	// With foreign key enforcement enabled, this should fail.
+	// The foreign key constraint must reject it.
 	_, err := s.db.Exec(
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at)
-		 VALUES (999, 'testuser', 1.0, 'PENDING', datetime('now'))`,
+		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
+		 VALUES (999, 'testuser', 1.0, 'PENDING', now(), now())`,
 	)
 	if err == nil {
 		t.Fatal("expected foreign key violation, got nil error")
@@ -58,18 +62,16 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 	s := newTestStore(t)
 
 	cols := map[string]bool{}
-	rows, err := s.db.Query(`PRAGMA table_info(album_jobs)`)
+	rows, err := s.db.Query(
+		`SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'album_jobs'`)
 	if err != nil {
-		t.Fatalf("pragma table_info: %v", err)
+		t.Fatalf("query columns: %v", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			t.Fatalf("scan pragma row: %v", err)
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan column row: %v", err)
 		}
 		cols[name] = true
 	}
@@ -81,104 +83,29 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 	}
 }
 
-// TestOpenMigratesPreExistingDBMissingUpdatedAt reproduces opening a database
-// created before candidate_attempts had an updated_at column: Open must add
-// the column and backfill existing rows from created_at, rather than failing.
-func TestOpenMigratesPreExistingDBMissingUpdatedAt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
-
-	// Build a pre-migration candidate_attempts table (no updated_at) and seed
-	// a row, simulating a database written before this migration existed.
-	legacyDB, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	createdAt := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := legacyDB.Exec(`CREATE TABLE album_jobs (
-		id               INTEGER PRIMARY KEY AUTOINCREMENT,
-		lidarr_album_id  INTEGER NOT NULL,
-		state            TEXT NOT NULL,
-		candidates_tried INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at  DATETIME,
-		created_at       DATETIME NOT NULL,
-		updated_at       DATETIME NOT NULL,
-		UNIQUE(lidarr_album_id)
-	)`); err != nil {
-		t.Fatalf("create legacy album_jobs: %v", err)
-	}
-	if _, err := legacyDB.Exec(`CREATE TABLE candidate_attempts (
-		id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		album_job_id  INTEGER NOT NULL REFERENCES album_jobs(id),
-		username      TEXT NOT NULL,
-		score         REAL NOT NULL,
-		state         TEXT NOT NULL,
-		fail_reason   TEXT NOT NULL DEFAULT '',
-		backoff_until DATETIME,
-		created_at    DATETIME NOT NULL
-	)`); err != nil {
-		t.Fatalf("create legacy candidate_attempts: %v", err)
-	}
-	if _, err := legacyDB.Exec(
-		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at) VALUES (1, 'DISCOVERED', ?, ?)`,
-		createdAt, createdAt); err != nil {
-		t.Fatalf("seed album_jobs: %v", err)
-	}
-	if _, err := legacyDB.Exec(
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at) VALUES (1, 'legacy_peer', 1.0, 'PENDING', ?)`,
-		createdAt); err != nil {
-		t.Fatalf("seed candidate_attempts: %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
-	}
-
-	// Opening via the store must migrate the column in rather than erroring.
-	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open on pre-migration db: %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-
-	var updatedAt time.Time
-	if err := s.db.QueryRow(`SELECT updated_at FROM candidate_attempts WHERE username = 'legacy_peer'`).Scan(&updatedAt); err != nil {
-		t.Fatalf("select updated_at: %v", err)
-	}
-	if !updatedAt.Equal(createdAt) {
-		t.Errorf("updated_at = %v, want backfilled to created_at %v", updatedAt, createdAt)
-	}
-
-	// The store must remain fully usable after migration (e.g. FailAttempt's
-	// updated_at write works against the migrated column).
-	if err := s.FailAttempt(context.Background(), 1, "timeout", createdAt.Add(time.Hour), createdAt.Add(time.Minute)); err != nil {
-		t.Fatalf("FailAttempt after migration: %v", err)
-	}
-}
-
-// TestJobViewQueryUsesIndexes guards against the dashboard's ListJobsWithTransfer
-// query falling back to full table scans of candidate_attempts/transfers inside
-// its correlated subqueries. Without covering indexes those scans run once per
-// album_jobs row, which at a few thousand jobs made a single /api/jobs request
-// take tens of seconds of CPU — and the dashboard polls it every 3 seconds, so
-// requests piled up and pinned multiple cores (the 300%-CPU incident).
-func TestJobViewQueryUsesIndexes(t *testing.T) {
+// TestJobViewIndexesExist guards against losing the covering indexes for the
+// dashboard's ListJobsWithTransfer correlated subqueries. Without them those
+// subqueries full-scanned candidate_attempts/transfers once per album_jobs row,
+// which at a few thousand jobs made a single /api/jobs request take tens of
+// seconds of CPU — and the dashboard polls it every 3 seconds, so requests
+// piled up and pinned multiple cores (the 300%-CPU incident).
+//
+// This asserts index existence rather than inspecting the query plan (the old
+// SQLite version used EXPLAIN QUERY PLAN): Postgres deliberately seq-scans
+// small tables even when an index exists, so a plan assertion on an empty test
+// database would be flaky and meaningless.
+func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 
-	rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + jobViewSelect + ` WHERE j.state != 'CANCELLED' ORDER BY j.updated_at DESC`)
-	if err != nil {
-		t.Fatalf("explain query plan: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, parent, notused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
-			t.Fatalf("scan plan row: %v", err)
+	for _, idx := range []string{"idx_attempts_job", "idx_transfers_attempt"} {
+		var count int
+		if err := s.db.QueryRow(
+			`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, idx,
+		).Scan(&count); err != nil {
+			t.Fatalf("query pg_indexes for %s: %v", idx, err)
 		}
-		if detail == "SCAN candidate_attempts" || detail == "SCAN transfers" {
-			t.Errorf("query plan contains full table scan: %q (missing index)", detail)
+		if count != 1 {
+			t.Errorf("index %s missing (dashboard job view would full-scan per job row)", idx)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("plan rows: %v", err)
 	}
 }

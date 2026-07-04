@@ -95,7 +95,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 // ListJobsWithTransfer returns every non-cancelled album job joined with its
 // most recent transfer, newest job first. Used by the dashboard's Queue view.
 func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error) {
-	rows, err := s.db.QueryContext(ctx, jobViewSelect+` WHERE j.state != ? ORDER BY j.updated_at DESC`, string(core.StateCancelled))
+	rows, err := s.db.QueryContext(ctx, jobViewSelect+` WHERE j.state != $1 ORDER BY j.updated_at DESC`, string(core.StateCancelled))
 	if err != nil {
 		return nil, fmt.Errorf("list jobs with transfer: %w", err)
 	}
@@ -116,7 +116,7 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 // recent transfer, for the cancel endpoint. found is false if no job has
 // that id.
 func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
-	row := s.db.QueryRowContext(ctx, jobViewSelect+` WHERE j.id = ?`, jobID)
+	row := s.db.QueryRowContext(ctx, jobViewSelect+` WHERE j.id = $1`, jobID)
 
 	v, err := scanJobView(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -139,7 +139,7 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 	var job core.AlbumJob
 	var state string
 	err := s.db.QueryRowContext(ctx,
-		jobSelect+` WHERE id = ?`, jobID).
+		jobSelect+` WHERE id = $1`, jobID).
 		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.JobDetail{}, false, nil

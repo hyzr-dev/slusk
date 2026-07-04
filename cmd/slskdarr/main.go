@@ -37,7 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, err := store.Open(cfg.Store.Path)
+	st, err := store.Open(cfg.Store.DSN)
 	if err != nil {
 		logger.Error("open store", "err", err)
 		os.Exit(1)

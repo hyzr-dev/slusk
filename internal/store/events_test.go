@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -146,59 +145,5 @@ func TestPruneJobEventsDeletesOnlyOldRows(t *testing.T) {
 	}
 	if events[0].Detail != "recent" {
 		t.Errorf("expected the recent event to survive, got %q", events[0].Detail)
-	}
-}
-
-// TestOpenMigratesPreExistingDBMissingJobEvents reproduces opening a database
-// created before job_events existed: Open must create the table rather than
-// failing, and AddJobEvent/JobEvents must work immediately after.
-func TestOpenMigratesPreExistingDBMissingJobEvents(t *testing.T) {
-	path := t.TempDir() + "/legacy_events.db"
-
-	legacyDB, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
-	}
-	if _, err := legacyDB.Exec(`CREATE TABLE album_jobs (
-		id               INTEGER PRIMARY KEY AUTOINCREMENT,
-		lidarr_album_id  INTEGER NOT NULL,
-		state            TEXT NOT NULL,
-		candidates_tried INTEGER NOT NULL DEFAULT 0,
-		next_attempt_at  DATETIME,
-		created_at       DATETIME NOT NULL,
-		updated_at       DATETIME NOT NULL,
-		title            TEXT NOT NULL DEFAULT '',
-		artist_name      TEXT NOT NULL DEFAULT '',
-		release_date     TEXT NOT NULL DEFAULT '',
-		artist_id        INTEGER NOT NULL DEFAULT 0,
-		UNIQUE(lidarr_album_id)
-	)`); err != nil {
-		t.Fatalf("create legacy album_jobs: %v", err)
-	}
-	if _, err := legacyDB.Exec(
-		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at) VALUES (1, 'DISCOVERED', datetime('now'), datetime('now'))`); err != nil {
-		t.Fatalf("seed album_jobs: %v", err)
-	}
-	if err := legacyDB.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
-	}
-
-	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open on pre-migration db (missing job_events): %v", err)
-	}
-	t.Cleanup(func() { s.Close() })
-
-	ctx := context.Background()
-	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	if err := s.AddJobEvent(ctx, 1, core.EventSearch, "post-migration event", now); err != nil {
-		t.Fatalf("AddJobEvent after migration: %v", err)
-	}
-	events, err := s.JobEvents(ctx, 1)
-	if err != nil {
-		t.Fatalf("JobEvents after migration: %v", err)
-	}
-	if len(events) != 1 || events[0].Detail != "post-migration event" {
-		t.Errorf("unexpected events after migration: %+v", events)
 	}
 }

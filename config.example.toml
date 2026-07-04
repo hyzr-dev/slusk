@@ -71,7 +71,9 @@ file_count = 1.0
 known_user = 1.0
 
 [store]
-path = "/data/slskdarr.db"
+# PostgreSQL connection string. The schema is created automatically on startup;
+# the database and user must already exist.
+dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 
 [observ]
 listen_addr = "0.0.0.0:9090"
