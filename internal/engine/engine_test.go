@@ -144,3 +144,38 @@ func TestHealthyReflectsReconcileProgress(t *testing.T) {
 		t.Error("expected unhealthy once staleAfter has already elapsed")
 	}
 }
+
+// TestReconcileOnceBoundedByTickTimeout verifies a reconcile pass stuck on an
+// unresponsive call (e.g. a silently dead pooled DB/network connection) is
+// aborted by a per-tick timeout rather than hanging the engine loop forever.
+// Without this bound, one stuck call freezes every loop iteration permanently
+// since reconcileOnce runs synchronously inside the engine's single goroutine.
+func TestReconcileOnceBoundedByTickTimeout(t *testing.T) {
+	store := &fakeStore{}
+	peers := &fakePeers{hang: true}
+	r := NewReconciler(peers, store, 3, time.Hour)
+
+	eng := New(Params{
+		Reconciler:  r,
+		StatusPoll:  time.Hour, // won't fire again during this test
+		LidarrPoll:  time.Hour,
+		TickTimeout: 20 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.After(200 * time.Millisecond)
+	for eng.ReconcileCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("reconcileOnce did not return within the tick timeout; stuck call hung the engine loop")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}

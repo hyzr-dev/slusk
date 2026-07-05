@@ -22,6 +22,17 @@ type MetricsSink interface {
 // configurable schedule).
 const eventPruneInterval = time.Hour
 
+// defaultTickTimeout bounds a single reconcile/discovery/prune pass when
+// Params.TickTimeout is unset. Every pass runs synchronously inside the
+// engine's one goroutine, so a call with no timeout of its own (database/sql
+// queries have none by default) can otherwise block that goroutine forever -
+// e.g. a pooled DB connection gone silently dead (no FIN/RST reaches either
+// side, so nothing but a deadline detects it) freezes the reconcile loop
+// permanently with no error, crash, or log line. Generous because a
+// legitimate pass can span several sequential slskd/Lidarr HTTP calls, each
+// already bounded at 30s by those clients' own http.Client.Timeout.
+const defaultTickTimeout = 5 * time.Minute
+
 // Params configures an Engine.
 type Params struct {
 	Reconciler   *Reconciler
@@ -32,6 +43,9 @@ type Params struct {
 	Logger       *slog.Logger // nil → reconcile errors are not logged
 	Metrics      MetricsSink  // nil → metrics are not fed
 	EventPruner  EventPruner  // nil → job_events pruning is disabled
+	// TickTimeout bounds each reconcile/discovery/prune pass so a stuck call
+	// cannot hang the engine loop forever. 0 → defaultTickTimeout.
+	TickTimeout time.Duration
 }
 
 // Engine runs the scheduler loops until its context is cancelled.
@@ -46,6 +60,15 @@ type Engine struct {
 // New constructs an Engine.
 func New(p Params) *Engine {
 	return &Engine{p: p}
+}
+
+// tickTimeout returns the configured per-pass timeout, or defaultTickTimeout
+// if unset.
+func (e *Engine) tickTimeout() time.Duration {
+	if e.p.TickTimeout > 0 {
+		return e.p.TickTimeout
+	}
+	return defaultTickTimeout
 }
 
 // ReconcileCount reports how many reconcile passes have run (for tests/metrics).
@@ -118,6 +141,8 @@ func (e *Engine) Run(ctx context.Context) error {
 // pruneEventsOnce deletes job_events rows past the retention window. Runs on
 // eventPruneInterval, independent of the reconcile/discovery loops.
 func (e *Engine) pruneEventsOnce(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, e.tickTimeout())
+	defer cancel()
 	if err := e.p.EventPruner.PruneJobEvents(ctx, time.Now().UTC()); err != nil {
 		if e.p.Logger != nil {
 			e.p.Logger.Error("prune job events failed", "err", err)
@@ -128,6 +153,8 @@ func (e *Engine) pruneEventsOnce(ctx context.Context) {
 // syncWantedOnce refreshes the cached wanted-missing list from Lidarr. It runs
 // on LidarrPoll, independent of how often the state machine advances.
 func (e *Engine) syncWantedOnce(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, e.tickTimeout())
+	defer cancel()
 	wanted, err := e.p.Discoverer.SyncWanted(ctx, time.Now().UTC())
 	if err != nil {
 		if e.p.Logger != nil {
@@ -147,6 +174,8 @@ func (e *Engine) advanceOnce(ctx context.Context) {
 		}
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, e.tickTimeout())
+	defer cancel()
 	if err := e.p.Discoverer.Advance(ctx, e.wanted, time.Now().UTC()); err != nil {
 		if e.p.Logger != nil {
 			e.p.Logger.Error("discovery advance failed", "err", err)
@@ -156,6 +185,8 @@ func (e *Engine) advanceOnce(ctx context.Context) {
 }
 
 func (e *Engine) reconcileOnce(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, e.tickTimeout())
+	defer cancel()
 	stats, err := e.p.Reconciler.Reconcile(ctx, time.Now().UTC())
 	if e.p.Metrics != nil {
 		e.p.Metrics.IncReconcile()
