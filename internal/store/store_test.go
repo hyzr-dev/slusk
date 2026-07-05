@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
@@ -94,6 +95,37 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 // SQLite version used EXPLAIN QUERY PLAN): Postgres deliberately seq-scans
 // small tables even when an index exists, so a plan assertion on an empty test
 // database would be flaky and meaningless.
+// TestOpenRecyclesIdleConnections guards against a pooled connection sitting
+// idle long enough for the network path to silently kill it (e.g. Docker
+// Swarm's overlay network dropping an idle mapping with no FIN/RST reaching
+// either side): with no idle-recycling policy, the next query on that
+// connection blocks forever, since neither the OS nor database/sql notices a
+// connection that looks fine but no longer delivers bytes. Open must configure
+// a connection max idle time so idle connections are proactively replaced
+// well before that can happen.
+func TestOpenRecyclesIdleConnections(t *testing.T) {
+	s, err := openWithLimits(storetest.DSN(t), 10*time.Millisecond, time.Hour)
+	if err != nil {
+		t.Fatalf("openWithLimits: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := s.db.Exec("SELECT 1"); err != nil {
+		t.Fatalf("first query: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.db.Stats().MaxIdleTimeClosed == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("expected at least one connection closed due to ConnMaxIdleTime, got 0 - idle connections are never recycled")
+		}
+		time.Sleep(20 * time.Millisecond) // let the connection sit idle past the limit
+		if _, err := s.db.Exec("SELECT 1"); err != nil {
+			t.Fatalf("query: %v", err)
+		}
+	}
+}
+
 func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 

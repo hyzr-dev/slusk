@@ -15,9 +15,18 @@ type fakePeers struct {
 	downloads []slskd.Transfer
 	cancelled []string
 	cancelErr error
+	// hang, when set, makes ListDownloads block until ctx is done instead of
+	// returning immediately, simulating a stuck network call (e.g. a silently
+	// dead pooled connection) so callers can verify a bounded context aborts it
+	// instead of hanging forever.
+	hang bool
 }
 
 func (f *fakePeers) ListDownloads(ctx context.Context) ([]slskd.Transfer, error) {
+	if f.hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return f.downloads, nil
 }
 func (f *fakePeers) Cancel(ctx context.Context, username, id string) error {

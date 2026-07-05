@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -20,14 +21,33 @@ type Store struct {
 	db *sql.DB
 }
 
+// connMaxIdleTime and connMaxLifetime bound how long a pooled connection may
+// sit idle or stay open before it is proactively replaced. Without this, a
+// connection can go silently dead - e.g. Docker Swarm's overlay network
+// (VXLAN) expiring an idle conntrack mapping with no FIN/RST reaching either
+// side - and the next query on it blocks forever: nothing at the OS or
+// database/sql level notices, since the socket still looks fine. Recycling
+// well before any such idle timeout turns that indefinite hang into, at worst,
+// one query retried on a fresh connection.
+const (
+	connMaxIdleTime = 2 * time.Minute
+	connMaxLifetime = 5 * time.Minute
+)
+
 // Open connects to the PostgreSQL database at dsn (a postgres:// URL or
 // key=value connection string), verifies the connection with a ping, and
 // applies the schema idempotently.
 func Open(dsn string) (*Store, error) {
+	return openWithLimits(dsn, connMaxIdleTime, connMaxLifetime)
+}
+
+func openWithLimits(dsn string, maxIdleTime, maxLifetime time.Duration) (*Store, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	db.SetConnMaxIdleTime(maxIdleTime)
+	db.SetConnMaxLifetime(maxLifetime)
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
