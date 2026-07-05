@@ -1238,6 +1238,46 @@ func TestAdvanceDownloadingCancelErrorRetriesNextTick(t *testing.T) {
 	}
 }
 
+// TestAdvanceDownloadingCancelNotFoundTreatsAsAlreadyCancelled reproduces the
+// production wedge: slskd has already forgotten a transfer (e.g. after its own
+// restart), so cancelling it 404s. Unlike a real cancel failure, a 404 must not
+// leave the job retrying forever - there is nothing left to cancel, so it
+// should be treated as already-terminal and the job allowed to converge.
+func TestAdvanceDownloadingCancelNotFoundTreatsAsAlreadyCancelled(t *testing.T) {
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer notFound.Close()
+	client := slskd.New(notFound.URL, "key")
+	cancelErr := client.Cancel(context.Background(), "someone", "some-id")
+	if !slskd.IsNotFound(cancelErr) {
+		t.Fatalf("expected a 404 from the test server, got %v", cancelErr)
+	}
+
+	peers := &fakeSearcher{cancelErr: cancelErr}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	jobID, _ := st.seedDownloadingJobWithFailedActiveAndPendingSiblings(t, now)
+	d := NewDiscoverer(p)
+
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if states := transferStates(t, st, jobID); states[`A\02.flac`] != core.TransferCancelled {
+		t.Errorf("a 404 on cancel must mark the sibling cancelled locally, got %v", states[`A\02.flac`])
+	}
+
+	// Tick 2: everything now terminal -> cleanup + FailAttempt + COOLDOWN, not
+	// stuck retrying the same 404 forever.
+	if err := d.Advance(ctx, map[int64]lidarr.WantedAlbum{}, now); err != nil {
+		t.Fatalf("Advance tick 2: %v", err)
+	}
+	if got := jobState(t, st, jobID); got != core.StateCooldown {
+		t.Errorf("job should reach COOLDOWN once the vanished sibling is treated as cancelled, got %v", got)
+	}
+}
+
 // TestSweepStaleDownloadsResolvesAllRegardlessOfBatch reproduces the
 // production incident: a batch of DOWNLOADING jobs whose attempts are already
 // fully terminal (reconciled against slskd by the Reconciler) but never got
