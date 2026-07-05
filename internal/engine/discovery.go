@@ -500,91 +500,146 @@ func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) erro
 		return err
 	}
 	for _, job := range jobs {
-		attempts, err := d.p.Store.AttemptsForJob(ctx, job.ID)
-		if err != nil {
+		if _, err := d.resolveDownloadingJob(ctx, job, now); err != nil {
 			return err
-		}
-		if len(attempts) == 0 {
-			continue
-		}
-		active := attempts[len(attempts)-1] // most recent
-		transfers, err := d.p.Store.TransfersForAttempt(ctx, active.ID)
-		if err != nil {
-			return err
-		}
-		allDone, anyFailed := len(transfers) > 0, false
-		var activeSiblings, pendingSiblings []core.Transfer
-		for _, t := range transfers {
-			switch t.State {
-			case core.TransferCompleted:
-			case core.TransferErrored, core.TransferCancelled:
-				anyFailed = true
-				allDone = false
-			case core.TransferPending:
-				// Never sent to slskd; nothing to cancel there, but still not terminal.
-				pendingSiblings = append(pendingSiblings, t)
-				allDone = false
-			default: // QUEUED, IN_PROGRESS, STALLED: still live in slskd.
-				activeSiblings = append(activeSiblings, t)
-				allDone = false
-			}
-		}
-		switch {
-		case anyFailed:
-			// A candidate failed, but other untried candidates usually remain, so
-			// use the short backoff to try the next one soon rather than the long
-			// "nothing new to try" backoff.
-			//
-			// Two-phase fail: never-sent PENDING siblings are cancelled straight in
-			// the DB (nothing exists in slskd to cancel, and without this the attempt
-			// would never reach "all terminal"); still-active siblings are cancelled
-			// in slskd. While any sibling is still live we defer cleanup/FailAttempt/
-			// cooldown to a later tick - deleting the folder now would race those
-			// downloads. The branch re-runs every tick, so the job converges to
-			// "all terminal" within a few ticks.
-			for _, t := range pendingSiblings {
-				if err := d.p.Store.UpdateTransferProgress(ctx, t.ID, core.TransferCancelled, t.BytesDone, t.BytesTotal, now); err != nil {
-					d.log().Error("cancel pending sibling failed", "transfer", t.ID, "err", err)
-				}
-			}
-			if len(activeSiblings) > 0 {
-				d.log().Info("candidate failed, cancelling active siblings before cleanup",
-					"album_job", job.ID, "attempt", active.ID, "active", len(activeSiblings))
-				for _, t := range activeSiblings {
-					if t.SlskdID == "" {
-						// No slskd id yet (enqueue never returned one); the reconciler's
-						// fallback matching will terminate it. Leave it for a later tick.
-						continue
-					}
-					if err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID); err != nil {
-						// Leave it active; the next tick retries the cancel.
-						d.log().Error("cancel active sibling failed", "album_job", job.ID, "transfer", t.ID, "err", err)
-					}
-				}
-				continue
-			}
-			// Every transfer is terminal: safe to clean up and fail the attempt.
-			failedDetail := fmt.Sprintf("candidate %s download failed, cooling down", active.Username)
-			d.log().Info(failedDetail, "album_job", job.ID, "attempt", active.ID)
-			d.recordEvent(ctx, job.ID, core.EventAttemptFailed, failedDetail, now)
-			names := make([]string, 0, len(transfers))
-			for _, t := range transfers {
-				names = append(names, t.Filename)
-			}
-			d.cleanupAttempt(ctx, job.ID, names)
-			d.recordOutcome(ctx, job, active.Username, false, now)
-			if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.FailedCandidateBackoff), now); err != nil {
-				d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
-			}
-			if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
-				d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
-			}
-		case allDone:
-			d.log().Info("download complete, verifying", "album_job", job.ID)
-			_ = d.p.Store.AdvanceJobState(ctx, job.ID, core.StateVerifying, now)
 		}
 	}
 	return nil
+}
+
+// sweepStaleDownloadsLimit bounds SweepStaleDownloads's one-off startup fetch
+// of every DOWNLOADING job, as opposed to advanceDownloading's per-tick
+// d.p.Batch. No real album_jobs table approaches this size.
+const sweepStaleDownloadsLimit = 1 << 20
+
+// SweepStaleDownloads resolves every DOWNLOADING job whose active attempt's
+// transfers are already fully terminal (reconciled against slskd's live list
+// by the Reconciler) but never got picked up by advanceDownloading - e.g. a
+// backlog left behind by a crash where the discovery loop stopped ticking
+// while the reconcile loop kept running independently, so the transfers table
+// reflects reality but album_jobs never caught up. Unlike advanceDownloading,
+// this is unbounded by Batch: intended to be called once at startup so a
+// prior incident's backlog drains immediately rather than over dozens of
+// ticks. Returns how many jobs were resolved.
+func (d *Discoverer) SweepStaleDownloads(ctx context.Context, now time.Time) (int, error) {
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, sweepStaleDownloadsLimit)
+	if err != nil {
+		return 0, err
+	}
+	resolved := 0
+	for _, job := range jobs {
+		did, err := d.resolveDownloadingJob(ctx, job, now)
+		if err != nil {
+			return resolved, err
+		}
+		if did {
+			resolved++
+		}
+	}
+	return resolved, nil
+}
+
+// resolveDownloadingJob advances one DOWNLOADING job to VERIFYING (all
+// transfers completed) or COOLDOWN (any transfer failed, once every sibling
+// has reached a terminal state), or leaves it untouched if genuinely still in
+// flight. Returns whether the job's state changed.
+//
+// The fail path is two-phase: cancel first, clean up once everything is quiet.
+// When an attempt fails while some of its siblings are still QUEUED/IN_PROGRESS/
+// STALLED in slskd, cleaning up (deleting the attempt's download folder) would
+// race those live downloads - slskd keeps writing their bytes back into the
+// folder we just deleted, re-creating exactly the cross-peer collision
+// cleanupAttempt exists to prevent. So we first cancel the still-active siblings
+// in slskd (and mark never-sent PENDING siblings CANCELLED directly, since there
+// is nothing in slskd to cancel), then wait: cleanup, FailAttempt and the
+// cooldown are deferred to a later call once every transfer is terminal.
+func (d *Discoverer) resolveDownloadingJob(ctx context.Context, job core.AlbumJob, now time.Time) (bool, error) {
+	attempts, err := d.p.Store.AttemptsForJob(ctx, job.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(attempts) == 0 {
+		return false, nil
+	}
+	active := attempts[len(attempts)-1] // most recent
+	transfers, err := d.p.Store.TransfersForAttempt(ctx, active.ID)
+	if err != nil {
+		return false, err
+	}
+	allDone, anyFailed := len(transfers) > 0, false
+	var activeSiblings, pendingSiblings []core.Transfer
+	for _, t := range transfers {
+		switch t.State {
+		case core.TransferCompleted:
+		case core.TransferErrored, core.TransferCancelled:
+			anyFailed = true
+			allDone = false
+		case core.TransferPending:
+			// Never sent to slskd; nothing to cancel there, but still not terminal.
+			pendingSiblings = append(pendingSiblings, t)
+			allDone = false
+		default: // QUEUED, IN_PROGRESS, STALLED: still live in slskd.
+			activeSiblings = append(activeSiblings, t)
+			allDone = false
+		}
+	}
+	switch {
+	case anyFailed:
+		// A candidate failed, but other untried candidates usually remain, so
+		// use the short backoff to try the next one soon rather than the long
+		// "nothing new to try" backoff.
+		//
+		// Two-phase fail: never-sent PENDING siblings are cancelled straight in
+		// the DB (nothing exists in slskd to cancel, and without this the attempt
+		// would never reach "all terminal"); still-active siblings are cancelled
+		// in slskd. While any sibling is still live we defer cleanup/FailAttempt/
+		// cooldown to a later call - deleting the folder now would race those
+		// downloads. The caller re-runs every tick, so the job converges to
+		// "all terminal" within a few ticks.
+		for _, t := range pendingSiblings {
+			if err := d.p.Store.UpdateTransferProgress(ctx, t.ID, core.TransferCancelled, t.BytesDone, t.BytesTotal, now); err != nil {
+				d.log().Error("cancel pending sibling failed", "transfer", t.ID, "err", err)
+			}
+		}
+		if len(activeSiblings) > 0 {
+			d.log().Info("candidate failed, cancelling active siblings before cleanup",
+				"album_job", job.ID, "attempt", active.ID, "active", len(activeSiblings))
+			for _, t := range activeSiblings {
+				if t.SlskdID == "" {
+					// No slskd id yet (enqueue never returned one); the reconciler's
+					// fallback matching will terminate it. Leave it for a later tick.
+					continue
+				}
+				if err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID); err != nil {
+					// Leave it active; the next tick retries the cancel.
+					d.log().Error("cancel active sibling failed", "album_job", job.ID, "transfer", t.ID, "err", err)
+				}
+			}
+			return false, nil
+		}
+		// Every transfer is terminal: safe to clean up and fail the attempt.
+		failedDetail := fmt.Sprintf("candidate %s download failed, cooling down", active.Username)
+		d.log().Info(failedDetail, "album_job", job.ID, "attempt", active.ID)
+		d.recordEvent(ctx, job.ID, core.EventAttemptFailed, failedDetail, now)
+		names := make([]string, 0, len(transfers))
+		for _, t := range transfers {
+			names = append(names, t.Filename)
+		}
+		d.cleanupAttempt(ctx, job.ID, names)
+		d.recordOutcome(ctx, job, active.Username, false, now)
+		if err := d.p.Store.FailAttempt(ctx, active.ID, "transfer failed", now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+			d.log().Error("fail attempt failed", "attempt", active.ID, "err", err)
+		}
+		if err := d.p.Store.SetJobCooldown(ctx, job.ID, now.Add(d.p.FailedCandidateBackoff), now); err != nil {
+			d.log().Error("set cooldown failed", "album_job", job.ID, "err", err)
+		}
+		return true, nil
+	case allDone:
+		d.log().Info("download complete, verifying", "album_job", job.ID)
+		_ = d.p.Store.AdvanceJobState(ctx, job.ID, core.StateVerifying, now)
+		return true, nil
+	}
+	return false, nil
 }
 
 // advanceImporting is the VERIFYING gate: it asks Lidarr what it would import
