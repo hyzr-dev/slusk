@@ -420,8 +420,12 @@ func (d *Discoverer) topUpAttempt(ctx context.Context, attemptID int64, now time
 // topUpDownloads promotes more PENDING files for every DOWNLOADING job whose
 // in-flight count has dropped below MaxInflightPerPeer, so a throttled candidate
 // keeps making progress across ticks as its earlier files complete.
+//
+// Bounded by MaxActive, not Batch — see advanceDownloading's doc comment: every
+// DOWNLOADING job needs a chance to resend its pending files each tick, and
+// Batch is too small a window once DOWNLOADING approaches MaxActive.
 func (d *Discoverer) topUpDownloads(ctx context.Context, now time.Time) error {
-	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.Batch)
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.MaxActive)
 	if err != nil {
 		return err
 	}
@@ -494,8 +498,16 @@ func (d *Discoverer) albumFor(job core.AlbumJob, wanted map[int64]lidarr.WantedA
 // in slskd (and mark never-sent PENDING siblings CANCELLED directly, since there
 // is nothing in slskd to cancel), then wait: cleanup, FailAttempt and the
 // cooldown are deferred to a later tick once every transfer is terminal.
+//
+// Bounded by MaxActive, not Batch: DOWNLOADING can hold up to MaxActive jobs at
+// once (the pipeline's own concurrency ceiling), all of which need a chance to
+// resolve every tick. Batch is a much smaller per-tick throttle meant for
+// pacing newly-started work (see startNewJobs); reusing it here would starve
+// every DOWNLOADING job outside the oldest-Batch window, since a job's
+// updated_at never advances while it sits in DOWNLOADING, making that window a
+// fixed FIFO that a single stuck job at its head can block indefinitely.
 func (d *Discoverer) advanceDownloading(ctx context.Context, now time.Time) error {
-	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.Batch)
+	jobs, err := d.p.Store.JobsInState(ctx, core.StateDownloading, d.p.MaxActive)
 	if err != nil {
 		return err
 	}
@@ -610,7 +622,21 @@ func (d *Discoverer) resolveDownloadingJob(ctx context.Context, job core.AlbumJo
 					// fallback matching will terminate it. Leave it for a later tick.
 					continue
 				}
-				if err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID); err != nil {
+				err := d.p.Peers.Cancel(ctx, t.Username, t.SlskdID)
+				switch {
+				case err == nil:
+					// Cancelled in slskd; the reconciler's next pass will observe it
+					// gone from slskd's live list and mark it terminal on our side.
+				case slskd.IsNotFound(err):
+					// slskd already forgot this transfer (e.g. it restarted, or the
+					// transfer silently dropped out of its live list): there is
+					// nothing left to cancel, so treat it as already-terminal here
+					// rather than retrying a cancel that would 404 forever and wedge
+					// this job in DOWNLOADING permanently.
+					if uerr := d.p.Store.UpdateTransferProgress(ctx, t.ID, core.TransferCancelled, t.BytesDone, t.BytesTotal, now); uerr != nil {
+						d.log().Error("mark vanished sibling cancelled failed", "transfer", t.ID, "err", uerr)
+					}
+				default:
 					// Leave it active; the next tick retries the cancel.
 					d.log().Error("cancel active sibling failed", "album_job", job.ID, "transfer", t.ID, "err", err)
 				}
