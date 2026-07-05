@@ -156,6 +156,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// A crash can leave DOWNLOADING jobs whose attempt is already fully
+	// terminal in the transfers table (the Reconciler keeps reconciling
+	// transfers against slskd independently of the discovery loop) but were
+	// never picked up by advanceDownloading before the process died. Sweeping
+	// them once at startup - unbounded by Batch - drains that backlog
+	// immediately instead of over dozens of ticks, and unblocks
+	// max_concurrent_active if it had pinned the scheduler at capacity on
+	// zombie rows.
+	sweepCtx, sweepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	resolved, err := discoverer.SweepStaleDownloads(sweepCtx, time.Now().UTC())
+	sweepCancel()
+	if err != nil {
+		logger.Error("sweep stale downloads failed", "err", err)
+	} else if resolved > 0 {
+		logger.Info("swept stale downloading jobs", "resolved", resolved)
+	}
+
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
 	if err := eng.Run(ctx); err != nil {
 		logger.Error("engine stopped", "err", err)

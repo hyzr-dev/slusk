@@ -1238,6 +1238,87 @@ func TestAdvanceDownloadingCancelErrorRetriesNextTick(t *testing.T) {
 	}
 }
 
+// TestSweepStaleDownloadsResolvesAllRegardlessOfBatch reproduces the
+// production incident: a batch of DOWNLOADING jobs whose attempts are already
+// fully terminal (reconciled against slskd by the Reconciler) but never got
+// picked up by advanceDownloading - e.g. after a restart following a crash,
+// before the discovery loop resumes ticking normally. advanceDownloading
+// alone only resolves up to Batch jobs per tick; SweepStaleDownloads must
+// resolve all of them in one pass, unbounded by Batch, since a backlog from a
+// prior incident should not need dozens of ticks to drain.
+func TestSweepStaleDownloadsResolvesAllRegardlessOfBatch(t *testing.T) {
+	peers := &fakeSearcher{}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	p.Batch = 1 // a normal Advance tick would only resolve one of these
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	const n = 4
+	jobIDs := make([]int64, n)
+	for i := 0; i < n; i++ {
+		job, err := st.UpsertDiscoveredJob(ctx, int64(1000+i), now)
+		if err != nil {
+			t.Fatalf("UpsertDiscoveredJob: %v", err)
+		}
+		if err := st.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+			t.Fatalf("AdvanceJobState: %v", err)
+		}
+		attemptID, err := st.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+		if err != nil {
+			t.Fatalf("CreateAttempt: %v", err)
+		}
+		deadline := now.Add(30 * time.Minute)
+		filename := fmt.Sprintf(`A\%02d.flac`, i)
+		transferID, err := st.RecordEnqueueIntent(ctx, attemptID, "bob", filename, deadline, now)
+		if err != nil {
+			t.Fatalf("RecordEnqueueIntent: %v", err)
+		}
+		if err := st.UpdateTransferProgress(ctx, transferID, core.TransferErrored, 0, 0, now); err != nil {
+			t.Fatalf("UpdateTransferProgress: %v", err)
+		}
+		jobIDs[i] = job.ID
+	}
+
+	d := NewDiscoverer(p)
+	resolved, err := d.SweepStaleDownloads(ctx, now)
+	if err != nil {
+		t.Fatalf("SweepStaleDownloads: %v", err)
+	}
+	if resolved != n {
+		t.Errorf("expected %d jobs resolved, got %d", n, resolved)
+	}
+	for _, id := range jobIDs {
+		if got := jobState(t, st, id); got != core.StateCooldown {
+			t.Errorf("job %d: expected COOLDOWN after sweep, got %v", id, got)
+		}
+	}
+}
+
+// TestSweepStaleDownloadsLeavesGenuinelyInFlightJobsAlone verifies the sweep
+// does not force-fail a job that is still legitimately downloading - a
+// still-live active sibling transfer means cleanup must be deferred (cancel
+// it first, then wait), exactly like advanceDownloading's two-phase fail path.
+func TestSweepStaleDownloadsLeavesGenuinelyInFlightJobsAlone(t *testing.T) {
+	peers := &fakeSearcher{cancelErr: errors.New("slskd down")}
+	p, st := newDiscoParams(t, &fakeMusic{}, peers)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	jobID, _ := st.seedDownloadingJobWithFailedActiveAndPendingSiblings(t, now)
+
+	d := NewDiscoverer(p)
+	resolved, err := d.SweepStaleDownloads(ctx, now)
+	if err != nil {
+		t.Fatalf("SweepStaleDownloads: %v", err)
+	}
+	if resolved != 0 {
+		t.Errorf("expected 0 jobs resolved (an active sibling is still live), got %d", resolved)
+	}
+	if got := jobState(t, st, jobID); got != core.StateDownloading {
+		t.Errorf("job should stay DOWNLOADING while a live sibling is uncancelled, got %v", got)
+	}
+}
+
 func TestDiscoverRejectedImportDeletesDownloadedFolder(t *testing.T) {
 	music := &fakeMusic{candidates: []lidarr.ManualImportItem{
 		{ID: 1, Path: "/music/slskd-downloads/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
