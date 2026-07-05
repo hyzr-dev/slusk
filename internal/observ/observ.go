@@ -130,16 +130,28 @@ const (
 // CancelFunc cancels a job by id, returning which outcome occurred.
 type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
-// NewServer returns an http.Handler exposing /metrics, /status, /api/jobs,
-// /api/jobs/{id}/cancel, /api/jobs/{id}/detail, /api/jobs/{id}/events,
-// /api/events, /api/peers, and the dashboard UI at /. failedRetryAfter and
-// maxCandidates are engine config values surfaced in /api/jobs so the
-// dashboard can show a job's retry ETA and candidate budget.
+// HealthyFunc reports whether the engine's reconcile loop is still making
+// progress. Unlike /status (a plain DB read that stays up even if the engine
+// goroutine deadlocks), this is the liveness signal Docker/Swarm should poll.
+type HealthyFunc func() bool
+
+// NewServer returns an http.Handler exposing /metrics, /status, /healthz,
+// /api/jobs, /api/jobs/{id}/cancel, /api/jobs/{id}/detail,
+// /api/jobs/{id}/events, /api/events, /api/peers, and the dashboard UI at /.
+// failedRetryAfter and maxCandidates are engine config values surfaced in
+// /api/jobs so the dashboard can show a job's retry ETA and candidate budget.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	healthy HealthyFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if !healthy() {
+			http.Error(w, "reconcile loop stalled", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		report, err := status(r.Context())
 		if err != nil {

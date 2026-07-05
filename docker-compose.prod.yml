@@ -24,6 +24,13 @@
 #   docker compose -f docker-compose.prod.yml pull
 #   docker compose -f docker-compose.prod.yml up -d
 #
+# The image ships a HEALTHCHECK (see Dockerfile) that polls the reconcile
+# loop's own liveness at /healthz, not just "is the process alive" — a hung
+# HTTP/DB call inside a reconcile pass can otherwise wedge the loop forever
+# without the process ever exiting. Both `docker compose` and `docker stack
+# deploy` (Swarm) read this from the image automatically; Swarm reschedules a
+# task once it's reported unhealthy for --retries consecutive checks.
+#
 # Pin a release with SLSKDARR_TAG=v1.2.3 (env or .env file); omit for :latest.
 # The homelab package-updater-action redeploys automatically on new tags.
 
