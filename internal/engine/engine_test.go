@@ -107,3 +107,40 @@ func TestRunAdvancesIndependentlyOfLidarrPoll(t *testing.T) {
 		t.Errorf("expected multiple discovery ticks driven by TickInterval alone, got %d", eng.DiscoverCount())
 	}
 }
+
+// TestHealthyReflectsReconcileProgress verifies Healthy is false before the
+// first reconcile pass, true shortly after one completes, and false again
+// once staleAfter has elapsed with no further passes (simulating a hung
+// reconcile call blocking the loop without crashing the process).
+func TestHealthyReflectsReconcileProgress(t *testing.T) {
+	store := &fakeStore{}
+	peers := &fakePeers{}
+	r := NewReconciler(peers, store, 3, time.Hour)
+
+	eng := New(Params{
+		Reconciler: r,
+		StatusPoll: time.Hour, // won't fire again during this test
+		LidarrPoll: time.Hour,
+	})
+
+	if eng.Healthy(time.Second) {
+		t.Error("expected unhealthy before any reconcile pass has run")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	time.Sleep(25 * time.Millisecond) // allow the immediate startup reconcile pass
+
+	if !eng.Healthy(time.Second) {
+		t.Error("expected healthy right after a reconcile pass completed")
+	}
+	if eng.Healthy(0) {
+		t.Error("expected unhealthy once staleAfter has already elapsed")
+	}
+}

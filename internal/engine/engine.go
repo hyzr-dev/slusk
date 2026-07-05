@@ -39,6 +39,7 @@ type Engine struct {
 	p              Params
 	reconcileCount atomic.Int64
 	discoverCount  atomic.Int64
+	lastReconcile  atomic.Int64                 // UnixNano of the last completed reconcileOnce, for Healthy
 	wanted         map[int64]lidarr.WantedAlbum // cached by syncWantedOnce, consumed by advanceOnce
 }
 
@@ -54,6 +55,20 @@ func (e *Engine) ReconcileCount() int64 {
 
 // DiscoverCount reports how many discovery passes have run.
 func (e *Engine) DiscoverCount() int64 { return e.discoverCount.Load() }
+
+// Healthy reports whether the reconcile loop is still making progress: it has
+// completed a pass within the last staleAfter window. A hung HTTP or database
+// call inside Reconcile blocks the single-goroutine select loop without
+// crashing the process, so the process-alive check Docker does by default
+// never notices; this is the signal /healthz uses instead so Swarm can detect
+// and restart a stuck-but-running container.
+func (e *Engine) Healthy(staleAfter time.Duration) bool {
+	ns := e.lastReconcile.Load()
+	if ns == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, ns)) <= staleAfter
+}
 
 // Run starts the reconcile loop and, when a Discoverer is configured, the
 // discovery loop, then blocks until ctx is cancelled, at which point it
@@ -164,4 +179,5 @@ func (e *Engine) reconcileOnce(ctx context.Context) {
 		}
 	}
 	e.reconcileCount.Add(1)
+	e.lastReconcile.Store(time.Now().UnixNano())
 }

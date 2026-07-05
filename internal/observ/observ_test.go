@@ -25,6 +25,7 @@ func noopJobDetail(ctx context.Context, jobID int64) (core.JobDetail, bool, erro
 func noopJobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, error)  { return nil, nil }
 func noopRecentEvents(ctx context.Context, limit int) ([]core.JobEvent, error) { return nil, nil }
 func noopPeers(ctx context.Context) ([]core.PeerRow, error)                    { return nil, nil }
+func noopHealthy() bool                                                        { return true }
 
 // newTestHandler builds a NewServer with no-op status/jobs/cancel funcs, for
 // tests that only care about routes unrelated to those three.
@@ -32,7 +33,7 @@ func newTestHandler(reg *prometheus.Registry) http.Handler {
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	return NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	return NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 }
 
 func TestStatusEndpointReturnsReport(t *testing.T) {
@@ -42,7 +43,7 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 	}
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()
@@ -60,13 +61,39 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 	}
 }
 
+func TestHealthzEndpointReflectsLiveness(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
+
+	healthy := true
+	healthyFn := func() bool { return healthy }
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, healthyFn, testFailedRetryAfter, testMaxCandidates)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthy: status code = %d", rec.Code)
+	}
+
+	healthy = false
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stalled: status code = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func TestMetricsEndpointServes(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)
 	m.ReconcileTotal.Inc()
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -89,7 +116,7 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 		}, nil
 	}
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	rec := httptest.NewRecorder()
@@ -147,7 +174,7 @@ func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 		}, nil
 	}
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	rec := httptest.NewRecorder()
@@ -184,7 +211,7 @@ func TestJobsEndpointReturnsNextAttemptForCooldownJob(t *testing.T) {
 		}, nil
 	}
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	rec := httptest.NewRecorder()
@@ -208,7 +235,7 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, errors.New("db exploded") }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	rec := httptest.NewRecorder()
@@ -228,7 +255,7 @@ func TestCancelEndpointSuccess(t *testing.T) {
 		gotID = jobID
 		return CancelResultOK, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/42/cancel", nil)
 	rec := httptest.NewRecorder()
@@ -247,7 +274,7 @@ func TestCancelEndpointNotFound(t *testing.T) {
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultNotFound, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/999/cancel", nil)
 	rec := httptest.NewRecorder()
@@ -265,7 +292,7 @@ func TestCancelEndpointStoreFailure(t *testing.T) {
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) {
 		return CancelResultFailed, errors.New("advance failed")
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/1/cancel", nil)
 	rec := httptest.NewRecorder()
@@ -281,7 +308,7 @@ func TestCancelEndpointBadID(t *testing.T) {
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs/not-a-number/cancel", nil)
 	rec := httptest.NewRecorder()
@@ -311,7 +338,7 @@ func TestJobDetailEndpointReturnsDetail(t *testing.T) {
 			},
 		}, true, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
 	rec := httptest.NewRecorder()
@@ -350,7 +377,7 @@ func TestJobDetailEndpointNotFound(t *testing.T) {
 	jobDetail := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 		return core.JobDetail{}, false, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/999/detail", nil)
 	rec := httptest.NewRecorder()
@@ -384,7 +411,7 @@ func TestJobEventsEndpointReturnsEvents(t *testing.T) {
 			{ID: 1, AlbumJobID: jobID, Event: core.EventSearch, Detail: "searched album", CreatedAt: when},
 		}, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, jobEvents, noopRecentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, jobEvents, noopRecentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/3/events", nil)
 	rec := httptest.NewRecorder()
@@ -412,7 +439,7 @@ func TestEventsEndpointDefaultLimit(t *testing.T) {
 		gotLimit = limit
 		return nil, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, recentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, recentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	rec := httptest.NewRecorder()
@@ -436,7 +463,7 @@ func TestEventsEndpointClampsLimit(t *testing.T) {
 		gotLimit = limit
 		return nil, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, recentEvents, noopPeers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, recentEvents, noopPeers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events?limit=99999", nil)
 	rec := httptest.NewRecorder()
@@ -462,7 +489,7 @@ func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 			},
 		}, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, peers, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, peers, noopHealthy, testFailedRetryAfter, testMaxCandidates)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/peers", nil)
 	rec := httptest.NewRecorder()
