@@ -85,6 +85,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON album_jobs(state);
 CREATE INDEX IF NOT EXISTS idx_candidates_job ON candidates(album_job_id, state);
 CREATE INDEX IF NOT EXISTS idx_transfers_candidate ON transfers(candidate_id, updated_at);
 
+-- idx_candidates_job_created backs the "latest candidate per job" correlated
+-- subquery (jobViewSelect above) and CandidatesForJob's per-job listing, both
+-- of which filter on album_job_id and order by created_at. idx_candidates_job
+-- (album_job_id, state) does not cover that ordering, so without this index
+-- each subquery still full-scans a job's candidates to find the newest one.
+CREATE INDEX IF NOT EXISTS idx_candidates_job_created ON candidates(album_job_id, created_at);
+
 -- known_users and artist_user_reliability hold the running success/fail history
 -- of Soulseek peers, used to score-boost known-good peers (and suppress
 -- consistently-failing ones) in future candidate ranking. CRITICAL: these two

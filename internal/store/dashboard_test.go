@@ -411,3 +411,104 @@ func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
 		t.Errorf("expected no artist-specific rows for artistID<=0, got %+v", np.Artists)
 	}
 }
+
+// TestRetryFailedJobRevivesFailedJob reproduces the dashboard's manual retry
+// button: a FAILED job with retries/failed_at set and leftover
+// candidates/transfers must come back to WANTED with a clean slate.
+func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 20, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("SetJobBackoff: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := s.RetryFailedJob(ctx, job.ID, later)
+	if err != nil {
+		t.Fatalf("RetryFailedJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected RetryFailedJob to return true for a FAILED job")
+	}
+
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, later.Add(time.Hour), 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("RunnableJobsInState: %v %+v", err, jobs)
+	}
+	got := jobs[0]
+	if got.State != core.StateWanted {
+		t.Errorf("State = %q, want WANTED", got.State)
+	}
+	if got.Retries != 0 {
+		t.Errorf("Retries = %d, want 0", got.Retries)
+	}
+	if got.NotBefore != nil {
+		t.Errorf("NotBefore = %v, want nil", got.NotBefore)
+	}
+	if got.FailedAt != nil {
+		t.Errorf("FailedAt = %v, want nil", got.FailedAt)
+	}
+
+	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
+		t.Fatalf("expected zero candidates after RetryFailedJob, found=%v (%v)", found, err)
+	}
+	if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+		t.Fatalf("expected zero transfers after RetryFailedJob, got %d (%v)", len(trs), err)
+	}
+}
+
+// TestRetryFailedJobNoopWhenNotFailed guards the race the dashboard button
+// can lose: if a module moved the job out of FAILED between the dashboard
+// fetching its state and the retry click landing, RetryFailedJob must not
+// touch it.
+func TestRetryFailedJobNoopWhenNotFailed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 21, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+
+	ok, err := s.RetryFailedJob(ctx, job.ID, now)
+	if err != nil {
+		t.Fatalf("RetryFailedJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryFailedJob to return false for a non-FAILED job")
+	}
+
+	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || !found {
+		t.Fatalf("expected candidate to survive the no-op retry, found=%v (%v)", found, err)
+	}
+}
+
+func TestRetryFailedJobUnknownID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	ok, err := s.RetryFailedJob(ctx, 99999, time.Now())
+	if err != nil {
+		t.Fatalf("RetryFailedJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryFailedJob to return false for an unknown job id")
+	}
+}

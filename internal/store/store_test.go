@@ -131,7 +131,7 @@ func TestOpenRecyclesIdleConnections(t *testing.T) {
 func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 
-	for _, idx := range []string{"idx_candidates_job", "idx_transfers_candidate"} {
+	for _, idx := range []string{"idx_candidates_job", "idx_candidates_job_created", "idx_transfers_candidate"} {
 		var count int
 		if err := s.db.QueryRow(
 			`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, idx,

@@ -1,16 +1,23 @@
 const STATUS_LABEL = { queued: 'Köad', active: 'Aktiv', stalled: 'Stannad', done: 'Klar', failed: 'Misslyckad' };
 
+// STATE_LABEL covers the pipeline's 7 job states (spec 2026-07-06).
 const STATE_LABEL = {
-  DISCOVERED: 'Upptäckt',
-  SEARCHING: 'Söker',
+  WANTED: 'Väntar',
   SELECTING: 'Väljer kandidat',
   DOWNLOADING: 'Laddar ner',
-  VERIFYING: 'Verifierar',
   IMPORTING: 'Importerar',
-  COMPLETED: 'Klar',
-  COOLDOWN: 'Väntar',
+  DONE: 'Klar',
   FAILED: 'Misslyckad',
   CANCELLED: 'Avbruten',
+};
+
+// CANDIDATE_STATE_LABEL covers core.CandidateState, shown in the job detail
+// panel's candidate history (including NEW/cached candidates not yet tried).
+const CANDIDATE_STATE_LABEL = {
+  NEW: 'Ej provad',
+  ACTIVE: 'Pågår',
+  SUCCEEDED: 'Lyckades',
+  FAILED: 'Misslyckades',
 };
 
 const EVENT_LABEL = {
@@ -60,6 +67,49 @@ function statCards() {
   ).join('');
 }
 
+// --- Module health (per-pipeline-module liveness from /status's modules map) ---
+
+let modules = {};
+
+// MODULE_STALE_AFTER_MS is a client-side approximation of the server's
+// per-module staleness window (Runner.Healthy uses each module's own
+// Interval()*3 + tickTimeout, not available here) — good enough to flag a
+// module that has clearly stopped ticking without needing that per-module
+// metadata threaded through /status.
+const MODULE_STALE_AFTER_MS = 60000;
+
+async function fetchStatus() {
+  try {
+    const res = await fetch('/status');
+    if (!res.ok) return; // keep showing last-good data on a transient error
+    const data = await res.json();
+    modules = data.modules || {};
+    moduleHealthRows();
+  } catch (e) {
+    // network error: keep showing last-good data
+  }
+}
+
+function moduleHealthRows() {
+  const el = document.getElementById('module-health-body');
+  if (!el) return;
+  const names = Object.keys(modules).sort();
+  const now = new Date();
+  el.innerHTML = names.map(name => {
+    const raw = modules[name];
+    const never = !raw;
+    const lastTick = never ? null : new Date(raw);
+    const stale = never || (now - lastTick) > MODULE_STALE_AFTER_MS;
+    const label = never ? 'Har aldrig tickat' : lastTick.toLocaleTimeString('sv-SE');
+    return `
+      <tr>
+        <td>${escapeHtml(name)}</td>
+        <td class="${stale ? 'module-stale' : ''}">${label}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
 function overviewActiveRows() {
   const active = jobs.filter(j => j.status === 'active');
   const body = document.getElementById('overview-active-body');
@@ -87,6 +137,16 @@ function matchesFilters(j) {
   return matchesSearch(j) && matchesStatusFilter(j);
 }
 
+// sleepingBadge renders a "sover till HH:MM" badge when a job's not_before
+// (backoff) is still in the future; not_before in the past just means the
+// job is runnable again and has no display relevance.
+function sleepingBadge(j) {
+  if (!j.notBefore) return '';
+  const t = new Date(j.notBefore);
+  if (t <= new Date()) return '';
+  return `Sover till ${t.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 function jobDetailLine(j) {
   const parts = [];
   if (j.failReason) parts.push(`Fel: ${escapeHtml(j.failReason)}`);
@@ -94,6 +154,9 @@ function jobDetailLine(j) {
   if (j.maxCandidates > 0 && (j.status === 'queued' || j.status === 'failed')) {
     parts.push(`Kandidat ${j.candidatesTried}/${j.maxCandidates}`);
   }
+  if (j.retries > 0) parts.push(`${j.retries} sökförsök`);
+  const sleeping = sleepingBadge(j);
+  if (sleeping) parts.push(sleeping);
   if (!parts.length) return '';
   return `<br><span style="color:#7c828d;font-size:11.5px;">${parts.join(' · ')}</span>`;
 }
@@ -120,7 +183,7 @@ function attemptHistoryHtml(id) {
   if (!detail.attempts || !detail.attempts.length) return '<div style="color:#7c828d;">Inga försök ännu.</div>';
   return detail.attempts.map(a => `
     <div class="detail-attempt">
-      <div><strong>${escapeHtml(a.username)}</strong> — ${escapeHtml(a.state)}${a.failReason ? ` (${escapeHtml(a.failReason)})` : ''}</div>
+      <div><strong>${escapeHtml(a.username)}</strong> — ${escapeHtml(CANDIDATE_STATE_LABEL[a.state] || a.state)}${a.failReason ? ` (${escapeHtml(a.failReason)})` : ''}</div>
       <div style="color:#7c828d;font-size:11px;">${new Date(a.createdAt).toLocaleString('sv-SE')} · ${a.fileCount} filer</div>
       ${(a.transfers || []).map(t => `
         <div class="detail-transfer mono">${escapeHtml(t.filename)} — ${escapeHtml(t.state)}
@@ -150,6 +213,7 @@ function queueRows() {
             <div>Peer: ${escapeHtml(j.peer) || '—'}</div>
             <div>Nedladdat: ${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>
             <button class="action" data-cancel="${j.id}">Avbryt</button>
+            ${j.state === 'FAILED' ? `<button class="action" data-retry="${j.id}">Försök igen</button>` : ''}
             <div style="margin-top:12px;">${attemptHistoryHtml(j.id)}</div>
           </td>
         </tr>
@@ -175,6 +239,15 @@ function queueRows() {
       ev.stopPropagation();
       const id = btn.getAttribute('data-cancel');
       await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
+      await fetchJobs();
+    });
+  });
+  body.querySelectorAll('button[data-retry]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const id = btn.getAttribute('data-retry');
+      await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
+      delete jobDetails[id]; // candidate history was wiped by the retry, refetch on next expand
       await fetchJobs();
     });
   });
@@ -307,6 +380,7 @@ function render() {
   queueRows();
 }
 
+
 function setupNav() {
   document.querySelectorAll('nav button[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -342,6 +416,8 @@ setupPeerSort();
 fetchJobs();
 fetchEvents();
 fetchPeers();
+fetchStatus();
 setInterval(fetchJobs, 3000);
 setInterval(fetchEvents, 3000);
 setInterval(fetchPeers, 5000);
+setInterval(fetchStatus, 5000);

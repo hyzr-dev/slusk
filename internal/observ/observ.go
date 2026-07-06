@@ -77,6 +77,8 @@ type jobDTO struct {
 	MaxCandidates   int    `json:"maxCandidates"`
 	FailReason      string `json:"failReason"`
 	NextAttemptAt   string `json:"nextAttemptAt"`
+	Retries         int    `json:"retries"`
+	NotBefore       string `json:"notBefore"`
 }
 
 // toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
@@ -93,6 +95,7 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int)
 		State:           string(v.Job.State),
 		CandidatesTried: v.Job.CandidatesTried,
 		MaxCandidates:   maxCandidates,
+		Retries:         v.Job.Retries,
 	}
 	if v.Transfer != nil {
 		d.BytesDone = v.Transfer.BytesDone
@@ -101,12 +104,10 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int)
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
 	}
-	switch v.Job.State {
-	case core.StateCooldown:
-		if v.Job.NextAttemptAt != nil {
-			d.NextAttemptAt = v.Job.NextAttemptAt.Format(timeFormat)
-		}
-	case core.StateFailed:
+	if v.Job.NotBefore != nil {
+		d.NotBefore = v.Job.NotBefore.Format(timeFormat)
+	}
+	if v.Job.State == core.StateFailed {
 		d.NextAttemptAt = v.Job.UpdatedAt.Add(failedRetryAfter).Format(timeFormat)
 	}
 	return d
@@ -130,6 +131,22 @@ const (
 // CancelFunc cancels a job by id, returning which outcome occurred.
 type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
+// RetryResult is the outcome of a RetryFunc call.
+type RetryResult int
+
+const (
+	RetryResultOK RetryResult = iota
+	RetryResultNotFound
+	// RetryResultConflict means the job exists but is not FAILED — the
+	// dashboard button raced a state change (e.g. WantedSync revived it, or a
+	// module already advanced it).
+	RetryResultConflict
+)
+
+// RetryFunc manually revives one FAILED job by id, returning which outcome
+// occurred (typically backed by the store's RetryFailedJob).
+type RetryFunc func(ctx context.Context, jobID int64) (RetryResult, error)
+
 // HealthyFunc reports whether the pipeline's modules are still making
 // progress. Unlike /status (a plain DB read that stays up even if a module
 // goroutine deadlocks), this is the liveness signal Docker/Swarm should poll.
@@ -142,13 +159,13 @@ type HealthyFunc func() bool
 type ModulesFunc func() map[string]time.Time
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
-// /api/jobs, /api/jobs/{id}/cancel, /api/jobs/{id}/detail,
+// /api/jobs, /api/jobs/{id}/cancel, /api/jobs/{id}/retry, /api/jobs/{id}/detail,
 // /api/jobs/{id}/events, /api/events, /api/peers, and the dashboard UI at /.
 // failedRetryAfter and maxCandidates are engine config values surfaced in
 // /api/jobs so the dashboard can show a job's retry ETA and candidate budget.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	healthy HealthyFunc, modules ModulesFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	healthy HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +229,30 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 				msg = err.Error()
 			}
 			http.Error(w, msg, http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	mux.HandleFunc("/api/jobs/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		result, err := retry(r.Context(), jobID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		switch result {
+		case RetryResultNotFound:
+			http.Error(w, "job not found", http.StatusNotFound)
+		case RetryResultConflict:
+			http.Error(w, "job is not FAILED", http.StatusConflict)
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}

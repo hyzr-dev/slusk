@@ -135,6 +135,48 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, retries int, 
 	return tx.Commit()
 }
 
+// RetryFailedJob manually revives one FAILED job: retries 0, not_before/failed_at
+// cleared, candidates deleted, state WANTED. Returns false when the job is not
+// FAILED (the dashboard button raced a state change) or does not exist.
+// Candidates/transfers must go with the reset for the same reason as
+// ResetJobToWanted: transfers has a global UNIQUE(username, filename), so a
+// leftover row from the failed cycle would collide when the revived job
+// re-attempts the same peer+file.
+func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		 WHERE id = $3 AND state = $4`,
+		string(core.StateWanted), now, jobID, string(core.StateFailed))
+	if err != nil {
+		return false, fmt.Errorf("retry failed job: update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("retry failed job: rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		return false, fmt.Errorf("retry failed job: delete candidate transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("retry failed job: delete candidates: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("retry failed job: commit: %w", err)
+	}
+	return true, nil
+}
+
 // AdvanceJobStateFrom is the conditional transition every module uses:
 // UPDATE ... SET state=$to WHERE id=$id AND state=$from. Returns whether a row
 // changed — false means someone (WantedSync cancel) got there first; move on.

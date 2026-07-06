@@ -173,8 +173,28 @@ func main() {
 	// beyond its own staleness window (see pipeline.Runner.Healthy).
 	healthyFn := func() bool { return runner.Healthy() }
 	modulesFn := func() map[string]time.Time { return runner.Health() }
+	// retryFn manually revives a FAILED job from the dashboard: NotFound if no
+	// such job exists, Conflict if it exists but is not currently FAILED (the
+	// dashboard button raced a state change).
+	retryFn := func(ctx context.Context, jobID int64) (observ.RetryResult, error) {
+		_, found, err := st.JobWithTransfer(ctx, jobID)
+		if err != nil {
+			return observ.RetryResultOK, err // result is ignored by the handler when err != nil
+		}
+		if !found {
+			return observ.RetryResultNotFound, nil
+		}
+		ok, err := st.RetryFailedJob(ctx, jobID, time.Now())
+		if err != nil {
+			return observ.RetryResultOK, err // result is ignored by the handler when err != nil
+		}
+		if !ok {
+			return observ.RetryResultConflict, nil
+		}
+		return observ.RetryResultOK, nil
+	}
 	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn,
-		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn, modulesFn,
+		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn, modulesFn, retryFn,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
