@@ -164,3 +164,13 @@ func TestLoadRejectsInvalidPipelineValue(t *testing.T) {
 		t.Errorf("error should name the invalid field: %v", err)
 	}
 }
+
+func TestLoadRejectsUnknownPipelineKey(t *testing.T) {
+	_, err := Load("testdata/pipeline_unknown_key.toml")
+	if err == nil {
+		t.Fatal("expected error for unknown key in [pipeline], got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Errorf("error should mention unknown key: %v", err)
+	}
+}

@@ -127,7 +127,9 @@ type PipelineConfig struct {
 
 // applyDefaults fills any zero-valued field with its documented default. Since
 // every default is a positive value and Validate rejects zero/negative
-// durations and counts, a zero value unambiguously means "not set in TOML".
+// Note: an explicit zero in TOML (e.g. `max_active = 0`) is indistinguishable
+// from an absent key and silently takes the default rather than failing Validate.
+// Accepted: no pipeline field is legitimately zero.
 func (p *PipelineConfig) applyDefaults() {
 	if p.MaxActive == 0 {
 		p.MaxActive = 30
