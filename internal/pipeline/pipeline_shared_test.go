@@ -69,11 +69,10 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 	return f.albumPresent, f.albumTotal, nil
 }
 
-// fakeSearcher is a PeerSearcher fake trimmed to what Discovery needs
-// (Search); ported from internal/engine/discovery_test.go's fakeSearcher.
-// Enqueue/Cancel/DeleteDownloadFolder are stubbed no-ops so fakeSearcher
-// satisfies the full PeerSearcher interface - no module up to Discovery
-// calls them.
+// fakeSearcher is a PeerSearcher fake; ported from
+// internal/engine/discovery_test.go's fakeSearcher. Cancel/DeleteDownloadFolder
+// are stubbed no-ops so fakeSearcher satisfies the full PeerSearcher
+// interface - no module up to Selecting calls them.
 type fakeSearcher struct {
 	// queries records every query Search was called with, in order, so tests
 	// can assert how many searches were issued and what they were.
@@ -87,6 +86,13 @@ type fakeSearcher struct {
 	// searchErrForQuery injects a Search error for a specific query, so tests
 	// can fail e.g. only the fallback search while the primary succeeds.
 	searchErrForQuery map[string]error
+
+	// enqueued records every filename Enqueue was called with, in call order,
+	// so Selecting/Downloading tests can assert how many (and which) files
+	// were actually handed to slskd.
+	enqueued []string
+	// enqueueErr, when set, fails every Enqueue call.
+	enqueueErr error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
@@ -101,7 +107,11 @@ func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Du
 }
 
 func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
-	return "", nil
+	if f.enqueueErr != nil {
+		return "", f.enqueueErr
+	}
+	f.enqueued = append(f.enqueued, filename)
+	return "slskd-" + filename, nil
 }
 
 func (f *fakeSearcher) Cancel(ctx context.Context, username, id string) error { return nil }
