@@ -209,9 +209,24 @@ func TestResetJobToWantedDeletesCandidates(t *testing.T) {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 
+	// A transfer left behind by the wiped cycle must go too: transfers has a
+	// global UNIQUE(username, filename), so a leftover row would collide when
+	// a later cycle re-attempts the same peer+file.
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if err := s.RecordPendingTransfer(ctx, cand.ID, cand.Username, "Music\\a.flac", 123, now); err != nil {
+		t.Fatalf("RecordPendingTransfer: %v", err)
+	}
+
 	notBefore := now.Add(time.Hour)
 	if err := s.ResetJobToWanted(ctx, job.ID, 3, &notBefore, now); err != nil {
 		t.Fatalf("ResetJobToWanted: %v", err)
+	}
+
+	if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+		t.Fatalf("expected zero transfers after ResetJobToWanted, got %d (%v)", len(trs), err)
 	}
 
 	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, now.Add(2*time.Hour), 10)

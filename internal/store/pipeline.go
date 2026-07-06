@@ -228,15 +228,23 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 	return nil
 }
 
-// ResetJobToWanted deletes the job's candidates and returns it to WANTED in
-// one tx. retries/notBefore are written as given (exhaustion passes bumped
-// values; TTL expiry and manual retry pass job.Retries-as-is / 0 and nil).
+// ResetJobToWanted deletes the job's candidates (and their transfers) and
+// returns it to WANTED in one tx. retries/notBefore are written as given
+// (exhaustion passes bumped values; TTL expiry and manual retry pass
+// job.Retries-as-is / 0 and nil). Transfers must go with the candidates:
+// transfers has a global UNIQUE(username, filename), so a leftover row from
+// the wiped cycle would collide when a later cycle re-attempts the same
+// peer+file (same rationale as the legacy ResetJobForRetry).
 func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, retries int, notBefore *time.Time, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		return fmt.Errorf("delete candidate transfers: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
 		return fmt.Errorf("delete candidates: %w", err)
 	}
