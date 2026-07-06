@@ -76,28 +76,50 @@ func applySchema(db *sql.DB, schemaSQL string) error {
 }
 
 // splitStatements splits schemaSQL on ';' the same way applySchema always
-// has, EXCEPT inside a $$ ... $$ dollar-quoted block (used by DO blocks for
-// conditional migrations, e.g. a guarded RENAME COLUMN): Postgres has no
-// "IF EXISTS" form for RENAME COLUMN or ADD CONSTRAINT, so those guards need
-// a DO block whose body itself contains semicolons that must NOT be treated
-// as statement boundaries.
+// has, EXCEPT:
+//   - inside a $$ ... $$ dollar-quoted block (used by DO blocks for
+//     conditional migrations, e.g. a guarded RENAME COLUMN): Postgres has no
+//     "IF EXISTS" form for RENAME COLUMN or ADD CONSTRAINT, so those guards
+//     need a DO block whose body itself contains semicolons that must NOT be
+//     treated as statement boundaries.
+//   - inside a "--" line comment, where a ';' is just text and must not
+//     split the statement it is documenting.
+//
+// Tagged dollar-quotes (e.g. $tag$ ... $tag$) are NOT supported - only the
+// bare $$ form used by this schema's DO blocks is recognized. If a tagged
+// form is ever needed, this parser must be extended first.
 func splitStatements(schemaSQL string) []string {
 	var out []string
 	var cur strings.Builder
 	inDollarQuote := false
+	inLineComment := false
 	for i := 0; i < len(schemaSQL); i++ {
-		if schemaSQL[i] == '$' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '$' {
+		c := schemaSQL[i]
+		if inLineComment {
+			cur.WriteByte(c)
+			if c == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if c == '-' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '-' {
+			inLineComment = true
+			cur.WriteString("--")
+			i++
+			continue
+		}
+		if c == '$' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '$' {
 			inDollarQuote = !inDollarQuote
 			cur.WriteString("$$")
 			i++
 			continue
 		}
-		if schemaSQL[i] == ';' && !inDollarQuote {
+		if c == ';' && !inDollarQuote {
 			out = append(out, cur.String())
 			cur.Reset()
 			continue
 		}
-		cur.WriteByte(schemaSQL[i])
+		cur.WriteByte(c)
 	}
 	if strings.TrimSpace(cur.String()) != "" {
 		out = append(out, cur.String())

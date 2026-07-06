@@ -2,6 +2,7 @@ package store
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,7 +130,7 @@ func TestOpenRecyclesIdleConnections(t *testing.T) {
 func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 
-	for _, idx := range []string{"idx_candidates_job", "idx_transfers_attempt"} {
+	for _, idx := range []string{"idx_candidates_job", "idx_transfers_candidate"} {
 		var count int
 		if err := s.db.QueryRow(
 			`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, idx,
@@ -138,6 +139,98 @@ func TestJobViewIndexesExist(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("index %s missing (dashboard job view would full-scan per job row)", idx)
+		}
+	}
+}
+
+// TestSplitStatements exercises the naive semicolon-splitting parser applySchema
+// relies on to break schema.sql into individually-executable statements.
+func TestSplitStatements(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "plain statements split on semicolon",
+			input: "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);",
+			want: []string{
+				"CREATE TABLE a (id INT)",
+				"\nCREATE TABLE b (id INT)",
+			},
+		},
+		{
+			name: "DO block kept as one statement despite internal semicolons",
+			input: "DO $$ BEGIN\n" +
+				"    IF EXISTS (SELECT 1) THEN\n" +
+				"        ALTER TABLE t RENAME COLUMN a TO b;\n" +
+				"    END IF;\n" +
+				"END $$;",
+			want: []string{
+				"DO $$ BEGIN\n" +
+					"    IF EXISTS (SELECT 1) THEN\n" +
+					"        ALTER TABLE t RENAME COLUMN a TO b;\n" +
+					"    END IF;\n" +
+					"END $$",
+			},
+		},
+		{
+			name: "two DO blocks with a plain statement between them",
+			input: "DO $$ BEGIN X; END $$;\n" +
+				"SELECT 1;\n" +
+				"DO $$ BEGIN Y; END $$;",
+			want: []string{
+				"DO $$ BEGIN X; END $$",
+				"\nSELECT 1",
+				"\nDO $$ BEGIN Y; END $$",
+			},
+		},
+		{
+			name:  "line comment containing a semicolon does not split the statement",
+			input: "-- a comment; with a semicolon inside it\nSELECT 1;",
+			want: []string{
+				"-- a comment; with a semicolon inside it\nSELECT 1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitStatements(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitStatements(%q) = %d statements, want %d\ngot: %#v", tt.input, len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if strings.TrimSpace(got[i]) != strings.TrimSpace(tt.want[i]) {
+					t.Errorf("statement %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestApplySchemaTwiceIsIdempotent makes explicit that applying schema.sql to
+// a database that has already had it applied (Open already runs applySchema
+// once) is safe: every statement in the file is guarded (IF (NOT) EXISTS, or
+// a DO block doing its own existence check) precisely so a second apply is a
+// no-op rather than an error.
+func TestApplySchemaTwiceIsIdempotent(t *testing.T) {
+	s := newTestStore(t) // Open already applied schema.sql once
+
+	if err := applySchema(s.db, schemaSQL); err != nil {
+		t.Fatalf("second applySchema: %v", err)
+	}
+
+	for _, table := range []string{"album_jobs", "candidates", "transfers"} {
+		var count int
+		if err := s.db.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("query schema for %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s table missing after re-applying schema", table)
 		}
 	}
 }
