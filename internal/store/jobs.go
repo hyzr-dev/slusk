@@ -24,9 +24,9 @@ func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, no
 	var j core.AlbumJob
 	var state string
 	err = s.db.QueryRowContext(ctx,
-		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id
+		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, not_before, failed_at
 		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID)
+		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
 	}
