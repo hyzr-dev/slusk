@@ -11,40 +11,40 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-// jobViewSelect joins each album_job with its most recent candidate_attempts
-// row (by created_at) and that attempt's most recent transfer (by
-// updated_at), if any. A job with no attempts yet still appears, with NULL
-// attempt/transfer columns. Callers append their own WHERE clause.
+// jobViewSelect joins each album_job with its most recently created candidate
+// row and that candidate's most recent transfer (by updated_at), if any. A
+// job with no candidates yet still appears, with NULL candidate/transfer
+// columns. Callers append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
 		j.id, j.lidarr_album_id, j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name,
-		t.id, t.attempt_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
-		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.backoff_until, a.created_at, a.updated_at
+		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
+		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at
 	FROM album_jobs j
-	LEFT JOIN candidate_attempts a ON a.id = (
-		SELECT id FROM candidate_attempts WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
+	LEFT JOIN candidates a ON a.id = (
+		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
 	)
 	LEFT JOIN transfers t ON t.id = (
-		SELECT id FROM transfers WHERE attempt_id = a.id ORDER BY updated_at DESC LIMIT 1
+		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC LIMIT 1
 	)`
 
 func scanJobView(r rowScanner) (core.JobView, error) {
 	var v core.JobView
 	var jState string
 	var tID sql.NullInt64
-	var tAttemptID sql.NullInt64
+	var tCandidateID sql.NullInt64
 	var tSlskdID, tUsername, tFilename, tState sql.NullString
 	var tBytesDone, tBytesTotal sql.NullInt64
 	var tDeadline, tLastProgressAt, tUpdatedAt sql.NullTime
 	var aID, aAlbumJobID sql.NullInt64
 	var aUsername, aState, aFailReason sql.NullString
 	var aScore sql.NullFloat64
-	var aBackoffUntil, aCreatedAt, aUpdatedAt sql.NullTime
+	var aCreatedAt, aUpdatedAt sql.NullTime
 
 	err := r.Scan(
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName,
-		&tID, &tAttemptID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
-		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aBackoffUntil, &aCreatedAt, &aUpdatedAt,
+		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
+		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt,
 	)
 	if err != nil {
 		return core.JobView{}, err
@@ -53,16 +53,16 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 
 	if tID.Valid {
 		tr := &core.Transfer{
-			ID:         tID.Int64,
-			AttemptID:  tAttemptID.Int64,
-			SlskdID:    tSlskdID.String,
-			Username:   tUsername.String,
-			Filename:   tFilename.String,
-			State:      core.TransferState(tState.String),
-			BytesDone:  tBytesDone.Int64,
-			BytesTotal: tBytesTotal.Int64,
-			Deadline:   tDeadline.Time,
-			UpdatedAt:  tUpdatedAt.Time,
+			ID:          tID.Int64,
+			CandidateID: tCandidateID.Int64,
+			SlskdID:     tSlskdID.String,
+			Username:    tUsername.String,
+			Filename:    tFilename.String,
+			State:       core.TransferState(tState.String),
+			BytesDone:   tBytesDone.Int64,
+			BytesTotal:  tBytesTotal.Int64,
+			Deadline:    tDeadline.Time,
+			UpdatedAt:   tUpdatedAt.Time,
 		}
 		if tLastProgressAt.Valid {
 			lp := tLastProgressAt.Time
@@ -73,21 +73,16 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	}
 
 	if aID.Valid {
-		att := &core.CandidateAttempt{
+		v.Attempt = &core.Candidate{
 			ID:         aID.Int64,
 			AlbumJobID: aAlbumJobID.Int64,
 			Username:   aUsername.String,
 			Score:      aScore.Float64,
-			State:      aState.String,
+			State:      core.CandidateState(aState.String),
 			FailReason: aFailReason.String,
 			CreatedAt:  aCreatedAt.Time,
 			UpdatedAt:  aUpdatedAt.Time,
 		}
-		if aBackoffUntil.Valid {
-			b := aBackoffUntil.Time
-			att.BackoffUntil = &b
-		}
-		v.Attempt = att
 	}
 	return v, nil
 }
@@ -128,11 +123,11 @@ func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView,
 	return v, true, nil
 }
 
-// JobDetail returns a job plus every candidate attempt made for it (newest
-// first) and each attempt's per-file transfers, for the dashboard's per-job
-// detail panel (GET /api/jobs/{id}/detail). found is false if no job has that
-// id. Built from AttemptsForJob/TransfersForAttempt (one query per attempt)
-// rather than a single join, since the number of attempts per job is small
+// JobDetail returns a job plus every candidate made for it (newest first) and
+// each candidate's per-file transfers, for the dashboard's per-job detail
+// panel (GET /api/jobs/{id}/detail). found is false if no job has that id.
+// Built from CandidatesForJob/TransfersForCandidate (one query per candidate)
+// rather than a single join, since the number of candidates per job is small
 // (bounded by MaxCandidatesPerAlbum) and this reuses the existing read paths
 // rather than a bespoke wide query.
 func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
@@ -149,19 +144,19 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 	}
 	job.State = core.AlbumJobState(state)
 
-	attempts, err := s.AttemptsForJob(ctx, jobID) // oldest first
+	candidates, err := s.CandidatesForJob(ctx, jobID) // oldest first
 	if err != nil {
-		return core.JobDetail{}, false, fmt.Errorf("job detail: attempts: %w", err)
+		return core.JobDetail{}, false, fmt.Errorf("job detail: candidates: %w", err)
 	}
-	details := make([]core.AttemptDetail, len(attempts))
-	for i, a := range attempts {
-		transfers, err := s.TransfersForAttempt(ctx, a.ID)
+	details := make([]core.AttemptDetail, len(candidates))
+	for i, c := range candidates {
+		transfers, err := s.TransfersForCandidate(ctx, c.ID)
 		if err != nil {
-			return core.JobDetail{}, false, fmt.Errorf("job detail: transfers for attempt %d: %w", a.ID, err)
+			return core.JobDetail{}, false, fmt.Errorf("job detail: transfers for candidate %d: %w", c.ID, err)
 		}
-		details[i] = core.AttemptDetail{Attempt: a, Transfers: transfers}
+		details[i] = core.AttemptDetail{Attempt: c, Transfers: transfers}
 	}
-	// AttemptsForJob returns oldest first; the detail panel wants newest first.
+	// CandidatesForJob returns oldest first; the detail panel wants newest first.
 	for i, j := 0, len(details)-1; i < j; i, j = i+1, j-1 {
 		details[i], details[j] = details[j], details[i]
 	}

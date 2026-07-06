@@ -13,9 +13,9 @@ func TestAddJobEventRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertDiscoveredJob(ctx, 1, now)
+	job, err := s.UpsertWantedJob(ctx, 1, now)
 	if err != nil {
-		t.Fatalf("UpsertDiscoveredJob: %v", err)
+		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 	if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "searched album, query=\"x\"", now); err != nil {
 		t.Fatalf("AddJobEvent: %v", err)
@@ -47,7 +47,7 @@ func TestJobEventsNewestFirst(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 1, now)
+	job, _ := s.UpsertWantedJob(ctx, 1, now)
 	if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "first", now); err != nil {
 		t.Fatalf("AddJobEvent 1: %v", err)
 	}
@@ -73,8 +73,8 @@ func TestRecentEventsAcrossJobsNewestFirst(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job1, _ := s.UpsertDiscoveredJob(ctx, 1, now)
-	job2, _ := s.UpsertDiscoveredJob(ctx, 2, now)
+	job1, _ := s.UpsertWantedJob(ctx, 1, now)
+	job2, _ := s.UpsertWantedJob(ctx, 2, now)
 	if err := s.AddJobEvent(ctx, job1.ID, core.EventSearch, "job1 event", now); err != nil {
 		t.Fatalf("AddJobEvent job1: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestRecentEventsRespectsLimit(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 1, now)
+	job, _ := s.UpsertWantedJob(ctx, 1, now)
 	for i := 0; i < 5; i++ {
 		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "e", now.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatalf("AddJobEvent %d: %v", i, err)
@@ -121,7 +121,7 @@ func TestPruneJobEventsDeletesOnlyOldRows(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 1, now)
+	job, _ := s.UpsertWantedJob(ctx, 1, now)
 
 	old := now.Add(-31 * 24 * time.Hour)
 	recent := now.Add(-1 * time.Hour)

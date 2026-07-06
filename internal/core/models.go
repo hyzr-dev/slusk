@@ -31,19 +31,6 @@ type AlbumJob struct {
 	FailedAt *time.Time
 }
 
-// CandidateAttempt is one ranked Soulseek user tried for an album.
-type CandidateAttempt struct {
-	ID           int64
-	AlbumJobID   int64
-	Username     string
-	Score        float64
-	State        string // PENDING/ACTIVE/SUCCEEDED/FAILED
-	FailReason   string // timeout/errored/cancelled/incomplete
-	BackoffUntil *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-}
-
 // CandidateFile is one file of a cached search result, persisted as JSONB on
 // the candidate so Selecting can enqueue it long after the search happened.
 type CandidateFile struct {
@@ -51,9 +38,9 @@ type CandidateFile struct {
 	Size     int64  `json:"size"`
 }
 
-// Candidate is one ranked Soulseek user cached for an album. A candidate is
-// its own attempt: NEW (cached, untried) → ACTIVE (picked by Selecting) →
-// SUCCEEDED | FAILED. Replaces CandidateAttempt in the pipeline rewrite.
+// Candidate is one ranked Soulseek user cached for an album: a candidate is
+// its own attempt, NEW (cached, untried) → ACTIVE (picked by Selecting) →
+// SUCCEEDED | FAILED.
 type Candidate struct {
 	ID                int64
 	AlbumJobID        int64
@@ -71,7 +58,7 @@ type Candidate struct {
 // enqueue; (Username, Filename) is the fallback correlation key until then.
 type Transfer struct {
 	ID             int64
-	AttemptID      int64
+	CandidateID    int64
 	SlskdID        string
 	Username       string
 	Filename       string
@@ -104,8 +91,8 @@ type ReliabilityCounters struct {
 // no outcome recorded at that scope.
 //
 // These two records are the ONLY peer history that survives a failed-album
-// retry: ResetJobForRetry DELETEs candidate_attempts, so reliability must be
-// written incrementally at attempt completion, never recomputed from attempts.
+// retry: ResetJobToWanted DELETEs candidates, so reliability must be written
+// incrementally at candidate completion, never recomputed from candidates.
 type PeerReliability struct {
 	Artist ReliabilityCounters
 	Global ReliabilityCounters
@@ -116,20 +103,20 @@ type PeerReliability struct {
 // written back to the store.
 type JobView struct {
 	Job      AlbumJob
-	Transfer *Transfer         // nil if the job has no attempt/transfer yet
-	Peer     string            // convenience copy of Transfer.Username; "" if Transfer is nil
-	Attempt  *CandidateAttempt // nil if the job has no attempt yet
+	Transfer *Transfer  // nil if the job has no candidate/transfer yet
+	Peer     string     // convenience copy of Transfer.Username; "" if Transfer is nil
+	Attempt  *Candidate // nil if the job has no candidate yet
 }
 
-// AttemptDetail bundles one candidate attempt with every transfer (one per
-// file) it produced, for the dashboard's per-job detail panel.
+// AttemptDetail bundles one candidate with every transfer (one per file) it
+// produced, for the dashboard's per-job detail panel.
 type AttemptDetail struct {
-	Attempt   CandidateAttempt
+	Attempt   Candidate
 	Transfers []Transfer
 }
 
 // JobDetail is the full history of one job: the job itself plus every
-// candidate attempt made for it (newest first) and each attempt's per-file
+// candidate made for it (newest first) and each candidate's per-file
 // transfers. Used by the dashboard's job detail panel (GET
 // /api/jobs/{id}/detail); never written back to the store.
 type JobDetail struct {

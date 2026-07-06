@@ -8,23 +8,35 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
+// newActiveCandidate creates a WANTED job, caches a single NEW candidate for
+// it, and returns the candidate's id — the pipeline-era equivalent of the
+// legacy CreateAttempt helper these tests used before the engine deletion.
+func newActiveCandidate(t *testing.T, s *Store, ctx context.Context, lidarrAlbumID int64, username string, score float64, now time.Time) (core.AlbumJob, int64) {
+	t.Helper()
+	job, err := s.UpsertWantedJob(ctx, lidarrAlbumID, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: username, Score: score}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	return job, cand.ID
+}
+
 func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertDiscoveredJob(ctx, 42, now)
-	if err != nil {
-		t.Fatalf("UpsertDiscoveredJob: %v", err)
-	}
-	attemptID, err := s.CreateAttempt(ctx, job.ID, "bob", 1.5, now)
-	if err != nil {
-		t.Fatalf("CreateAttempt: %v", err)
-	}
+	_, candidateID := newActiveCandidate(t, s, ctx, 42, "bob", 1.5, now)
 
 	// Step 1 of write-ahead: intent persisted, no slskd id yet.
 	deadline := now.Add(30 * time.Minute)
-	tid, err := s.RecordEnqueueIntent(ctx, attemptID, "bob", "album/01.flac", deadline, now)
+	tid, err := s.RecordEnqueueIntent(ctx, candidateID, "bob", "album/01.flac", deadline, now)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
@@ -58,10 +70,9 @@ func TestTransfersPastDeadline(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 1, now)
-	attemptID, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	_, candidateID := newActiveCandidate(t, s, ctx, 1, "bob", 1.0, now)
 	// Deadline already in the past.
-	_, _ = s.RecordEnqueueIntent(ctx, attemptID, "bob", "f.flac", now.Add(-time.Minute), now)
+	_, _ = s.RecordEnqueueIntent(ctx, candidateID, "bob", "f.flac", now.Add(-time.Minute), now)
 
 	overdue, err := s.TransfersPastDeadline(ctx, now)
 	if err != nil {
@@ -76,14 +87,13 @@ func TestRecordEnqueueIntentIsConflictSafe(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 300, now)
-	a1, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	_, a1 := newActiveCandidate(t, s, ctx, 300, "bob", 1.0, now)
 
 	id1, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("first intent: %v", err)
 	}
-	// A later attempt re-enqueues the same (username, filename) — must not error,
+	// A later candidate re-enqueues the same (username, filename) — must not error,
 	// and must return the existing row rather than creating a duplicate.
 	id2, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(2*time.Hour), now)
 	if err != nil {
@@ -98,14 +108,13 @@ func TestRetryTransferAccumulatesAndSurvivesResend(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 500, now)
-	a, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, now)
+	_, a := newActiveCandidate(t, s, ctx, 500, "bob", 1.0, now)
 
 	only := func() core.Transfer {
 		t.Helper()
-		trs, err := s.TransfersForAttempt(ctx, a)
+		trs, err := s.TransfersForCandidate(ctx, a)
 		if err != nil || len(trs) != 1 {
-			t.Fatalf("TransfersForAttempt: %v (n=%d)", err, len(trs))
+			t.Fatalf("TransfersForCandidate: %v (n=%d)", err, len(trs))
 		}
 		return trs[0]
 	}
@@ -143,8 +152,7 @@ func TestUpdateTransferProgressLastProgressAtTracksBytes(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 900, t0)
-	a, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, t0)
+	_, a := newActiveCandidate(t, s, ctx, 900, "bob", 1.0, t0)
 	tid, _ := s.RecordEnqueueIntent(ctx, a, "bob", "p.flac", t0.Add(time.Hour), t0)
 
 	read := func() core.Transfer {
@@ -198,8 +206,7 @@ func TestRetryTransferResetsStallClock(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	job, _ := s.UpsertDiscoveredJob(ctx, 901, t0)
-	a, _ := s.CreateAttempt(ctx, job.ID, "bob", 1.0, t0)
+	_, a := newActiveCandidate(t, s, ctx, 901, "bob", 1.0, t0)
 	tid, _ := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", t0.Add(time.Hour), t0)
 
 	read := func() core.Transfer {
@@ -239,12 +246,12 @@ func TestRetryTransferResetsStallClock(t *testing.T) {
 	}
 }
 
-func TestUpsertDiscoveredJobIsIdempotent(t *testing.T) {
+func TestUpsertWantedJobIsIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	a, _ := s.UpsertDiscoveredJob(ctx, 7, now)
-	b, err := s.UpsertDiscoveredJob(ctx, 7, now)
+	a, _ := s.UpsertWantedJob(ctx, 7, now)
+	b, err := s.UpsertWantedJob(ctx, 7, now)
 	if err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
@@ -258,9 +265,9 @@ func TestUpdateJobMetadataSetsTitleAndArtist(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertDiscoveredJob(ctx, 42, now)
+	job, err := s.UpsertWantedJob(ctx, 42, now)
 	if err != nil {
-		t.Fatalf("UpsertDiscoveredJob: %v", err)
+		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 	if job.Title != "" || job.ArtistName != "" {
 		t.Fatalf("expected empty title/artist before UpdateJobMetadata, got %q / %q", job.Title, job.ArtistName)
@@ -270,9 +277,9 @@ func TestUpdateJobMetadataSetsTitleAndArtist(t *testing.T) {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
 
-	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, now, 10)
 	if err != nil {
-		t.Fatalf("JobsInState: %v", err)
+		t.Fatalf("RunnableJobsInState: %v", err)
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 job, got %d", len(jobs))
@@ -287,18 +294,18 @@ func TestBackfillJobMetadataIfEmptyFillsBlankFields(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertDiscoveredJob(ctx, 50, now)
+	job, err := s.UpsertWantedJob(ctx, 50, now)
 	if err != nil {
-		t.Fatalf("UpsertDiscoveredJob: %v", err)
+		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 
 	if err := s.BackfillJobMetadataIfEmpty(ctx, job.ID, "Title A", "Artist A", "", 0); err != nil {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 
-	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, now, 10)
 	if err != nil {
-		t.Fatalf("JobsInState: %v", err)
+		t.Fatalf("RunnableJobsInState: %v", err)
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("expected 1 job, got %d", len(jobs))
@@ -313,7 +320,7 @@ func TestBackfillJobMetadataIfEmptyDoesNotOverwriteExisting(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 51, now)
+	job, _ := s.UpsertWantedJob(ctx, 51, now)
 	if err := s.UpdateJobMetadata(ctx, job.ID, "Original Title", "Original Artist", "2020-01-01", 7, now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
 	}
@@ -322,9 +329,9 @@ func TestBackfillJobMetadataIfEmptyDoesNotOverwriteExisting(t *testing.T) {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 
-	jobs, err := s.JobsInState(ctx, core.StateDiscovered, 10)
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, now, 10)
 	if err != nil {
-		t.Fatalf("JobsInState: %v", err)
+		t.Fatalf("RunnableJobsInState: %v", err)
 	}
 	if jobs[0].Title != "Original Title" || jobs[0].ArtistName != "Original Artist" || jobs[0].ReleaseDate != "2020-01-01" || jobs[0].ArtistID != 7 {
 		t.Errorf("expected existing metadata preserved, got %q / %q / %q / artist_id %d",
@@ -337,7 +344,7 @@ func TestBackfillJobMetadataIfEmptyDoesNotTouchUpdatedAt(t *testing.T) {
 	ctx := context.Background()
 	createdAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 52, createdAt)
+	job, _ := s.UpsertWantedJob(ctx, 52, createdAt)
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateFailed, createdAt); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
@@ -346,9 +353,9 @@ func TestBackfillJobMetadataIfEmptyDoesNotTouchUpdatedAt(t *testing.T) {
 		t.Fatalf("BackfillJobMetadataIfEmpty: %v", err)
 	}
 
-	failed, err := s.JobsInState(ctx, core.StateFailed, 10)
+	failed, err := s.RunnableJobsInState(ctx, core.StateFailed, createdAt, 10)
 	if err != nil {
-		t.Fatalf("JobsInState: %v", err)
+		t.Fatalf("RunnableJobsInState: %v", err)
 	}
 	if len(failed) != 1 {
 		t.Fatalf("expected 1 FAILED job, got %d", len(failed))

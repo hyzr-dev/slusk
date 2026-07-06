@@ -130,10 +130,16 @@ const (
 // CancelFunc cancels a job by id, returning which outcome occurred.
 type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
 
-// HealthyFunc reports whether the engine's reconcile loop is still making
-// progress. Unlike /status (a plain DB read that stays up even if the engine
+// HealthyFunc reports whether the pipeline's modules are still making
+// progress. Unlike /status (a plain DB read that stays up even if a module
 // goroutine deadlocks), this is the liveness signal Docker/Swarm should poll.
 type HealthyFunc func() bool
+
+// ModulesFunc reports each pipeline module's last completed tick (see
+// pipeline.Runner.Health), surfaced at /status so an operator can see which
+// module (if any) has gone stale without needing metrics/log access. A zero
+// time.Time means the module has never completed a tick.
+type ModulesFunc func() map[string]time.Time
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
 // /api/jobs, /api/jobs/{id}/cancel, /api/jobs/{id}/detail,
@@ -142,7 +148,7 @@ type HealthyFunc func() bool
 // /api/jobs so the dashboard can show a job's retry ETA and candidate budget.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	healthy HealthyFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	healthy HealthyFunc, modules ModulesFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -158,8 +164,20 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		moduleTicks := map[string]string{}
+		for name, t := range modules() {
+			if !t.IsZero() {
+				moduleTicks[name] = t.Format(timeFormat)
+			} else {
+				moduleTicks[name] = ""
+			}
+		}
+		resp := struct {
+			StatusReport
+			Modules map[string]string `json:"modules"`
+		}{report, moduleTicks}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(report)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		views, err := jobs(r.Context())

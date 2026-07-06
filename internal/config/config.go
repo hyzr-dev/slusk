@@ -15,53 +15,27 @@ import (
 type Config struct {
 	Lidarr   LidarrConfig   `toml:"lidarr"`
 	Slskd    SlskdConfig    `toml:"slskd"`
-	Engine   EngineConfig   `toml:"engine"`
 	Pipeline PipelineConfig `toml:"pipeline"`
 	Store    StoreConfig    `toml:"store"`
 	Observ   ObservConfig   `toml:"observ"`
 	Paths    PathsConfig    `toml:"paths"`
 }
 
-// LidarrConfig is the Lidarr music server integration configuration.
+// LidarrConfig is the Lidarr music server integration configuration. There is
+// no poll_interval here: the legacy engine's LidarrPoll tick is gone, and the
+// pipeline's own wanted-list refresh cadence is [pipeline] wanted_sync_interval.
 type LidarrConfig struct {
-	URL          string   `toml:"url"`
-	APIKey       string   `toml:"api_key"`
-	PollInterval Duration `toml:"poll_interval"`
+	URL    string `toml:"url"`
+	APIKey string `toml:"api_key"`
 }
 
-// SlskdConfig is the Slsk daemon configuration.
+// SlskdConfig is the Slsk daemon configuration. There is no
+// status_poll_interval here: the legacy engine's StatusPoll tick is gone, and
+// the pipeline's own downloading-reconcile cadence is [pipeline]
+// downloading_interval.
 type SlskdConfig struct {
-	URL                string   `toml:"url"`
-	APIKey             string   `toml:"api_key"`
-	StatusPollInterval Duration `toml:"status_poll_interval"`
-}
-
-// EngineConfig is the matching engine configuration.
-type EngineConfig struct {
-	MaxCandidatesPerAlbum  int      `toml:"max_candidates_per_album"`
-	TransferDeadline       Duration `toml:"transfer_deadline"`
-	StallTimeout           Duration `toml:"stall_timeout"`
-	SearchTimeout          Duration `toml:"search_timeout"`
-	MinBitrate             int      `toml:"min_bitrate"`
-	MaxConcurrentActive    int      `toml:"max_concurrent_active"`
-	MaxInflightPerPeer     int      `toml:"max_inflight_per_peer"`
-	MaxTransferRetries     int      `toml:"max_transfer_retries"`
-	CandidateBackoff       Duration `toml:"candidate_backoff"`
-	FailedCandidateBackoff Duration `toml:"failed_candidate_backoff"`
-	FailedRetryAfter       Duration `toml:"failed_retry_after"`
-	ImportConfirmTimeout   Duration `toml:"import_confirm_timeout"`
-	TickInterval           Duration `toml:"tick_interval"`
-	// Batch bounds the per-tick batch size used across the discovery pipeline
-	// stages (retry, start, top-up, downloading, verifying, importing). It is
-	// not a concurrency limit: searches within a batch run sequentially.
-	Batch int `toml:"batch"`
-	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
-	// album's known Lidarr track count by more than this multiple (e.g. 2.0
-	// means a candidate offering more than 2x the expected tracks is skipped).
-	// Guards against a Soulseek share dumping an artist's whole discography into
-	// one flat folder being mistaken for a single album.
-	MaxCandidateFileRatio float64 `toml:"max_candidate_file_ratio"`
-	Weights               Weights `toml:"weights"`
+	URL    string `toml:"url"`
+	APIKey string `toml:"api_key"`
 }
 
 // Weights are the tunable scoring weights for the matcher.
@@ -78,16 +52,42 @@ type Weights struct {
 	KnownUser float64 `toml:"known_user"`
 }
 
-// PipelineConfig is the state-machine pipeline configuration. All fields are
-// optional; a wholly absent [pipeline] section yields the defaults applied in
-// applyPipelineDefaults. The matcher/transfer knobs the pipeline also needs
-// (search_timeout, transfer_deadline, etc.) are still read from [engine] by
-// both the legacy engine and the pipeline until a later task consolidates them
-// here.
+// PipelineConfig is the state-machine pipeline configuration: the sole
+// configuration surface for matching, transfer and scheduling knobs (the
+// legacy [engine] section it replaced is gone). The scheduling/backoff knobs
+// below are optional (a wholly absent [pipeline] section yields the defaults
+// applied in applyDefaults); the matcher/transfer knobs (MaxCandidatesPerAlbum
+// through Weights) are mandatory, same as they were under [engine].
 type PipelineConfig struct {
+	// MaxCandidatesPerAlbum bounds how many ranked search results are cached
+	// per album search.
+	MaxCandidatesPerAlbum int `toml:"max_candidates_per_album"`
+	// TransferDeadline bounds how long a single file transfer may run before
+	// it is considered overdue.
+	TransferDeadline Duration `toml:"transfer_deadline"`
+	// StallTimeout bounds how long a transfer may go without byte progress
+	// before it is considered stalled.
+	StallTimeout Duration `toml:"stall_timeout"`
+	// SearchTimeout bounds how long a single Soulseek search waits for results.
+	SearchTimeout Duration `toml:"search_timeout"`
+	// MinBitrate rejects candidate files below this bitrate (kbps).
+	MinBitrate int `toml:"min_bitrate"`
+	// MaxInflightPerPeer bounds how many files are handed to a single peer at
+	// once, so a burst never trips a peer's per-user queued-megabyte limit.
+	MaxInflightPerPeer int `toml:"max_inflight_per_peer"`
+	// MaxTransferRetries caps how many times a transfer rejected for a
+	// transient reason is re-queued before it is given up on.
+	MaxTransferRetries int `toml:"max_transfer_retries"`
+	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
+	// album's known Lidarr track count by more than this multiple (e.g. 2.0
+	// means a candidate offering more than 2x the expected tracks is skipped).
+	// Guards against a Soulseek share dumping an artist's whole discography into
+	// one flat folder being mistaken for a single album.
+	MaxCandidateFileRatio float64 `toml:"max_candidate_file_ratio"`
+	// Weights are the tunable scoring weights for the matcher.
+	Weights Weights `toml:"weights"`
 	// MaxActive caps jobs simultaneously active across the pipeline
-	// (SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING). Mirrors today's
-	// engine.max_concurrent_active. Default 30.
+	// (SELECTING/DOWNLOADING/IMPORTING). Default 30.
 	MaxActive int `toml:"max_active"`
 	// MaxRetries caps how many candidates a job cycles through before it is
 	// given up on. Default 10.
@@ -233,65 +233,38 @@ func (c Config) Validate() error {
 	if c.Lidarr.APIKey == "" {
 		problems = append(problems, "lidarr.api_key is required")
 	}
-	if c.Lidarr.PollInterval.Duration <= 0 {
-		problems = append(problems, "lidarr.poll_interval must be > 0")
-	}
 	if c.Slskd.URL == "" {
 		problems = append(problems, "slskd.url is required")
 	}
 	if c.Slskd.APIKey == "" {
 		problems = append(problems, "slskd.api_key is required")
 	}
-	if c.Slskd.StatusPollInterval.Duration <= 0 {
-		problems = append(problems, "slskd.status_poll_interval must be > 0")
+	if c.Pipeline.MaxCandidatesPerAlbum <= 0 {
+		problems = append(problems, "pipeline.max_candidates_per_album must be > 0")
 	}
-	if c.Engine.MaxCandidatesPerAlbum <= 0 {
-		problems = append(problems, "engine.max_candidates_per_album must be > 0")
+	if c.Pipeline.TransferDeadline.Duration <= 0 {
+		problems = append(problems, "pipeline.transfer_deadline must be > 0")
 	}
-	if c.Engine.TransferDeadline.Duration <= 0 {
-		problems = append(problems, "engine.transfer_deadline must be > 0")
+	if c.Pipeline.StallTimeout.Duration <= 0 {
+		problems = append(problems, "pipeline.stall_timeout must be > 0")
 	}
-	if c.Engine.StallTimeout.Duration <= 0 {
-		problems = append(problems, "engine.stall_timeout must be > 0")
+	if c.Pipeline.SearchTimeout.Duration <= 0 {
+		problems = append(problems, "pipeline.search_timeout must be > 0")
 	}
-	if c.Engine.SearchTimeout.Duration <= 0 {
-		problems = append(problems, "engine.search_timeout must be > 0")
+	if c.Pipeline.MinBitrate <= 0 {
+		problems = append(problems, "pipeline.min_bitrate must be > 0")
 	}
-	if c.Engine.MinBitrate <= 0 {
-		problems = append(problems, "engine.min_bitrate must be > 0")
+	if c.Pipeline.MaxInflightPerPeer <= 0 {
+		problems = append(problems, "pipeline.max_inflight_per_peer must be > 0")
 	}
-	if c.Engine.Batch <= 0 {
-		problems = append(problems, "engine.batch must be > 0")
+	if c.Pipeline.MaxTransferRetries < 0 {
+		problems = append(problems, "pipeline.max_transfer_retries must be >= 0")
 	}
-	if c.Engine.MaxConcurrentActive <= 0 {
-		problems = append(problems, "engine.max_concurrent_active must be > 0")
+	if c.Pipeline.MaxCandidateFileRatio <= 0 {
+		problems = append(problems, "pipeline.max_candidate_file_ratio must be > 0")
 	}
-	if c.Engine.MaxInflightPerPeer <= 0 {
-		problems = append(problems, "engine.max_inflight_per_peer must be > 0")
-	}
-	if c.Engine.MaxTransferRetries < 0 {
-		problems = append(problems, "engine.max_transfer_retries must be >= 0")
-	}
-	if c.Engine.CandidateBackoff.Duration <= 0 {
-		problems = append(problems, "engine.candidate_backoff must be > 0")
-	}
-	if c.Engine.FailedCandidateBackoff.Duration <= 0 {
-		problems = append(problems, "engine.failed_candidate_backoff must be > 0")
-	}
-	if c.Engine.FailedRetryAfter.Duration <= 0 {
-		problems = append(problems, "engine.failed_retry_after must be > 0")
-	}
-	if c.Engine.ImportConfirmTimeout.Duration <= 0 {
-		problems = append(problems, "engine.import_confirm_timeout must be > 0")
-	}
-	if c.Engine.TickInterval.Duration <= 0 {
-		problems = append(problems, "engine.tick_interval must be > 0")
-	}
-	if c.Engine.MaxCandidateFileRatio <= 0 {
-		problems = append(problems, "engine.max_candidate_file_ratio must be > 0")
-	}
-	if c.Engine.Weights.KnownUser < 0 {
-		problems = append(problems, "engine.weights.known_user must be >= 0")
+	if c.Pipeline.Weights.KnownUser < 0 {
+		problems = append(problems, "pipeline.weights.known_user must be >= 0")
 	}
 	if c.Pipeline.MaxActive < 1 {
 		problems = append(problems, "pipeline.max_active must be >= 1")

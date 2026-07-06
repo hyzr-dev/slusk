@@ -59,11 +59,11 @@ func openWithLimits(dsn string, maxIdleTime, maxLifetime time.Duration) (*Store,
 	return &Store{db: db}, nil
 }
 
-// applySchema splits the schema SQL by semicolons and executes each statement.
-// Every statement is CREATE ... IF NOT EXISTS, so the apply is idempotent.
+// applySchema splits the schema SQL into statements and executes each one.
+// Every statement is either CREATE/ALTER ... IF (NOT) EXISTS or a DO block
+// guarded the same way, so the apply is idempotent.
 func applySchema(db *sql.DB, schemaSQL string) error {
-	statements := strings.Split(schemaSQL, ";")
-	for _, stmt := range statements {
+	for _, stmt := range splitStatements(schemaSQL) {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue
@@ -73,6 +73,36 @@ func applySchema(db *sql.DB, schemaSQL string) error {
 		}
 	}
 	return nil
+}
+
+// splitStatements splits schemaSQL on ';' the same way applySchema always
+// has, EXCEPT inside a $$ ... $$ dollar-quoted block (used by DO blocks for
+// conditional migrations, e.g. a guarded RENAME COLUMN): Postgres has no
+// "IF EXISTS" form for RENAME COLUMN or ADD CONSTRAINT, so those guards need
+// a DO block whose body itself contains semicolons that must NOT be treated
+// as statement boundaries.
+func splitStatements(schemaSQL string) []string {
+	var out []string
+	var cur strings.Builder
+	inDollarQuote := false
+	for i := 0; i < len(schemaSQL); i++ {
+		if schemaSQL[i] == '$' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '$' {
+			inDollarQuote = !inDollarQuote
+			cur.WriteString("$$")
+			i++
+			continue
+		}
+		if schemaSQL[i] == ';' && !inDollarQuote {
+			out = append(out, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteByte(schemaSQL[i])
+	}
+	if strings.TrimSpace(cur.String()) != "" {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // Close closes the underlying database handle.

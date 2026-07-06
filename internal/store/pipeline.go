@@ -26,24 +26,6 @@ func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	return out, rows.Err()
 }
 
-// JobsInState returns up to limit jobs currently in the given state. For
-// DISCOVERED jobs, newest-released albums come first (falling back to
-// oldest-updated-first for ties or blank release dates) so freshly-released
-// albums get picked up before older backlog; every other state keeps the
-// oldest-updated-first order state transitions rely on elsewhere.
-func (s *Store) JobsInState(ctx context.Context, state core.AlbumJobState, limit int) ([]core.AlbumJob, error) {
-	order := "ORDER BY updated_at"
-	if state == core.StateDiscovered {
-		order = "ORDER BY release_date DESC, updated_at"
-	}
-	rows, err := s.db.QueryContext(ctx, jobSelect+` WHERE state = $1 `+order+` LIMIT $2`, string(state), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanJobs(rows)
-}
-
 // CountJobsInStates returns the total number of jobs currently in any of the
 // given states, used to enforce the global cap on concurrently active jobs.
 func (s *Store) CountJobsInStates(ctx context.Context, states ...core.AlbumJobState) (int, error) {
@@ -64,128 +46,25 @@ func (s *Store) CountJobsInStates(ctx context.Context, states ...core.AlbumJobSt
 	return count, nil
 }
 
-// DueCooldownJobs returns up to limit COOLDOWN jobs whose next_attempt_at has passed.
-func (s *Store) DueCooldownJobs(ctx context.Context, now time.Time, limit int) ([]core.AlbumJob, error) {
+// CandidatesForJob returns all candidates ever cached for a job (any state),
+// oldest first, for the dashboard's per-job detail panel. See dashboard.go's
+// JobDetail.
+func (s *Store) CandidatesForJob(ctx context.Context, jobID int64) ([]core.Candidate, error) {
 	rows, err := s.db.QueryContext(ctx,
-		jobSelect+` WHERE state = $1 AND next_attempt_at IS NOT NULL AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3`,
-		string(core.StateCooldown), now, limit)
+		candidateSelect+` WHERE album_job_id = $1 ORDER BY created_at`, jobID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanJobs(rows)
-}
-
-// AttemptsForJob returns all candidate attempts for a job, oldest first.
-func (s *Store) AttemptsForJob(ctx context.Context, jobID int64) ([]core.CandidateAttempt, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, album_job_id, username, score, state, fail_reason, backoff_until, created_at, updated_at
-		 FROM candidate_attempts WHERE album_job_id = $1 ORDER BY created_at`, jobID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []core.CandidateAttempt
+	var out []core.Candidate
 	for rows.Next() {
-		var a core.CandidateAttempt
-		if err := rows.Scan(&a.ID, &a.AlbumJobID, &a.Username, &a.Score, &a.State, &a.FailReason, &a.BackoffUntil, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		c, err := scanCandidate(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, a)
+		out = append(out, c)
 	}
 	return out, rows.Err()
-}
-
-// TransfersForAttempt returns all transfers belonging to a candidate attempt.
-func (s *Store) TransfersForAttempt(ctx context.Context, attemptID int64) ([]core.Transfer, error) {
-	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE attempt_id = $1`, attemptID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanTransfers(rows)
-}
-
-// FailAttempt marks a candidate attempt FAILED with a reason and a backoff time.
-func (s *Store) FailAttempt(ctx context.Context, attemptID int64, reason string, backoffUntil, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'FAILED', fail_reason = $1, backoff_until = $2, updated_at = $3 WHERE id = $4`,
-		reason, backoffUntil, now, attemptID)
-	if err != nil {
-		return fmt.Errorf("fail attempt: %w", err)
-	}
-	return nil
-}
-
-// SucceedAttempt marks a candidate attempt SUCCEEDED.
-func (s *Store) SucceedAttempt(ctx context.Context, attemptID int64, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE candidate_attempts SET state = 'SUCCEEDED', updated_at = $1 WHERE id = $2`, now, attemptID)
-	if err != nil {
-		return fmt.Errorf("succeed attempt: %w", err)
-	}
-	return nil
-}
-
-// SetJobCooldown moves a job to COOLDOWN with the given next-attempt time.
-func (s *Store) SetJobCooldown(ctx context.Context, jobID int64, nextAttemptAt, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, next_attempt_at = $2, updated_at = $3 WHERE id = $4`,
-		string(core.StateCooldown), nextAttemptAt, now, jobID)
-	if err != nil {
-		return fmt.Errorf("set job cooldown: %w", err)
-	}
-	return nil
-}
-
-// IncrementCandidatesTried bumps the count of candidates tried for a job.
-func (s *Store) IncrementCandidatesTried(ctx context.Context, jobID int64, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET candidates_tried = candidates_tried + 1, updated_at = $1 WHERE id = $2`,
-		now, jobID)
-	if err != nil {
-		return fmt.Errorf("increment candidates tried: %w", err)
-	}
-	return nil
-}
-
-// DueFailedJobs returns up to limit FAILED jobs whose updated_at is at or before
-// cutoff — used to retry failed albums after failed_retry_after has elapsed.
-func (s *Store) DueFailedJobs(ctx context.Context, cutoff time.Time, limit int) ([]core.AlbumJob, error) {
-	rows, err := s.db.QueryContext(ctx,
-		jobSelect+` WHERE state = $1 AND updated_at <= $2 ORDER BY updated_at LIMIT $3`,
-		string(core.StateFailed), cutoff, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanJobs(rows)
-}
-
-// ResetJobForRetry gives a failed album a fresh start: it deletes the job's prior
-// attempts (and their now-terminal transfers) in a transaction and returns the job
-// to DISCOVERED with a zero candidate count. Clearing attempts frees the
-// (username, filename) transfer keys and lets previously-tried peers be retried.
-func (s *Store) ResetJobForRetry(ctx context.Context, jobID int64, now time.Time) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidate_attempts WHERE album_job_id = $1)`, jobID); err != nil {
-		return fmt.Errorf("delete transfers: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM candidate_attempts WHERE album_job_id = $1`, jobID); err != nil {
-		return fmt.Errorf("delete attempts: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, candidates_tried = 0, next_attempt_at = NULL, updated_at = $2 WHERE id = $3`,
-		string(core.StateDiscovered), now, jobID); err != nil {
-		return fmt.Errorf("reset job: %w", err)
-	}
-	return tx.Commit()
 }
 
 // RunnableJobsInState is JobsInState plus the not_before filter. Order:
@@ -234,7 +113,7 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 // job.Retries-as-is / 0 and nil). Transfers must go with the candidates:
 // transfers has a global UNIQUE(username, filename), so a leftover row from
 // the wiped cycle would collide when a later cycle re-attempts the same
-// peer+file (same rationale as the legacy ResetJobForRetry).
+// peer+file.
 func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, retries int, notBefore *time.Time, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -242,7 +121,7 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, retries int, 
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM transfers WHERE attempt_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
 		return fmt.Errorf("delete candidate transfers: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {

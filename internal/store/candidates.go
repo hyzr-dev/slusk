@@ -188,10 +188,8 @@ func (s *Store) ActivateCandidate(ctx context.Context, candidateID, jobID int64,
 }
 
 // TransfersForCandidate returns all transfers belonging to a candidate.
-// transfers.attempt_id holds candidate ids in the pipeline (see schema.sql);
-// the column is renamed to candidate_id once the legacy engine is deleted.
 func (s *Store) TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error) {
-	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE attempt_id = $1`, candidateID)
+	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE candidate_id = $1`, candidateID)
 	if err != nil {
 		return nil, err
 	}

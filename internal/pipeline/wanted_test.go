@@ -169,11 +169,14 @@ type testDiscard struct{}
 
 func (testDiscard) Write(p []byte) (int, error) { return len(p), nil }
 
-// jobStateFor scans every pipeline state to find jobID's current state,
-// since the store has no direct get-by-ID lookup exposed here.
+// jobStateFor scans every pipeline state to find jobID's current state, since
+// the store has no direct get-by-ID lookup exposed here. It uses
+// RunnableJobsInState with a far-future "now" so a job hidden behind a
+// not_before backoff is still found regardless of state.
 func jobStateFor(t *testing.T, st *store.Store, jobID int64) core.AlbumJobState {
 	t.Helper()
 	ctx := context.Background()
+	farFuture := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 	all := []core.AlbumJobState{
 		core.StateWanted, core.StateSearching, core.StateSelecting,
 		core.StateDownloading, core.StateVerifying, core.StateImporting,
@@ -181,9 +184,9 @@ func jobStateFor(t *testing.T, st *store.Store, jobID int64) core.AlbumJobState 
 		core.StateDiscovered, core.StateCompleted,
 	}
 	for _, state := range all {
-		jobs, err := st.JobsInState(ctx, state, 100)
+		jobs, err := st.RunnableJobsInState(ctx, state, farFuture, 100)
 		if err != nil {
-			t.Fatalf("JobsInState(%v): %v", state, err)
+			t.Fatalf("RunnableJobsInState(%v): %v", state, err)
 		}
 		for _, j := range jobs {
 			if j.ID == jobID {

@@ -1,6 +1,7 @@
 // Command slskdarr is the daemon entrypoint: it loads config, opens the store,
-// wires the clients and engine, starts the observability server, and runs until
-// it receives SIGINT/SIGTERM (graceful shutdown via context cancellation).
+// wires the clients and the pipeline modules, starts the observability
+// server, and runs until it receives SIGINT/SIGTERM (graceful shutdown via
+// context cancellation).
 package main
 
 import (
@@ -19,19 +20,13 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/engine"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/observ"
+	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
-
-// livenessStalePollFactor bounds how many missed StatusPoll ticks /healthz
-// tolerates before reporting the reconcile loop as stalled. The runtime image
-// is distroless (no shell/curl), so Docker's HEALTHCHECK execs this same
-// binary with --healthcheck to hit that endpoint locally.
-const livenessStalePollFactor = 4
 
 func main() {
 	configPath := flag.String("config", "/config/config.toml", "path to config file")
@@ -62,38 +57,74 @@ func main() {
 	defer st.Close()
 
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
-	reconciler := engine.NewReconciler(peers, st, cfg.Engine.MaxTransferRetries, cfg.Engine.StallTimeout.Duration)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
-	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
-	discoverer := engine.NewDiscoverer(engine.DiscovererParams{
-		Music: lidarrClient, Peers: peers, Store: st, Ranker: scorer,
-		CompleteDir:            cfg.Paths.SlskdCompleteDir,
-		SearchTimeout:          cfg.Engine.SearchTimeout.Duration,
-		TransferDeadline:       cfg.Engine.TransferDeadline.Duration,
-		CandidateBackoff:       cfg.Engine.CandidateBackoff.Duration,
-		FailedCandidateBackoff: cfg.Engine.FailedCandidateBackoff.Duration,
-		FailedRetryAfter:       cfg.Engine.FailedRetryAfter.Duration,
-		ImportConfirmTimeout:   cfg.Engine.ImportConfirmTimeout.Duration,
-		MaxCandidates:          cfg.Engine.MaxCandidatesPerAlbum,
-		Batch:                  cfg.Engine.Batch,
-		MaxActive:              cfg.Engine.MaxConcurrentActive,
-		MaxInflightPerPeer:     cfg.Engine.MaxInflightPerPeer,
-		MaxCandidateFileRatio:  cfg.Engine.MaxCandidateFileRatio,
-		MaxTransferRetries:     cfg.Engine.MaxTransferRetries,
-		Logger:                 logger,
-	})
+	scorer := matcher.NewWeighted(cfg.Pipeline.Weights, cfg.Pipeline.MinBitrate)
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
-	eng := engine.New(engine.Params{
-		Reconciler:   reconciler,
-		Discoverer:   discoverer,
-		StatusPoll:   cfg.Slskd.StatusPollInterval.Duration,
-		LidarrPoll:   cfg.Lidarr.PollInterval.Duration,
-		TickInterval: cfg.Engine.TickInterval.Duration,
-		Logger:       logger,
-		Metrics:      metrics,
-		EventPruner:  st,
+
+	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{
+		Music:             lidarrClient,
+		Store:             st,
+		Interval:          cfg.Pipeline.WantedSyncInterval.Duration,
+		FailedReviveAfter: cfg.Pipeline.FailedReviveAfter.Duration,
+		Logger:            logger,
 	})
+	discovery := pipeline.NewDiscovery(pipeline.DiscoveryParams{
+		Store:                 st,
+		Peers:                 peers,
+		Music:                 lidarrClient,
+		Ranker:                scorer,
+		WantedSource:          wantedSync,
+		SearchTimeout:         cfg.Pipeline.SearchTimeout.Duration,
+		MaxCandidates:         cfg.Pipeline.MaxCandidatesPerAlbum,
+		MaxCandidateFileRatio: cfg.Pipeline.MaxCandidateFileRatio,
+		MaxRetries:            cfg.Pipeline.MaxRetries,
+		BackoffBase:           cfg.Pipeline.BackoffBase.Duration,
+		BackoffCap:            cfg.Pipeline.BackoffCap.Duration,
+		Interval:              cfg.Pipeline.DiscoveryInterval.Duration,
+		Logger:                logger,
+	})
+	selecting := pipeline.NewSelecting(pipeline.SelectingParams{
+		Store:              st,
+		Peers:              peers,
+		MaxActive:          cfg.Pipeline.MaxActive,
+		MaxRetries:         cfg.Pipeline.MaxRetries,
+		BackoffBase:        cfg.Pipeline.BackoffBase.Duration,
+		BackoffCap:         cfg.Pipeline.BackoffCap.Duration,
+		CandidateTTL:       cfg.Pipeline.CandidateTTL.Duration,
+		MaxInflightPerPeer: cfg.Pipeline.MaxInflightPerPeer,
+		MaxTransferRetries: cfg.Pipeline.MaxTransferRetries,
+		TransferDeadline:   cfg.Pipeline.TransferDeadline.Duration,
+		Interval:           cfg.Pipeline.SelectingInterval.Duration,
+		Logger:             logger,
+	})
+	downloading := pipeline.NewDownloading(pipeline.DownloadingParams{
+		Store:              st,
+		Network:            peers,
+		Peers:              peers,
+		Logger:             logger,
+		Metrics:            metrics,
+		MaxActive:          cfg.Pipeline.MaxActive,
+		MaxTransferRetries: cfg.Pipeline.MaxTransferRetries,
+		StallTimeout:       cfg.Pipeline.StallTimeout.Duration,
+		MaxInflightPerPeer: cfg.Pipeline.MaxInflightPerPeer,
+		TransferDeadline:   cfg.Pipeline.TransferDeadline.Duration,
+		Interval:           cfg.Pipeline.DownloadingInterval.Duration,
+	})
+	importing := pipeline.NewImporting(pipeline.ImportingParams{
+		Store:                st,
+		Music:                lidarrClient,
+		Peers:                peers,
+		Logger:               logger,
+		CompleteDir:          cfg.Paths.SlskdCompleteDir,
+		MaxActive:            cfg.Pipeline.MaxActive,
+		StuckAfter:           cfg.Pipeline.StuckAfter.Duration,
+		ImportConfirmTimeout: cfg.Pipeline.ImportConfirmTimeout.Duration,
+		Interval:             cfg.Pipeline.ImportingInterval.Duration,
+	})
+	runner := pipeline.NewRunner(logger, cfg.Pipeline.TickTimeout.Duration,
+		wantedSync, discovery, selecting, downloading, importing)
+
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
 		active, err := st.ActiveTransfers(ctx)
 		if err != nil {
@@ -137,16 +168,14 @@ func main() {
 		}
 		return observ.CancelResultOK, nil
 	}
-	// staleAfter tolerates a few missed StatusPoll ticks (e.g. a slow slskd
-	// response) before /healthz reports the reconcile loop as stalled -
-	// it's driven by StatusPoll alone, so an empty Lidarr wanted list (nothing
-	// to discover) never counts as "stuck": reconcileOnce still runs every
-	// StatusPoll tick regardless of whether there's anything to reconcile.
-	staleAfter := cfg.Slskd.StatusPollInterval.Duration * livenessStalePollFactor
-	healthyFn := func() bool { return eng.Healthy(staleAfter) }
+	// healthyFn/modulesFn surface the Runner's per-module liveness: healthy
+	// only once every module has ticked at least once and none is stale
+	// beyond its own staleness window (see pipeline.Runner.Healthy).
+	healthyFn := func() bool { return runner.Healthy() }
+	modulesFn := func() map[string]time.Time { return runner.Health() }
 	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn,
-		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn,
-		cfg.Engine.FailedRetryAfter.Duration, cfg.Engine.MaxCandidatesPerAlbum)}
+		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn, modulesFn,
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("status server", "err", err)
@@ -156,26 +185,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// A crash can leave DOWNLOADING jobs whose attempt is already fully
-	// terminal in the transfers table (the Reconciler keeps reconciling
-	// transfers against slskd independently of the discovery loop) but were
-	// never picked up by advanceDownloading before the process died. Sweeping
-	// them once at startup - unbounded by Batch - drains that backlog
-	// immediately instead of over dozens of ticks, and unblocks
-	// max_concurrent_active if it had pinned the scheduler at capacity on
-	// zombie rows.
-	sweepCtx, sweepCancel := context.WithTimeout(ctx, 2*time.Minute)
-	resolved, err := discoverer.SweepStaleDownloads(sweepCtx, time.Now().UTC())
-	sweepCancel()
-	if err != nil {
-		logger.Error("sweep stale downloads failed", "err", err)
-	} else if resolved > 0 {
-		logger.Info("swept stale downloading jobs", "resolved", resolved)
-	}
-
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
-	if err := eng.Run(ctx); err != nil {
-		logger.Error("engine stopped", "err", err)
+	if err := runner.Run(ctx); err != nil {
+		logger.Error("pipeline runner stopped", "err", err)
 	}
 	_ = srv.Shutdown(context.Background())
 	logger.Info("slskdarr stopped cleanly")

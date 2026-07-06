@@ -13,9 +13,9 @@ func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertDiscoveredJob(ctx, 1, now)
+	job, err := s.UpsertWantedJob(ctx, 1, now)
 	if err != nil {
-		t.Fatalf("UpsertDiscoveredJob: %v", err)
+		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 	if err := s.UpdateJobMetadata(ctx, job.ID, "Rounds", "Four Tet", "", 0, now); err != nil {
 		t.Fatalf("UpdateJobMetadata: %v", err)
@@ -33,7 +33,7 @@ func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 		t.Errorf("title/artist = %q / %q, want Rounds / Four Tet", v.Job.Title, v.Job.ArtistName)
 	}
 	if v.Transfer != nil {
-		t.Errorf("expected nil Transfer for a job with no attempt, got %+v", v.Transfer)
+		t.Errorf("expected nil Transfer for a job with no candidate, got %+v", v.Transfer)
 	}
 	if v.Peer != "" {
 		t.Errorf("expected empty Peer, got %q", v.Peer)
@@ -45,25 +45,31 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 2, now)
+	job, _ := s.UpsertWantedJob(ctx, 2, now)
 	_ = s.UpdateJobMetadata(ctx, job.ID, "Dummy", "Portishead", "", 0, now)
 
-	// First (older) attempt/transfer.
-	a1, err := s.CreateAttempt(ctx, job.ID, "peer_one", 1.0, now)
-	if err != nil {
-		t.Fatalf("CreateAttempt a1: %v", err)
+	// First (older) candidate/transfer.
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates a1: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a1, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	a1, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a1: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent a1: %v", err)
 	}
 
-	// Second (newer) attempt/transfer — this is the one ListJobsWithTransfer must surface.
+	// Second (newer) candidate/transfer — this is the one ListJobsWithTransfer must surface.
 	later := now.Add(time.Minute)
-	a2, err := s.CreateAttempt(ctx, job.ID, "peer_two", 2.0, later)
-	if err != nil {
-		t.Fatalf("CreateAttempt a2: %v", err)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_two", Score: 2.0}}, later); err != nil {
+		t.Fatalf("InsertCandidates a2: %v", err)
 	}
-	tid2, err := s.RecordEnqueueIntent(ctx, a2, "peer_two", "f2.flac", later.Add(time.Hour), later)
+	a2, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a2: found=%v (%v)", found, err)
+	}
+	tid2, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent a2: %v", err)
 	}
@@ -83,7 +89,7 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 		t.Fatalf("expected non-nil Transfer")
 	}
 	if v.Peer != "peer_two" {
-		t.Errorf("Peer = %q, want peer_two (the newer attempt)", v.Peer)
+		t.Errorf("Peer = %q, want peer_two (the newer candidate)", v.Peer)
 	}
 	if v.Transfer.State != core.TransferInProgress || v.Transfer.BytesDone != 512 {
 		t.Errorf("Transfer = %+v, want state IN_PROGRESS bytesDone 512", v.Transfer)
@@ -95,7 +101,7 @@ func TestListJobsWithTransferExcludesCancelled(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 3, now)
+	job, _ := s.UpsertWantedJob(ctx, 3, now)
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateCancelled, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
@@ -110,8 +116,8 @@ func TestListJobsWithTransferExcludesCancelled(t *testing.T) {
 }
 
 // TestListJobsWithTransferDedupesMultiTransferAttempt reproduces the
-// multi-track-album scenario: a single candidate_attempt gets one transfer
-// row per file (see engine.Discovery, one RecordEnqueueIntent call per
+// multi-track-album scenario: a single candidate gets one transfer row per
+// file (see pipeline.Selecting, one RecordEnqueueIntent call per
 // cand.Files entry). ListJobsWithTransfer must still return exactly one
 // JobView per job, picking the most recently updated transfer.
 func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
@@ -119,22 +125,25 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 5, now)
+	job, _ := s.UpsertWantedJob(ctx, 5, now)
 	_ = s.UpdateJobMetadata(ctx, job.ID, "Multi Track Album", "Boards of Canada", "", 0, now)
 
-	attempt, err := s.CreateAttempt(ctx, job.ID, "album_peer", 1.0, now)
-	if err != nil {
-		t.Fatalf("CreateAttempt: %v", err)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "album_peer", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	attempt, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
 
 	// First file of the album.
-	if _, err := s.RecordEnqueueIntent(ctx, attempt, "album_peer", "track1.flac", now.Add(time.Hour), now); err != nil {
+	if _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent track1: %v", err)
 	}
 
-	// Second file of the same album, same attempt, enqueued slightly later.
+	// Second file of the same album, same candidate, enqueued slightly later.
 	later := now.Add(time.Minute)
-	tid2, err := s.RecordEnqueueIntent(ctx, attempt, "album_peer", "track2.flac", later.Add(time.Hour), later)
+	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track2: %v", err)
 	}
@@ -168,16 +177,18 @@ func TestListJobsWithTransferPopulatesAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 6, now)
+	job, _ := s.UpsertWantedJob(ctx, 6, now)
 	_ = s.UpdateJobMetadata(ctx, job.ID, "Failed Album", "Some Artist", "", 0, now)
 
-	attemptID, err := s.CreateAttempt(ctx, job.ID, "flaky_peer", 1.5, now)
-	if err != nil {
-		t.Fatalf("CreateAttempt: %v", err)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "flaky_peer", Score: 1.5}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
 	}
-	backoff := now.Add(time.Hour)
-	if err := s.FailAttempt(ctx, attemptID, "transfer failed", backoff, now); err != nil {
-		t.Fatalf("FailAttempt: %v", err)
+	candidate, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if err := s.FailCandidate(ctx, candidate.ID, "transfer failed", now); err != nil {
+		t.Fatalf("FailCandidate: %v", err)
 	}
 
 	views, err := s.ListJobsWithTransfer(ctx)
@@ -197,11 +208,8 @@ func TestListJobsWithTransferPopulatesAttempt(t *testing.T) {
 	if v.Attempt.FailReason != "transfer failed" {
 		t.Errorf("Attempt.FailReason = %q, want %q", v.Attempt.FailReason, "transfer failed")
 	}
-	if v.Attempt.State != "FAILED" {
+	if v.Attempt.State != core.CandidateFailed {
 		t.Errorf("Attempt.State = %q, want FAILED", v.Attempt.State)
-	}
-	if v.Attempt.BackoffUntil == nil || !v.Attempt.BackoffUntil.Equal(backoff) {
-		t.Errorf("Attempt.BackoffUntil = %v, want %v", v.Attempt.BackoffUntil, backoff)
 	}
 }
 
@@ -210,7 +218,7 @@ func TestListJobsWithTransferNilAttemptWhenNoAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 7, now)
+	job, _ := s.UpsertWantedJob(ctx, 7, now)
 	_ = s.UpdateJobMetadata(ctx, job.ID, "No Attempt Album", "Nobody", "", 0, now)
 
 	views, err := s.ListJobsWithTransfer(ctx)
@@ -243,9 +251,15 @@ func TestJobWithTransferFound(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 4, now)
-	a1, _ := s.CreateAttempt(ctx, job.ID, "solo_peer", 1.0, now)
-	if _, err := s.RecordEnqueueIntent(ctx, a1, "solo_peer", "solo.flac", now.Add(time.Hour), now); err != nil {
+	job, _ := s.UpsertWantedJob(ctx, 4, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "solo_peer", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	a1, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "solo_peer", "solo.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 
@@ -275,37 +289,43 @@ func TestJobDetailNotFound(t *testing.T) {
 }
 
 // TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst reproduces the
-// dashboard's per-job detail panel: every candidate attempt made for the job
-// (not just the latest, unlike JobWithTransfer/ListJobsWithTransfer), newest
+// dashboard's per-job detail panel: every candidate made for the job (not
+// just the latest, unlike JobWithTransfer/ListJobsWithTransfer), newest
 // first, each with its own per-file transfers.
 func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertDiscoveredJob(ctx, 10, now)
+	job, _ := s.UpsertWantedJob(ctx, 10, now)
 	_ = s.UpdateJobMetadata(ctx, job.ID, "Album", "Artist", "", 0, now)
 
-	a1, err := s.CreateAttempt(ctx, job.ID, "peer_one", 1.0, now)
-	if err != nil {
-		t.Fatalf("CreateAttempt a1: %v", err)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates a1: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a1, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	a1, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a1: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent a1/f1: %v", err)
 	}
-	if err := s.FailAttempt(ctx, a1, "transfer failed", now.Add(time.Hour), now); err != nil {
-		t.Fatalf("FailAttempt a1: %v", err)
+	if err := s.FailCandidate(ctx, a1.ID, "transfer failed", now); err != nil {
+		t.Fatalf("FailCandidate a1: %v", err)
 	}
 
 	later := now.Add(time.Minute)
-	a2, err := s.CreateAttempt(ctx, job.ID, "peer_two", 2.0, later)
-	if err != nil {
-		t.Fatalf("CreateAttempt a2: %v", err)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_two", Score: 2.0}}, later); err != nil {
+		t.Fatalf("InsertCandidates a2: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a2, "peer_two", "f2.flac", later.Add(time.Hour), later); err != nil {
+	a2, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a2: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later); err != nil {
 		t.Fatalf("RecordEnqueueIntent a2/f2: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a2, "peer_two", "f3.flac", later.Add(time.Hour), later); err != nil {
+	if _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f3.flac", later.Add(time.Hour), later); err != nil {
 		t.Fatalf("RecordEnqueueIntent a2/f3: %v", err)
 	}
 
@@ -323,19 +343,19 @@ func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 		t.Fatalf("expected 2 attempts, got %d", len(d.Attempts))
 	}
 	if d.Attempts[0].Attempt.Username != "peer_two" {
-		t.Errorf("expected newest attempt (peer_two) first, got %q", d.Attempts[0].Attempt.Username)
+		t.Errorf("expected newest candidate (peer_two) first, got %q", d.Attempts[0].Attempt.Username)
 	}
 	if len(d.Attempts[0].Transfers) != 2 {
-		t.Errorf("expected 2 transfers for peer_two's attempt, got %d", len(d.Attempts[0].Transfers))
+		t.Errorf("expected 2 transfers for peer_two's candidate, got %d", len(d.Attempts[0].Transfers))
 	}
 	if d.Attempts[1].Attempt.Username != "peer_one" {
-		t.Errorf("expected oldest attempt (peer_one) last, got %q", d.Attempts[1].Attempt.Username)
+		t.Errorf("expected oldest candidate (peer_one) last, got %q", d.Attempts[1].Attempt.Username)
 	}
 	if d.Attempts[1].Attempt.FailReason != "transfer failed" {
 		t.Errorf("FailReason = %q, want %q", d.Attempts[1].Attempt.FailReason, "transfer failed")
 	}
 	if len(d.Attempts[1].Transfers) != 1 {
-		t.Errorf("expected 1 transfer for peer_one's attempt, got %d", len(d.Attempts[1].Transfers))
+		t.Errorf("expected 1 transfer for peer_one's candidate, got %d", len(d.Attempts[1].Transfers))
 	}
 }
 

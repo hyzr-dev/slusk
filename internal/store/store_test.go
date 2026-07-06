@@ -29,7 +29,7 @@ func TestOpenAppliesSchema(t *testing.T) {
 	s := newTestStore(t)
 
 	// Check that all three core tables exist
-	tables := []string{"album_jobs", "candidate_attempts", "transfers"}
+	tables := []string{"album_jobs", "candidates", "transfers"}
 	for _, table := range tables {
 		var count int
 		err := s.db.QueryRow(
@@ -48,11 +48,11 @@ func TestOpenAppliesSchema(t *testing.T) {
 func TestForeignKeysEnforced(t *testing.T) {
 	s := newTestStore(t)
 
-	// Try to insert a candidate_attempts row with a non-existent album_job_id.
+	// Try to insert a candidates row with a non-existent album_job_id.
 	// The foreign key constraint must reject it.
 	_, err := s.db.Exec(
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
-		 VALUES (999, 'testuser', 1.0, 'PENDING', now(), now())`,
+		`INSERT INTO candidates (album_job_id, username, score, files, state, created_at, updated_at)
+		 VALUES (999, 'testuser', 1.0, '[]', 'NEW', now(), now())`,
 	)
 	if err == nil {
 		t.Fatal("expected foreign key violation, got nil error")
@@ -86,7 +86,7 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 
 // TestJobViewIndexesExist guards against losing the covering indexes for the
 // dashboard's ListJobsWithTransfer correlated subqueries. Without them those
-// subqueries full-scanned candidate_attempts/transfers once per album_jobs row,
+// subqueries full-scanned candidates/transfers once per album_jobs row,
 // which at a few thousand jobs made a single /api/jobs request take tens of
 // seconds of CPU — and the dashboard polls it every 3 seconds, so requests
 // piled up and pinned multiple cores (the 300%-CPU incident).
@@ -129,7 +129,7 @@ func TestOpenRecyclesIdleConnections(t *testing.T) {
 func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 
-	for _, idx := range []string{"idx_attempts_job", "idx_transfers_attempt"} {
+	for _, idx := range []string{"idx_candidates_job", "idx_transfers_attempt"} {
 		var count int
 		if err := s.db.QueryRow(
 			`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, idx,

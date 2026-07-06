@@ -261,7 +261,7 @@ func TestSelectingExhaustionAtMaxRetriesFails(t *testing.T) {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	jobs, err := st.JobsInState(ctx, core.StateFailed, 10)
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
 		t.Fatalf("expected job FAILED, got %+v (%v)", jobs, err)
 	}

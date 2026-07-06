@@ -14,8 +14,8 @@ func TestLoadValid(t *testing.T) {
 	if cfg.Lidarr.URL != "http://lidarr:8686" {
 		t.Errorf("Lidarr.URL = %q", cfg.Lidarr.URL)
 	}
-	if cfg.Engine.MaxCandidatesPerAlbum != 5 {
-		t.Errorf("MaxCandidatesPerAlbum = %d", cfg.Engine.MaxCandidatesPerAlbum)
+	if cfg.Pipeline.MaxCandidatesPerAlbum != 5 {
+		t.Errorf("MaxCandidatesPerAlbum = %d", cfg.Pipeline.MaxCandidatesPerAlbum)
 	}
 }
 
@@ -32,9 +32,9 @@ func TestLoadRejectsUnknownKey(t *testing.T) {
 func TestLoadRejectsMissingDuration(t *testing.T) {
 	_, err := Load("testdata/missing_duration.toml")
 	if err == nil {
-		t.Fatal("expected error for missing status_poll_interval, got nil")
+		t.Fatal("expected error for missing pipeline.search_timeout, got nil")
 	}
-	if !strings.Contains(err.Error(), "status_poll_interval") {
+	if !strings.Contains(err.Error(), "search_timeout") {
 		t.Errorf("error should name the missing field: %v", err)
 	}
 }
@@ -44,11 +44,11 @@ func TestLoadValidHasPipelineFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Engine.MinBitrate != 192 {
-		t.Errorf("MinBitrate = %d", cfg.Engine.MinBitrate)
+	if cfg.Pipeline.MinBitrate != 192 {
+		t.Errorf("MinBitrate = %d", cfg.Pipeline.MinBitrate)
 	}
-	if cfg.Engine.SearchTimeout.Duration.Seconds() != 30 {
-		t.Errorf("SearchTimeout = %v", cfg.Engine.SearchTimeout.Duration)
+	if cfg.Pipeline.SearchTimeout.Duration.Seconds() != 30 {
+		t.Errorf("SearchTimeout = %v", cfg.Pipeline.SearchTimeout.Duration)
 	}
 	if cfg.Paths.SlskdCompleteDir != "/music/slskd-downloads" {
 		t.Errorf("SlskdCompleteDir = %q", cfg.Paths.SlskdCompleteDir)

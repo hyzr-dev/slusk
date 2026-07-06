@@ -99,16 +99,12 @@ Här vill jag att du tittar noga.
 
 För smök-test, korta ner intervallen så du slipper vänta:
 ```toml
-[lidarr]
-poll_interval = "30s"
-[slskd]
-status_poll_interval = "10s"
-[engine]
+[pipeline]
 transfer_deadline = "5m"
-candidate_backoff = "1m"
-failed_retry_after = "2m"
+backoff_base = "1m"
+failed_revive_after = "2m"
 ```
-Återställ till produktionsvärden (t.ex. `poll_interval = "5m"`, `failed_retry_after = "24h"`)
+Återställ till produktionsvärden (t.ex. `failed_revive_after = "720h"`)
 när allt gått igenom grönt.
 
 ## Fas 8 — Dashboard-verifikation
