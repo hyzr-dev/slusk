@@ -125,12 +125,22 @@ func (w *WantedSync) Tick(ctx context.Context, now time.Time) error {
 		}
 	}
 
-	cancelled, err := w.p.Store.CancelJobsNotWanted(ctx, wantedIDs, now)
-	if err != nil {
-		return err
-	}
-	if cancelled > 0 {
-		w.log().Info("cancelled jobs no longer wanted", "count", cancelled)
+	// An empty wanted list from a successful fetch is treated as suspicious: a
+	// transient empty response from Lidarr must not cancel every in-flight job
+	// (CancelJobsNotWanted with an empty wantedIDs would cancel all non-terminal
+	// jobs, since `lidarr_album_id <> ALL('{}')` is vacuously true). Skip
+	// cancellation entirely this pass; the next successful non-empty sync
+	// reconciles anything that genuinely left the list.
+	if len(wantedIDs) == 0 {
+		w.log().Info("wanted list empty, skipping cancellation (treating empty list as suspicious)")
+	} else {
+		cancelled, err := w.p.Store.CancelJobsNotWanted(ctx, wantedIDs, now)
+		if err != nil {
+			return err
+		}
+		if cancelled > 0 {
+			w.log().Info("cancelled jobs no longer wanted", "count", cancelled)
+		}
 	}
 
 	revived, err := w.p.Store.ReviveFailedJobs(ctx, wantedIDs, now.Add(-w.p.FailedReviveAfter), now)

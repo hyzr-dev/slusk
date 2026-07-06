@@ -122,6 +122,63 @@ func TestWantedSyncRevivesOldFailed(t *testing.T) {
 	}
 }
 
+// TestWantedSyncEmptyListSkipsCancellation: a successful but empty wanted-list
+// fetch must NOT cancel in-flight jobs - a transient empty response from Lidarr
+// would otherwise cancel every job in the pipeline.
+func TestWantedSyncEmptyListSkipsCancellation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	music := &fakeMusic{wanted: nil} // successful fetch, empty list
+	p, st := newWantedSyncParams(t, music)
+
+	// A pre-existing DOWNLOADING job that would be cancelled if cancellation ran.
+	job, err := st.UpsertWantedJob(ctx, 42, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if _, err := st.AdvanceJobStateFrom(ctx, job.ID, core.StateWanted, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobStateFrom: %v", err)
+	}
+
+	w := NewWantedSync(p)
+	if err := w.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := jobStateFor(t, st, job.ID); got != core.StateDownloading {
+		t.Errorf("empty wanted list must not cancel in-flight jobs, job state = %v, want DOWNLOADING", got)
+	}
+}
+
+// TestWantedSyncReentersCancelledAlbum: a CANCELLED job whose album reappears on
+// the wanted list must re-enter WANTED via the sync (UpsertWantedJob's re-enter
+// path).
+func TestWantedSyncReentersCancelledAlbum(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 7, Title: "A", ArtistName: "X"}}}
+	p, st := newWantedSyncParams(t, music)
+
+	job, err := st.UpsertWantedJob(ctx, 7, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateCancelled, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	w := NewWantedSync(p)
+	if err := w.Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := jobStateFor(t, st, job.ID); got != core.StateWanted {
+		t.Errorf("re-wanted CANCELLED album must re-enter WANTED, got %v", got)
+	}
+}
+
 func TestWantedSyncKeepsSnapshotOnLidarrError(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

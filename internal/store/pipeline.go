@@ -96,11 +96,17 @@ func (s *Store) SetJobBackoff(ctx context.Context, jobID int64, retries int, not
 	return nil
 }
 
-// MarkJobFailed: state→FAILED, failed_at=now, not_before cleared.
+// MarkJobFailed: state→FAILED, failed_at=now, not_before cleared. The UPDATE is
+// guarded (state NOT IN the terminal states) so a job WantedSync cancelled
+// underneath a failing search cycle is never resurrected CANCELLED→FAILED (or a
+// DONE/FAILED job re-failed); per the single-writer invariant every transition
+// UPDATE must be conditional. A guarded-out no-op returns nil (nothing to fail).
 func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, failed_at = $2, not_before = NULL, updated_at = $3 WHERE id = $4`,
-		string(core.StateFailed), now, now, jobID)
+		`UPDATE album_jobs SET state = $1, failed_at = $2, not_before = NULL, updated_at = $3
+		 WHERE id = $4 AND state NOT IN ($5, $6, $7)`,
+		string(core.StateFailed), now, now, jobID,
+		string(core.StateCancelled), string(core.StateDone), string(core.StateFailed))
 	if err != nil {
 		return fmt.Errorf("mark job failed: %w", err)
 	}
@@ -114,23 +120,38 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 // transfers has a global UNIQUE(username, filename), so a leftover row from
 // the wiped cycle would collide when a later cycle re-attempts the same
 // peer+file.
-func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, retries int, notBefore *time.Time, now time.Time) error {
+// The job UPDATE is guarded on the caller-supplied `from` state (per the
+// single-writer invariant every transition UPDATE must be conditional): every
+// caller resets a SELECTING job, so a job WantedSync cancelled underneath us
+// must NOT be resurrected to WANTED nor have its candidates/transfers deleted.
+// When the guard bounces (0 rows) the whole tx rolls back and nil is returned.
+func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.AlbumJobState, retries int, notBefore *time.Time, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// The guarded transition runs first: if it bounces, the deferred rollback
+	// leaves the candidates/transfers intact for the job that turned CANCELLED.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, retries = $2, not_before = $3, updated_at = $4 WHERE id = $5 AND state = $6`,
+		string(core.StateWanted), retries, notBefore, now, jobID, string(from))
+	if err != nil {
+		return fmt.Errorf("reset job to wanted: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("reset job to wanted: rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
 		return fmt.Errorf("delete candidate transfers: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
 		return fmt.Errorf("delete candidates: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = $2, not_before = $3, updated_at = $4 WHERE id = $5`,
-		string(core.StateWanted), retries, notBefore, now, jobID); err != nil {
-		return fmt.Errorf("reset job to wanted: %w", err)
 	}
 	return tx.Commit()
 }
@@ -230,24 +251,68 @@ func (s *Store) ReviveFailedJobs(ctx context.Context, wantedIDs []int64, cutoff 
 	return int(n), nil
 }
 
-// UpsertWantedJob is UpsertDiscoveredJob but inserting state WANTED.
+// UpsertWantedJob inserts a WANTED job for the album (no-op if one already
+// exists) and, in the same transaction, re-enters a previously-CANCELLED job
+// whose album is wanted again: it is reset to WANTED with a clean slate
+// (retries=0, not_before/failed_at cleared, leftover candidates+transfers
+// deleted, same as RetryFailedJob), gated strictly on state='CANCELLED' so an
+// in-flight job for a still-wanted album is left untouched. Without this a
+// re-wanted CANCELLED album would never re-enter, since the INSERT is ON
+// CONFLICT DO NOTHING.
 func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error) {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.AlbumJob{}, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT(lidarr_album_id) DO NOTHING`,
-		lidarrAlbumID, string(core.StateWanted), now, now)
-	if err != nil {
+		lidarrAlbumID, string(core.StateWanted), now, now); err != nil {
 		return core.AlbumJob{}, fmt.Errorf("insert job: %w", err)
 	}
+
+	// Re-enter a re-wanted CANCELLED job with a clean slate.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		 WHERE lidarr_album_id = $3 AND state = $4`,
+		string(core.StateWanted), now, lidarrAlbumID, string(core.StateCancelled))
+	if err != nil {
+		return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: %w", err)
+	}
+	reentered, err := res.RowsAffected()
+	if err != nil {
+		return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: rows affected: %w", err)
+	}
+	if reentered > 0 {
+		// Wipe the stale cycle's candidates+transfers for the same reason as
+		// RetryFailedJob: transfers has a global UNIQUE(username, filename), so a
+		// leftover row would collide when the revived job re-attempts the peer+file.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1))`,
+			lidarrAlbumID); err != nil {
+			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete transfers: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1)`,
+			lidarrAlbumID); err != nil {
+			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete candidates: %w", err)
+		}
+	}
+
 	var j core.AlbumJob
 	var state string
-	err = s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, not_before, failed_at
 		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
 		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return core.AlbumJob{}, fmt.Errorf("upsert wanted job: commit: %w", err)
 	}
 	j.State = core.AlbumJobState(state)
 	return j, nil

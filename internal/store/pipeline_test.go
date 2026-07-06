@@ -319,3 +319,55 @@ func TestAdvanceJobStateFrom(t *testing.T) {
 		t.Fatal("AdvanceJobStateFrom: expected false when current state no longer matches from")
 	}
 }
+
+// TestReviveFailedJobsEmptyWantedRevivesNothing: with no wanted albums, the
+// ANY($wantedIDs) filter matches nothing, so no FAILED job is revived.
+func TestReviveFailedJobsEmptyWantedRevivesNothing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 900, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, job.ID, now.Add(-31*24*time.Hour)); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	count, err := s.ReviveFailedJobs(ctx, []int64{}, now.Add(-30*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("ReviveFailedJobs: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 revived with empty wantedIDs, got %d", count)
+	}
+	failed, err := s.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil || len(failed) != 1 || failed[0].ID != job.ID {
+		t.Fatalf("job must stay FAILED, got %+v (%v)", failed, err)
+	}
+}
+
+// TestMarkJobFailedBouncesWhenCancelled: MarkJobFailed's UPDATE is guarded so a
+// job WantedSync cancelled underneath a failing search cycle is never
+// resurrected CANCELLED->FAILED.
+func TestMarkJobFailedBouncesWhenCancelled(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 901, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateCancelled, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+	if got := jobStateForStore(t, s, job.ID); got != core.StateCancelled {
+		t.Errorf("job must stay CANCELLED, got %v", got)
+	}
+}

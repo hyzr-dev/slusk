@@ -28,15 +28,15 @@ type ImportingStore interface {
 	// MarkImportSubmitted records that ExecuteManualImport has been called,
 	// switching the candidate from verify to confirm on the next tick.
 	MarkImportSubmitted(ctx context.Context, candidateID int64, now time.Time) error
-	// SucceedCandidate marks a candidate SUCCEEDED (import confirmed, or the
-	// idempotent already-imported path).
-	SucceedCandidate(ctx context.Context, candidateID int64, now time.Time) error
-	// FailCandidate marks a candidate FAILED once rejected, incomplete, stuck,
-	// or unconfirmed past ImportConfirmTimeout.
-	FailCandidate(ctx context.Context, candidateID int64, reason string, now time.Time) error
-	// AdvanceJobStateFrom conditionally transitions a job (IMPORTING→DONE on
-	// success, IMPORTING→SELECTING on per-candidate failure).
-	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// SucceedCandidateAndAdvance atomically marks the candidate SUCCEEDED and
+	// advances the job IMPORTING→DONE (import confirmed, or the idempotent
+	// already-imported path) in one tx.
+	SucceedCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// FailCandidateAndAdvance atomically marks the candidate FAILED and advances
+	// the job IMPORTING→SELECTING (rejected, incomplete, stuck, or unconfirmed
+	// past ImportConfirmTimeout) in one tx, so a job is never left in IMPORTING
+	// with no ACTIVE candidate.
+	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// RecordAttemptOutcome writes a candidate's terminal success/fail outcome to
 	// the peer reliability tables (best-effort).
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
@@ -138,25 +138,28 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 			}
 			continue
 		}
-		m.confirm(ctx, job, cand, now)
+		if err := m.confirm(ctx, job, cand, now); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // failCandidate is the shared "reject like a failed download" path used by
 // both the rejection and incomplete-coverage cases in verify: cleanup, record
-// outcome, FailCandidate, and return the job to SELECTING. No cooldown is set
-// - other candidates usually remain cached, so the next SELECTING tick tries
-// one immediately.
-func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, now time.Time) {
+// outcome, then atomically fail the candidate and return the job to SELECTING.
+// The candidate-fail + job-advance commit together or not at all, so the job is
+// never stranded in IMPORTING with no ACTIVE candidate. No cooldown is set -
+// other candidates usually remain cached, so the next SELECTING tick tries one
+// immediately. The best-effort cleanup/outcome errors are logged inside their
+// helpers; only the combined store call's error is propagated.
+func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, now time.Time) error {
 	cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
 	m.recordOutcome(ctx, job, cand.Username, false, now)
-	if err := m.p.Store.FailCandidate(ctx, cand.ID, reason, now); err != nil {
-		m.log().Error("fail candidate failed", "candidate", cand.ID, "err", err)
+	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
+		return err
 	}
-	if _, err := m.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateImporting, core.StateSelecting, now); err != nil {
-		m.log().Error("advance to selecting failed", "album_job", job.ID, "err", err)
-	}
+	return nil
 }
 
 // verify is the verify-phase gate (ImportSubmittedAt is NULL): it asks Lidarr
@@ -182,8 +185,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	items, err := m.p.Music.ManualImportCandidates(ctx, folder)
 	if err != nil {
 		m.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)
-		m.escalateIfStuck(ctx, job, cand, names, "import candidates failed", now)
-		return nil
+		return m.escalateIfStuck(ctx, job, cand, names, "import candidates failed", now)
 	}
 	if len(items) == 0 {
 		// Empty folder on a job whose transfers all completed means the files
@@ -194,11 +196,8 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		m.log().Info(emptyDetail, "album_job", job.ID, "folder", folder)
 		m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, emptyDetail, now)
 		m.recordOutcome(ctx, job, cand.Username, true, now)
-		if err := m.p.Store.SucceedCandidate(ctx, cand.ID, now); err != nil {
-			m.log().Error("succeed candidate failed", "candidate", cand.ID, "err", err)
-		}
-		if _, err := m.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateImporting, core.StateDone, now); err != nil {
-			m.log().Error("advance to done failed", "album_job", job.ID, "err", err)
+		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -217,14 +216,12 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
-		m.failCandidate(ctx, job, cand, names, "import rejected", now)
-		return nil
+		return m.failCandidate(ctx, job, cand, names, "import rejected", now)
 	}
 	_, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 	if err != nil {
 		m.log().Error("album status failed", "album_job", job.ID, "err", err)
-		m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
-		return nil
+		return m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
 	}
 	if coverage(importable) < total {
 		// A source that can't complete the release is rejected outright rather
@@ -234,8 +231,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
 			"covered", coverage(importable), "total", total)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
-		m.failCandidate(ctx, job, cand, names, "incomplete download", now)
-		return nil
+		return m.failCandidate(ctx, job, cand, names, "incomplete download", now)
 	}
 	if err := m.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 		// Legacy propagated this error from the whole pass (advanceImporting
@@ -266,14 +262,16 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 // own ImportConfirmTimeout.
 //
 // Ported from the legacy Discoverer.escalateIfStuck (engine/discovery.go:783-798).
-func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand core.Candidate, filenames []string, reason string, now time.Time) {
+// Within the timeout it is a no-op (returns nil); past it, it propagates the
+// atomic fail path's error.
+func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand core.Candidate, filenames []string, reason string, now time.Time) error {
 	if now.Sub(job.UpdatedAt) <= m.p.StuckAfter {
-		return
+		return nil
 	}
 	stuckDetail := fmt.Sprintf("importing stuck past timeout (%s)", reason)
 	m.log().Info(stuckDetail, "album_job", job.ID, "reason", reason)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, stuckDetail, now)
-	m.failCandidate(ctx, job, cand, filenames, reason, now)
+	return m.failCandidate(ctx, job, cand, filenames, reason, now)
 }
 
 // coverage counts the distinct Lidarr track IDs covered by importable, used to
@@ -305,46 +303,42 @@ func coverage(importable []lidarr.ManualImportItem) int {
 // pipeline keys it on cand.ImportSubmittedAt, since ImportSubmittedAt is the
 // actual start of the async wait and job.UpdatedAt could be bumped by
 // unrelated writes.
-func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Candidate, now time.Time) {
+func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Candidate, now time.Time) error {
 	present, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 	if err != nil {
 		m.log().Error("album status failed", "album_job", job.ID, "err", err)
 		if now.Sub(*cand.ImportSubmittedAt) > m.p.ImportConfirmTimeout {
-			m.failUnconfirmed(ctx, job, cand, "import not confirmed in time (album status check failing), cooling down", now)
+			return m.failUnconfirmed(ctx, job, cand, "import not confirmed in time (album status check failing), cooling down", now)
 		}
-		return
+		return nil
 	}
 	if present >= total {
 		confirmedDetail := fmt.Sprintf("import confirmed, completed (%d/%d present)", present, total)
 		m.log().Info(confirmedDetail, "album_job", job.ID)
 		m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, confirmedDetail, now)
 		m.recordOutcome(ctx, job, cand.Username, true, now)
-		if err := m.p.Store.SucceedCandidate(ctx, cand.ID, now); err != nil {
-			m.log().Error("succeed candidate failed", "candidate", cand.ID, "err", err)
+		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
+			return err
 		}
-		if _, err := m.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateImporting, core.StateDone, now); err != nil {
-			m.log().Error("advance to done failed", "album_job", job.ID, "err", err)
-		}
-		return
+		return nil
 	}
 	if now.Sub(*cand.ImportSubmittedAt) > m.p.ImportConfirmTimeout {
 		notConfirmedDetail := fmt.Sprintf("import not confirmed in time (%d/%d present), cooling down", present, total)
-		m.failUnconfirmed(ctx, job, cand, notConfirmedDetail, now)
+		return m.failUnconfirmed(ctx, job, cand, notConfirmedDetail, now)
 	}
+	return nil
 }
 
 // failUnconfirmed is confirm's shared "import not confirmed" fail path: unlike
 // verify's failCandidate, it does not cleanupFolder (the files were
 // imported/moved by Lidarr, not left behind by a failed download - the legacy
 // confirmImports didn't clean up here either).
-func (m *Importing) failUnconfirmed(ctx context.Context, job core.AlbumJob, cand core.Candidate, detail string, now time.Time) {
+func (m *Importing) failUnconfirmed(ctx context.Context, job core.AlbumJob, cand core.Candidate, detail string, now time.Time) error {
 	m.log().Info(detail, "album_job", job.ID)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, detail, now)
 	m.recordOutcome(ctx, job, cand.Username, false, now)
-	if err := m.p.Store.FailCandidate(ctx, cand.ID, "import not confirmed", now); err != nil {
-		m.log().Error("fail candidate failed", "candidate", cand.ID, "err", err)
+	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "import not confirmed", core.StateImporting, core.StateSelecting, now); err != nil {
+		return err
 	}
-	if _, err := m.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateImporting, core.StateSelecting, now); err != nil {
-		m.log().Error("advance to selecting failed", "album_job", job.ID, "err", err)
-	}
+	return nil
 }

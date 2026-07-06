@@ -128,6 +128,76 @@ func (s *Store) SucceedCandidate(ctx context.Context, candidateID int64, now tim
 	return nil
 }
 
+// FailCandidateAndAdvance atomically (single tx) marks an ACTIVE candidate
+// FAILED and advances its job from->to. Both writes are conditional (candidate
+// still ACTIVE, job still in `from`) and commit together or not at all: a job
+// must never be left in DOWNLOADING/IMPORTING with no ACTIVE candidate (which
+// both modules permanently skip while it holds a MaxActive slot). Returns
+// whether the job row transitioned; false (with the tx rolled back, candidate
+// left ACTIVE) when the job already left `from` or the candidate is no longer
+// ACTIVE.
+func (s *Store) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
+		`UPDATE candidates SET state = $1, fail_reason = $2, updated_at = $3 WHERE id = $4 AND state = $5`,
+		[]any{string(core.CandidateFailed), reason, now, candidateID, string(core.CandidateActive)},
+		from, to, now)
+}
+
+// SucceedCandidateAndAdvance is FailCandidateAndAdvance's success twin: it marks
+// an ACTIVE candidate SUCCEEDED and advances its job from->to in one tx, with
+// the same commit-both-or-neither guarantee.
+func (s *Store) SucceedCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
+		`UPDATE candidates SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
+		[]any{string(core.CandidateSucceeded), now, candidateID, string(core.CandidateActive)},
+		from, to, now)
+}
+
+// terminalCandidateAndAdvance runs candSQL (the candidate terminal-state write,
+// guarded on state='ACTIVE') and the job's conditional from->to advance in one
+// transaction. Either write affecting zero rows rolls back both.
+func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, candSQL string, candArgs []any, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, candSQL, candArgs...)
+	if err != nil {
+		return false, fmt.Errorf("terminal candidate: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("terminal candidate: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Candidate already left ACTIVE (double-processed): change nothing.
+		return false, nil
+	}
+
+	res, err = tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
+		string(to), now, jobID, string(from))
+	if err != nil {
+		return false, fmt.Errorf("advance job: %w", err)
+	}
+	n, err = res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("advance job: rows affected: %w", err)
+	}
+	if n == 0 {
+		// Job left `from` underneath us (e.g. WantedSync cancel): roll back the
+		// candidate write too, so we never strand the job with no ACTIVE candidate.
+		return false, nil
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // MarkImportSubmitted records that ExecuteManualImport has been called for
 // this candidate's transfers, gating Importing's verify-vs-confirm phase.
 func (s *Store) MarkImportSubmitted(ctx context.Context, candidateID int64, now time.Time) error {

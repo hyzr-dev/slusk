@@ -66,7 +66,7 @@ func (f *fakeBackoffStore) MarkJobFailed(_ context.Context, jobID int64, _ time.
 	return nil
 }
 
-func (f *fakeBackoffStore) ResetJobToWanted(_ context.Context, jobID int64, retries int, notBefore *time.Time, _ time.Time) error {
+func (f *fakeBackoffStore) ResetJobToWanted(_ context.Context, jobID int64, _ core.AlbumJobState, retries int, notBefore *time.Time, _ time.Time) error {
 	f.resetCalls = append(f.resetCalls, struct {
 		jobID     int64
 		retries   int

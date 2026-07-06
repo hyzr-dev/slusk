@@ -253,7 +253,7 @@ New/changed keys (names indicative):
 
 ```toml
 [pipeline]
-max_active            = 3        # unchanged semantics, now enforced by Selecting
+max_active            = 30       # unchanged semantics, now enforced by Selecting
 max_retries           = 10
 backoff_base          = "15m"
 backoff_cap           = "24h"

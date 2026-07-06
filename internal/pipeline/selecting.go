@@ -191,7 +191,7 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		// wrong.
 		detail := "candidate cache expired, re-searching"
 		s.log().Info(detail, "album_job", job.ID, "candidate", cand.ID)
-		if err := s.p.Store.ResetJobToWanted(ctx, job.ID, job.Retries, nil, now); err != nil {
+		if err := s.p.Store.ResetJobToWanted(ctx, job.ID, core.StateSelecting, job.Retries, nil, now); err != nil {
 			return false, err
 		}
 		s.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)

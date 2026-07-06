@@ -29,7 +29,7 @@ func nextBackoff(retries int, base, maxBackoff time.Duration) time.Duration {
 type BackoffStore interface {
 	SetJobBackoff(ctx context.Context, jobID int64, retries int, notBefore time.Time, now time.Time) error
 	MarkJobFailed(ctx context.Context, jobID int64, now time.Time) error
-	ResetJobToWanted(ctx context.Context, jobID int64, retries int, notBefore *time.Time, now time.Time) error
+	ResetJobToWanted(ctx context.Context, jobID int64, from core.AlbumJobState, retries int, notBefore *time.Time, now time.Time) error
 	AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error
 }
 
@@ -52,7 +52,10 @@ func failOrBackoff(ctx context.Context, st BackoffStore, log *slog.Logger, job c
 
 	notBefore := now.Add(nextBackoff(retries, base, maxBackoff))
 	if resetToWanted {
-		return st.ResetJobToWanted(ctx, job.ID, retries, &notBefore, now)
+		// resetToWanted is only ever set by Selecting (candidate cache exhausted),
+		// so the job is in SELECTING; ResetJobToWanted's from-guard bounces if
+		// WantedSync cancelled it underneath us.
+		return st.ResetJobToWanted(ctx, job.ID, core.StateSelecting, retries, &notBefore, now)
 	}
 	return st.SetJobBackoff(ctx, job.ID, retries, notBefore, now)
 }

@@ -58,10 +58,12 @@ type DownloadingStore interface {
 	ActiveCandidate(ctx context.Context, jobID int64) (core.Candidate, bool, error)
 	// TransfersForCandidate is shared by the resolve and top-up phases.
 	TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error)
-	// FailCandidate marks a candidate FAILED once all its transfers are terminal.
-	FailCandidate(ctx context.Context, candidateID int64, reason string, now time.Time) error
+	// FailCandidateAndAdvance atomically fails a candidate and returns its job to
+	// SELECTING in one tx (DOWNLOADING→SELECTING on per-candidate failure), so a
+	// job is never left in DOWNLOADING with no ACTIVE candidate.
+	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// AdvanceJobStateFrom conditionally transitions a job (DOWNLOADING→IMPORTING
-	// on success, DOWNLOADING→SELECTING on per-candidate failure).
+	// on success; the candidate stays ACTIVE for the Importing module).
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// RecordAttemptOutcome writes a candidate's terminal success/fail outcome to
 	// the peer reliability tables (best-effort).
@@ -529,13 +531,13 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 		}
 		cleanupFolder(ctx, d.p.Peers, d.log(), job.ID, names)
 		d.recordOutcome(ctx, job, cand.Username, false, now)
-		if err := d.p.Store.FailCandidate(ctx, cand.ID, "transfer failed", now); err != nil {
-			d.log().Error("fail candidate failed", "candidate", cand.ID, "err", err)
-		}
-		// Per-candidate failure is free: no cooldown, no retries bump. Return the
-		// job to SELECTING so the next cached candidate is tried immediately.
-		if _, err := d.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateSelecting, now); err != nil {
-			d.log().Error("advance to selecting failed", "album_job", job.ID, "err", err)
+		// Fail the candidate and return the job to SELECTING atomically: the two
+		// writes commit together or not at all, so the job can never be stranded
+		// in DOWNLOADING with no ACTIVE candidate (which would permanently consume
+		// a MaxActive slot). Per-candidate failure is free: no cooldown, no retries
+		// bump - the next cached candidate is tried immediately on the next tick.
+		if _, err := d.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
+			return false, err
 		}
 		return true, nil
 	case allDone:
