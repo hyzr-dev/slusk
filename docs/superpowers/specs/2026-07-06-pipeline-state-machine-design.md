@@ -163,21 +163,23 @@ time and never derived from candidates, so it survives cache deletion.
 `transfers` (except the FK rename), `known_users`,
 `artist_user_reliability`, `job_events`.
 
-### State migration (one-off, idempotent, runs at startup like schema apply)
+### Existing data: clean slate
 
-| Old | New | Notes |
-|---|---|---|
-| DISCOVERED, SEARCHING, SELECTING | WANTED | No cache exists → re-search |
-| COOLDOWN | WANTED | `not_before = next_attempt_at` |
-| DOWNLOADING | DOWNLOADING | Active attempt becomes an ACTIVE candidate; `files` rebuilt from its transfers |
-| VERIFYING, IMPORTING | IMPORTING | |
-| COMPLETED | DONE | |
-| FAILED | FAILED | `failed_at = updated_at`, `retries = max_retries` |
-| CANCELLED | CANCELLED | |
+No state migration. At deploy, the pipeline tables (`album_jobs`,
+`candidate_attempts`, `transfers`, `job_events`) are emptied via
+`scripts/clean-slate-pipeline.sh`, and the slskd downloads directory is
+cleared manually. The app is self-healing from Lidarr's wanted list: every
+still-wanted album reappears as WANTED on the first WantedSync tick.
 
-Old `candidate_attempts` rows for non-DOWNLOADING jobs are not migrated
-(their jobs restart from WANTED anyway); peer reliability history already
-lives in its own tables.
+**Kept:** `known_users` and `artist_user_reliability` — the peer history is
+the only data with forward value, and it lives in its own tables.
+
+**Accepted one-off losses:** in-flight downloads (re-searched, possibly
+re-downloaded), dashboard history/`job_events`, FAILED jobs' retry counters
+(they get a fresh cycle). Rationale: migration code that runs exactly once,
+for exactly one user, is the worst kind of code to write and test — the
+attempt→candidate reconstruction for DOWNLOADING jobs alone outweighed the
+value of everything preserved.
 
 ## Error handling
 
@@ -238,8 +240,12 @@ One PR, one commit per step, every commit builds with green tests:
 7. Dashboard adaptation
 
 No legacy/config flag: rollback is running the previous Docker tag, which
-works because the schema migration is additive (old columns stay until the
-rollout is verified; the old engine ignores the new ones).
+works because the schema changes are additive (old columns/tables stay until
+the rollout is verified; the old engine ignores the new ones).
+
+Deploy procedure: stop the container, run `scripts/clean-slate-pipeline.sh`
+against the store DSN, clear the slskd downloads directory (manual), start
+the new tag.
 
 ## Config
 
