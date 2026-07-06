@@ -1,8 +1,8 @@
-// Package pipeline provides the scheduling framework shared by all pipeline
-// modules. It defines the narrow port interfaces it consumes here (Go style:
-// the consumer declares the interface), so the concrete slskd/store types
-// satisfy them implicitly.
 package pipeline
+
+// This file declares the narrow port interfaces pipeline modules consume (Go
+// style: the consumer declares the interface), so the concrete slskd/store
+// types satisfy them implicitly.
 
 import (
 	"context"
