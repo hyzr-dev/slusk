@@ -70,6 +70,46 @@ file_count = 1.0
 # other weights, not a multiplier on them.
 known_user = 1.0
 
+[pipeline]
+# All keys below are optional; an absent [pipeline] section (or an absent
+# individual key) uses the default shown. This section configures the new
+# state-machine pipeline; the legacy engine above is unaffected and reads its
+# own [engine] keys until it is retired.
+#
+# Global cap on jobs simultaneously active across the pipeline (searching
+# through importing). Mirrors engine.max_concurrent_active above.
+max_active = 30
+# How many candidates a job cycles through before it is given up on.
+max_retries = 10
+# Initial wait before retrying a job with no untried candidate left.
+backoff_base = "15m"
+# Upper bound on exponential backoff growth.
+backoff_cap = "24h"
+# How long a discovered candidate stays eligible before it is dropped and
+# re-discovered.
+candidate_ttl = "24h"
+# How long a permanently failed job waits before being revived for another
+# attempt.
+failed_revive_after = "720h"
+# How long a job may sit without progress in an active phase before it is
+# treated as stuck and reconciled.
+stuck_after = "1h"
+# Upper bound on a single pipeline tick's total execution time.
+tick_timeout = "5m"
+# How long an import may sit unconfirmed (Lidarr's ManualImport command is
+# async) before it's treated as failed and rotated to the next candidate.
+import_confirm_timeout = "3m"
+# How often the wanted list is refreshed from Lidarr.
+wanted_sync_interval = "15m"
+# How often the discovery phase runs.
+discovery_interval = "30s"
+# How often the selecting phase runs.
+selecting_interval = "10s"
+# How often the downloading phase runs.
+downloading_interval = "15s"
+# How often the importing phase runs.
+importing_interval = "30s"
+
 [store]
 # PostgreSQL connection string. The schema is created automatically on startup;
 # the database and user must already exist.

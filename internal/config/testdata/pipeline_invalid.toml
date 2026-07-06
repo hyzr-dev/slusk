@@ -1,0 +1,44 @@
+[lidarr]
+url = "http://lidarr:8686"
+api_key = "abc"
+poll_interval = "5m"
+
+[slskd]
+url = "http://slskd:5030"
+api_key = "def"
+status_poll_interval = "15s"
+
+[engine]
+max_candidates_per_album = 5
+transfer_deadline = "30m"
+stall_timeout = "5m"
+search_timeout = "30s"
+min_bitrate = 192
+batch = 2
+max_concurrent_active = 20
+max_inflight_per_peer = 3
+max_transfer_retries = 3
+candidate_backoff = "10m"
+failed_candidate_backoff = "30s"
+failed_retry_after = "24h"
+import_confirm_timeout = "3m"
+tick_interval = "30s"
+max_candidate_file_ratio = 2.0
+
+[engine.weights]
+format = 1.0
+bitrate = 0.5
+reliability = 0.8
+file_count = 1.0
+
+[pipeline]
+max_active = -1
+
+[store]
+dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+
+[observ]
+listen_addr = "127.0.0.1:9090"
+
+[paths]
+slskd_complete_dir = "/music/slskd-downloads"

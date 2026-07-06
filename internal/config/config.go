@@ -13,12 +13,13 @@ import (
 
 // Config is the entire application configuration. Every field maps to a TOML key.
 type Config struct {
-	Lidarr LidarrConfig `toml:"lidarr"`
-	Slskd  SlskdConfig  `toml:"slskd"`
-	Engine EngineConfig `toml:"engine"`
-	Store  StoreConfig  `toml:"store"`
-	Observ ObservConfig `toml:"observ"`
-	Paths  PathsConfig  `toml:"paths"`
+	Lidarr   LidarrConfig   `toml:"lidarr"`
+	Slskd    SlskdConfig    `toml:"slskd"`
+	Engine   EngineConfig   `toml:"engine"`
+	Pipeline PipelineConfig `toml:"pipeline"`
+	Store    StoreConfig    `toml:"store"`
+	Observ   ObservConfig   `toml:"observ"`
+	Paths    PathsConfig    `toml:"paths"`
 }
 
 // LidarrConfig is the Lidarr music server integration configuration.
@@ -77,6 +78,101 @@ type Weights struct {
 	KnownUser float64 `toml:"known_user"`
 }
 
+// PipelineConfig is the state-machine pipeline configuration. All fields are
+// optional; a wholly absent [pipeline] section yields the defaults applied in
+// applyPipelineDefaults. The matcher/transfer knobs the pipeline also needs
+// (search_timeout, transfer_deadline, etc.) are still read from [engine] by
+// both the legacy engine and the pipeline until a later task consolidates them
+// here.
+type PipelineConfig struct {
+	// MaxActive caps jobs simultaneously active across the pipeline
+	// (SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING). Mirrors today's
+	// engine.max_concurrent_active. Default 30.
+	MaxActive int `toml:"max_active"`
+	// MaxRetries caps how many candidates a job cycles through before it is
+	// given up on. Default 10.
+	MaxRetries int `toml:"max_retries"`
+	// BackoffBase is the initial wait before retrying a job with no untried
+	// candidate left. Default 15m.
+	BackoffBase Duration `toml:"backoff_base"`
+	// BackoffCap bounds exponential backoff growth. Default 24h.
+	BackoffCap Duration `toml:"backoff_cap"`
+	// CandidateTTL is how long a discovered candidate stays eligible before
+	// it is dropped and re-discovered. Default 24h.
+	CandidateTTL Duration `toml:"candidate_ttl"`
+	// FailedReviveAfter is how long a permanently failed job waits before
+	// being revived for another attempt. Default 720h (30 days).
+	FailedReviveAfter Duration `toml:"failed_revive_after"`
+	// StuckAfter is how long a job may sit without progress in an active
+	// phase before it is treated as stuck and reconciled. Default 1h.
+	StuckAfter Duration `toml:"stuck_after"`
+	// TickTimeout bounds a single pipeline tick's total execution time.
+	// Default 5m.
+	TickTimeout Duration `toml:"tick_timeout"`
+	// ImportConfirmTimeout is how long an import may sit unconfirmed before
+	// it's treated as failed and rotated to the next candidate. Default 3m.
+	ImportConfirmTimeout Duration `toml:"import_confirm_timeout"`
+	// WantedSyncInterval is how often the wanted list is refreshed from
+	// Lidarr. Default 15m.
+	WantedSyncInterval Duration `toml:"wanted_sync_interval"`
+	// DiscoveryInterval is how often the discovery phase runs. Default 30s.
+	DiscoveryInterval Duration `toml:"discovery_interval"`
+	// SelectingInterval is how often the selecting phase runs. Default 10s.
+	SelectingInterval Duration `toml:"selecting_interval"`
+	// DownloadingInterval is how often the downloading phase runs. Default 15s.
+	DownloadingInterval Duration `toml:"downloading_interval"`
+	// ImportingInterval is how often the importing phase runs. Default 30s.
+	ImportingInterval Duration `toml:"importing_interval"`
+}
+
+// applyDefaults fills any zero-valued field with its documented default. Since
+// every default is a positive value and Validate rejects zero/negative
+// durations and counts, a zero value unambiguously means "not set in TOML".
+func (p *PipelineConfig) applyDefaults() {
+	if p.MaxActive == 0 {
+		p.MaxActive = 30
+	}
+	if p.MaxRetries == 0 {
+		p.MaxRetries = 10
+	}
+	if p.BackoffBase.Duration == 0 {
+		p.BackoffBase.Duration = 15 * time.Minute
+	}
+	if p.BackoffCap.Duration == 0 {
+		p.BackoffCap.Duration = 24 * time.Hour
+	}
+	if p.CandidateTTL.Duration == 0 {
+		p.CandidateTTL.Duration = 24 * time.Hour
+	}
+	if p.FailedReviveAfter.Duration == 0 {
+		p.FailedReviveAfter.Duration = 720 * time.Hour
+	}
+	if p.StuckAfter.Duration == 0 {
+		p.StuckAfter.Duration = time.Hour
+	}
+	if p.TickTimeout.Duration == 0 {
+		p.TickTimeout.Duration = 5 * time.Minute
+	}
+	if p.ImportConfirmTimeout.Duration == 0 {
+		p.ImportConfirmTimeout.Duration = 3 * time.Minute
+	}
+	if p.WantedSyncInterval.Duration == 0 {
+		p.WantedSyncInterval.Duration = 15 * time.Minute
+	}
+	if p.DiscoveryInterval.Duration == 0 {
+		p.DiscoveryInterval.Duration = 30 * time.Second
+	}
+	if p.SelectingInterval.Duration == 0 {
+		p.SelectingInterval.Duration = 10 * time.Second
+	}
+	if p.DownloadingInterval.Duration == 0 {
+		p.DownloadingInterval.Duration = 15 * time.Second
+	}
+	if p.ImportingInterval.Duration == 0 {
+		p.ImportingInterval.Duration = 30 * time.Second
+	}
+}
+
 // StoreConfig is the persistent store configuration.
 type StoreConfig struct {
 	// DSN is the PostgreSQL connection string, e.g.
@@ -118,6 +214,7 @@ func Load(path string) (Config, error) {
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		return Config{}, fmt.Errorf("unknown config keys: %v", undecoded)
 	}
+	cfg.Pipeline.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -194,6 +291,48 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.Weights.KnownUser < 0 {
 		problems = append(problems, "engine.weights.known_user must be >= 0")
+	}
+	if c.Pipeline.MaxActive < 1 {
+		problems = append(problems, "pipeline.max_active must be >= 1")
+	}
+	if c.Pipeline.MaxRetries < 1 {
+		problems = append(problems, "pipeline.max_retries must be >= 1")
+	}
+	if c.Pipeline.BackoffBase.Duration <= 0 {
+		problems = append(problems, "pipeline.backoff_base must be > 0")
+	}
+	if c.Pipeline.BackoffCap.Duration <= 0 {
+		problems = append(problems, "pipeline.backoff_cap must be > 0")
+	}
+	if c.Pipeline.CandidateTTL.Duration <= 0 {
+		problems = append(problems, "pipeline.candidate_ttl must be > 0")
+	}
+	if c.Pipeline.FailedReviveAfter.Duration <= 0 {
+		problems = append(problems, "pipeline.failed_revive_after must be > 0")
+	}
+	if c.Pipeline.StuckAfter.Duration <= 0 {
+		problems = append(problems, "pipeline.stuck_after must be > 0")
+	}
+	if c.Pipeline.TickTimeout.Duration <= 0 {
+		problems = append(problems, "pipeline.tick_timeout must be > 0")
+	}
+	if c.Pipeline.ImportConfirmTimeout.Duration <= 0 {
+		problems = append(problems, "pipeline.import_confirm_timeout must be > 0")
+	}
+	if c.Pipeline.WantedSyncInterval.Duration <= 0 {
+		problems = append(problems, "pipeline.wanted_sync_interval must be > 0")
+	}
+	if c.Pipeline.DiscoveryInterval.Duration <= 0 {
+		problems = append(problems, "pipeline.discovery_interval must be > 0")
+	}
+	if c.Pipeline.SelectingInterval.Duration <= 0 {
+		problems = append(problems, "pipeline.selecting_interval must be > 0")
+	}
+	if c.Pipeline.DownloadingInterval.Duration <= 0 {
+		problems = append(problems, "pipeline.downloading_interval must be > 0")
+	}
+	if c.Pipeline.ImportingInterval.Duration <= 0 {
+		problems = append(problems, "pipeline.importing_interval must be > 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")
