@@ -19,3 +19,16 @@ func TestAlbumJobStateTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestPipelineTerminalStates(t *testing.T) {
+	for _, s := range []AlbumJobState{StateDone, StateCancelled, StateFailed} {
+		if !s.PipelineTerminal() {
+			t.Errorf("%s should be pipeline-terminal", s)
+		}
+	}
+	for _, s := range []AlbumJobState{StateWanted, StateSelecting, StateDownloading, StateImporting} {
+		if s.PipelineTerminal() {
+			t.Errorf("%s should not be pipeline-terminal", s)
+		}
+	}
+}

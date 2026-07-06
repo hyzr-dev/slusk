@@ -19,6 +19,16 @@ type AlbumJob struct {
 	// completes, so the job needs it long after the wanted-list entry that
 	// supplied it is gone. 0 when unknown (e.g. an older job not yet backfilled).
 	ArtistID int64
+	// Retries counts search-cycle failures (empty search, candidates
+	// exhausted). Per-candidate failures do not touch it. At max_retries the
+	// job goes FAILED. Reset to 0 when a search yields candidates.
+	Retries int
+	// NotBefore hides the job from every pipeline module until it passes.
+	// Backoff lives here as data — there is no COOLDOWN state.
+	NotBefore *time.Time
+	// FailedAt is set when the job enters FAILED; WantedSync revives the job
+	// once it is older than failed_revive_after and the album is still wanted.
+	FailedAt *time.Time
 }
 
 // CandidateAttempt is one ranked Soulseek user tried for an album.
@@ -32,6 +42,29 @@ type CandidateAttempt struct {
 	BackoffUntil *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// CandidateFile is one file of a cached search result, persisted as JSONB on
+// the candidate so Selecting can enqueue it long after the search happened.
+type CandidateFile struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+// Candidate is one ranked Soulseek user cached for an album. A candidate is
+// its own attempt: NEW (cached, untried) → ACTIVE (picked by Selecting) →
+// SUCCEEDED | FAILED. Replaces CandidateAttempt in the pipeline rewrite.
+type Candidate struct {
+	ID                int64
+	AlbumJobID        int64
+	Username          string
+	Score             float64
+	Files             []CandidateFile
+	State             CandidateState
+	FailReason        string
+	ImportSubmittedAt *time.Time // set by Importing after ExecuteManualImport; gates verify vs confirm phase
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Transfer is one slskd file download. SlskdID is empty until slskd accepts the
