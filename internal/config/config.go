@@ -125,8 +125,7 @@ type PipelineConfig struct {
 	ImportingInterval Duration `toml:"importing_interval"`
 }
 
-// applyDefaults fills any zero-valued field with its documented default. Since
-// every default is a positive value and Validate rejects zero/negative
+// applyDefaults fills any zero-valued field with its documented default.
 // Note: an explicit zero in TOML (e.g. `max_active = 0`) is indistinguishable
 // from an absent key and silently takes the default rather than failing Validate.
 // Accepted: no pipeline field is legitimately zero.
