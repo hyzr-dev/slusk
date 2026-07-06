@@ -103,6 +103,59 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	if c1.Username == "toobig" {
 		t.Errorf("oversized candidate should have been rejected, got it cached")
 	}
+
+	// Drain every NEW candidate deterministically (highest score first, per
+	// NextNewCandidate's ordering) to assert exactly 2 rows were persisted:
+	// 3 search results in, 1 ("toobig") excluded by the file-ratio filter.
+	seen := map[string]bool{c1.Username: true}
+	if err := st.FailCandidate(ctx, c1.ID, "drained for test assertion", now); err != nil {
+		t.Fatalf("FailCandidate: %v", err)
+	}
+	count := 1
+	for {
+		c, ok, err := st.NextNewCandidate(ctx, job.ID)
+		if err != nil {
+			t.Fatalf("NextNewCandidate (drain): %v", err)
+		}
+		if !ok {
+			break
+		}
+		if c.Username == "toobig" {
+			t.Errorf("oversized candidate should have been rejected, got it cached")
+		}
+		seen[c.Username] = true
+		count++
+		if err := st.FailCandidate(ctx, c.ID, "drained for test assertion", now); err != nil {
+			t.Fatalf("FailCandidate: %v", err)
+		}
+	}
+	if count != 2 {
+		t.Errorf("expected exactly 2 cached candidates, drained %d", count)
+	}
+	wantUsernames := map[string]bool{"good1": true, "good2": true}
+	if len(seen) != len(wantUsernames) {
+		t.Errorf("expected drained usernames %v, got %v", wantUsernames, seen)
+	}
+	for u := range wantUsernames {
+		if !seen[u] {
+			t.Errorf("expected %q among drained candidates, got %v", u, seen)
+		}
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	rejected := false
+	for _, e := range events {
+		if e.Event == core.EventCandidateRejected {
+			rejected = true
+			break
+		}
+	}
+	if !rejected {
+		t.Errorf("expected an EventCandidateRejected event for the oversized candidate, got events %+v", events)
+	}
 }
 
 func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {

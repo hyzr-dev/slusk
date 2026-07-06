@@ -172,9 +172,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	// Lidarr has no reliable count for this album right now, so the check is
 	// skipped entirely rather than risk rejecting a legitimate candidate on
 	// bad data. An error here is not counted against the job's retry budget:
-	// it propagates so the job is retried next tick untouched, matching the
-	// legacy engine's behavior where a startJob error simply aborts without
-	// spending a cooldown.
+	// it aborts this search pass early - log and return nil so the job stays
+	// WANTED, untouched, and is retried on a later tick without spending
+	// retry budget.
 	_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
 	if err != nil {
 		d.log().Error("album status failed", "album_job", job.ID, "err", err)
