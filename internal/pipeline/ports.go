@@ -8,7 +8,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
+	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
@@ -36,4 +38,9 @@ type PeerSearcher interface {
 type PeerNetwork interface {
 	ListDownloads(ctx context.Context) ([]slskd.Transfer, error)
 	Cancel(ctx context.Context, username, id string) error
+}
+
+// Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).
+type Ranker interface {
+	Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []matcher.Candidate
 }
