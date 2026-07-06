@@ -520,7 +520,7 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 			return false, nil
 		}
 		// Every transfer is terminal: safe to clean up and fail the candidate.
-		failedDetail := fmt.Sprintf("candidate %s download failed, cooling down", cand.Username)
+		failedDetail := fmt.Sprintf("candidate %s download failed, trying next candidate", cand.Username)
 		d.log().Info(failedDetail, "album_job", job.ID, "candidate", cand.ID)
 		d.recordEvent(ctx, job.ID, core.EventAttemptFailed, failedDetail, now)
 		names := make([]string, 0, len(transfers))
