@@ -33,6 +33,27 @@
 #
 # Pin a release with SLSKDARR_TAG=v1.2.3 (env or .env file); omit for :latest.
 # The homelab package-updater-action redeploys automatically on new tags.
+#
+# --- Deploy (breaking): pipeline-state-machine rewrite ---
+# This release replaces the old engine with internal/pipeline (states
+# WANTED/SELECTING/DOWNLOADING/IMPORTING/DONE/CANCELLED/FAILED) and swaps
+# candidate_attempts for a candidates table. There is no migration path for
+# in-flight jobs — clean-slate the pipeline tables instead:
+#   1. docker compose -f docker-compose.prod.yml stop slskdarr
+#   2. Migrate config.toml: [engine] -> [pipeline]; drop lidarr.poll_interval
+#      and slskd.status_poll_interval (both gone); rename
+#      max_concurrent_active -> max_active (now lives under [pipeline]);
+#      drop batch, candidate_backoff, failed_candidate_backoff,
+#      failed_retry_after, tick_interval (no [pipeline] equivalent).
+#   3. scripts/clean-slate-pipeline.sh "$DSN"   (wipes album_jobs/candidates/
+#      candidate_attempts/transfers/job_events; keeps known_users and
+#      artist_user_reliability peer history)
+#   4. Manually clear slskd's downloads directory so leftover files from
+#      orphaned transfers don't collide with fresh attempts.
+#   5. docker compose -f docker-compose.prod.yml pull && ... up -d
+#      (pin SLSKDARR_TAG to the new release if not using :latest)
+# Every still-wanted album reappears as WANTED on the first WantedSync tick
+# after startup, so nothing needs to be manually re-queued.
 
 services:
   slskdarr:

@@ -9,7 +9,7 @@ Nyttiga kommandon (byt ut värden mot dina):
 STATUS=http://192.168.86.33:9090        # observ.listen_addr
 PGDSN='postgres://slskdarr:password@localhost:5432/slskdarr'  # store.dsn
 docker logs -f slskdarr                 # strukturerad JSON-logg
-curl -s $STATUS/status | jq             # köade/aktiva/stalled/orphaned
+curl -s $STATUS/status | jq             # köade/aktiva/stannade/orphanade
 curl -s $STATUS/metrics | grep slskdarr # Prometheus-mätvärden
 psql "$PGDSN" -c 'SELECT id,lidarr_album_id,state,candidates_tried FROM album_jobs'
 ```
@@ -25,12 +25,15 @@ eller `docker exec` in i Postgres-containern.)
       tyst defaulta).
 - [ ] Containern kör som **oprivilegierad UID** (`docker inspect slskdarr` → `User: nonroot`).
 - [ ] Schemat skapas i Postgres-databasen vid start (`psql "$PGDSN" -c '\dt'` visar
-      `album_jobs`, `transfers` m.fl.).
+      `album_jobs`, `candidates`, `transfers`, `job_events` m.fl.).
 - [ ] Loggen visar `slskdarr started` med rätt `status_addr`.
 
 ## Fas 2 — Anslutning + observability
 
-- [ ] `curl $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..}`).
+- [ ] `curl $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...}}`).
+      `modules` listar varje pipeline-modul (`wanted_sync`, `discovery`, `selecting`,
+      `downloading`, `importing`) med tidpunkten för dess senast avslutade tick — en
+      modul som slutat synas där (eller vars tid slutat röra sig) har fastnat.
 - [ ] `curl $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)
@@ -41,9 +44,12 @@ eller `docker exec` in i Postgres-containern.)
 
 - [ ] Se till att Lidarr har minst **ett** wanted/missing album (lägg till ett artist/album
       du vet finns rikligt på Soulseek, t.ex. något populärt i FLAC).
-- [ ] Inom en `LidarrPoll`-cykel: en rad i `album_jobs` med `state=DISCOVERED` dyker upp.
-- [ ] Nästa tick: jobbet går till `state=DOWNLOADING`, och en/flera rader i `transfers`
-      skapas. `curl $STATUS/status` visar `active > 0`.
+- [ ] Inom en `WantedSync`-cykel (var `wanted_sync_interval`, default 15m): en rad i
+      `album_jobs` med `state=WANTED` dyker upp.
+- [ ] Nästa tick: jobbet går `WANTED → SELECTING` (kandidatsökning/matchning i
+      `candidates`-tabellen). Så snart en kandidat väljs går jobbet vidare
+      `SELECTING → DOWNLOADING`, och en/flera rader i `transfers` skapas.
+      `curl $STATUS/status` visar `active > 0`.
 - [ ] I slskd:s eget UI syns nedladdningarna starta (samma filer slskdarr enqueue:ade).
 - [ ] `slskdarr_downloads_active` > 0 i metrics.
 
@@ -59,39 +65,46 @@ Detta är det enda anropet jag **inte** kunde verifiera mot din live-Lidarr (mut
 Här vill jag att du tittar noga.
 
 - [ ] Låt en nedladdning bli **klar** i slskd (alla filer). Jobbet ska gå
-      `DOWNLOADING → VERIFYING`.
+      `DOWNLOADING → IMPORTING`.
 - [ ] Nästa tick: loggen visar antingen import eller `import rejected`. Kolla:
-  - [ ] **Lyckad import:** jobbet blir `state=COMPLETED`, filerna **flyttade** in i ditt
-        Lidarr-bibliotek (inte kvar i `/music/slskd-downloads`), och albumet försvinner ur
+  - [ ] **Lyckad import:** jobbet blir `state=DONE`, filerna **flyttade** in i ditt
+        Lidarr-bibliotek (inte kvar i `slskd_complete_dir`), och albumet försvinner ur
         Lidarrs wanted-lista.
-  - [ ] Om filerna **inte** flyttades men jobbet blev COMPLETED → `ManualImport`-POST-kroppen
+  - [ ] Om filerna **inte** flyttades men jobbet blev DONE → `ManualImport`-POST-kroppen
         (per-fil-fälten `path/folderName/artistId/albumId`) accepterades inte som väntat av
         din Lidarr-version. Fånga `docker logs` + Lidarrs egen logg och hör av dig — det är
         `internal/lidarr/client.go:ExecuteManualImport` som då behöver justeras.
 - [ ] **Path-kollen:** bekräfta att `AlbumFolder` pekade rätt — leta i loggen efter
       `import rejected`/`empty folder` med `folder=...` och se att sökvägen matchar var slskd
-      faktiskt la filerna (`/music/slskd-downloads/<...>`).
+      faktiskt la filerna (under `paths.slskd_complete_dir`).
+- [ ] Om ett import-svar dröjer förbi `import_confirm_timeout` (Lidarrs `ManualImport`-kommando
+      är asynkront) behandlas jobbet som misslyckat och roteras till nästa kandidat, precis som
+      ett avvisat svar (se Fas 6).
 
 ## Fas 6 — Felvägar (att de inte loopar tyst)
 
 - [ ] **Avvisad import:** om Lidarr avvisar (t.ex. fel kvalitet) → loggen visar
-      `import rejected`, jobbet går `COOLDOWN`, och nästa kandidat provas (ny rad i
-      `candidate_attempts`). Det ska **inte** loopa på samma kandidat.
-- [ ] **Kandidater slut:** ett svårt album där alla kandidater fälls → efter
-      `max_candidates_per_album` försök blir jobbet `state=FAILED` (inte evig loop).
+      `import rejected`, jobbet går tillbaka till `SELECTING`, och nästa kandidat provas
+      (ny rad i `candidates`). Det ska **inte** loopa på samma kandidat.
+- [ ] **Kandidater slut:** ett svårt album där alla kandidater fälls → efter `max_retries`
+      försök (default 10, räknas i `candidates_tried`) blir jobbet `state=FAILED` (inte evig
+      loop). Mellan försöken backar jobbet av med `backoff_base`/`backoff_cap` innan nästa
+      kandidat provas, snarare än att direkt gå i loop.
 - [ ] **Retry efter fönster:** ett FAILED-album som fortfarande är wanted ska återupptas
-      (`state` tillbaka till DISCOVERED) efter `failed_retry_after`. (Sätt tillfälligt
-      `failed_retry_after = "2m"` för att testa snabbt, återställ sen.)
+      (`state` tillbaka till WANTED) efter `failed_revive_after`. (Sätt tillfälligt
+      `failed_revive_after = "2m"` för att testa snabbt, återställ sen.) Samma sak går att
+      trigga manuellt via dashboardens Retry-knapp (`POST /api/jobs/{id}/retry`), som ger
+      `409` om jobbet redan hunnit lämna FAILED.
 
 ## Fas 7 — Restart-säkerhet (existensberättigandet)
 
 - [ ] Starta en nedladdning, vänta tills den är **mitt i** (`active`, byte-progress i slskd).
 - [ ] `docker restart slskdarr` (eller `kill` + starta om).
-- [ ] Efter omstart: loggen/`$STATUS/status` visar att den **adopterade** den pågående
-      transfern (ingen ny enqueue, ingen orphan i slskd). Nedladdningen fortsätter.
-- [ ] Låt en transfer bli hängande förbi `transfer_deadline` → verifiera att reconcilern
-      **avbryter** den i slskd och att jobbet går vidare (COOLDOWN/nästa kandidat), och att
-      inget lämnas orphanat i slskd.
+- [ ] Efter omstart: loggen/`$STATUS/status` visar att downloading-modulen **adopterade** den
+      pågående transfern (ingen ny enqueue, ingen orphan i slskd). Nedladdningen fortsätter.
+- [ ] Låt en transfer bli hängande förbi `transfer_deadline` → verifiera att downloading-modulens
+      reconcile **avbryter** den i slskd och att jobbet går vidare (tillbaka till SELECTING/nästa
+      kandidat), och att inget lämnas orphanat i slskd.
 
 ---
 
