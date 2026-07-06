@@ -69,10 +69,33 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 	return f.albumPresent, f.albumTotal, nil
 }
 
+// fakeNetwork is an in-memory PeerNetwork fake for the Downloading module's
+// reconcile phase; ported from internal/engine/reconciler_test.go's fakePeers.
+// downloads is what ListDownloads returns (slskd's live list); cancelled
+// records every id Cancel was called with, in order; cancelErr, when set, fails
+// every Cancel call (so tests can assert the leave-non-terminal-and-retry path).
+type fakeNetwork struct {
+	downloads []slskd.Transfer
+	cancelled []string
+	cancelErr error
+}
+
+func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]slskd.Transfer, error) {
+	return f.downloads, nil
+}
+
+func (f *fakeNetwork) Cancel(ctx context.Context, username, id string) error {
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, id)
+	return nil
+}
+
 // fakeSearcher is a PeerSearcher fake; ported from
 // internal/engine/discovery_test.go's fakeSearcher. Cancel/DeleteDownloadFolder
-// are stubbed no-ops so fakeSearcher satisfies the full PeerSearcher
-// interface - no module up to Selecting calls them.
+// record their calls (and honour cancelErr) so Downloading's two-phase fail
+// path and cleanup can be asserted; no module up to Selecting exercises them.
 type fakeSearcher struct {
 	// queries records every query Search was called with, in order, so tests
 	// can assert how many searches were issued and what they were.
@@ -93,6 +116,16 @@ type fakeSearcher struct {
 	enqueued []string
 	// enqueueErr, when set, fails every Enqueue call.
 	enqueueErr error
+
+	// cancelled records every id Cancel was called with, in order, and
+	// deletedFolders every folder DeleteDownloadFolder was called with, so
+	// Downloading's two-phase fail path and cleanup can be asserted.
+	cancelled      []string
+	deletedFolders []string
+	// cancelErr, when set, fails every Cancel call (an slskd.IsNotFound error
+	// exercises the treat-as-already-terminal branch; any other error the
+	// leave-active-and-retry branch).
+	cancelErr error
 }
 
 func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
@@ -114,6 +147,15 @@ func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, s
 	return "slskd-" + filename, nil
 }
 
-func (f *fakeSearcher) Cancel(ctx context.Context, username, id string) error { return nil }
+func (f *fakeSearcher) Cancel(ctx context.Context, username, id string) error {
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, id)
+	return nil
+}
 
-func (f *fakeSearcher) DeleteDownloadFolder(ctx context.Context, name string) error { return nil }
+func (f *fakeSearcher) DeleteDownloadFolder(ctx context.Context, name string) error {
+	f.deletedFolders = append(f.deletedFolders, name)
+	return nil
+}

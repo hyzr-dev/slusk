@@ -1,9 +1,53 @@
 package pipeline
 
 import (
+	"context"
+	"log/slog"
 	"path"
 	"strings"
+
+	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
+
+// FolderCleaner is the minimal slice of PeerSearcher that cleanupFolder needs:
+// the single slskd "delete a completed-download subfolder" call. Kept as its
+// own tiny interface (rather than taking a full PeerSearcher) so cleanupFolder
+// is a clean, reusable free function both Downloading (task 9) and Importing
+// (task 10) can call with only the capability it actually uses.
+type FolderCleaner interface {
+	DeleteDownloadFolder(ctx context.Context, name string) error
+}
+
+// cleanupFolder best-effort deletes a failed candidate's leftover files from
+// slskd's downloads root, so they don't get mixed into the next candidate's
+// local folder (slskd names local subfolders after the remote peer's own leaf
+// directory name, so two different peers sharing an identically-named folder
+// can otherwise collide, corrupting Lidarr's later import scan). It skips the
+// delete entirely when filenames don't share one common remote directory
+// (commonLeaf == ""): that's ambiguous, and slskd's API only accepts one
+// relative subdirectory name, so guessing wrong risks deleting more than this
+// candidate wrote. A delete failure is logged and otherwise ignored — it must
+// not block the job from moving on to its next candidate. A 404 means the
+// candidate never wrote any bytes (e.g. it failed before any transfer started),
+// which is routine, so it's logged quietly rather than as an ERROR.
+//
+// Ported from the legacy engine's Discoverer.cleanupAttempt
+// (engine/discovery.go:812-825) as a shared free function so both Downloading
+// and Importing reuse it.
+func cleanupFolder(ctx context.Context, peers FolderCleaner, log *slog.Logger, jobID int64, filenames []string) {
+	leaf := commonLeaf(filenames)
+	if leaf == "" {
+		return
+	}
+	err := peers.DeleteDownloadFolder(ctx, leaf)
+	switch {
+	case err == nil:
+	case slskd.IsNotFound(err):
+		log.Info("nothing to clean up for failed attempt", "album_job", jobID, "folder", leaf)
+	default:
+		log.Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
+	}
+}
 
 // AlbumFolder computes the local folder Lidarr should scan for one album, from
 // the downloaded transfers' filenames. filenames are the remote peer's full
