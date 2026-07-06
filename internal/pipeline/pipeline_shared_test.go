@@ -34,10 +34,11 @@ func newBackedStore(t *testing.T) *store.Store {
 }
 
 // fakeMusic is a MusicSource fake. WantedSync only ever uses WantedMissing;
-// Discovery additionally uses AlbumStatus. ManualImportCandidates and
-// ExecuteManualImport are stubbed no-ops since no module up to Discovery
-// calls them - they exist only so fakeMusic satisfies the full MusicSource
-// interface.
+// Discovery additionally uses AlbumStatus. Importing additionally uses
+// ManualImportCandidates and ExecuteManualImport: manualImportItems/Err drive
+// the verify phase's Lidarr manual-import-preview call, and
+// executeManualImportErr/executedFolders let tests inject an
+// ExecuteManualImport failure and assert what was actually submitted.
 type fakeMusic struct {
 	wanted    []lidarr.WantedAlbum
 	wantedErr error
@@ -45,6 +46,18 @@ type fakeMusic struct {
 	albumPresent   int
 	albumTotal     int
 	albumStatusErr error
+
+	// manualImportItems/manualImportErr drive ManualImportCandidates; folders
+	// records every folder it was called with, in order, so tests can assert
+	// AlbumFolder computed the expected path.
+	manualImportItems []lidarr.ManualImportItem
+	manualImportErr   error
+	manualImportCalls []string
+
+	// executeManualImportErr, when set, fails ExecuteManualImport; executedItems
+	// records the items it was actually called with.
+	executeManualImportErr error
+	executedItems          []lidarr.ManualImportItem
 }
 
 func (f *fakeMusic) WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error) {
@@ -55,10 +68,18 @@ func (f *fakeMusic) WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, er
 }
 
 func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error) {
-	return nil, nil
+	f.manualImportCalls = append(f.manualImportCalls, folder)
+	if f.manualImportErr != nil {
+		return nil, f.manualImportErr
+	}
+	return f.manualImportItems, nil
 }
 
 func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error {
+	if f.executeManualImportErr != nil {
+		return f.executeManualImportErr
+	}
+	f.executedItems = append(f.executedItems, items...)
 	return nil
 }
 
