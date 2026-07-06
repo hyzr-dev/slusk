@@ -50,6 +50,29 @@ CREATE TABLE IF NOT EXISTS transfers (
     UNIQUE(username, filename)
 );
 
+-- Pre-rewrite migration, and it MUST run before idx_transfers_candidate below:
+-- on a database where transfers still has attempt_id, CREATE INDEX IF NOT
+-- EXISTS only guards the index NAME - Postgres still resolves the column list,
+-- so an index on candidate_id would abort the apply (and the boot) unless the
+-- rename has already happened. On a fresh database (transfers created above
+-- already has candidate_id) every statement here is a no-op.
+ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_attempt_id_fkey;
+
+-- Postgres has no "RENAME COLUMN IF EXISTS" form, hence the DO block guard -
+-- it is a no-op once the column has already been renamed (or was never named
+-- attempt_id to begin with, as on a fresh database).
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name='transfers' AND column_name='attempt_id') THEN
+        ALTER TABLE transfers RENAME COLUMN attempt_id TO candidate_id;
+    END IF;
+END $$;
+
+-- Pre-rewrite databases had these indexes on the now-gone candidate_attempts
+-- table and the old attempt_id-named transfers index; drop them on upgrade.
+DROP INDEX IF EXISTS idx_attempts_job;
+DROP INDEX IF EXISTS idx_transfers_attempt;
+
 CREATE INDEX IF NOT EXISTS idx_transfers_slskd_id ON transfers(slskd_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON album_jobs(state);
 
@@ -61,11 +84,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON album_jobs(state);
 -- of CPU.
 CREATE INDEX IF NOT EXISTS idx_candidates_job ON candidates(album_job_id, state);
 CREATE INDEX IF NOT EXISTS idx_transfers_candidate ON transfers(candidate_id, updated_at);
-
--- Pre-rewrite databases had these indexes on the now-gone candidate_attempts
--- table and the old attempt_id-named transfers index; drop them on upgrade.
-DROP INDEX IF EXISTS idx_attempts_job;
-DROP INDEX IF EXISTS idx_transfers_attempt;
 
 -- known_users and artist_user_reliability hold the running success/fail history
 -- of Soulseek peers, used to score-boost known-good peers (and suppress
@@ -124,27 +142,13 @@ ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS retries    BIGINT NOT NULL DEFAU
 ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS not_before TIMESTAMPTZ;
 ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS failed_at  TIMESTAMPTZ;
 
--- The migrations below only do work on databases that ran a pre-rewrite
--- version of this file (candidate_attempts existed, transfers.attempt_id
--- pointed at it with an inline FK). On a fresh database candidates/transfers
--- are already created in their final shape above, so every guard below is a
--- no-op.
+-- The attempt_id → candidate_id rename and old-index drops run much earlier
+-- in this file (they must precede idx_transfers_candidate); what remains here
+-- is only work on databases that ran a pre-rewrite version of this file. On a
+-- fresh database transfers is already created in its final shape above, so
+-- both guards below are no-ops.
 
--- transfers.candidate_id now holds candidate IDs in the pipeline, so the old
--- FK to candidate_attempts must go or pipeline writes would violate it.
-ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_attempt_id_fkey;
-
--- Postgres has no "RENAME COLUMN IF EXISTS" form, hence the DO block guard -
--- it is a no-op once the column has already been renamed (or was never named
--- attempt_id to begin with, as on a fresh database).
-DO $$ BEGIN
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_name='transfers' AND column_name='attempt_id') THEN
-        ALTER TABLE transfers RENAME COLUMN attempt_id TO candidate_id;
-    END IF;
-END $$;
-
--- Postgres has no "ADD CONSTRAINT IF NOT EXISTS" form either, hence the guard.
+-- Postgres has no "ADD CONSTRAINT IF NOT EXISTS" form, hence the guard.
 -- NOT VALID: pre-existing rows are wiped by scripts/clean-slate-pipeline.sh
 -- ahead of this deploy anyway, so there is nothing to validate against.
 DO $$ BEGIN
