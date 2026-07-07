@@ -16,6 +16,11 @@ const (
 	StateCooldown    AlbumJobState = "COOLDOWN"
 	StateFailed      AlbumJobState = "FAILED"
 	StateCancelled   AlbumJobState = "CANCELLED"
+	// StateWanted is the pipeline rewrite's entry state: synced from Lidarr's
+	// wanted list, awaiting a Discovery search. Replaces DISCOVERED/SEARCHING.
+	StateWanted AlbumJobState = "WANTED"
+	// StateDone replaces COMPLETED in the pipeline rewrite.
+	StateDone AlbumJobState = "DONE"
 )
 
 // Terminal reports whether the state is an end state that needs no further work
@@ -23,6 +28,15 @@ const (
 // is terminal: the album left Lidarr's wanted list, so there is nothing to do.
 func (s AlbumJobState) Terminal() bool {
 	return s == StateCompleted || s == StateFailed || s == StateCancelled
+}
+
+// PipelineTerminal reports whether the state is an end state in the pipeline
+// state machine (spec 2026-07-06). FAILED is included: it is only ever left
+// via WantedSync's revival or a manual dashboard retry, never by a module's
+// normal advance. Distinct from Terminal() (the legacy engine's notion) until
+// the engine is deleted.
+func (s AlbumJobState) PipelineTerminal() bool {
+	return s == StateDone || s == StateCancelled || s == StateFailed
 }
 
 // TransferState mirrors slskd's transfer states, plus STALLED which slskdarr
@@ -60,4 +74,14 @@ const (
 	EventImportOK          JobEventType = "import_ok"
 	EventImportRejected    JobEventType = "import_rejected"
 	EventJobFailed         JobEventType = "job_failed"
+)
+
+// CandidateState is the lifecycle of one cached candidate (see core.Candidate).
+type CandidateState string
+
+const (
+	CandidateNew       CandidateState = "NEW"
+	CandidateActive    CandidateState = "ACTIVE"
+	CandidateSucceeded CandidateState = "SUCCEEDED"
+	CandidateFailed    CandidateState = "FAILED"
 )

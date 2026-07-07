@@ -50,6 +50,8 @@
   #event-filter{padding:8px 10px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;margin-bottom:12px;width:260px;}
   th.sortable{cursor:pointer;user-select:none;}
   th.sortable:hover{color:#a3aab5;}
+  .module-stale{color:var(--orphaned);font-weight:600;}
+  button.action + button.action{margin-left:8px;}
   .detail-attempt{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #1c2028;}
   .detail-attempt:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
   .detail-transfer{font-size:11.5px;color:#9aa0aa;padding:3px 0 3px 12px;}
@@ -80,6 +82,11 @@
       <table>
         <thead><tr><th>Album / Artist</th><th>Peer</th><th>Progress</th></tr></thead>
         <tbody id="overview-active-body"></tbody>
+      </table>
+      <h1 style="margin-top:22px;">Moduler</h1>
+      <table>
+        <thead><tr><th>Modul</th><th>Senast tickad</th></tr></thead>
+        <tbody id="module-health-body"></tbody>
       </table>
     </div>
     <div id="view-queue" class="view">

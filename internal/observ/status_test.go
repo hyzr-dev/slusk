@@ -14,13 +14,8 @@ func TestDashboardStatus(t *testing.T) {
 	}{
 		{
 			name: "no transfer yet is queued",
-			v:    core.JobView{Job: core.AlbumJob{State: core.StateDiscovered}},
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateWanted}},
 			want: "queued",
-		},
-		{
-			name: "searching with no transfer is active",
-			v:    core.JobView{Job: core.AlbumJob{State: core.StateSearching}},
-			want: "active",
 		},
 		{
 			name: "selecting is active",
@@ -28,14 +23,14 @@ func TestDashboardStatus(t *testing.T) {
 			want: "active",
 		},
 		{
-			name: "verifying is active",
-			v:    core.JobView{Job: core.AlbumJob{State: core.StateVerifying}},
-			want: "active",
-		},
-		{
 			name: "importing is active",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateImporting}},
 			want: "active",
+		},
+		{
+			name: "downloading with no transfer yet is queued",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateDownloading}},
+			want: "queued",
 		},
 		{
 			name: "transfer in progress is active",
@@ -54,19 +49,14 @@ func TestDashboardStatus(t *testing.T) {
 			want: "stalled",
 		},
 		{
-			name: "job completed is done",
-			v:    core.JobView{Job: core.AlbumJob{State: core.StateCompleted}},
+			name: "job done is done",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateDone}},
 			want: "done",
 		},
 		{
 			name: "job failed is failed",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateFailed}},
 			want: "failed",
-		},
-		{
-			name: "job in cooldown is queued",
-			v:    core.JobView{Job: core.AlbumJob{State: core.StateCooldown}},
-			want: "queued",
 		},
 		{
 			name: "transfer errored is failed",

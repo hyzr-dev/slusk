@@ -10,30 +10,6 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-// UpsertDiscoveredJob inserts a DISCOVERED job for the Lidarr album, or returns
-// the existing job if one already exists (idempotent on lidarr_album_id).
-func (s *Store) UpsertDiscoveredJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error) {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT(lidarr_album_id) DO NOTHING`,
-		lidarrAlbumID, string(core.StateDiscovered), now, now)
-	if err != nil {
-		return core.AlbumJob{}, fmt.Errorf("insert job: %w", err)
-	}
-	var j core.AlbumJob
-	var state string
-	err = s.db.QueryRowContext(ctx,
-		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id
-		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID)
-	if err != nil {
-		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
-	}
-	j.State = core.AlbumJobState(state)
-	return j, nil
-}
-
 // UpdateJobMetadata refreshes the cached title/artist_name/release_date/artist_id
 // for a job. It is called every discovery pass so display metadata and
 // release-date ordering stay current even if Lidarr renames an album/artist or
@@ -65,36 +41,22 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 	return nil
 }
 
-// CreateAttempt inserts a PENDING candidate attempt and returns its ID.
-func (s *Store) CreateAttempt(ctx context.Context, albumJobID int64, username string, score float64, now time.Time) (int64, error) {
-	var id int64
-	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
-		 VALUES ($1, $2, $3, 'PENDING', $4, $5)
-		 RETURNING id`,
-		albumJobID, username, score, now, now).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("insert attempt: %w", err)
-	}
-	return id, nil
-}
-
 // RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a QUEUED
 // transfer with no slskd id BEFORE slskd is called. It is idempotent on the
-// (username, filename) key: a re-enqueue updates the existing row's attempt and
-// deadline and returns that row, rather than violating the UNIQUE constraint.
-func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, username, filename string, deadline, now time.Time) (int64, error) {
+// (username, filename) key: a re-enqueue updates the existing row's candidate
+// and deadline and returns that row, rather than violating the UNIQUE constraint.
+func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error) {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO transfers (attempt_id, username, filename, state, deadline, updated_at)
+		`INSERT INTO transfers (candidate_id, username, filename, state, deadline, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT(username, filename) DO UPDATE SET
-		   attempt_id = excluded.attempt_id,
+		   candidate_id = excluded.candidate_id,
 		   state = excluded.state,
 		   deadline = excluded.deadline,
 		   slskd_id = '',
 		   bytes_done = 0,
 		   updated_at = excluded.updated_at`,
-		attemptID, username, filename, string(core.TransferQueued), deadline, now)
+		candidateID, username, filename, string(core.TransferQueued), deadline, now)
 	if err != nil {
 		return 0, fmt.Errorf("upsert transfer intent: %w", err)
 	}
@@ -106,26 +68,27 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, attemptID int64, userna
 	return id, nil
 }
 
-// RecordPendingTransfer persists a file the engine intends to download but has
-// not yet handed to slskd, as a PENDING transfer carrying its size in
-// bytes_total. The engine promotes a bounded number of these to QUEUED per peer
-// at a time (via RecordEnqueueIntent) so a burst never trips a peer's per-user
-// queued-megabyte limit. Idempotent on the (username, filename) key, mirroring
-// RecordEnqueueIntent. The deadline is a placeholder; the real one is set when
-// the file is actually sent, since PENDING transfers are never deadline-reaped.
-func (s *Store) RecordPendingTransfer(ctx context.Context, attemptID int64, username, filename string, size int64, now time.Time) error {
+// RecordPendingTransfer persists a file the pipeline intends to download but
+// has not yet handed to slskd, as a PENDING transfer carrying its size in
+// bytes_total. The pipeline promotes a bounded number of these to QUEUED per
+// peer at a time (via RecordEnqueueIntent) so a burst never trips a peer's
+// per-user queued-megabyte limit. Idempotent on the (username, filename) key,
+// mirroring RecordEnqueueIntent. The deadline is a placeholder; the real one
+// is set when the file is actually sent, since PENDING transfers are never
+// deadline-reaped.
+func (s *Store) RecordPendingTransfer(ctx context.Context, candidateID int64, username, filename string, size int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO transfers (attempt_id, username, filename, state, bytes_total, deadline, updated_at)
+		`INSERT INTO transfers (candidate_id, username, filename, state, bytes_total, deadline, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT(username, filename) DO UPDATE SET
-		   attempt_id = excluded.attempt_id,
+		   candidate_id = excluded.candidate_id,
 		   state = excluded.state,
 		   bytes_total = excluded.bytes_total,
 		   slskd_id = '',
 		   bytes_done = 0,
 		   deadline = excluded.deadline,
 		   updated_at = excluded.updated_at`,
-		attemptID, username, filename, string(core.TransferPending), size, now, now)
+		candidateID, username, filename, string(core.TransferPending), size, now, now)
 	if err != nil {
 		return fmt.Errorf("record pending transfer: %w", err)
 	}
@@ -238,7 +201,7 @@ func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Ti
 	return nil
 }
 
-const transferSelect = `SELECT id, attempt_id, slskd_id, username, filename, state,
+const transferSelect = `SELECT id, candidate_id, slskd_id, username, filename, state,
 	bytes_done, bytes_total, retries, deadline, last_progress_at, updated_at FROM transfers`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
@@ -249,7 +212,7 @@ type rowScanner interface {
 func scanTransfer(r rowScanner) (core.Transfer, error) {
 	var t core.Transfer
 	var state string
-	err := r.Scan(&t.ID, &t.AttemptID, &t.SlskdID, &t.Username, &t.Filename, &state,
+	err := r.Scan(&t.ID, &t.CandidateID, &t.SlskdID, &t.Username, &t.Filename, &state,
 		&t.BytesDone, &t.BytesTotal, &t.Retries, &t.Deadline, &t.LastProgressAt, &t.UpdatedAt)
 	t.State = core.TransferState(state)
 	return t, err

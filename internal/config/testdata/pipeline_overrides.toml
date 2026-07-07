@@ -15,6 +15,20 @@ min_bitrate = 192
 max_inflight_per_peer = 3
 max_transfer_retries = 3
 max_candidate_file_ratio = 2.0
+max_active = 50
+max_retries = 5
+backoff_base = "10m"
+backoff_cap = "12h"
+candidate_ttl = "12h"
+failed_revive_after = "360h"
+stuck_after = "30m"
+tick_timeout = "2m"
+import_confirm_timeout = "4m"
+wanted_sync_interval = "10m"
+discovery_interval = "20s"
+selecting_interval = "5s"
+downloading_interval = "10s"
+importing_interval = "20s"
 
 [pipeline.weights]
 format = 1.0

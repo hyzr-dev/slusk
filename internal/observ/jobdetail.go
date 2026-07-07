@@ -57,7 +57,7 @@ func toJobDetailDTO(d core.JobDetail) jobDetailDTO {
 			ID:         ad.Attempt.ID,
 			Username:   ad.Attempt.Username,
 			FileCount:  len(ad.Transfers),
-			State:      ad.Attempt.State,
+			State:      string(ad.Attempt.State),
 			FailReason: ad.Attempt.FailReason,
 			CreatedAt:  ad.Attempt.CreatedAt.Format(timeFormat),
 			UpdatedAt:  ad.Attempt.UpdatedAt.Format(timeFormat),

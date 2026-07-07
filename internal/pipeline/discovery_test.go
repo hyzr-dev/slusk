@@ -1,0 +1,350 @@
+package pipeline
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/config"
+	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slskdarr/internal/lidarr"
+	"github.com/samuelenocsson/slskdarr/internal/matcher"
+	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slskdarr/internal/store"
+)
+
+// fakeWantedSource is a WantedSource fake so tests can hand Discovery an
+// album map without constructing a real WantedSync.
+type fakeWantedSource struct {
+	wanted map[int64]lidarr.WantedAlbum
+}
+
+func (f *fakeWantedSource) Wanted() map[int64]lidarr.WantedAlbum { return f.wanted }
+
+// newDiscoveryParams builds DiscoveryParams over a fresh store-backed
+// fixture. Ranker uses the real matcher.NewWeighted scorer rather than a
+// fake: its ranking logic (grouping, floor, sort order) is exactly what the
+// candidate-cap and ordering assertions below need to exercise, and
+// constructing it is trivial, so a fake would only need to reimplement it.
+func newDiscoveryParams(t *testing.T, music *fakeMusic, searcher *fakeSearcher, wanted map[int64]lidarr.WantedAlbum) (DiscoveryParams, *store.Store) {
+	t.Helper()
+	st := newBackedStore(t)
+	return DiscoveryParams{
+		Store:                 st,
+		Peers:                 searcher,
+		Music:                 music,
+		Ranker:                matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
+		WantedSource:          &fakeWantedSource{wanted: wanted},
+		SearchTimeout:         5 * time.Second,
+		MaxCandidates:         2,
+		MaxCandidateFileRatio: 2.0,
+		MaxRetries:            3,
+		BackoffBase:           15 * time.Minute,
+		BackoffCap:            24 * time.Hour,
+		Interval:              30 * time.Second,
+		Logger:                slog.New(slog.NewTextHandler(testDiscard{}, nil)),
+	}, st
+}
+
+func TestDiscoveryCachesRankedCandidates(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}, albumTotal: 2}
+	searcher := &fakeSearcher{results: []slskd.Result{
+		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
+		{Username: "good2", Filename: "good2/01.flac", Size: 10, BitRate: 900},
+		{Username: "good2", Filename: "good2/02.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	// Add a third, oversized candidate directly to the fake results so the
+	// file-ratio filter has something to reject: 5 files against a 2-track
+	// album with ratio 2.0 (5 > 2*2=4).
+	searcher.results = append(searcher.results, []slskd.Result{
+		{Username: "toobig", Filename: "toobig/01.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/02.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/03.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/04.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/05.flac", Size: 10, BitRate: 900},
+	}...)
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got, err := st.RunnableJobsInState(ctx, core.StateSelecting, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != job.ID {
+		t.Fatalf("expected job %d in SELECTING, got %+v", job.ID, got)
+	}
+	if got[0].Retries != 0 {
+		t.Errorf("expected retries reset to 0, got %d", got[0].Retries)
+	}
+
+	c1, ok1, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("NextNewCandidate: %v", err)
+	}
+	if !ok1 {
+		t.Fatalf("expected at least one cached candidate")
+	}
+	if c1.Username == "toobig" {
+		t.Errorf("oversized candidate should have been rejected, got it cached")
+	}
+
+	// Drain every NEW candidate deterministically (highest score first, per
+	// NextNewCandidate's ordering) to assert exactly 2 rows were persisted:
+	// 3 search results in, 1 ("toobig") excluded by the file-ratio filter.
+	seen := map[string]bool{c1.Username: true}
+	if err := st.FailCandidate(ctx, c1.ID, "drained for test assertion", now); err != nil {
+		t.Fatalf("FailCandidate: %v", err)
+	}
+	count := 1
+	for {
+		c, ok, err := st.NextNewCandidate(ctx, job.ID)
+		if err != nil {
+			t.Fatalf("NextNewCandidate (drain): %v", err)
+		}
+		if !ok {
+			break
+		}
+		if c.Username == "toobig" {
+			t.Errorf("oversized candidate should have been rejected, got it cached")
+		}
+		seen[c.Username] = true
+		count++
+		if err := st.FailCandidate(ctx, c.ID, "drained for test assertion", now); err != nil {
+			t.Fatalf("FailCandidate: %v", err)
+		}
+	}
+	if count != 2 {
+		t.Errorf("expected exactly 2 cached candidates, drained %d", count)
+	}
+	wantUsernames := map[string]bool{"good1": true, "good2": true}
+	if len(seen) != len(wantUsernames) {
+		t.Errorf("expected drained usernames %v, got %v", wantUsernames, seen)
+	}
+	for u := range wantUsernames {
+		if !seen[u] {
+			t.Errorf("expected %q among drained candidates, got %v", u, seen)
+		}
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	rejected := false
+	for _, e := range events {
+		if e.Event == core.EventCandidateRejected {
+			rejected = true
+			break
+		}
+	}
+	if !rejected {
+		t.Errorf("expected an EventCandidateRejected event for the oversized candidate, got events %+v", events)
+	}
+}
+
+func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	searcher := &fakeSearcher{} // no results ever, primary or fallback
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick 1: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateWanted, now.Add(35*time.Minute), 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job still WANTED and runnable after 35m, got %+v", jobs)
+	}
+	if jobs[0].Retries != 1 {
+		t.Errorf("expected retries=1, got %d", jobs[0].Retries)
+	}
+	if jobs[0].NotBefore == nil {
+		t.Fatalf("expected not_before to be set")
+	}
+	wantNotBefore := now.Add(30 * time.Minute)
+	if diff := jobs[0].NotBefore.Sub(wantNotBefore); diff < -time.Second || diff > time.Second {
+		t.Errorf("expected not_before ~= %v, got %v", wantNotBefore, *jobs[0].NotBefore)
+	}
+
+	now2 := now.Add(35 * time.Minute)
+	if err := d.Tick(ctx, now2); err != nil {
+		t.Fatalf("Tick 2: %v", err)
+	}
+	jobs2, err := st.RunnableJobsInState(ctx, core.StateWanted, now2.Add(65*time.Minute), 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState 2: %v", err)
+	}
+	if len(jobs2) != 1 || jobs2[0].ID != job.ID {
+		t.Fatalf("expected job still WANTED and runnable, got %+v", jobs2)
+	}
+	if jobs2[0].Retries != 2 {
+		t.Errorf("expected retries=2, got %d", jobs2[0].Retries)
+	}
+	wantNotBefore2 := now2.Add(1 * time.Hour)
+	if diff := jobs2[0].NotBefore.Sub(wantNotBefore2); diff < -time.Second || diff > time.Second {
+		t.Errorf("expected not_before ~= %v, got %v", wantNotBefore2, *jobs2[0].NotBefore)
+	}
+}
+
+func TestDiscoveryFailsJobAtMaxRetries(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	searcher := &fakeSearcher{}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	p.MaxRetries = 3
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	// Pre-set retries to maxRetries-1 so this tick's failure crosses the line.
+	if err := st.SetJobBackoff(ctx, job.ID, p.MaxRetries-1, time.Time{}, now); err != nil {
+		t.Fatalf("SetJobBackoff: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED, got %+v", jobs)
+	}
+	if jobs[0].FailedAt == nil {
+		t.Errorf("expected failed_at to be set")
+	}
+}
+
+func TestDiscoveryFallbackQuery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	primary := "Artist Album (Deluxe Edition)"
+	fallback := normalizeQuery(primary)
+	searcher := &fakeSearcher{resultsForQuery: map[string][]slskd.Result{
+		fallback: {
+			{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
+		},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(searcher.queries) != 2 {
+		t.Fatalf("expected 2 searches (primary + fallback), got %d: %v", len(searcher.queries), searcher.queries)
+	}
+	if searcher.queries[0] != primary {
+		t.Errorf("expected first query %q, got %q", primary, searcher.queries[0])
+	}
+	if searcher.queries[1] != fallback {
+		t.Errorf("expected fallback query %q, got %q", fallback, searcher.queries[1])
+	}
+
+	got, err := st.RunnableJobsInState(ctx, core.StateSelecting, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != job.ID {
+		t.Fatalf("expected job in SELECTING, got %+v", got)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var sawFallback bool
+	for _, e := range events {
+		if e.Event == core.EventSearchFallback {
+			sawFallback = true
+		}
+	}
+	if !sawFallback {
+		t.Errorf("expected an EventSearchFallback event, got %+v", events)
+	}
+}
+
+func TestDiscoveryOrdersByReleaseDateDesc(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]lidarr.WantedAlbum{
+		1: {ID: 1, Title: "Old", ArtistName: "Artist", ReleaseDate: "2020-01-01"},
+		2: {ID: 2, Title: "New", ArtistName: "Artist", ReleaseDate: "2025-01-01"},
+	}
+	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1], wanted[2]}}
+	searcher := &fakeSearcher{} // empty results either way; we only care which query fires
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	oldJob, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob old: %v", err)
+	}
+	if err := st.UpdateJobMetadata(ctx, oldJob.ID, "Old", "Artist", "2020-01-01", 0, now); err != nil {
+		t.Fatalf("UpdateJobMetadata old: %v", err)
+	}
+	newJob, err := st.UpsertWantedJob(ctx, 2, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob new: %v", err)
+	}
+	if err := st.UpdateJobMetadata(ctx, newJob.ID, "New", "Artist", "2025-01-01", 0, now); err != nil {
+		t.Fatalf("UpdateJobMetadata new: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(searcher.queries) == 0 {
+		t.Fatalf("expected at least one search")
+	}
+	if searcher.queries[0] != "Artist New" {
+		t.Errorf("expected the newer release searched first, got query %q", searcher.queries[0])
+	}
+}

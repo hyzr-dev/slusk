@@ -1,7 +1,9 @@
 package store
 
 import (
+	"database/sql"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +31,7 @@ func TestOpenAppliesSchema(t *testing.T) {
 	s := newTestStore(t)
 
 	// Check that all three core tables exist
-	tables := []string{"album_jobs", "candidate_attempts", "transfers"}
+	tables := []string{"album_jobs", "candidates", "transfers"}
 	for _, table := range tables {
 		var count int
 		err := s.db.QueryRow(
@@ -48,11 +50,11 @@ func TestOpenAppliesSchema(t *testing.T) {
 func TestForeignKeysEnforced(t *testing.T) {
 	s := newTestStore(t)
 
-	// Try to insert a candidate_attempts row with a non-existent album_job_id.
+	// Try to insert a candidates row with a non-existent album_job_id.
 	// The foreign key constraint must reject it.
 	_, err := s.db.Exec(
-		`INSERT INTO candidate_attempts (album_job_id, username, score, state, created_at, updated_at)
-		 VALUES (999, 'testuser', 1.0, 'PENDING', now(), now())`,
+		`INSERT INTO candidates (album_job_id, username, score, files, state, created_at, updated_at)
+		 VALUES (999, 'testuser', 1.0, '[]', 'NEW', now(), now())`,
 	)
 	if err == nil {
 		t.Fatal("expected foreign key violation, got nil error")
@@ -86,7 +88,7 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 
 // TestJobViewIndexesExist guards against losing the covering indexes for the
 // dashboard's ListJobsWithTransfer correlated subqueries. Without them those
-// subqueries full-scanned candidate_attempts/transfers once per album_jobs row,
+// subqueries full-scanned candidates/transfers once per album_jobs row,
 // which at a few thousand jobs made a single /api/jobs request take tens of
 // seconds of CPU — and the dashboard polls it every 3 seconds, so requests
 // piled up and pinned multiple cores (the 300%-CPU incident).
@@ -129,7 +131,7 @@ func TestOpenRecyclesIdleConnections(t *testing.T) {
 func TestJobViewIndexesExist(t *testing.T) {
 	s := newTestStore(t)
 
-	for _, idx := range []string{"idx_attempts_job", "idx_transfers_attempt"} {
+	for _, idx := range []string{"idx_candidates_job", "idx_candidates_job_created", "idx_transfers_candidate"} {
 		var count int
 		if err := s.db.QueryRow(
 			`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, idx,
@@ -138,6 +140,165 @@ func TestJobViewIndexesExist(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("index %s missing (dashboard job view would full-scan per job row)", idx)
+		}
+	}
+}
+
+// TestSplitStatements exercises the naive semicolon-splitting parser applySchema
+// relies on to break schema.sql into individually-executable statements.
+func TestSplitStatements(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "plain statements split on semicolon",
+			input: "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);",
+			want: []string{
+				"CREATE TABLE a (id INT)",
+				"\nCREATE TABLE b (id INT)",
+			},
+		},
+		{
+			name: "DO block kept as one statement despite internal semicolons",
+			input: "DO $$ BEGIN\n" +
+				"    IF EXISTS (SELECT 1) THEN\n" +
+				"        ALTER TABLE t RENAME COLUMN a TO b;\n" +
+				"    END IF;\n" +
+				"END $$;",
+			want: []string{
+				"DO $$ BEGIN\n" +
+					"    IF EXISTS (SELECT 1) THEN\n" +
+					"        ALTER TABLE t RENAME COLUMN a TO b;\n" +
+					"    END IF;\n" +
+					"END $$",
+			},
+		},
+		{
+			name: "two DO blocks with a plain statement between them",
+			input: "DO $$ BEGIN X; END $$;\n" +
+				"SELECT 1;\n" +
+				"DO $$ BEGIN Y; END $$;",
+			want: []string{
+				"DO $$ BEGIN X; END $$",
+				"\nSELECT 1",
+				"\nDO $$ BEGIN Y; END $$",
+			},
+		},
+		{
+			name:  "line comment containing a semicolon does not split the statement",
+			input: "-- a comment; with a semicolon inside it\nSELECT 1;",
+			want: []string{
+				"-- a comment; with a semicolon inside it\nSELECT 1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitStatements(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitStatements(%q) = %d statements, want %d\ngot: %#v", tt.input, len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if strings.TrimSpace(got[i]) != strings.TrimSpace(tt.want[i]) {
+					t.Errorf("statement %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestSchemaMigratesLegacyShape verifies schema.sql boots cleanly against a
+// pre-rewrite database: transfers still named attempt_id with an inline FK to
+// candidate_attempts and the old idx_transfers_attempt index. The clean-slate
+// script only truncates - it does not drop - so production databases hit
+// exactly this shape on first post-rewrite boot. The apply must run the
+// attempt_id → candidate_id migration BEFORE any statement that references
+// candidate_id by name: IF NOT EXISTS only guards names, Postgres still
+// resolves the column list.
+func TestSchemaMigratesLegacyShape(t *testing.T) {
+	dsn := storetest.DSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		`CREATE TABLE album_jobs (
+			id    BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+			state TEXT NOT NULL
+		)`,
+		`CREATE TABLE candidate_attempts (
+			id           BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+			album_job_id BIGINT NOT NULL REFERENCES album_jobs(id)
+		)`,
+		`CREATE TABLE transfers (
+			id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+			attempt_id BIGINT NOT NULL REFERENCES candidate_attempts(id),
+			slskd_id   TEXT NOT NULL DEFAULT '',
+			username   TEXT NOT NULL,
+			filename   TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE INDEX idx_attempts_job ON candidate_attempts(album_job_id)`,
+		`CREATE INDEX idx_transfers_attempt ON transfers(attempt_id, updated_at)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create legacy shape: %v\nstatement: %s", err, stmt)
+		}
+	}
+
+	s, err := Open(dsn) // applies schema.sql against the legacy shape
+	if err != nil {
+		t.Fatalf("Open against legacy-shape database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = 'public' AND table_name = 'transfers' AND column_name = 'candidate_id'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query transfers columns: %v", err)
+	}
+	if count != 1 {
+		t.Error("transfers.attempt_id was not renamed to candidate_id")
+	}
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_transfers_candidate'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if count != 1 {
+		t.Error("idx_transfers_candidate missing after migrating legacy shape")
+	}
+}
+
+// TestApplySchemaTwiceIsIdempotent makes explicit that applying schema.sql to
+// a database that has already had it applied (Open already runs applySchema
+// once) is safe: every statement in the file is guarded (IF (NOT) EXISTS, or
+// a DO block doing its own existence check) precisely so a second apply is a
+// no-op rather than an error.
+func TestApplySchemaTwiceIsIdempotent(t *testing.T) {
+	s := newTestStore(t) // Open already applied schema.sql once
+
+	if err := applySchema(s.db, schemaSQL); err != nil {
+		t.Fatalf("second applySchema: %v", err)
+	}
+
+	for _, table := range []string{"album_jobs", "candidates", "transfers"} {
+		var count int
+		if err := s.db.QueryRow(
+			`SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("query schema for %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s table missing after re-applying schema", table)
 		}
 	}
 }

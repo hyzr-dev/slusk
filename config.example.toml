@@ -1,27 +1,21 @@
 [lidarr]
 url = "http://lidarr:8686"
 api_key = "CHANGEME"
-poll_interval = "5m"
 
 [slskd]
 url = "http://slskd:5030"
 api_key = "CHANGEME"
-status_poll_interval = "15s"
 
-[engine]
+[pipeline]
+# The matcher/transfer knobs below (through max_candidate_file_ratio and
+# [pipeline.weights]) are mandatory, same as they were under the old [engine]
+# section. Everything else in [pipeline] is optional; an absent key uses the
+# default shown.
 max_candidates_per_album = 5
 transfer_deadline = "30m"
 stall_timeout = "5m"
 search_timeout = "20s"
 min_bitrate = 192
-# Per-tick batch size used across the discovery pipeline stages (retry, start,
-# top-up, downloading, verifying, importing). Not a concurrency limit: searches
-# within a batch run sequentially.
-batch = 4
-# Global cap on jobs simultaneously active (searching through importing:
-# SEARCHING/SELECTING/DOWNLOADING/VERIFYING/IMPORTING), regardless of how
-# many are newly started per tick.
-max_concurrent_active = 30
 # Max files handed to a single peer at once. slskdarr records a candidate's whole
 # album up front but only sends this many to slskd at a time, releasing more as
 # each finishes. Enqueuing a whole album at once trips Soulseek peers' per-user
@@ -35,31 +29,50 @@ max_inflight_per_peer = 3
 # instead of failing the whole candidate. Permanent reasons ("File not shared",
 # "Banned") are never retried. 0 disables retries (optional; defaults to 0).
 max_transfer_retries = 3
-# Wait before re-searching an album when NO untried candidate is left (nothing
-# new to try soon).
-candidate_backoff = "2m"
-# Wait before trying the NEXT candidate after one fails to download or is rejected
-# on import. Kept short: other candidates are usually available immediately, so a
-# single peer timeout should not stall the album for long.
-failed_candidate_backoff = "20s"
-failed_retry_after = "24h"
-# How long an import may sit unconfirmed in IMPORTING (Lidarr's ManualImport
-# command is async) before it's treated as failed and rotated to the next
-# candidate.
-import_confirm_timeout = "3m"
-# How often the discovery pipeline advances jobs through the state machine
-# (retries, candidate starts, download/import progression). Independent of
-# lidarr.poll_interval, which only controls how often the wanted list is
-# refreshed from Lidarr.
-tick_interval = "30s"
 # Reject a candidate whose file count exceeds the album's known Lidarr track
 # count by more than this multiple, e.g. 2.0 rejects a candidate offering more
 # than 2x the expected tracks. Guards against a Soulseek share dumping an
 # artist's whole discography into one flat folder being mistaken for a single
 # album. Ignored (no rejection) when Lidarr's expected track count is unknown.
 max_candidate_file_ratio = 2.0
+#
+# Global cap on jobs simultaneously active across the pipeline
+# (SELECTING/DOWNLOADING/IMPORTING), regardless of how many are newly started
+# per tick. Default 30.
+max_active = 30
+# How many candidates a job cycles through before it is given up on. Default 10.
+max_retries = 10
+# Initial wait before retrying a job with no untried candidate left. Default 15m.
+backoff_base = "15m"
+# Upper bound on exponential backoff growth. Default 24h.
+backoff_cap = "24h"
+# How long a discovered candidate stays eligible before it is dropped and
+# re-discovered. Default 24h.
+candidate_ttl = "24h"
+# How long a permanently failed job waits before being revived for another
+# attempt. Default 720h.
+failed_revive_after = "720h"
+# How long a job may sit without progress in an active phase before it is
+# treated as stuck and reconciled. Default 1h.
+stuck_after = "1h"
+# Upper bound on a single pipeline tick's total execution time. Default 5m.
+tick_timeout = "5m"
+# How long an import may sit unconfirmed (Lidarr's ManualImport command is
+# async) before it's treated as failed and rotated to the next candidate.
+# Default 3m.
+import_confirm_timeout = "3m"
+# How often the wanted list is refreshed from Lidarr. Default 15m.
+wanted_sync_interval = "15m"
+# How often the discovery phase runs. Default 30s.
+discovery_interval = "30s"
+# How often the selecting phase runs. Default 10s.
+selecting_interval = "10s"
+# How often the downloading phase runs. Default 15s.
+downloading_interval = "15s"
+# How often the importing phase runs. Default 30s.
+importing_interval = "30s"
 
-[engine.weights]
+[pipeline.weights]
 format = 1.0
 bitrate = 0.5
 reliability = 0.8

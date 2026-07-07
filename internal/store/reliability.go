@@ -1,6 +1,6 @@
 // Package store: reliability.go holds the known_users / artist_user_reliability
 // read and write paths. See the schema comment above those tables for why they
-// are written incrementally rather than derived from candidate_attempts.
+// are written incrementally rather than derived from candidates.
 package store
 
 import (
@@ -14,10 +14,10 @@ import (
 
 // RecordAttemptOutcome upserts a peer's global (known_users) reliability row,
 // and its artist-specific (artist_user_reliability) row when artistID is
-// known, after a candidate attempt reaches a terminal state. This is the ONLY
-// place peer history is written, and must be called at attempt completion
-// (success or fail) rather than derived from candidate_attempts, since
-// ResetJobForRetry deletes that history on every retry cycle. artistID <= 0
+// known, after a candidate reaches a terminal state. This is the ONLY place
+// peer history is written, and must be called at candidate completion
+// (success or fail) rather than derived from candidates, since
+// ResetJobToWanted deletes that history on every retry cycle. artistID <= 0
 // (not yet backfilled onto the job) skips the artist-specific row rather than
 // writing a bogus artist_id=0 bucket; the global row is still recorded.
 func (s *Store) RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -304,11 +305,64 @@ func TestSearchReturnsPartialOnTimeout(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "k")
 	c.pollInterval = 5 * time.Millisecond
+	c.stopGrace = 25 * time.Millisecond // fake never reports isComplete; don't wait out the real grace
 	got, err := c.Search(context.Background(), "q", 30*time.Millisecond)
 	if err != nil {
 		t.Fatalf("timeout should return partial results, not error: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected partial results on timeout, got %d", len(got))
+	}
+}
+
+// TestSearchStopsIncompleteSearchToHarvestPartial pins the fix for a live bug:
+// slskd only persists a search's responses when the search is finalized
+// (isComplete), so harvesting /responses from a still-InProgress search
+// returns an empty list even when responseCount is already large. Verified
+// against a live slskd: at t=20s state was InProgress with responseCount=42
+// while /responses returned 0 groups; the moment the search completed,
+// /responses returned everything. The client must therefore STOP the search
+// (PUT /api/v0/searches/{id}) when its own timeout fires, wait for slskd to
+// finalize, and only then harvest.
+func TestSearchStopsIncompleteSearchToHarvestPartial(t *testing.T) {
+	var mu sync.Mutex
+	stopped := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v0/searches/s1":
+			stopped = true
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			// Completes only once the client has asked slskd to stop it.
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed, Cancelled", "isComplete": stopped})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			// Real slskd: empty until the search is finalized.
+			if !stopped {
+				w.Write([]byte(`[]`))
+				return
+			}
+			w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+	c.stopGrace = 500 * time.Millisecond
+	c.searchRetries = 0 // a single attempt: the stop-and-harvest path must succeed on its own
+	got, err := c.Search(context.Background(), "q", 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("timeout should stop the search and return partial results, not error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected harvested results after stopping the search, got %d", len(got))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !stopped {
+		t.Fatal("client never asked slskd to stop the search (PUT /api/v0/searches/s1)")
 	}
 }
