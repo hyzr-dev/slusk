@@ -170,7 +170,7 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !healthy() {
-			http.Error(w, "reconcile loop stalled", http.StatusServiceUnavailable)
+			http.Error(w, "pipeline module stalled", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
