@@ -26,6 +26,7 @@ type Client struct {
 	enqueueBackoff time.Duration // initial delay between Enqueue retries (doubles each time)
 	searchRetries  int           // extra Search attempts when a search returns zero results
 	searchBackoff  time.Duration // delay between empty-result search retries
+	stopGrace      time.Duration // how long stopAndHarvest waits for slskd to finalize a stopped search
 }
 
 // New constructs a slskd client for the given base URL and API key.
@@ -39,6 +40,7 @@ func New(baseURL, apiKey string) *Client {
 		enqueueBackoff: 500 * time.Millisecond,
 		searchRetries:  2,
 		searchBackoff:  time.Second,
+		stopGrace:      10 * time.Second,
 	}
 }
 
@@ -278,10 +280,10 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 	for {
 		var st searchState
 		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(started.ID), nil, &st); err != nil {
-			// If the timeout/cancel fired during the poll GET, return whatever
-			// responses exist rather than a bare context error.
+			// If the timeout/cancel fired during the poll GET, stop the search
+			// and harvest what it found rather than return a bare context error.
 			if ctx.Err() != nil {
-				return c.searchResponses(context.Background(), started.ID)
+				return c.stopAndHarvest(started.ID)
 			}
 			return nil, err
 		}
@@ -290,12 +292,49 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 		}
 		select {
 		case <-ctx.Done():
-			// Timed out: return whatever responses exist so far rather than error.
-			return c.searchResponses(context.Background(), started.ID)
+			// Timed out: stop the search and harvest what it found so far.
+			return c.stopAndHarvest(started.ID)
 		case <-ticker.C:
 		}
 	}
 	return c.searchResponses(ctx, started.ID)
+}
+
+// stopAndHarvest asks slskd to stop a still-in-progress search, waits for it to
+// finalize, then harvests its responses. It exists because slskd only persists
+// a search's responses when the search is finalized: GET /responses on an
+// InProgress search returns an empty list even when the search state already
+// reports a large responseCount (verified live: at t=20s a search was
+// InProgress with responseCount=42 while /responses returned 0 groups; the
+// moment it completed, everything appeared). Harvesting at our own timeout
+// without stopping therefore ALWAYS yielded zero results for any search slower
+// than search_timeout. The wait-for-isComplete after the stop is deliberate:
+// harvesting (or deleting — see searchOnce's doc comment) while slskd's own
+// async finalize is still running is the same race that used to surface as EF
+// Core "affected 0 rows" errors. If the search never finalizes within
+// stopGrace, a best-effort harvest happens anyway.
+func (c *Client) stopAndHarvest(id string) ([]Result, error) {
+	// The caller's context already expired; this cleanup gets its own budget.
+	ctx, cancel := context.WithTimeout(context.Background(), c.stopGrace)
+	defer cancel()
+
+	// Best-effort: the search may have completed on its own in the meantime,
+	// in which case slskd has nothing to cancel and may answer with an error.
+	_ = c.do(ctx, http.MethodPut, "/api/v0/searches/"+url.PathEscape(id), nil, nil)
+
+	ticker := time.NewTicker(c.pollInterval)
+	defer ticker.Stop()
+	for {
+		var st searchState
+		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(id), nil, &st); err == nil && st.IsComplete {
+			return c.searchResponses(ctx, id)
+		}
+		select {
+		case <-ctx.Done():
+			return c.searchResponses(context.Background(), id)
+		case <-ticker.C:
+		}
+	}
 }
 
 // searchResponses fetches and flattens a completed search's responses.
