@@ -18,9 +18,13 @@ func TestDashboardStatus(t *testing.T) {
 			want: "queued",
 		},
 		{
-			name: "selecting is active",
+			// SELECTING is the pipeline's waiting room: candidates are cached but
+			// the job is waiting for a MaxActive slot. Showing it as "active" made
+			// the dashboard's Aktiv count grow past max_active (which only caps
+			// DOWNLOADING+IMPORTING), reading like a broken cap.
+			name: "selecting is queued (waiting for a MaxActive slot)",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateSelecting}},
-			want: "active",
+			want: "queued",
 		},
 		{
 			name: "importing is active",
