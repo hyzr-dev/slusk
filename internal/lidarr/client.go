@@ -247,7 +247,7 @@ func (c *Client) ExecuteManualImport(ctx context.Context, items []ManualImportIt
 			"indexerFlags":            it.IndexerFlags,
 			"additionalFile":          false,
 			"replaceExistingFiles":    true,
-			"disableReleaseSwitching": it.DisableReleaseSwitching,
+			"disableReleaseSwitching": false,
 		})
 	}
 	body := map[string]any{"name": "ManualImport", "importMode": "move", "files": files}
