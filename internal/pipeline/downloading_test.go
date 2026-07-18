@@ -154,12 +154,44 @@ func TestDownloadingReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 	if len(net.cancelled) != 1 || net.cancelled[0] != "g2" {
 		t.Errorf("expected g2 cancelled, got %v", net.cancelled)
 	}
+	// The overdue transfer is now terminal (CANCELLED) and was matched live in
+	// slskd, so its record must be purged; the still-in-flight adopted transfer
+	// (a.flac) must NOT be removed.
+	if len(net.removed) != 1 || net.removed[0] != "g2" {
+		t.Errorf("expected g2 removed from slskd, got %v", net.removed)
+	}
 	states := transferStatesFor(t, st, candID)
 	if states["a.flac"].State != core.TransferInProgress {
 		t.Errorf("adopted transfer should be IN_PROGRESS, got %v", states["a.flac"].State)
 	}
 	if states["b.flac"].State != core.TransferCancelled {
 		t.Errorf("overdue transfer should be CANCELLED, got %v", states["b.flac"].State)
+	}
+}
+
+// A transfer that reaches a terminal state (Completed, Succeeded) via the main
+// adoption path must have its leftover slskd record purged once the store
+// write lands - see removeFromSlskd's doc comment.
+func TestDownloadingReconcileRemovesTerminalTransfer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []slskd.Transfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Succeeded", Size: 100, BytesTransferred: 100},
+	}}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+
+	d := NewDownloading(p)
+	stats, err := d.reconcile(ctx, now)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if stats.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", stats.Completed)
+	}
+	if len(net.removed) != 1 || net.removed[0] != "g1" {
+		t.Errorf("expected g1 removed from slskd, got %v", net.removed)
 	}
 }
 
@@ -434,6 +466,11 @@ func TestDownloadingReconcileStalledErrorsWhenExhausted(t *testing.T) {
 	}
 	if stats.Stalled != 1 {
 		t.Errorf("Stalled = %d, want 1", stats.Stalled)
+	}
+	// Now that the store has marked it ERRORED (terminal), its leftover slskd
+	// record must be purged so slskd's transfer list does not accumulate it.
+	if len(net.removed) != 1 || net.removed[0] != "g1" {
+		t.Errorf("expected stalled-and-exhausted transfer g1 removed from slskd, got %v", net.removed)
 	}
 }
 

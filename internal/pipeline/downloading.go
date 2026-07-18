@@ -270,6 +270,22 @@ func isRetryable(exception string) bool {
 	return true
 }
 
+// removeFromSlskd best-effort purges a terminal transfer's leftover record from
+// slskd. Call it ONLY after the store has marked the transfer terminal (so it is
+// no longer in ActiveTransfers): removing it while the store still lists it
+// active would make the next reconcile pass see it gone from slskd's live list
+// and treat it as "lost". A 404 is routine (slskd already forgot it, e.g. after
+// a restart); any other failure is logged and swallowed, with slskd's retention
+// config as the backstop.
+func (d *Downloading) removeFromSlskd(ctx context.Context, username, id string) {
+	if id == "" {
+		return
+	}
+	if err := d.p.Network.Remove(ctx, username, id); err != nil && !slskd.IsNotFound(err) {
+		d.log().Warn("remove slskd transfer failed", "user", username, "slskd_id", id, "err", err)
+	}
+}
+
 // reconcile performs one pass: adopt live transfers, advance terminal ones,
 // mark lost ones, and cancel anything past its deadline. Ported verbatim from
 // the legacy engine's Reconciler.Reconcile (engine/reconciler.go:83-212),
@@ -324,6 +340,10 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			}
 		}
 		_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, tr.BytesDone, tr.BytesTotal, now)
+		if matched {
+			// It existed in slskd (we just cancelled it there); purge the record.
+			d.removeFromSlskd(ctx, tr.Username, effectiveID)
+		}
 		stats.Cancelled++
 		handled[tr.ID] = true
 	}
@@ -385,11 +405,19 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				_ = d.p.Store.RetryTransfer(ctx, tr.ID, now)
 			} else {
 				_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+				// Terminal now (retries exhausted): purge the record we cancelled.
+				d.removeFromSlskd(ctx, tr.Username, lt.ID)
 			}
 			stats.Stalled++
 			continue
 		}
 		_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now)
+		if newState == core.TransferCompleted || newState == core.TransferCancelled || newState == core.TransferErrored {
+			// Reached a terminal state and the store write above is committed, so
+			// slskd's now-stale record can be purged. slskd keeps terminal
+			// transfers in its list ("Completed, <Outcome>") forever otherwise.
+			d.removeFromSlskd(ctx, lt.Username, lt.ID)
+		}
 		switch newState {
 		case core.TransferCompleted:
 			stats.Completed++
