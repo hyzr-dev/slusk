@@ -26,7 +26,7 @@ type Client struct {
 	enqueueBackoff time.Duration // initial delay between Enqueue retries (doubles each time)
 	searchRetries  int           // extra Search attempts when a search returns zero results
 	searchBackoff  time.Duration // delay between empty-result search retries
-	stopGrace      time.Duration // how long stopAndHarvest waits for slskd to finalize a stopped search
+	stopGrace      time.Duration // how long stopAndHarvest waits for slskd to finalize a stopped search; also the best-effort budget for deleteSearch's DELETE
 }
 
 // New constructs a slskd client for the given base URL and API key.
@@ -200,9 +200,22 @@ func (c *Client) ListDownloads(ctx context.Context) ([]Transfer, error) {
 	return out, nil
 }
 
-// Cancel cancels and removes a download by user and id.
+// Cancel cancels a still-active slskd download by user and id (DELETE without
+// ?remove=true). It stops an in-flight transfer but leaves the resulting
+// terminal record behind; use Remove to purge that record once a transfer has
+// reached a terminal state.
 func (c *Client) Cancel(ctx context.Context, username, id string) error {
 	path := fmt.Sprintf("/api/v0/transfers/downloads/%s/%s", url.PathEscape(username), url.PathEscape(id))
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// Remove purges a slskd download record entirely (DELETE with ?remove=true).
+// Unlike Cancel — which only cancels a still-active transfer and leaves the
+// terminal record behind — Remove is for a transfer that has already reached a
+// terminal state: it deletes the leftover record so slskd's transfer list does
+// not accumulate every download slskdarr has ever made.
+func (c *Client) Remove(ctx context.Context, username, id string) error {
+	path := fmt.Sprintf("/api/v0/transfers/downloads/%s/%s?remove=true", url.PathEscape(username), url.PathEscape(id))
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
@@ -259,10 +272,13 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 
 // searchOnce starts one async slskd search, polls until it completes or timeout,
 // then returns the peers' result files (locked files skipped), each enriched with
-// its peer's upload-availability signals. The search is left in slskd afterward —
-// deleting it here used to race slskd's own async finalize of the same search,
-// which surfaced as EF Core "affected 0 rows" errors and could drop responses;
-// slskd manages its own search history/retention, so we don't need to clean up.
+// its peer's upload-availability signals. The search is deleted from slskd once
+// its responses are harvested — but ONLY after the search has finalized
+// (isComplete): deleting it any earlier used to race slskd's own async finalize
+// of the same search, which surfaced as EF Core "affected 0 rows" errors and
+// could drop responses. On the timeout path below, completion (and the delete)
+// is handled by stopAndHarvest, which deletes only once slskd reports the
+// search complete and otherwise leaves it for slskd's own retention.
 func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -297,7 +313,15 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 		case <-ticker.C:
 		}
 	}
-	return c.searchResponses(ctx, started.ID)
+	res, err := c.searchResponses(ctx, started.ID)
+	if err == nil {
+		// The poll loop broke on isComplete, so slskd finalized this search and
+		// its responses are now in hand: safe to remove it. On a harvest error we
+		// leave the search for slskd's own retention to reap rather than deleting
+		// responses we never managed to read.
+		c.deleteSearch(started.ID)
+	}
+	return res, err
 }
 
 // stopAndHarvest asks slskd to stop a still-in-progress search, waits for it to
@@ -312,7 +336,9 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 // harvesting (or deleting — see searchOnce's doc comment) while slskd's own
 // async finalize is still running is the same race that used to surface as EF
 // Core "affected 0 rows" errors. If the search never finalizes within
-// stopGrace, a best-effort harvest happens anyway.
+// stopGrace, a best-effort harvest happens anyway — and in that fallback case
+// the search is deliberately left undeleted for the same reason: isComplete
+// was never observed, so we cannot be sure slskd has finished writing it.
 func (c *Client) stopAndHarvest(id string) ([]Result, error) {
 	// The caller's context already expired; this cleanup gets its own budget.
 	ctx, cancel := context.WithTimeout(context.Background(), c.stopGrace)
@@ -327,10 +353,19 @@ func (c *Client) stopAndHarvest(id string) ([]Result, error) {
 	for {
 		var st searchState
 		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(id), nil, &st); err == nil && st.IsComplete {
-			return c.searchResponses(ctx, id)
+			res, err := c.searchResponses(ctx, id)
+			if err == nil {
+				// Finalized (isComplete) before harvest, so deleting is safe once
+				// the responses are in hand; on a harvest error we leave it for
+				// slskd's retention rather than dropping unread responses.
+				c.deleteSearch(id)
+			}
+			return res, err
 		}
 		select {
 		case <-ctx.Done():
+			// Grace period expired without ever observing isComplete: harvest
+			// best-effort but do NOT delete — see the doc comment above.
 			return c.searchResponses(context.Background(), id)
 		case <-ticker.C:
 		}
@@ -357,4 +392,20 @@ func (c *Client) searchResponses(ctx context.Context, id string) ([]Result, erro
 		}
 	}
 	return out, nil
+}
+
+// deleteSearch best-effort removes a finished search from slskd (DELETE
+// /api/v0/searches/{id}). Discovery issues many searches per album; left in
+// place they pile up in slskd's search history and make its UI unresponsive.
+// It is called ONLY after a search's responses have been harvested following
+// completion (see searchOnce and stopAndHarvest) — deleting while slskd is
+// still finalizing the search is the same async-write race that used to surface
+// as EF Core "affected 0 rows" and could drop responses. Errors are swallowed:
+// a failed delete must never fail the search, and slskd's own retention config
+// is the backstop for records that slip through (e.g. a crash between harvest
+// and delete).
+func (c *Client) deleteSearch(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.stopGrace)
+	defer cancel()
+	_ = c.do(ctx, http.MethodDelete, "/api/v0/searches/"+url.PathEscape(id), nil, nil)
 }

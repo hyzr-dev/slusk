@@ -26,10 +26,11 @@ type MusicSource interface {
 type PeerSearcher interface {
 	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
-	// Cancel cancels and removes a still-active slskd download, so a failed
-	// attempt's live sibling transfers stop writing into a folder that is about
-	// to be cleaned up. Same call the reconciler uses for deadline-overdue
-	// transfers.
+	// Cancel stops a still-active slskd download, so a failed attempt's live
+	// sibling transfers stop writing into a folder that is about to be cleaned
+	// up. It cancels the in-flight transfer but leaves the terminal record in
+	// slskd (use Remove to purge that). Same call the reconciler uses for
+	// deadline-overdue transfers.
 	Cancel(ctx context.Context, username, id string) error
 	DeleteDownloadFolder(ctx context.Context, name string) error
 }
@@ -38,6 +39,13 @@ type PeerSearcher interface {
 type PeerNetwork interface {
 	ListDownloads(ctx context.Context) ([]slskd.Transfer, error)
 	Cancel(ctx context.Context, username, id string) error
+	// Remove purges a terminal transfer's leftover record from slskd (DELETE
+	// ?remove=true). reconcile calls it immediately after the store marks a
+	// transfer terminal, so slskd's transfer list does not accumulate every
+	// finished download. It MUST run only after that store write — otherwise the
+	// next reconcile pass would see the transfer gone from slskd's live list and
+	// mis-handle it as "lost".
+	Remove(ctx context.Context, username, id string) error
 }
 
 // Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).

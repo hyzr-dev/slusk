@@ -5,6 +5,11 @@ api_key = "CHANGEME"
 [slskd]
 url = "http://slskd:5030"
 api_key = "CHANGEME"
+# slskdarr cleans up after itself in slskd: it deletes each search once its
+# responses are harvested, and removes download records once they reach a
+# terminal state. As a backstop for anything left behind by a crash between
+# harvest and delete, enable slskd's own retention in its config (slskd.yml),
+# e.g. retention.search and retention.transfers.* (minutes).
 
 [pipeline]
 # The matcher/transfer knobs below (through max_candidate_file_ratio and

@@ -95,10 +95,13 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 // downloads is what ListDownloads returns (slskd's live list); cancelled
 // records every id Cancel was called with, in order; cancelErr, when set, fails
 // every Cancel call (so tests can assert the leave-non-terminal-and-retry path).
+// removed records every id Remove was called with, in order, so tests can
+// assert reconcile purges terminal transfers from slskd.
 type fakeNetwork struct {
 	downloads []slskd.Transfer
 	cancelled []string
 	cancelErr error
+	removed   []string
 }
 
 func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]slskd.Transfer, error) {
@@ -110,6 +113,11 @@ func (f *fakeNetwork) Cancel(ctx context.Context, username, id string) error {
 		return f.cancelErr
 	}
 	f.cancelled = append(f.cancelled, id)
+	return nil
+}
+
+func (f *fakeNetwork) Remove(ctx context.Context, username, id string) error {
+	f.removed = append(f.removed, id)
 	return nil
 }
 

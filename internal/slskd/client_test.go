@@ -155,6 +155,31 @@ func TestIsNotFoundRejectsOtherStatuses(t *testing.T) {
 	}
 }
 
+func TestRemoveSendsRemoveTrueQuery(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	if err := c.Remove(context.Background(), "user", "abc"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method = %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/api/v0/transfers/downloads/user/abc" {
+		t.Errorf("path = %q, want /api/v0/transfers/downloads/user/abc", gotPath)
+	}
+	if gotQuery != "remove=true" {
+		t.Errorf("query = %q, want remove=true", gotQuery)
+	}
+}
+
 func TestListDownloadsFlattens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[
@@ -195,6 +220,11 @@ func TestSearchPollsThenReturnsFlattenedResults(t *testing.T) {
 			     {"filename":"@@x\\A\\locked.flac","size":100,"bitRate":900,"isLocked":true}
 			   ]}
 			]`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
+			// searchOnce deletes the search once its responses are harvested
+			// after completion — see TestSearchDeletesSearchAfterHarvest for the
+			// ordering assertion; this test only needs the request handled.
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -218,6 +248,64 @@ func TestSearchPollsThenReturnsFlattenedResults(t *testing.T) {
 	}
 	if !got[0].HasFreeUploadSlot || got[0].UploadSpeed != 1000 {
 		t.Errorf("per-user reliability fields not propagated: %+v", got[0])
+	}
+}
+
+// TestSearchDeletesSearchAfterHarvest pins that a completed search is deleted
+// from slskd only AFTER its responses are harvested — never before, since
+// deleting first would race slskd's own async finalize (see searchOnce's doc
+// comment).
+func TestSearchDeletesSearchAfterHarvest(t *testing.T) {
+	var mu sync.Mutex
+	var seq []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seq = append(seq, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,
+			  "files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+	got, err := c.Search(context.Background(), "artist album", time.Second)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(got))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	responsesIdx, deleteIdx := -1, -1
+	for i, s := range seq {
+		switch s {
+		case "GET /api/v0/searches/s1/responses":
+			if responsesIdx == -1 {
+				responsesIdx = i
+			}
+		case "DELETE /api/v0/searches/s1":
+			if deleteIdx == -1 {
+				deleteIdx = i
+			}
+		}
+	}
+	if deleteIdx == -1 {
+		t.Fatalf("expected the search to be deleted after harvest, sequence: %v", seq)
+	}
+	if responsesIdx == -1 || deleteIdx < responsesIdx {
+		t.Errorf("expected DELETE to happen after harvesting responses, sequence: %v", seq)
 	}
 }
 
@@ -312,6 +400,55 @@ func TestSearchReturnsPartialOnTimeout(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected partial results on timeout, got %d", len(got))
+	}
+}
+
+// TestSearchTimeoutDoesNotDeleteSearchInGraceFallback pins the safety-critical
+// branch of stopAndHarvest: when a search never reports isComplete (even after
+// being asked to stop) and the stopGrace budget expires, the fallback harvests
+// best-effort but must NOT delete the search — deleting mid-finalize is the
+// same async-write race that used to drop responses (see stopAndHarvest's doc
+// comment). Only searchOnce/stopAndHarvest's isComplete branches are allowed
+// to delete.
+func TestSearchTimeoutDoesNotDeleteSearchInGraceFallback(t *testing.T) {
+	var mu sync.Mutex
+	var seq []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seq = append(seq, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v0/searches/s1":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			// Never completes, even after the stop PUT: forces the grace-expiry
+			// fallback in stopAndHarvest.
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = 20 * time.Millisecond
+	c.stopGrace = 20 * time.Millisecond
+	got, err := c.Search(context.Background(), "q", 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("grace-expiry fallback should return partial results, not error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected partial results from the fallback harvest, got %d", len(got))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range seq {
+		if s == "DELETE /api/v0/searches/s1" {
+			t.Fatalf("search must not be deleted when isComplete was never observed, sequence: %v", seq)
+		}
 	}
 }
 
