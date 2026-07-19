@@ -2,13 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 // MetricsSink receives reconciliation metrics. A nil sink is a no-op, so
@@ -229,47 +228,6 @@ func (d *Downloading) Tick(ctx context.Context, now time.Time) error {
 	return d.topUpDownloads(ctx, now)
 }
 
-// mapSlskdState translates a slskd transfer state string to our TransferState.
-// Ported verbatim from engine/reconciler.go.
-func mapSlskdState(s string) core.TransferState {
-	l := strings.ToLower(s)
-	switch {
-	case strings.Contains(l, "completed"):
-		// slskd reports every terminal outcome as "Completed, <Outcome>": Succeeded,
-		// Cancelled, TimedOut, Errored, Rejected, or Aborted. Only Succeeded is a win;
-		// Cancelled is our/its cancellation; everything else (timed out, rejected,
-		// aborted, errored) is a terminal failure.
-		switch {
-		case strings.Contains(l, "succeeded"):
-			return core.TransferCompleted
-		case strings.Contains(l, "cancelled"), strings.Contains(l, "canceled"):
-			return core.TransferCancelled
-		default:
-			return core.TransferErrored
-		}
-	case strings.Contains(l, "inprogress"):
-		return core.TransferInProgress
-	default:
-		return core.TransferQueued
-	}
-}
-
-// isRetryable reports whether a slskd failure reason is transient (worth
-// re-queueing) rather than permanent. Permanent reasons - the peer will never
-// serve this file - are matched by a denylist; everything else, including a
-// peer's "Too many megabytes" queue-limit rejection, is treated as retryable.
-// An empty reason is retryable: the bounded retry count keeps it from looping.
-// Ported verbatim from engine/reconciler.go.
-func isRetryable(exception string) bool {
-	e := strings.ToLower(exception)
-	for _, permanent := range []string{"file not shared", "not shared", "banned"} {
-		if strings.Contains(e, permanent) {
-			return false
-		}
-	}
-	return true
-}
-
 // removeFromSlskd best-effort purges a terminal transfer's leftover record from
 // slskd. Call it ONLY after the store has marked the transfer terminal (so it is
 // no longer in ActiveTransfers): removing it while the store still lists it
@@ -281,7 +239,7 @@ func (d *Downloading) removeFromSlskd(ctx context.Context, username, id string) 
 	if id == "" {
 		return
 	}
-	if err := d.p.Network.Remove(ctx, username, id); err != nil && !slskd.IsNotFound(err) {
+	if err := d.p.Network.Remove(ctx, username, id); err != nil && !errors.Is(err, core.ErrRemoteNotFound) {
 		d.log().Warn("remove slskd transfer failed", "user", username, "slskd_id", id, "err", err)
 	}
 }
@@ -298,14 +256,14 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 	if err != nil {
 		return stats, err
 	}
-	liveByID := map[string]slskd.Transfer{}
-	liveByFallback := map[string]slskd.Transfer{}
+	liveByID := map[string]core.RemoteTransfer{}
+	liveByFallback := map[string]core.RemoteTransfer{}
 	ourIDs := map[string]bool{}
 	for _, t := range live {
 		liveByID[t.ID] = t
 		liveByFallback[t.Username+"\x00"+t.Filename] = t
 	}
-	matchLive := func(tr core.Transfer) (slskd.Transfer, bool) {
+	matchLive := func(tr core.Transfer) (core.RemoteTransfer, bool) {
 		if tr.SlskdID != "" {
 			if lt, ok := liveByID[tr.SlskdID]; ok {
 				return lt, true
@@ -317,7 +275,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 	// STALLED is a durable local intent: it is written before remote
 	// cancellation so a later pass can distinguish our stall cancellation from
 	// an unrelated cancellation, even if the retry/error write failed.
-	finishStalled := func(tr core.Transfer, lt slskd.Transfer) error {
+	finishStalled := func(tr core.Transfer, lt core.RemoteTransfer) error {
 		if tr.Retries < d.p.MaxTransferRetries {
 			if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
 				return fmt.Errorf("retry stalled transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
@@ -356,7 +314,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// A failed local retry/error write may outlive the original deadline.
 			// Preserve its already-recorded stall intent instead of reclassifying our
 			// terminal remote cancellation as an overdue/user cancellation.
-			if tr.State == core.TransferStalled && mapSlskdState(lt.State) == core.TransferCancelled {
+			if tr.State == core.TransferStalled && lt.State == core.TransferCancelled {
 				if err := finishStalled(tr, lt); err != nil {
 					return stats, err
 				}
@@ -419,7 +377,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
 			}
 		}
-		newState := mapSlskdState(lt.State)
+		newState := lt.State
 		if tr.State == core.TransferStalled && newState == core.TransferCancelled {
 			if err := finishStalled(tr, lt); err != nil {
 				return stats, err
@@ -429,7 +387,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 		// A transient rejection (e.g. a peer's "Too many megabytes" queue limit)
 		// with retries left goes back to PENDING for a later resend rather than
 		// failing the whole attempt and discarding a peer that has the album.
-		if newState == core.TransferErrored && tr.Retries < d.p.MaxTransferRetries && isRetryable(lt.Exception) {
+		if newState == core.TransferErrored && tr.Retries < d.p.MaxTransferRetries && lt.Retryable {
 			if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
 				return stats, fmt.Errorf("retry rejected transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
 			}
@@ -445,7 +403,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 		if newState == core.TransferInProgress && tr.LastProgressAt != nil &&
 			now.Sub(*tr.LastProgressAt) > d.p.StallTimeout {
 			if tr.State != core.TransferStalled {
-				if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferStalled, lt.BytesTransferred, lt.Size, now); err != nil {
+				if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferStalled, lt.BytesDone, lt.Size, now); err != nil {
 					return stats, fmt.Errorf("mark transfer stalled: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
 				}
 			}
@@ -458,7 +416,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			}
 			continue
 		}
-		if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now); err != nil {
+		if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesDone, lt.Size, now); err != nil {
 			return stats, fmt.Errorf("update transfer progress to %s: transfer %d candidate %d remote %q: %w", newState, tr.ID, tr.CandidateID, lt.ID, err)
 		}
 		if newState == core.TransferCompleted || newState == core.TransferCancelled || newState == core.TransferErrored {
@@ -582,7 +540,7 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 				case err == nil:
 					// Cancelled in slskd; the reconciler's next pass will observe it
 					// gone from slskd's live list and mark it terminal on our side.
-				case slskd.IsNotFound(err):
+				case errors.Is(err, core.ErrRemoteNotFound):
 					// slskd already forgot this transfer (e.g. it restarted, or the
 					// transfer silently dropped out of its live list): there is
 					// nothing left to cancel, so treat it as already-terminal here

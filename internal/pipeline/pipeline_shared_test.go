@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
@@ -111,13 +110,13 @@ func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]core.Al
 // removed records every id Remove was called with, in order, so tests can
 // assert reconcile purges terminal transfers from slskd.
 type fakeNetwork struct {
-	downloads []slskd.Transfer
+	downloads []core.RemoteTransfer
 	cancelled []string
 	cancelErr error
 	removed   []string
 }
 
-func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]slskd.Transfer, error) {
+func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error) {
 	return f.downloads, nil
 }
 
@@ -128,7 +127,7 @@ func (f *fakeNetwork) Cancel(ctx context.Context, username, id string) error {
 	f.cancelled = append(f.cancelled, id)
 	for i := range f.downloads {
 		if f.downloads[i].ID == id && f.downloads[i].Username == username {
-			f.downloads[i].State = "Completed, Cancelled"
+			f.downloads[i].State = core.TransferCancelled
 		}
 	}
 	return nil
@@ -169,7 +168,7 @@ type fakeSearcher struct {
 	// Downloading's two-phase fail path and cleanup can be asserted.
 	cancelled      []string
 	deletedFolders []string
-	// cancelErr, when set, fails every Cancel call (an slskd.IsNotFound error
+	// cancelErr, when set, fails every Cancel call (a core.ErrRemoteNotFound error
 	// exercises the treat-as-already-terminal branch; any other error the
 	// leave-active-and-retry branch).
 	cancelErr error

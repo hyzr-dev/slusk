@@ -8,7 +8,6 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -117,11 +116,11 @@ func newLifecycleModules(t *testing.T, music *fakeMusic, search *fakeSearcher, n
 func completeTransfers(t *testing.T, lm *lifecycleModules, candID int64, username string, files []core.CandidateFile, now time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	var downloads []slskd.Transfer
+	var downloads []core.RemoteTransfer
 	for _, f := range files {
-		downloads = append(downloads, slskd.Transfer{
+		downloads = append(downloads, core.RemoteTransfer{
 			ID: "slskd-" + f.Filename, Username: username, Filename: f.Filename,
-			State: "Completed, Succeeded", Size: f.Size, BytesTransferred: f.Size,
+			State: core.TransferCompleted, Size: f.Size, BytesDone: f.Size,
 		})
 	}
 	lm.network.downloads = downloads
@@ -139,11 +138,11 @@ func completeTransfers(t *testing.T, lm *lifecycleModules, candID int64, usernam
 func failTransfersTerminally(t *testing.T, lm *lifecycleModules, username string, files []core.CandidateFile, now time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	var downloads []slskd.Transfer
+	var downloads []core.RemoteTransfer
 	for _, f := range files {
-		downloads = append(downloads, slskd.Transfer{
+		downloads = append(downloads, core.RemoteTransfer{
 			ID: "slskd-" + f.Filename, Username: username, Filename: f.Filename,
-			State: "Completed, Errored", Size: f.Size,
+			State: core.TransferErrored, Size: f.Size,
 		})
 	}
 	lm.network.downloads = downloads

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -81,15 +82,6 @@ func isRetryable(err error) bool {
 	return true
 }
 
-// IsNotFound reports whether err is a 404 response from slskd, e.g. from
-// DeleteDownloadFolder when the folder never existed (a failed attempt whose
-// transfers never wrote any bytes to disk) - a routine outcome for a
-// best-effort cleanup, not a real failure.
-func IsNotFound(err error) bool {
-	var ae *apiError
-	return errors.As(err, &ae) && ae.status == http.StatusNotFound
-}
-
 // result is one search result file offered by a peer, enriched with the
 // peer's upload-availability signals (copied from the per-user response
 // group) — slskd's wire shape. Search maps it to core.SearchResult so callers
@@ -118,8 +110,10 @@ func (r result) toCore() core.SearchResult {
 	}
 }
 
-// Transfer is one download slskd currently knows about.
-type Transfer struct {
+// transfer is one download slskd currently knows about — slskd's wire shape.
+// ListDownloads maps it to core.RemoteTransfer so callers never depend on
+// this type or slskd's own state-string vocabulary.
+type transfer struct {
 	ID               string `json:"id"`
 	Username         string `json:"username"`
 	Filename         string `json:"filename"`
@@ -130,6 +124,62 @@ type Transfer struct {
 	// peer's "Too many megabytes" rejection. Used to decide whether a failure is
 	// worth retrying (transient) or terminal (e.g. "File not shared").
 	Exception string `json:"exception"`
+}
+
+// toCore maps slskd's wire transfer shape to the provider-neutral core type,
+// translating slskd's state string and failure reason at the boundary.
+func (t transfer) toCore() core.RemoteTransfer {
+	return core.RemoteTransfer{
+		ID:        t.ID,
+		Username:  t.Username,
+		Filename:  t.Filename,
+		State:     mapTransferState(t.State),
+		Size:      t.Size,
+		BytesDone: t.BytesTransferred,
+		Failure:   t.Exception,
+		Retryable: isTransientFailure(t.Exception),
+	}
+}
+
+// mapTransferState translates a slskd transfer state string to our
+// core.TransferState. Ported verbatim from the legacy engine/reconciler.go.
+func mapTransferState(s string) core.TransferState {
+	l := strings.ToLower(s)
+	switch {
+	case strings.Contains(l, "completed"):
+		// slskd reports every terminal outcome as "Completed, <Outcome>": Succeeded,
+		// Cancelled, TimedOut, Errored, Rejected, or Aborted. Only Succeeded is a win;
+		// Cancelled is our/its cancellation; everything else (timed out, rejected,
+		// aborted, errored) is a terminal failure.
+		switch {
+		case strings.Contains(l, "succeeded"):
+			return core.TransferCompleted
+		case strings.Contains(l, "cancelled"), strings.Contains(l, "canceled"):
+			return core.TransferCancelled
+		default:
+			return core.TransferErrored
+		}
+	case strings.Contains(l, "inprogress"):
+		return core.TransferInProgress
+	default:
+		return core.TransferQueued
+	}
+}
+
+// isTransientFailure reports whether a slskd failure reason is transient
+// (worth re-queueing) rather than permanent. Permanent reasons - the peer
+// will never serve this file - are matched by a denylist; everything else,
+// including a peer's "Too many megabytes" queue-limit rejection, is treated
+// as retryable. An empty reason is retryable: the bounded retry count keeps
+// it from looping. Ported verbatim from engine/reconciler.go.
+func isTransientFailure(exception string) bool {
+	e := strings.ToLower(exception)
+	for _, permanent := range []string{"file not shared", "not shared", "banned"} {
+		if strings.Contains(e, permanent) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
@@ -155,7 +205,15 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return &apiError{method: method, path: path, status: resp.StatusCode}
+		ae := &apiError{method: method, path: path, status: resp.StatusCode}
+		if resp.StatusCode == http.StatusNotFound {
+			// e.g. DeleteDownloadFolder when the folder never existed (a failed
+			// attempt whose transfers never wrote any bytes to disk) - a routine
+			// outcome for a best-effort cleanup, not a real failure. Wrapped so
+			// callers can check with errors.Is(err, core.ErrRemoteNotFound).
+			return fmt.Errorf("%w: %w", ae, core.ErrRemoteNotFound)
+		}
+		return ae
 	}
 	if out != nil {
 		// Tolerate an empty body (e.g. 201 Created with no content): EOF is not
@@ -207,22 +265,23 @@ func (c *Client) Enqueue(ctx context.Context, username, filename string, size in
 type downloadsResponse []struct {
 	Username    string `json:"username"`
 	Directories []struct {
-		Files []Transfer `json:"files"`
+		Files []transfer `json:"files"`
 	} `json:"directories"`
 }
 
-// ListDownloads returns every download slskd currently tracks, flattened.
-func (c *Client) ListDownloads(ctx context.Context) ([]Transfer, error) {
+// ListDownloads returns every download slskd currently tracks, flattened and
+// mapped to the provider-neutral core type.
+func (c *Client) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error) {
 	var grouped downloadsResponse
 	if err := c.do(ctx, http.MethodGet, "/api/v0/transfers/downloads", nil, &grouped); err != nil {
 		return nil, err
 	}
-	var out []Transfer
+	var out []core.RemoteTransfer
 	for _, u := range grouped {
 		for _, d := range u.Directories {
 			for _, f := range d.Files {
 				f.Username = u.Username
-				out = append(out, f)
+				out = append(out, f.toCore())
 			}
 		}
 	}

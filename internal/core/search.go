@@ -1,6 +1,9 @@
 package core
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // SearchResult is one search result file offered by a peer, enriched with the
 // peer's upload-availability signals. Provider-neutral: the pipeline and
@@ -67,3 +70,24 @@ type ImportItem struct {
 	Rejections              []string
 	Importable              bool // true when Rejections is empty
 }
+
+// RemoteTransfer is one file download a remote peer-to-peer provider (e.g.
+// slskd) currently knows about, mapped to a provider-neutral shape.
+type RemoteTransfer struct {
+	ID        string
+	Username  string
+	Filename  string
+	State     TransferState // the adapter maps the provider's own state strings onto this
+	Size      int64
+	BytesDone int64
+	Failure   string // the provider's terminal failure text, if any
+	// Retryable reports whether Failure is transient (worth re-queueing)
+	// rather than permanent. Meaningful only when State is TransferErrored.
+	Retryable bool
+}
+
+// ErrRemoteNotFound is returned (wrapped) by a peer-to-peer provider adapter
+// when the provider reports a resource (e.g. a transfer or download folder)
+// as not found — typically a routine outcome (e.g. the provider already
+// forgot a terminal transfer), not a real failure.
+var ErrRemoteNotFound = errors.New("remote resource not found")

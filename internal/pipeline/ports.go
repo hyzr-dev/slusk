@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 // MusicSource is the slice of the Lidarr client the discoverer needs.
@@ -36,7 +35,7 @@ type PeerSearcher interface {
 
 // PeerNetwork is the slice of the slskd client the engine needs.
 type PeerNetwork interface {
-	ListDownloads(ctx context.Context) ([]slskd.Transfer, error)
+	ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error)
 	Cancel(ctx context.Context, username, id string) error
 	// Remove purges a terminal transfer's leftover record from slskd (DELETE
 	// ?remove=true). reconcile calls it immediately after the store marks a
