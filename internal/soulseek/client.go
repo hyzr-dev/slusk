@@ -560,7 +560,12 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 	case server.CodeEmbeddedMessage:
 		msg := &server.EmbeddedMessage{}
 		if err := msg.Deserialize(reader); err != nil {
-			return fmt.Errorf("deserialize embedded message: %w", err)
+			// Embedded distributed messages are optional compatibility input.
+			// Ignore malformed wrappers without dropping the server session.
+			if c.logger != nil {
+				c.logger.Debug("ignore malformed embedded distributed message", "err", err)
+			}
+			return nil
 		}
 		if err := c.tree.handleServerEmbedded(c.currentServerGeneration(), *msg); err != nil {
 			return fmt.Errorf("handle embedded distributed message: %w", err)

@@ -12,9 +12,9 @@ import (
 
 const CodeEmbeddedMessage Code = 93
 
-// EmbeddedMessage code 93 a branch root sends us an embedded distributed message. We unpack the
-// distributed message and distribute it to our child peers. The only type of distributed
-// message sent at present is DistribSearch (distributed code 3).
+// EmbeddedMessage code 93 is the deprecated wrapper older clients used when forwarding a
+// server-provided distributed search. Current frames use one-byte outer and inner codes followed
+// immediately by the raw inner payload. Older SoulseekQt frames used a four-byte outer code.
 type EmbeddedMessage struct {
 	Code    Code
 	Message []byte
@@ -33,8 +33,7 @@ func (e *EmbeddedMessage) Serialize(message *EmbeddedMessage) ([]byte, error) {
 		return nil, err
 	}
 
-	err = internal.WriteBytes(buf, message.Message)
-	if err != nil {
+	if _, err = buf.Write(message.Message); err != nil {
 		return nil, err
 	}
 
@@ -58,17 +57,21 @@ func (e *EmbeddedMessage) Deserialize(reader io.Reader) error {
 			fmt.Errorf("expected code %d, got %d", CodeEmbeddedMessage, code))
 	}
 
-	code, err = internal.ReadUint8(reader)
+	remainder, err := io.ReadAll(reader)
 	if err != nil {
 		return err
 	}
-
-	e.Code = Code(code)
-
-	e.Message, err = internal.ReadBytes(reader)
-	if err != nil {
-		return err
+	// MessageRead consumes the first byte of the outer code. Older SoulseekQt
+	// encoded that distributed outer code as uint32, leaving three zero bytes
+	// before the one-byte embedded code.
+	if len(remainder) >= 3 && remainder[0] == 0 && remainder[1] == 0 && remainder[2] == 0 {
+		remainder = remainder[3:]
+	}
+	if len(remainder) == 0 {
+		return io.ErrUnexpectedEOF
 	}
 
+	e.Code = Code(remainder[0])
+	e.Message = append(e.Message[:0], remainder[1:]...)
 	return nil
 }

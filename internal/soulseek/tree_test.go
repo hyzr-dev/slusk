@@ -2,6 +2,7 @@ package soulseek
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -102,6 +103,31 @@ func readDistributedWire(t *testing.T, conn net.Conn) []byte {
 	return wire
 }
 
+func decodeMetadataBatch(t *testing.T, batch []byte) (int32, string) {
+	t.Helper()
+	reader := bytes.NewReader(batch)
+	levelReader, _, levelCode, err := distributed.Read(reader)
+	if err != nil || levelCode != distributed.CodeBranchLevel {
+		t.Fatalf("read metadata level: code=%d err=%v", levelCode, err)
+	}
+	var level distributed.BranchLevel
+	if err := level.Deserialize(levelReader); err != nil {
+		t.Fatalf("decode metadata level: %v", err)
+	}
+	rootReader, _, rootCode, err := distributed.Read(reader)
+	if err != nil || rootCode != distributed.CodeBranchRoot {
+		t.Fatalf("read metadata root: code=%d err=%v", rootCode, err)
+	}
+	var root distributed.BranchRoot
+	if err := root.Deserialize(rootReader); err != nil {
+		t.Fatalf("decode metadata root: %v", err)
+	}
+	if reader.Len() != 0 {
+		t.Fatalf("metadata batch has %d trailing bytes", reader.Len())
+	}
+	return level.Level, root.Root
+}
+
 func waitTree(t *testing.T, condition func() bool, message string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -134,6 +160,66 @@ func TestDistributedTreeInitialAdvertisements(t *testing.T) {
 	c.tree.mu.Unlock()
 	if root != "me" || level != 0 {
 		t.Fatalf("initial metadata = %q/%d, want me/0", root, level)
+	}
+}
+
+func TestServerEmbeddedRawWireClientHandlingAndPeerPrecedence(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	body := searchBody(t, "wire-user", "wire-query", 77, 0xde, 0xad)
+	payload := make([]byte, 5+len(body))
+	binary.LittleEndian.PutUint32(payload[:4], uint32(server.CodeEmbeddedMessage))
+	payload[4] = byte(distributed.CodeSearch)
+	copy(payload[5:], body)
+	rawFrame := packFrame(payload)
+
+	parentSide, parentRemote := net.Pipe()
+	defer parentRemote.Close()
+	parent := c.newSession(parentSide, sessionKey{username: "peer-parent", connType: distributed.ConnectionType}, sessionInitiatorLocal, sessionRoleParent, generation, nil)
+	defer parent.Close(errors.New("test complete"))
+	callback := make(chan distributed.Search, 1)
+	c.tree.mu.Lock()
+	c.tree.parent = parent
+	c.tree.onSearch = func(search distributed.Search, _ []byte) { callback <- search }
+	c.tree.mu.Unlock()
+
+	if err := c.handleMessage(context.Background(), server.CodeEmbeddedMessage, bytes.NewReader(rawFrame)); err != nil {
+		t.Fatalf("handle raw embedded with peer parent: %v", err)
+	}
+	c.tree.mu.Lock()
+	keptParent, serverParent := c.tree.parent, c.tree.serverParent
+	c.tree.mu.Unlock()
+	if keptParent != parent || serverParent {
+		t.Fatalf("server embedded replaced peer parent: parent=%p serverParent=%v", keptParent, serverParent)
+	}
+	select {
+	case <-callback:
+		t.Fatal("ignored server search reached callback")
+	default:
+	}
+
+	c.tree.mu.Lock()
+	c.tree.parent = nil
+	c.tree.mu.Unlock()
+	if err := c.handleMessage(context.Background(), server.CodeEmbeddedMessage, bytes.NewReader(rawFrame)); err != nil {
+		t.Fatalf("handle raw embedded as server root: %v", err)
+	}
+	select {
+	case got := <-callback:
+		if got.Username != "wire-user" || got.Query != "wire-query" || got.Token != 77 {
+			t.Fatalf("decoded raw search = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("raw server wire search did not reach tree callback")
+	}
+
+	for _, malformed := range [][]byte{
+		packFrame([]byte{byte(server.CodeEmbeddedMessage), 0, 0, 0}),
+		packFrame([]byte{byte(server.CodeEmbeddedMessage), 0, 0, 0, byte(distributed.CodeSearch), 0}),
+		packFrame([]byte{byte(server.CodeEmbeddedMessage), 0, 0, 0, byte(distributed.CodeBranchRoot)}),
+	} {
+		if err := c.handleMessage(context.Background(), server.CodeEmbeddedMessage, bytes.NewReader(malformed)); err != nil {
+			t.Fatalf("malformed/unsupported embedded frame dropped server: %v", err)
+		}
 	}
 }
 
@@ -205,16 +291,16 @@ func TestServerEmbeddedRootCapacityAndRawForwarding(t *testing.T) {
 	}
 }
 
-func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
+func TestPossibleParentsSilentFirstDoesNotStarveValidLater(t *testing.T) {
 	c, conn, generation := startTreeClient(t)
-	c.cfg.parentCandidateTimeout = 80 * time.Millisecond
+	c.cfg.parentCandidateTimeout = 500 * time.Millisecond
 
 	firstLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer firstLn.Close()
-	firstSeen := make(chan struct{}, 1)
+	firstSeen := make(chan time.Time, 1)
 	go func() {
 		pc, err := firstLn.Accept()
 		if err != nil {
@@ -222,8 +308,8 @@ func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
 		}
 		defer pc.Close()
 		_, _, _, _ = peer.Read(peer.CodeInit(0), pc, false)
-		firstSeen <- struct{}{}
-		time.Sleep(300 * time.Millisecond)
+		firstSeen <- time.Now()
+		time.Sleep(time.Second)
 	}()
 
 	secondLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -231,7 +317,7 @@ func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer secondLn.Close()
-	secondSeen := make(chan struct{}, 1)
+	secondSeen := make(chan time.Time, 1)
 	go func() {
 		pc, err := secondLn.Accept()
 		if err != nil {
@@ -246,7 +332,7 @@ func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
 		if init.Deserialize(reader) != nil || init.ConnectionType != distributed.ConnectionType {
 			return
 		}
-		secondSeen <- struct{}{}
+		secondSeen <- time.Now()
 		_, _ = distributed.Write(pc, &distributed.BranchLevel{Level: 0})
 		_, _ = distributed.Write(pc, &distributed.BranchRoot{Root: "ignored-for-level-zero"})
 		_, _ = distributed.Write(pc, &distributed.Search{Username: "alice", Token: 42, Query: "needle"})
@@ -259,15 +345,19 @@ func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
 		{Username: "silent", IP: first.IP, Port: first.Port},
 		{Username: "parent", IP: second.IP, Port: second.Port},
 	})
+	var firstAt time.Time
 	select {
-	case <-firstSeen:
+	case firstAt = <-firstSeen:
 	case <-time.After(time.Second):
 		t.Fatal("first candidate was not tried")
 	}
 	select {
-	case <-secondSeen:
-	case <-time.After(time.Second):
-		t.Fatal("second candidate was not tried after timeout")
+	case secondAt := <-secondSeen:
+		if delay := secondAt.Sub(firstAt); delay >= c.cfg.parentCandidateTimeout/2 {
+			t.Fatalf("valid later candidate waited %v behind silent first candidate", delay)
+		}
+	case <-time.After(c.cfg.parentCandidateTimeout / 2):
+		t.Fatal("valid later candidate was starved by silent first candidate")
 	}
 	waitTree(t, func() bool {
 		c.tree.mu.Lock()
@@ -284,6 +374,65 @@ func TestPossibleParentsDirectFailoverAndSearchAdoption(t *testing.T) {
 		if code := serverFrameCode(frame); code == uint32(server.CodeGetPeerAddress) || code == uint32(server.CodeConnectToPeer) {
 			t.Fatalf("candidate used forbidden address/indirect request code %d", code)
 		}
+	}
+}
+
+func TestChildAdmissionMetadataBatchCannotBeOvertakenByUpdate(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		c, _, generation := startTreeClient(t)
+		childSide, childRemote := net.Pipe()
+		child := c.newSession(childSide, sessionKey{username: "ordered-child", connType: distributed.ConnectionType}, sessionInitiatorRemote, sessionRoleChild, generation, nil)
+		c.tree.mu.Lock()
+		c.tree.serverParent = true
+		c.tree.capacity = 1
+		c.tree.mu.Unlock()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			c.tree.established(child)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			c.tree.mu.Lock()
+			c.tree.branchLevel = 8
+			c.tree.branchRoot = "new-root"
+			failed := queueChildMetadata(c.tree.childSnapshotLocked(), 8, "new-root")
+			c.tree.mu.Unlock()
+			closeOverflowedChildren(failed)
+		}()
+		close(start)
+		wg.Wait()
+
+		var batches [][]byte
+		for {
+			select {
+			case batch := <-child.writes:
+				batches = append(batches, batch)
+			default:
+				goto drained
+			}
+		}
+	drained:
+		if len(batches) < 1 || len(batches) > 2 {
+			t.Fatalf("metadata queue commands = %d, want one or two atomic batches", len(batches))
+		}
+		lastLevel, lastRoot := decodeMetadataBatch(t, batches[len(batches)-1])
+		if lastLevel != 8 || lastRoot != "new-root" {
+			t.Fatalf("last metadata = %d/%q, want 8/new-root", lastLevel, lastRoot)
+		}
+		if len(batches) == 2 {
+			firstLevel, firstRoot := decodeMetadataBatch(t, batches[0])
+			if firstLevel != 0 || firstRoot != "me" {
+				t.Fatalf("ordered admission metadata = %d/%q then %d/%q", firstLevel, firstRoot, lastLevel, lastRoot)
+			}
+		}
+		child.Close(errors.New("test complete"))
+		_ = childRemote.Close()
 	}
 }
 
@@ -337,7 +486,17 @@ func TestParentUpdatesSearchForwardingLossAndChildRejection(t *testing.T) {
 		t.Fatalf("plain forwarding = %x, want %x", got, plain)
 	}
 	body := searchBody(t, "legacy-user", "legacy", 3, 0xca, 0xfe)
-	_, _ = distributed.Write(parentRemote, &distributed.EmbeddedMessage{Code: distributed.CodeSearch, Message: body})
+	// Older SoulseekQt used a uint32 outer code for this deprecated peer
+	// wrapper. Write that historical frame by hand so compatibility is tested
+	// against real wire bytes rather than this package's serializer.
+	legacy := make([]byte, 9+len(body))
+	binary.LittleEndian.PutUint32(legacy[:4], uint32(5+len(body)))
+	binary.LittleEndian.PutUint32(legacy[4:8], uint32(distributed.CodeEmbeddedMessage))
+	legacy[8] = byte(distributed.CodeSearch)
+	copy(legacy[9:], body)
+	if _, err := parentRemote.Write(legacy); err != nil {
+		t.Fatal(err)
+	}
 	if got, want := readDistributedWire(t, childRemote), rawDistributedSearchFrame(body); !bytes.Equal(got, want) {
 		t.Fatalf("deprecated forwarding = %x, want raw %x", got, want)
 	}
@@ -365,6 +524,67 @@ func TestParentUpdatesSearchForwardingLossAndChildRejection(t *testing.T) {
 	}
 	if len(after) < before+4 || !foundNoParent {
 		t.Fatal("parent loss did not re-advertise no-parent state")
+	}
+}
+
+func TestCandidateDeadlineVersusFinalSearchIsAtomic(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	for i := 0; i < 50; i++ {
+		local, remote := net.Pipe()
+		session := c.newSession(local, sessionKey{username: "deadline-" + string(rune('a'+i)), connType: distributed.ConnectionType}, sessionInitiatorLocal, sessionRoleParent, generation, nil)
+		c.sessions.Register(session)
+
+		level := int32(0)
+		c.tree.mu.Lock()
+		epoch := c.tree.epoch
+		c.tree.candidateUsers[session.key.username] = struct{}{}
+		c.tree.candidates[session] = &parentCandidateState{
+			session: session,
+			epoch:   epoch,
+			level:   &level,
+			root:    session.key.username,
+			signal:  make(chan struct{}, 1),
+		}
+		c.tree.mu.Unlock()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			c.tree.retireCandidate(session, generation, epoch, errors.New("candidate deadline"))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = c.tree.handleSearch(session, distributed.Search{Username: "last", Token: 1, Query: "at-deadline"}, rawDistributedSearchFrame(searchBody(t, "last", "at-deadline", 1)))
+		}()
+		close(start)
+		wg.Wait()
+
+		c.tree.mu.Lock()
+		adopted := c.tree.parent == session
+		_, candidateStillPresent := c.tree.candidates[session]
+		c.tree.mu.Unlock()
+		if adopted {
+			select {
+			case <-session.done:
+				t.Fatal("deadline closed candidate after it won promotion")
+			default:
+			}
+			session.Close(errors.New("next iteration"))
+		} else {
+			select {
+			case <-session.done:
+			default:
+				t.Fatal("deadline loser remained open without promotion")
+			}
+		}
+		if candidateStillPresent {
+			t.Fatal("deadline/promotion race left stale candidate state")
+		}
+		_ = remote.Close()
 	}
 }
 
@@ -459,10 +679,10 @@ func TestDistributedValidationSlowChildAndReset(t *testing.T) {
 			t.Fatalf("D session %q survived reset", session.key.username)
 		}
 	}
-	if err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{Code: distributed.CodeSearch, Message: []byte{0}}); err == nil {
-		t.Fatal("malformed embedded search was accepted")
+	if err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{Code: distributed.CodeSearch, Message: []byte{0}}); err != nil {
+		t.Fatalf("malformed embedded search should be ignored: %v", err)
 	}
-	if err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{Code: distributed.CodeBranchRoot}); !errors.Is(err, errInvalidDistributedFrame) {
-		t.Fatalf("unsupported embedded code error = %v", err)
+	if err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{Code: distributed.CodeBranchRoot}); err != nil {
+		t.Fatalf("unsupported embedded code should be ignored: %v", err)
 	}
 }

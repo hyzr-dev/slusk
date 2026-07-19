@@ -16,7 +16,10 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
-const defaultParentCandidateTimeout = 10 * time.Second
+const (
+	defaultParentCandidateTimeout = 10 * time.Second
+	maxConcurrentParentCandidates = 4
+)
 
 var (
 	errRejectedDistributedPeer = errors.New("rejected distributed peer")
@@ -52,6 +55,7 @@ type distributedSearchCallback func(distributed.Search, []byte)
 
 type parentCandidateState struct {
 	session    *peerSession
+	epoch      uint64
 	level      *int32
 	root       string
 	search     *distributed.Search
@@ -248,74 +252,33 @@ func (t *distributedTree) offerParents(ctx context.Context, generation uint64, p
 }
 
 func (t *distributedTree) runCandidates(ctx context.Context, generation, epoch uint64, parents []server.Parent) {
+	semaphore := make(chan struct{}, maxConcurrentParentCandidates)
+	var wg sync.WaitGroup
+	seen := make(map[string]struct{}, len(parents))
+
 	for _, parent := range parents {
 		if parent.Username == "" || parent.Username == t.c.cfg.Username || parent.IP == nil || parent.IP.IsUnspecified() || parent.Port <= 0 || parent.Port > 65535 {
 			continue
 		}
+		if _, duplicate := seen[parent.Username]; duplicate {
+			continue
+		}
+		seen[parent.Username] = struct{}{}
 
-		t.mu.Lock()
-		if !t.candidateWorkerCurrentLocked(generation, epoch) {
-			t.mu.Unlock()
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
 			return
 		}
-		t.currentCandidate = parent.Username
-		t.mu.Unlock()
-
-		attemptCtx, cancel := context.WithTimeout(ctx, t.c.cfg.parentCandidateTimeout)
-		target := sessionTarget{
-			username: parent.Username,
-			connType: distributed.ConnectionType,
-			address:  net.JoinHostPort(parent.IP.String(), strconv.Itoa(parent.Port)),
-		}
-		session, err := t.c.getOrEstablishSession(attemptCtx, target, sessionInitiatorLocal, sessionRoleParent, generation)
-		if err != nil {
-			cancel()
-			continue
-		}
-
-		t.mu.Lock()
-		if !t.candidateWorkerCurrentLocked(generation, epoch) || t.currentCandidate != parent.Username || session.role != sessionRoleParent || session.generation != generation {
-			t.mu.Unlock()
-			cancel()
-			t.closeUnlessParent(session, errors.New("stale parent candidate"))
-			if ctx.Err() != nil {
-				return
-			}
-			continue
-		}
-		candidate := t.candidates[session]
-		if candidate == nil {
-			candidate = &parentCandidateState{session: session, signal: make(chan struct{}, 1)}
-			t.candidates[session] = candidate
-		}
-		t.mu.Unlock()
-
-		for {
-			select {
-			case <-ctx.Done():
-				cancel()
-				t.closeUnlessParent(session, ctx.Err())
-				return
-			case <-attemptCtx.Done():
-				cancel()
-				t.closeUnlessParent(session, errors.New("parent candidate timed out"))
-				goto nextCandidate
-			case <-session.done:
-				cancel()
-				goto nextCandidate
-			case <-candidate.signal:
-				t.mu.Lock()
-				adopted := t.parent == session
-				current := t.candidateWorkerCurrentLocked(generation, epoch)
-				t.mu.Unlock()
-				if adopted || !current {
-					cancel()
-					return
-				}
-			}
-		}
-	nextCandidate:
+		wg.Add(1)
+		go func(parent server.Parent) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			t.runCandidate(ctx, generation, epoch, parent)
+		}(parent)
 	}
+	wg.Wait()
 
 	t.mu.Lock()
 	if t.candidateWorkerCurrentLocked(generation, epoch) {
@@ -325,17 +288,75 @@ func (t *distributedTree) runCandidates(ctx context.Context, generation, epoch u
 	t.mu.Unlock()
 }
 
+func (t *distributedTree) runCandidate(ctx context.Context, generation, epoch uint64, parent server.Parent) {
+	attemptCtx, cancel := context.WithTimeout(ctx, t.c.cfg.parentCandidateTimeout)
+	defer cancel()
+	target := sessionTarget{
+		username: parent.Username,
+		connType: distributed.ConnectionType,
+		address:  net.JoinHostPort(parent.IP.String(), strconv.Itoa(parent.Port)),
+	}
+	session, err := t.c.getOrEstablishSession(attemptCtx, target, sessionInitiatorLocal, sessionRoleParent, generation)
+	if err != nil {
+		return
+	}
+
+	t.mu.Lock()
+	if !t.candidateWorkerCurrentLocked(generation, epoch) || session.role != sessionRoleParent || session.generation != generation {
+		t.mu.Unlock()
+		t.retireCandidate(session, generation, epoch, errors.New("stale parent candidate"))
+		return
+	}
+	candidate := t.candidates[session]
+	if candidate == nil {
+		candidate = &parentCandidateState{session: session, epoch: epoch, signal: make(chan struct{}, 1)}
+		t.candidates[session] = candidate
+	}
+	t.mu.Unlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.retireCandidate(session, generation, epoch, ctx.Err())
+			return
+		case <-attemptCtx.Done():
+			t.retireCandidate(session, generation, epoch, errors.New("parent candidate timed out"))
+			return
+		case <-session.done:
+			return
+		case <-candidate.signal:
+			t.mu.Lock()
+			adopted := t.parent == session
+			current := t.candidateWorkerCurrentLocked(generation, epoch)
+			t.mu.Unlock()
+			if adopted || !current {
+				return
+			}
+		}
+	}
+}
+
 func (t *distributedTree) candidateWorkerCurrentLocked(generation, epoch uint64) bool {
 	return t.active && t.generation == generation && t.epoch == epoch && t.parent == nil && !t.serverParent
 }
 
-func (t *distributedTree) closeUnlessParent(session *peerSession, reason error) {
+// retireCandidate and tryPromote arbitrate under the same tree lock. Once a
+// candidate is removed for timeout/staleness it cannot be promoted, and once
+// promoted it cannot be closed by its attempt deadline.
+func (t *distributedTree) retireCandidate(session *peerSession, generation, epoch uint64, reason error) {
 	t.mu.Lock()
-	isParent := t.parent == session
-	t.mu.Unlock()
-	if !isParent {
-		session.Close(reason)
+	if t.parent == session {
+		t.mu.Unlock()
+		return
 	}
+	candidate := t.candidates[session]
+	if candidate == nil || candidate.epoch != epoch || session.generation != generation {
+		t.mu.Unlock()
+		return
+	}
+	delete(t.candidates, session)
+	t.mu.Unlock()
+	session.Close(reason)
 }
 
 func (t *distributedTree) established(session *peerSession) {
@@ -356,10 +377,9 @@ func (t *distributedTree) established(session *peerSession) {
 	case sessionRoleParent:
 		t.mu.Lock()
 		_, expected := t.candidateUsers[session.key.username]
-		valid := t.active && session.generation == t.generation && t.parent == nil && !t.serverParent &&
-			expected && t.currentCandidate == session.key.username
+		valid := t.active && session.generation == t.generation && t.parent == nil && !t.serverParent && expected
 		if valid && t.candidates[session] == nil {
-			t.candidates[session] = &parentCandidateState{session: session, signal: make(chan struct{}, 1)}
+			t.candidates[session] = &parentCandidateState{session: session, epoch: t.epoch, signal: make(chan struct{}, 1)}
 		}
 		t.mu.Unlock()
 		if !valid {
@@ -373,17 +393,24 @@ func (t *distributedTree) established(session *peerSession) {
 		valid := t.active && session.generation == t.generation && session.key.username != "" &&
 			session.key.username != t.c.cfg.Username && !candidate && !duplicate &&
 			(t.parent != nil || t.serverParent) && t.capacity > len(t.children)
+		queued := false
 		if valid {
 			t.children[session] = struct{}{}
+			// Queue the initial pair while holding the state lock. Metadata
+			// transitions use the same lock, so an update cannot overtake this
+			// admission snapshot. TrySend only enqueues; it performs no I/O.
+			queued = sendChildMetadata(session, t.branchLevel, t.branchRoot)
+			if !queued {
+				delete(t.children, session)
+			}
 		}
-		level, root := t.branchLevel, t.branchRoot
 		acceptUpdate := t.acceptUpdateLocked(false)
 		t.mu.Unlock()
 		if !valid {
 			session.Close(errRejectedDistributedPeer)
 			return
 		}
-		if !sendChildMetadata(session, level, root) {
+		if !queued {
 			session.Close(errors.New("distributed child write queue overflow"))
 			return
 		}
@@ -482,12 +509,17 @@ func (t *distributedTree) handleBranchLevel(session *peerSession, parentLevel in
 		t.branchRoot = root
 		generation, level := t.generation, t.branchLevel
 		children := t.childSnapshotLocked()
+		var failed []*peerSession
+		if root != previousRoot {
+			failed = queueChildMetadata(children, level, root)
+		} else {
+			failed = queueChildLevel(children, level)
+		}
 		t.mu.Unlock()
+		closeOverflowedChildren(failed)
 		t.reportLevel(generation, level)
-		t.sendLevelToChildren(children, level)
 		if root != previousRoot {
 			t.reportRoot(generation, root)
-			t.sendRootToChildren(children, root)
 		}
 		return nil
 	}
@@ -515,10 +547,10 @@ func (t *distributedTree) handleBranchRoot(session *peerSession, root string) er
 		}
 		t.branchRoot = root
 		generation := t.generation
-		children := t.childSnapshotLocked()
+		failed := queueChildRoot(t.childSnapshotLocked(), root)
 		t.mu.Unlock()
+		closeOverflowedChildren(failed)
 		t.reportRoot(generation, root)
-		t.sendRootToChildren(children, root)
 		return nil
 	}
 	candidate := t.candidates[session]
@@ -565,7 +597,7 @@ func (t *distributedTree) handleSearch(session *peerSession, search distributed.
 func (t *distributedTree) tryPromote(session *peerSession) bool {
 	t.mu.Lock()
 	candidate := t.candidates[session]
-	if candidate == nil || candidate.level == nil || candidate.search == nil || *candidate.level < 0 || *candidate.level == math.MaxInt32 {
+	if candidate == nil || candidate.epoch != t.epoch || candidate.level == nil || candidate.search == nil || *candidate.level < 0 || *candidate.level == math.MaxInt32 {
 		t.mu.Unlock()
 		return false
 	}
@@ -598,6 +630,7 @@ func (t *distributedTree) tryPromote(session *peerSession) bool {
 	t.candidates = make(map[*peerSession]*parentCandidateState)
 	t.candidateUsers = make(map[string]struct{})
 	children := t.childSnapshotLocked()
+	failed := queueChildMetadata(children, t.branchLevel, root)
 	generation, level := t.generation, t.branchLevel
 	search := *candidate.search
 	wire := append([]byte(nil), candidate.searchWire...)
@@ -616,7 +649,7 @@ func (t *distributedTree) tryPromote(session *peerSession) bool {
 	}
 	t.reportMetadata(generation, level, root)
 	t.sendAcceptUpdate(generation, acceptUpdate)
-	t.sendMetadataToChildren(children, level, root)
+	closeOverflowedChildren(failed)
 	t.fanout(children, wire)
 	callback(search, wire)
 	return true
@@ -668,13 +701,28 @@ func (t *distributedTree) closed(session *peerSession, _ error) {
 }
 
 func (t *distributedTree) handleServerEmbedded(generation uint64, embedded server.EmbeddedMessage) error {
+	t.mu.Lock()
+	if !t.active || t.generation != generation {
+		t.mu.Unlock()
+		return errNoServerConnection
+	}
+	// A peer parent takes precedence. The server should not send embedded
+	// searches in this state, but delayed/stray frames must not replace it.
+	if t.parent != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	t.mu.Unlock()
+
+	// Unknown and malformed embedded types are optional protocol input. Ignore
+	// them without making the central server connection fail.
 	if embedded.Code != distributed.CodeSearch {
-		return fmt.Errorf("%w: unsupported server embedded code %d", errInvalidDistributedFrame, embedded.Code)
+		return nil
 	}
 	wire := rawDistributedSearchFrame(embedded.Message)
 	search, err := validateSearchFrame(wire)
 	if err != nil {
-		return err
+		return nil
 	}
 
 	t.mu.Lock()
@@ -682,20 +730,18 @@ func (t *distributedTree) handleServerEmbedded(generation uint64, embedded serve
 		t.mu.Unlock()
 		return errNoServerConnection
 	}
-	alreadyRoot := t.serverParent && t.parent == nil
+	if t.parent != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	alreadyRoot := t.serverParent
 	if t.candidateCancel != nil {
 		t.candidateCancel()
 	}
-	var closing []*peerSession
-	if t.parent != nil {
-		closing = append(closing, t.parent)
-	}
+	closing := make([]*peerSession, 0, len(t.candidates))
 	for candidate := range t.candidates {
-		if candidate != t.parent {
-			closing = append(closing, candidate)
-		}
+		closing = append(closing, candidate)
 	}
-	t.parent = nil
 	t.parentLevel = 0
 	t.serverParent = true
 	t.branchLevel = 0
@@ -706,6 +752,10 @@ func (t *distributedTree) handleServerEmbedded(generation uint64, embedded serve
 	t.candidateUsers = make(map[string]struct{})
 	t.candidates = make(map[*peerSession]*parentCandidateState)
 	children := t.childSnapshotLocked()
+	var failed []*peerSession
+	if !alreadyRoot {
+		failed = queueChildMetadata(children, 0, t.c.cfg.Username)
+	}
 	callback := t.onSearch
 	acceptUpdate := t.acceptUpdateLocked(false)
 	t.mu.Unlock()
@@ -713,9 +763,9 @@ func (t *distributedTree) handleServerEmbedded(generation uint64, embedded serve
 	for _, session := range closing {
 		session.Close(errors.New("server became distributed parent"))
 	}
+	closeOverflowedChildren(failed)
 	if !alreadyRoot {
 		t.reportMetadata(generation, 0, t.c.cfg.Username)
-		t.sendMetadataToChildren(children, 0, t.c.cfg.Username)
 	}
 	t.sendAcceptUpdate(generation, acceptUpdate)
 	t.fanout(children, wire)
@@ -809,38 +859,66 @@ func (t *distributedTree) reportLevel(generation uint64, level int32) {
 	}
 }
 
-func (t *distributedTree) sendMetadataToChildren(children []*peerSession, level int32, root string) {
-	for _, child := range children {
-		if !sendChildMetadata(child, level, root) {
-			child.Close(errors.New("distributed child write queue overflow"))
-		}
-	}
-}
-
 func sendChildMetadata(child *peerSession, level int32, root string) bool {
 	levelMessage := &distributed.BranchLevel{Level: level}
 	levelFrame, err := levelMessage.Serialize(levelMessage)
-	if err != nil || !child.TrySend(levelFrame) {
+	if err != nil {
 		return false
 	}
 	rootMessage := &distributed.BranchRoot{Root: root}
 	rootFrame, err := rootMessage.Serialize(rootMessage)
-	return err == nil && child.TrySend(rootFrame)
+	if err != nil {
+		return false
+	}
+	// A single queue command keeps the level/root pair indivisible relative to
+	// every other child write. The writer emits the concatenated framed messages
+	// in order with one serialized write operation.
+	batch := make([]byte, 0, len(levelFrame)+len(rootFrame))
+	batch = append(batch, levelFrame...)
+	batch = append(batch, rootFrame...)
+	return child.TrySend(batch)
 }
 
-func (t *distributedTree) sendLevelToChildren(children []*peerSession, level int32) {
+func queueChildMetadata(children []*peerSession, level int32, root string) (failed []*peerSession) {
+	for _, child := range children {
+		if !sendChildMetadata(child, level, root) {
+			failed = append(failed, child)
+		}
+	}
+	return failed
+}
+
+func queueChildLevel(children []*peerSession, level int32) (failed []*peerSession) {
 	message := &distributed.BranchLevel{Level: level}
 	frame, err := message.Serialize(message)
-	if err == nil {
-		t.fanout(children, frame)
+	if err != nil {
+		return append(failed, children...)
 	}
+	for _, child := range children {
+		if !child.TrySend(frame) {
+			failed = append(failed, child)
+		}
+	}
+	return failed
 }
 
-func (t *distributedTree) sendRootToChildren(children []*peerSession, root string) {
+func queueChildRoot(children []*peerSession, root string) (failed []*peerSession) {
 	message := &distributed.BranchRoot{Root: root}
 	frame, err := message.Serialize(message)
-	if err == nil {
-		t.fanout(children, frame)
+	if err != nil {
+		return append(failed, children...)
+	}
+	for _, child := range children {
+		if !child.TrySend(frame) {
+			failed = append(failed, child)
+		}
+	}
+	return failed
+}
+
+func closeOverflowedChildren(children []*peerSession) {
+	for _, child := range children {
+		child.Close(errors.New("distributed child write queue overflow"))
 	}
 }
 

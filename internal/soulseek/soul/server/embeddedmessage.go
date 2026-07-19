@@ -43,12 +43,7 @@ func (e *EmbeddedMessage) Deserialize(reader io.Reader) error {
 	}
 
 	e.Code = distributed.Code(embeddedCode)
-
-	e.Message, err = internal.ReadBytes(reader)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	e.Message, err = io.ReadAll(reader)
+	return err
 
 }

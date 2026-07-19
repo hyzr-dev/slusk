@@ -116,25 +116,34 @@ func TestEmbeddedMessageFramingPreservesRawBytes(t *testing.T) {
 		t.Fatalf("Serialize: %v", err)
 	}
 
-	if got := binary.LittleEndian.Uint32(frame[:4]); got != uint32(1+1+4+len(rawSearchBody)) {
-		t.Fatalf("declared size = %d, want %d", got, 1+1+4+len(rawSearchBody))
+	if got := binary.LittleEndian.Uint32(frame[:4]); got != uint32(1+1+len(rawSearchBody)) {
+		t.Fatalf("declared size = %d, want %d", got, 1+1+len(rawSearchBody))
 	}
 	if frame[4] != byte(CodeEmbeddedMessage) || frame[5] != byte(CodeSearch) {
 		t.Fatalf("outer/embedded codes = %d/%d, want %d/%d", frame[4], frame[5], CodeEmbeddedMessage, CodeSearch)
 	}
-	if got := binary.LittleEndian.Uint32(frame[6:10]); got != uint32(len(rawSearchBody)) {
-		t.Fatalf("embedded length = %d, want %d", got, len(rawSearchBody))
-	}
-	if !bytes.Equal(frame[10:], rawSearchBody) {
-		t.Fatalf("embedded bytes = %x, want %x", frame[10:], rawSearchBody)
+	if !bytes.Equal(frame[6:], rawSearchBody) {
+		t.Fatalf("embedded bytes = %x, want raw remainder %x", frame[6:], rawSearchBody)
 	}
 
 	var got EmbeddedMessage
 	if err := got.Deserialize(bytes.NewReader(frame)); err != nil {
-		t.Fatalf("Deserialize: %v", err)
+		t.Fatalf("Deserialize raw current frame: %v", err)
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("round trip = %#v, want %#v", got, want)
+		t.Fatalf("raw current decode = %#v, want %#v", got, want)
+	}
+
+	// Older SoulseekQt encoded the outer distributed code as uint32. The
+	// distributed frame reader consumes its low byte and leaves three zero
+	// bytes for this decoder to skip.
+	legacyFrame := append([]byte{byte(5 + len(rawSearchBody)), 0, 0, 0, byte(CodeEmbeddedMessage), 0, 0, 0, byte(CodeSearch)}, rawSearchBody...)
+	got = EmbeddedMessage{}
+	if err := got.Deserialize(bytes.NewReader(legacyFrame)); err != nil {
+		t.Fatalf("Deserialize raw legacy frame: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw legacy decode = %#v, want %#v", got, want)
 	}
 }
 
