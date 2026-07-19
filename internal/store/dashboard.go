@@ -135,7 +135,7 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 	var state string
 	err := s.db.QueryRowContext(ctx,
 		jobSelect+` WHERE id = $1`, jobID).
-		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.NotBefore, &job.FailedAt)
+		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.JobDetail{}, false, nil
 	}

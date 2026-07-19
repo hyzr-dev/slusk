@@ -185,6 +185,21 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		names = append(names, t.Filename)
 	}
 	folder := AlbumFolder(m.p.CompleteDir, names)
+	if folder != m.p.CompleteDir {
+		// Best-effort dedup before Lidarr scans the folder: a messy share can
+		// contain the same track twice (mixed formats, stray copies), which
+		// makes Lidarr's matching ambiguous. Skipped when AlbumFolder fell
+		// back to the download root itself — deduping there could remove
+		// other albums' files. A dedup failure (e.g. folder already imported
+		// and gone) must not block verify; the scan below copes either way.
+		if removed, err := dedupAlbumFolder(m.log(), folder); err != nil {
+			m.log().Warn("dedup album folder failed", "album_job", job.ID, "folder", folder, "err", err)
+		} else if len(removed) > 0 {
+			detail := fmt.Sprintf("removed %d duplicate track file(s) before import", len(removed))
+			m.log().Info(detail, "album_job", job.ID, "folder", folder, "removed", removed)
+			m.recordEvent(ctx, job.ID, core.EventDedup, detail, now)
+		}
+	}
 	items, err := m.p.Music.ManualImportCandidates(ctx, folder)
 	if err != nil {
 		m.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)

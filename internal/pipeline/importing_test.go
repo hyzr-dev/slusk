@@ -264,6 +264,61 @@ func TestImportingCoverageUsesMinTrackCountBand(t *testing.T) {
 	}
 }
 
+// TestImportingVerifyDedupsFolderBeforeImportScan: verify removes duplicate
+// track files from the album folder before asking Lidarr what to import.
+func TestImportingVerifyDedupsFolderBeforeImportScan(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	dir := t.TempDir()
+	albumDir := filepath.Join(dir, "Album")
+	if err := os.MkdirAll(albumDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"one.flac", "one.mp3"} {
+		if err := os.WriteFile(filepath.Join(albumDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := readFileMeta
+	t.Cleanup(func() { readFileMeta = orig })
+	readFileMeta = func(path string, size int64) dedupFile {
+		switch filepath.Base(path) {
+		case "one.flac":
+			return df(path, 30_000_000, 1, 1, "One", true)
+		default:
+			return df(path, 8_000_000, 1, 1, "One", false)
+		}
+	}
+
+	music := &fakeMusic{
+		manualImportItems: []lidarr.ManualImportItem{
+			{ID: 1, Path: filepath.Join(albumDir, "one.flac"), Importable: true, TrackIDs: []int64{1}},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = dir
+	_, _ = seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `Album\one.flac`, Size: 10}, {Filename: `Album\one.mp3`, Size: 10},
+	}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(albumDir, "one.mp3")); !os.IsNotExist(err) {
+		t.Error("one.mp3 should have been removed by dedup before the import scan")
+	}
+	if _, err := os.Stat(filepath.Join(albumDir, "one.flac")); err != nil {
+		t.Errorf("one.flac should still be present: %v", err)
+	}
+	if len(music.manualImportCalls) != 1 {
+		t.Fatalf("expected ManualImportCandidates called once, got %d", len(music.manualImportCalls))
+	}
+}
+
 // TestImportingHappyPathSubmitsThenConfirmsToDone drives two ticks: the first
 // verifies a clean, complete candidate and submits it (ExecuteManualImport
 // called, ImportSubmittedAt set, job stays IMPORTING); the second, with
