@@ -314,6 +314,25 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 		lt, ok := liveByFallback[tr.Username+"\x00"+tr.Filename]
 		return lt, ok
 	}
+	// STALLED is a durable local intent: it is written before remote
+	// cancellation so a later pass can distinguish our stall cancellation from
+	// an unrelated cancellation, even if the retry/error write failed.
+	finishStalled := func(tr core.Transfer, lt slskd.Transfer) error {
+		if tr.Retries < d.p.MaxTransferRetries {
+			if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
+				return fmt.Errorf("retry stalled transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+			}
+		} else {
+			if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
+				return fmt.Errorf("mark stalled transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+			}
+		}
+		// Production slskd retains cancellation as "Completed, Cancelled".
+		// Purge it only after the local retry/error transition has committed.
+		d.removeFromSlskd(ctx, tr.Username, lt.ID)
+		stats.Stalled++
+		return nil
+	}
 
 	// Deadline enforcement runs first; a past-deadline transfer must be cancelled
 	// and taking it here keeps the active loop from double-processing the same row.
@@ -333,6 +352,16 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				if err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now); err != nil {
 					return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
 				}
+			}
+			// A failed local retry/error write may outlive the original deadline.
+			// Preserve its already-recorded stall intent instead of reclassifying our
+			// terminal remote cancellation as an overdue/user cancellation.
+			if tr.State == core.TransferStalled && mapSlskdState(lt.State) == core.TransferCancelled {
+				if err := finishStalled(tr, lt); err != nil {
+					return stats, err
+				}
+				handled[tr.ID] = true
+				continue
 			}
 			// Still live in slskd: it MUST be cancelled there before we record it
 			// cancelled, otherwise we orphan an in-flight download.
@@ -391,6 +420,12 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			}
 		}
 		newState := mapSlskdState(lt.State)
+		if tr.State == core.TransferStalled && newState == core.TransferCancelled {
+			if err := finishStalled(tr, lt); err != nil {
+				return stats, err
+			}
+			continue
+		}
 		// A transient rejection (e.g. a peer's "Too many megabytes" queue limit)
 		// with retries left goes back to PENDING for a later resend rather than
 		// failing the whole attempt and discarding a peer that has the album.
@@ -404,27 +439,23 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 		// A transfer still IN_PROGRESS but making no byte progress for longer than
 		// StallTimeout is treated as dead: the peer stopped sending without
 		// disconnecting, so it would otherwise live on until its enqueue-relative
-		// deadline. Cancel it in slskd first (same must-cancel-before-record rule as
-		// the deadline path above), then retry within budget or error it out once the
-		// budget is spent, reclaiming the attempt early.
+		// deadline. Persist STALLED intent, cancel it in slskd, then retry within
+		// budget or error it out once the budget is spent, reclaiming the attempt
+		// early.
 		if newState == core.TransferInProgress && tr.LastProgressAt != nil &&
 			now.Sub(*tr.LastProgressAt) > d.p.StallTimeout {
+			if tr.State != core.TransferStalled {
+				if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferStalled, lt.BytesTransferred, lt.Size, now); err != nil {
+					return stats, fmt.Errorf("mark transfer stalled: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+				}
+			}
 			if err := d.p.Network.Cancel(ctx, tr.Username, lt.ID); err != nil {
-				// Leave it non-terminal; the next pass retries the cancel.
+				// The STALLED intent remains durable; the next pass retries cancel.
 				continue
 			}
-			if tr.Retries < d.p.MaxTransferRetries {
-				if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
-					return stats, fmt.Errorf("retry stalled transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
-				}
-			} else {
-				if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
-					return stats, fmt.Errorf("mark stalled transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
-				}
-				// Terminal now (retries exhausted): purge the record we cancelled.
-				d.removeFromSlskd(ctx, tr.Username, lt.ID)
+			if err := finishStalled(tr, lt); err != nil {
+				return stats, err
 			}
-			stats.Stalled++
 			continue
 		}
 		if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now); err != nil {
