@@ -188,7 +188,9 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !live() {
-			http.Error(w, "pipeline module stalled", http.StatusServiceUnavailable)
+			// /healthz is public; keep the body generic so it leaks no
+			// internal pipeline detail (see ProtectPrivateEndpoints).
+			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

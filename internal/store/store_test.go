@@ -254,7 +254,9 @@ func TestSchemaMigratesLegacyShape(t *testing.T) {
 			slskd_id   TEXT NOT NULL DEFAULT '',
 			username   TEXT NOT NULL,
 			filename   TEXT NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			state      TEXT NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (username, filename)
 		)`,
 		`CREATE INDEX idx_attempts_job ON candidate_attempts(album_job_id)`,
 		`CREATE INDEX idx_transfers_attempt ON transfers(attempt_id, updated_at)`,
@@ -287,6 +289,38 @@ func TestSchemaMigratesLegacyShape(t *testing.T) {
 	}
 	if count != 1 {
 		t.Error("idx_transfers_candidate missing after migrating legacy shape")
+	}
+}
+
+func TestSchemaMigratesGlobalTransferUniquenessToCandidateOwnership(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(`ALTER TABLE transfers DROP CONSTRAINT transfers_candidate_username_filename_key;
+		ALTER TABLE transfers ADD CONSTRAINT transfers_username_filename_key UNIQUE (username, filename)`); err != nil {
+		t.Fatalf("install previous global uniqueness: %v", err)
+	}
+	if err := applySchema(s.db, schemaSQL); err != nil {
+		t.Fatalf("applySchema migration: %v", err)
+	}
+	if err := applySchema(s.db, schemaSQL); err != nil {
+		t.Fatalf("second applySchema migration: %v", err)
+	}
+
+	var oldCount, scopedCount, liveIndexCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM pg_constraint
+		WHERE conrelid = 'transfers'::regclass AND conname = 'transfers_username_filename_key'`).Scan(&oldCount); err != nil {
+		t.Fatalf("query old transfer constraint: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM pg_constraint
+		WHERE conrelid = 'transfers'::regclass AND conname = 'transfers_candidate_username_filename_key'`).Scan(&scopedCount); err != nil {
+		t.Fatalf("query scoped transfer constraint: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM pg_indexes
+		WHERE schemaname = 'public' AND indexname = 'idx_transfers_live_remote_owner'`).Scan(&liveIndexCount); err != nil {
+		t.Fatalf("query live-owner transfer index: %v", err)
+	}
+	if oldCount != 0 || scopedCount != 1 || liveIndexCount != 1 {
+		t.Errorf("transfer keys after migration: old=%d scoped=%d live_index=%d, want 0/1/1", oldCount, scopedCount, liveIndexCount)
 	}
 }
 

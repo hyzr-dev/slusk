@@ -226,9 +226,13 @@ func main() {
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, cancelFn,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, retryFn,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)
+	var authenticator observ.Authenticator
+	if cfg.Observ.AuthToken != "" {
+		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
+	}
 	srv := &http.Server{
 		Addr:              cfg.Observ.ListenAddr,
-		Handler:           handler,
+		Handler:           observ.ProtectPrivateEndpoints(handler, authenticator),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		WriteTimeout:      httpWriteTimeout,
@@ -352,21 +356,21 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 	return runtimeOutcome{err: runtimeErr, storeCloseSafe: storeCloseSafe}
 }
 
-// runHealthcheck loads the config to find the observ listen port, then GETs
-// its own /healthz over loopback and returns nil only on a 200 response. This
-// is invoked as `slskdarr --healthcheck` by the Dockerfile's HEALTHCHECK,
-// since the distroless runtime image has no shell, curl, or wget for Docker
-// to exec directly.
+// runHealthcheck loads the config to find the observ listener, then GETs its
+// own /healthz and returns nil only on a 200 response. Wildcard listeners are
+// probed on the matching loopback family; specific listeners retain their
+// configured host. This is invoked as `slskdarr --healthcheck` by the
+// Dockerfile's HEALTHCHECK, since the distroless runtime image has no shell,
+// curl, or wget for Docker to exec directly.
 func runHealthcheck(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	_, port, err := net.SplitHostPort(cfg.Observ.ListenAddr)
+	url, err := healthcheckURL(cfg.Observ.ListenAddr)
 	if err != nil {
-		return fmt.Errorf("parse observ.listen_addr %q: %w", cfg.Observ.ListenAddr, err)
+		return err
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%s/healthz", port)
 	client := &http.Client{Timeout: healthcheckTimeout}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -377,4 +381,21 @@ func runHealthcheck(configPath string) error {
 		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
 	return nil
+}
+
+func healthcheckURL(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("parse observ.listen_addr %q: %w", listenAddr, err)
+	}
+
+	probeHost := host
+	ip := net.ParseIP(host)
+	if host == "" || (ip != nil && ip.IsUnspecified()) {
+		probeHost = "127.0.0.1"
+		if ip != nil && ip.To4() == nil {
+			probeHost = "::1"
+		}
+	}
+	return "http://" + net.JoinHostPort(probeHost, port) + "/healthz", nil
 }

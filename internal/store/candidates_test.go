@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,7 +39,7 @@ func TestCandidateLifecycle(t *testing.T) {
 		t.Fatalf("expected carol (score 3.0) first, got %+v", top)
 	}
 
-	ok, err := s.ActivateCandidate(ctx, top.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, top.ID, job.ID, 5, now)
 	if err != nil {
 		t.Fatalf("ActivateCandidate: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestActivateCandidateRespectsMaxActive(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0}}, now); err != nil {
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)
@@ -140,12 +141,12 @@ func TestActivateCandidateRespectsMaxActive(t *testing.T) {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
 
-	ok, err := s.ActivateCandidate(ctx, cand.ID, job.ID, 2, now)
+	ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 2, now)
 	if err != nil {
 		t.Fatalf("ActivateCandidate: %v", err)
 	}
-	if ok {
-		t.Fatal("ActivateCandidate: expected false when maxActive cap is already reached")
+	if ok || !capFull {
+		t.Fatalf("ActivateCandidateWithTransfers: activated=%v capFull=%v, want false/true", ok, capFull)
 	}
 
 	jobs, err := s.RunnableJobsInState(ctx, core.StateSelecting, now, 10)
@@ -170,7 +171,7 @@ func TestActivateCandidateBouncesWhenJobLeftSelecting(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0}}, now); err != nil {
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)
@@ -184,12 +185,359 @@ func TestActivateCandidateBouncesWhenJobLeftSelecting(t *testing.T) {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 
-	ok, err := s.ActivateCandidate(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
 	if err != nil {
-		t.Fatalf("ActivateCandidate: %v", err)
+		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
 	}
 	if ok {
-		t.Fatal("ActivateCandidate: expected false when job left SELECTING")
+		t.Fatal("ActivateCandidateWithTransfers: expected false when job left SELECTING")
+	}
+}
+
+func TestActivateCandidateWithTransfersRejectsWrongJobOwnership(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	var jobs []core.AlbumJob
+	var candidates []core.Candidate
+	for i, albumID := range []int64{310, 311} {
+		job, err := s.UpsertWantedJob(ctx, albumID, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{
+			Username: "peer", Score: float64(i + 1),
+			Files: []core.CandidateFile{{Filename: "same.flac", Size: 10}},
+		}}, now); err != nil {
+			t.Fatalf("InsertCandidates: %v", err)
+		}
+		if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+			t.Fatalf("AdvanceJobState: %v", err)
+		}
+		cand, found, err := s.NextNewCandidate(ctx, job.ID)
+		if err != nil || !found {
+			t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+		}
+		jobs = append(jobs, job)
+		candidates = append(candidates, cand)
+	}
+
+	activated, _, err := s.ActivateCandidateWithTransfers(ctx, candidates[0].ID, jobs[1].ID, 5, now)
+	if err != nil {
+		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
+	}
+	if activated {
+		t.Fatal("candidate must not activate under a job it does not own")
+	}
+	for i, job := range jobs {
+		if got := jobStateForStore(t, s, job.ID); got != core.StateSelecting {
+			t.Errorf("job %d state = %v, want SELECTING", job.ID, got)
+		}
+		if transfers, err := s.TransfersForCandidate(ctx, candidates[i].ID); err != nil || len(transfers) != 0 {
+			t.Errorf("candidate %d transfers = %d, want 0 (%v)", candidates[i].ID, len(transfers), err)
+		}
+	}
+}
+
+func TestActivateCandidateWithTransfersRejectsInvalidFileSets(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files string
+	}{
+		{name: "empty_array", files: `[]`},
+		{name: "non_array", files: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			job, err := s.UpsertWantedJob(ctx, 315, now)
+			if err != nil {
+				t.Fatalf("UpsertWantedJob: %v", err)
+			}
+			if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{
+				Username: "peer", Score: 1,
+				Files: []core.CandidateFile{{Filename: "valid.flac", Size: 1}},
+			}}, now); err != nil {
+				t.Fatalf("InsertCandidates: %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
+			cand, found, err := s.NextNewCandidate(ctx, job.ID)
+			if err != nil || !found {
+				t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+			}
+			if _, err := s.db.ExecContext(ctx, `UPDATE candidates SET files = $1::jsonb WHERE id = $2`, tc.files, cand.ID); err != nil {
+				t.Fatalf("seed invalid candidate files: %v", err)
+			}
+
+			activated, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+			if err == nil {
+				t.Fatal("expected invalid candidate file set to be rejected")
+			}
+			if activated || capFull {
+				t.Fatalf("invalid candidate result: activated=%v capFull=%v, want false/false", activated, capFull)
+			}
+			if got := jobStateForStore(t, s, job.ID); got != core.StateSelecting {
+				t.Errorf("job state = %v, want SELECTING", got)
+			}
+			var candidateState string
+			if readErr := s.db.QueryRowContext(ctx, `SELECT state FROM candidates WHERE id = $1`, cand.ID).Scan(&candidateState); readErr != nil {
+				t.Errorf("read candidate state: %v", readErr)
+			} else if candidateState != string(core.CandidateNew) {
+				t.Errorf("candidate state = %q, want NEW", candidateState)
+			}
+			if transfers, readErr := s.TransfersForCandidate(ctx, cand.ID); readErr != nil || len(transfers) != 0 {
+				t.Errorf("invalid candidate created transfers: count=%d err=%v", len(transfers), readErr)
+			}
+		})
+	}
+}
+
+func TestActivateCandidateWithTransfersRollsBackOnEveryInsertPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files []core.CandidateFile
+	}{
+		{name: "first", files: []core.CandidateFile{{Filename: "fail.flac", Size: 1}, {Filename: "02.flac", Size: 2}, {Filename: "03.flac", Size: 3}}},
+		{name: "middle", files: []core.CandidateFile{{Filename: "01.flac", Size: 1}, {Filename: "fail.flac", Size: 2}, {Filename: "03.flac", Size: 3}}},
+		{name: "final", files: []core.CandidateFile{{Filename: "01.flac", Size: 1}, {Filename: "02.flac", Size: 2}, {Filename: "fail.flac", Size: 3}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			if _, err := s.db.Exec(`CREATE FUNCTION fail_named_transfer() RETURNS trigger AS $$
+				BEGIN
+					IF NEW.filename = 'fail.flac' THEN
+						RAISE EXCEPTION 'injected transfer insert failure';
+					END IF;
+					RETURN NEW;
+				END $$ LANGUAGE plpgsql;
+				CREATE TRIGGER fail_named_transfer BEFORE INSERT ON transfers
+				FOR EACH ROW EXECUTE FUNCTION fail_named_transfer()`); err != nil {
+				t.Fatalf("install failure trigger: %v", err)
+			}
+
+			job, err := s.UpsertWantedJob(ctx, 320, now)
+			if err != nil {
+				t.Fatalf("UpsertWantedJob: %v", err)
+			}
+			if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer", Score: 1, Files: tc.files}}, now); err != nil {
+				t.Fatalf("InsertCandidates: %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
+			cand, found, err := s.NextNewCandidate(ctx, job.ID)
+			if err != nil || !found {
+				t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+			}
+
+			activated, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+			if err == nil {
+				t.Fatal("expected injected transfer insertion error")
+			}
+			if activated {
+				t.Fatal("activation must be false after insertion failure")
+			}
+			if got := jobStateForStore(t, s, job.ID); got != core.StateSelecting {
+				t.Errorf("job state = %v, want SELECTING after rollback", got)
+			}
+			stillNew, found, readErr := s.NextNewCandidate(ctx, job.ID)
+			if readErr != nil || !found || stillNew.ID != cand.ID {
+				t.Errorf("candidate must remain NEW after rollback: %+v found=%v err=%v", stillNew, found, readErr)
+			}
+			if transfers, readErr := s.TransfersForCandidate(ctx, cand.ID); readErr != nil || len(transfers) != 0 {
+				t.Errorf("partial transfer set survived rollback: count=%d err=%v", len(transfers), readErr)
+			}
+		})
+	}
+}
+
+func TestActivateCandidateWithTransfersConcurrentLiveOwnerConflictRollsBack(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	files := []core.CandidateFile{{Filename: "same.flac", Size: 10}}
+
+	type attempt struct {
+		jobID  int64
+		candID int64
+	}
+	var attempts []attempt
+	for _, albumID := range []int64{325, 326} {
+		job, err := s.UpsertWantedJob(ctx, albumID, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer", Score: 1, Files: files}}, now); err != nil {
+			t.Fatalf("InsertCandidates: %v", err)
+		}
+		if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+			t.Fatalf("AdvanceJobState: %v", err)
+		}
+		cand, found, err := s.NextNewCandidate(ctx, job.ID)
+		if err != nil || !found {
+			t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+		}
+		attempts = append(attempts, attempt{jobID: job.ID, candID: cand.ID})
+	}
+
+	type result struct {
+		ok      bool
+		capFull bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(attempts))
+	var wg sync.WaitGroup
+	for _, a := range attempts {
+		a := a
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, a.candID, a.jobID, 5, now)
+			results <- result{ok: ok, capFull: capFull, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var successes, conflicts int
+	for result := range results {
+		switch {
+		case result.err != nil:
+			t.Fatalf("concurrent activation: %v", result.err)
+		case result.ok:
+			successes++
+		case !result.capFull:
+			conflicts++
+		default:
+			t.Fatal("live-owner conflict was incorrectly reported as a full cap")
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("activation results: successes=%d conflicts=%d, want 1/1", successes, conflicts)
+	}
+
+	for _, a := range attempts {
+		state := jobStateForStore(t, s, a.jobID)
+		transfers, err := s.TransfersForCandidate(ctx, a.candID)
+		if err != nil {
+			t.Fatalf("TransfersForCandidate: %v", err)
+		}
+		switch state {
+		case core.StateDownloading:
+			if len(transfers) != 1 {
+				t.Errorf("winning DOWNLOADING job has %d transfers, want 1", len(transfers))
+			}
+		case core.StateSelecting:
+			if len(transfers) != 0 {
+				t.Errorf("conflicting SELECTING job retained %d partial transfers", len(transfers))
+			}
+			cand, found, err := s.NextNewCandidate(ctx, a.jobID)
+			if err != nil || !found || cand.ID != a.candID {
+				t.Errorf("conflicting candidate must remain NEW: found=%v candidate=%+v err=%v", found, cand, err)
+			}
+		default:
+			t.Errorf("job %d reached unexpected state %v", a.jobID, state)
+		}
+	}
+}
+
+func TestActivateCandidateWithTransfersConcurrentCapKeepsJobsComplete(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	files := []core.CandidateFile{{Filename: "01.flac", Size: 1}, {Filename: "02.flac", Size: 2}, {Filename: "03.flac", Size: 3}}
+
+	type activation struct {
+		jobID  int64
+		candID int64
+	}
+	var attempts []activation
+	for albumID := int64(330); albumID < 334; albumID++ {
+		job, err := s.UpsertWantedJob(ctx, albumID, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer", Score: 1, Files: files}}, now); err != nil {
+			t.Fatalf("InsertCandidates: %v", err)
+		}
+		if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+			t.Fatalf("AdvanceJobState: %v", err)
+		}
+		cand, found, err := s.NextNewCandidate(ctx, job.ID)
+		if err != nil || !found {
+			t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+		}
+		attempts = append(attempts, activation{jobID: job.ID, candID: cand.ID})
+	}
+
+	start := make(chan struct{})
+	results := make(chan bool, len(attempts))
+	errs := make(chan error, len(attempts))
+	var wg sync.WaitGroup
+	for _, attempt := range attempts {
+		attempt := attempt
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, _, err := s.ActivateCandidateWithTransfers(ctx, attempt.candID, attempt.jobID, 1, now)
+			results <- ok
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ActivateCandidateWithTransfers: %v", err)
+		}
+	}
+	activated := 0
+	for ok := range results {
+		if ok {
+			activated++
+		}
+	}
+	if activated != 1 {
+		t.Fatalf("successful activations = %d, want exactly 1 at MaxActive=1", activated)
+	}
+
+	downloading := 0
+	for _, attempt := range attempts {
+		state := jobStateForStore(t, s, attempt.jobID)
+		transfers, err := s.TransfersForCandidate(ctx, attempt.candID)
+		if err != nil {
+			t.Fatalf("TransfersForCandidate: %v", err)
+		}
+		switch state {
+		case core.StateDownloading:
+			downloading++
+			if len(transfers) != len(files) {
+				t.Errorf("DOWNLOADING job %d has %d transfers, want complete set of %d", attempt.jobID, len(transfers), len(files))
+			}
+		case core.StateSelecting:
+			if len(transfers) != 0 {
+				t.Errorf("non-activated job %d has %d transfers, want 0", attempt.jobID, len(transfers))
+			}
+		default:
+			t.Errorf("job %d reached unexpected state %v", attempt.jobID, state)
+		}
+	}
+	if downloading != 1 {
+		t.Errorf("DOWNLOADING jobs = %d, want exactly 1", downloading)
 	}
 }
 
@@ -206,14 +554,14 @@ func helperActivate(t *testing.T, s *Store, albumID int64, now time.Time) (jobID
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0}}, now); err != nil {
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
-	ok, err := s.ActivateCandidate(ctx, cand.ID, job.ID, 100, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidate: %v ok=%v", err, ok)
 	}
@@ -395,9 +743,8 @@ func TestResetJobToWantedDeletesCandidates(t *testing.T) {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 
-	// A transfer left behind by the wiped cycle must go too: transfers has a
-	// global UNIQUE(username, filename), so a leftover row would collide when
-	// a later cycle re-attempts the same peer+file.
+	// A transfer left behind by the wiped cycle must go too: transfer ownership
+	// and the FK require the cycle to be deleted as one clean unit.
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
@@ -447,7 +794,7 @@ func TestResetJobToWantedBouncesWhenCancelled(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0}}, now); err != nil {
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)
@@ -494,7 +841,7 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	if err := s.SetJobBackoff(ctx, job.ID, 4, now.Add(time.Hour), now); err != nil {
 		t.Fatalf("SetJobBackoff: %v", err)
 	}
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0}}, now); err != nil {
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
 	cand, found, err := s.NextNewCandidate(ctx, job.ID)

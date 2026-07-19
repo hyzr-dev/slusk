@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -181,9 +182,14 @@ type StoreConfig struct {
 	DSN string `toml:"dsn"`
 }
 
+const observAuthTokenPlaceholder = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+
 // ObservConfig is the observability configuration.
 type ObservConfig struct {
 	ListenAddr string `toml:"listen_addr"`
+	// AuthToken protects every UI, API, and metrics endpoint except /healthz.
+	// It may be omitted only when ListenAddr is strictly loopback-only.
+	AuthToken string `toml:"auth_token"`
 }
 
 // PathsConfig holds filesystem paths shared with the arr-stack.
@@ -316,9 +322,31 @@ func (c Config) Validate() error {
 	}
 	if c.Observ.ListenAddr == "" {
 		problems = append(problems, "observ.listen_addr is required")
+	} else {
+		host, _, err := net.SplitHostPort(c.Observ.ListenAddr)
+		if err != nil {
+			problems = append(problems, "observ.listen_addr must be a valid host:port")
+		} else if c.Observ.AuthToken == "" && !isLoopbackHost(host) {
+			problems = append(problems, "observ.auth_token is required when observ.listen_addr is not loopback-only")
+		}
+		if c.Observ.AuthToken == observAuthTokenPlaceholder {
+			problems = append(problems, "observ.auth_token must be replaced with a generated token")
+		}
+		if strings.ContainsAny(c.Observ.AuthToken, " \t\r\n") {
+			problems = append(problems, "observ.auth_token must not contain whitespace")
+		}
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

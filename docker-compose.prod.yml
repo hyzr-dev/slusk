@@ -16,9 +16,10 @@
 # --- Prerequisites ---
 #   1. docker login gitea.shcizo.se        (registry auth; the package is private)
 #   2. A config.toml next to this file      (copy config.example.toml, fill in
-#      your Lidarr/slskd URLs + API keys and the Postgres store.dsn — all
-#      reachable from the container, e.g. LAN IPs like
-#      http://192.168.86.33:5030 or arr-network service names).
+#      your Lidarr/slskd URLs + API keys, Postgres store.dsn, and a long random
+#      observ.auth_token — all upstream services must be reachable from the
+#      container, e.g. LAN IPs like http://192.168.86.33:5030 or arr-network
+#      service names). Keep config.toml out of source control and logs.
 #
 # --- Deploy / update ---
 #   docker compose -f docker-compose.prod.yml pull
@@ -71,7 +72,11 @@ services:
       - ./config.toml:/config/config.toml:ro
 
     ports:
-      # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
+      # /healthz is public for container/orchestrator probes. Every UI/API,
+      # /status, and /metrics request requires observ.auth_token (Bearer for
+      # clients; HTTP Basic password for browsers). Never put the token in a
+      # URL/query. Terminate TLS at a trusted reverse proxy before exposing
+      # this port outside a trusted private network.
       - "9090:9090"
 
 # --- Option: run inside your existing arr-stack network ---
