@@ -41,23 +41,29 @@ count. Different pressings/editions of the same album can legitimately
 have different track counts (bonus tracks, deluxe editions, etc.), and none
 of that variance is visible to the pipeline today.
 
-**Change:**
+**Change** (amended during planning — the call site moved from WantedSync to
+Discovery: WantedSync loops over the *entire* wanted list every pass, so a
+per-album `AlbumReleases` call there is O(wanted-list) HTTP calls per sync;
+Discovery searches exactly one album per tick, so fetching there is one call
+per search, exactly when the data is needed):
 
 - Add `AlbumReleases(ctx, albumID) ([]AlbumRelease, error)` to
-  `internal/lidarr/client.go`, calling Lidarr's release-listing endpoint for
-  an album and returning each release's track count.
-- Replace `WantedAlbum.TrackCount int` with
-  `WantedAlbum.MinTrackCount, MaxTrackCount int` — computed as the min/max
-  across all releases returned by `AlbumReleases`.
+  `internal/lidarr/client.go`, calling Lidarr's release-listing endpoint
+  (`GET /api/v1/albumrelease?albumId={id}`) and returning each release's
+  track count.
 - Add `MinTrackCount`, `MaxTrackCount` columns to `album_jobs`
   (`internal/store/schema.sql`), and matching fields on `core.AlbumJob`.
-- `internal/pipeline/wanted.go`'s sync writes these two fields instead of a
-  single track count, on both job creation and update.
+- `Discovery.searchJob` calls `AlbumReleases` once per search (replacing
+  today's `AlbumStatus` call there), computes min/max across all releases,
+  and persists the band onto the job — persisted because `Importing.verify`
+  needs `MinTrackCount` later (see section 4's coverage note).
+- `WantedAlbum.TrackCount` is removed entirely (it has no consumers outside
+  the client today); WantedSync is untouched.
 
-**Fallback:** if `AlbumReleases` returns no releases (or errors), fall back
-to Lidarr's existing album-level track count as both `MinTrackCount` and
-`MaxTrackCount` (a degenerate single-value band) — this preserves today's
-behavior when the new call isn't available.
+**Fallback:** if `AlbumReleases` errors, abort the search pass without
+spending retry budget (same handling as today's `AlbumStatus` error). If it
+returns no releases with a positive track count, the band is `(0, 0)` =
+unknown, and the filter is skipped.
 
 ## 2. Discovery/selecting: `[min, max]` band replaces the ratio filter
 
@@ -147,18 +153,34 @@ for _, it := range items {
 
 A file that Lidarr assigned one or more real track IDs is treated as
 importable regardless of a folder-level rejection reason attached to it.
-Files with no track ID at all (genuinely unmatched) still fall through to
-`rejections` and can still fail the candidate. The downstream coverage
-check (`coverage(importable) < total`, importing.go:227) is unchanged and
-continues to guard against importing a partial release.
+Files with no track ID at all (genuinely unmatched) fall through to
+`rejections`; the candidate only fails outright when *no* file is
+importable. Unmatched extras are logged and left behind (the completed-
+folder cleanup already leaves non-empty folders in place).
+
+**Coverage gate (amended during planning):** the downstream coverage check
+currently compares `coverage(importable) < total` where `total` is the
+album's canonical track count from `AlbumStatus`. With section 2's band, a
+valid smaller edition (e.g. 10 tracks vs the canonical 12) would pass
+discovery but always fail this gate. The gate therefore compares against
+`job.MinTrackCount` when set, falling back to the `AlbumStatus` total when
+the band is unknown (0). The confirm phase's `present >= total` poll is
+unchanged — after import with release switching, Lidarr's own statistics
+reflect whichever release it settled on, so it stays self-consistent.
 
 ## Data model summary
 
 | Type | Field(s) added | Field(s) removed |
 |---|---|---|
-| `lidarr.WantedAlbum` | `MinTrackCount`, `MaxTrackCount` | `TrackCount` |
+| `lidarr.WantedAlbum` | — | `TrackCount` (no consumers) |
+| `lidarr.AlbumRelease` (new) | `ID`, `TrackCount`, `Monitored` | — |
 | `core.AlbumJob` | `MinTrackCount`, `MaxTrackCount` | — |
 | `album_jobs` (schema.sql) | `min_track_count`, `max_track_count` | — |
+
+Config: `pipeline.max_candidate_file_ratio` is removed (config struct,
+validation, example, `main.go` wiring). **Breaking config change** — configs
+still carrying the key will fail the unknown-key check at startup and must
+drop the line.
 
 No changes to `core.Candidate` / `core.CandidateFile` — dedup operates on
 files already on disk via their transfer filenames, not on new persisted
