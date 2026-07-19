@@ -34,16 +34,19 @@ type Module interface {
 }
 
 // ModuleStatus is an immutable snapshot of one module's runtime state.
-// LastError is retained after recovery for diagnostics; ConsecutiveFailures
-// resets to zero on the first successful tick.
+// LastAttempt records tick start while LastCompleted changes only after Tick
+// returns. LastError is retained after recovery for diagnostics;
+// ConsecutiveFailures resets to zero on the first successful tick.
 type ModuleStatus struct {
 	LastAttempt         time.Time
+	LastCompleted       time.Time
 	LastSuccess         time.Time
 	LastErrorAt         time.Time
 	LastError           string
 	ConsecutiveFailures int
 	StaleDeadline       time.Time
 	Live                bool
+	Ready               bool
 }
 
 type moduleState struct {
@@ -163,13 +166,15 @@ func (r *Runner) runTick(ctx context.Context, st *moduleState) {
 }
 
 func (r *Runner) recordOutcome(st *moduleState, attemptedAt time.Time, tickErr error) {
+	completedAt := time.Now()
 	status := *st.status.Load()
 	status.LastAttempt = attemptedAt
+	status.LastCompleted = completedAt
 	if tickErr == nil {
-		status.LastSuccess = time.Now()
+		status.LastSuccess = completedAt
 		status.ConsecutiveFailures = 0
 	} else {
-		status.LastErrorAt = time.Now()
+		status.LastErrorAt = completedAt
 		status.LastError = tickErr.Error()
 		status.ConsecutiveFailures++
 	}
@@ -188,6 +193,7 @@ func (r *Runner) Health() map[string]ModuleStatus {
 			status.StaleDeadline = status.LastAttempt.Add(st.module.Interval()*3 + r.tickTimeout)
 			status.Live = !now.After(status.StaleDeadline)
 		}
+		status.Ready = status.Live && !status.LastSuccess.IsZero() && status.ConsecutiveFailures < ReadinessFailureThreshold
 		out[st.module.Name()] = status
 	}
 	return out
@@ -209,12 +215,8 @@ func (r *Runner) Live() bool {
 // Three consecutive errors or panics make a module unready; one success
 // immediately recovers it.
 func (r *Runner) Ready() bool {
-	if !r.Live() {
-		return false
-	}
-	for _, st := range r.states {
-		status := st.status.Load()
-		if status.LastSuccess.IsZero() || status.ConsecutiveFailures >= ReadinessFailureThreshold {
+	for _, status := range r.Health() {
+		if !status.Ready {
 			return false
 		}
 	}

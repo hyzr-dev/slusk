@@ -60,6 +60,12 @@ func (m *sequenceModule) Tick(_ context.Context, _ time.Time) error {
 	return m.results[idx]
 }
 
+func (m *sequenceModule) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 }
@@ -123,8 +129,11 @@ func TestRunnerTracksRepeatedErrorsAndPanic(t *testing.T) {
 	}
 	for _, name := range []string{"panicker", "erroring"} {
 		status := r.Health()[name]
-		if status.LastAttempt.IsZero() || status.LastErrorAt.IsZero() || status.LastError == "" {
-			t.Errorf("%s status missing attempt/error details: %+v", name, status)
+		if status.LastAttempt.IsZero() || status.LastCompleted.IsZero() || status.LastErrorAt.IsZero() || status.LastError == "" {
+			t.Errorf("%s status missing attempt/completion/error details: %+v", name, status)
+		}
+		if status.Ready {
+			t.Errorf("%s per-module readiness remained true: %+v", name, status)
 		}
 		if !status.LastSuccess.IsZero() {
 			t.Errorf("%s unexpectedly recorded success: %+v", name, status)
@@ -174,7 +183,39 @@ func TestRunnerReadinessRecoversAfterSuccess(t *testing.T) {
 	if status.LastError == "" {
 		t.Error("LastError should be retained after recovery for diagnostics")
 	}
+	if !status.Ready {
+		t.Error("per-module readiness did not recover after success")
+	}
 
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+func TestRunnerTracksCompletedTickSeparatelyFromActiveAttempt(t *testing.T) {
+	release := make(chan struct{})
+	m := &sequenceModule{
+		name: "completion", interval: 100 * time.Millisecond,
+		results: []error{errors.New("first failed")}, blockBefore: 1, release: release,
+	}
+	r := newTestRunner(t, time.Second, m)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	waitFor(t, time.Second, func() bool { return !r.Health()[m.name].LastCompleted.IsZero() })
+	completed := r.Health()[m.name].LastCompleted
+	waitFor(t, time.Second, func() bool { return m.callCount() >= 2 })
+	status := r.Health()[m.name]
+	if !status.LastAttempt.After(status.LastCompleted) {
+		t.Errorf("LastAttempt = %v, want after LastCompleted %v while next tick is active", status.LastAttempt, status.LastCompleted)
+	}
+	if !status.LastCompleted.Equal(completed) {
+		t.Errorf("LastCompleted changed during active tick: got %v, want %v", status.LastCompleted, completed)
+	}
+
+	close(release)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run returned error: %v", err)

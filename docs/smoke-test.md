@@ -31,11 +31,11 @@ eller `docker exec` in i Postgres-containern.)
 ## Fas 2 — Anslutning + observability
 
 - [ ] `curl $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`).
-      `modules` behåller den kompatibla timestamp-kartan för varje pipeline-modul
-      (`wanted_sync`, `discovery`, `selecting`, `downloading`, `importing`).
-      `moduleDetails` innehåller dessutom `lastAttempt`, felstatus, serverns
-      intervallbaserade `staleDeadline` och dess auktoritativa `live`-värde; dashboarden
-      använder dessa fält i stället för en egen fast stale-gräns.
+      `modules` behåller den kompatibla kartan med senast avslutad tick för varje
+      pipeline-modul (`wanted_sync`, `discovery`, `selecting`, `downloading`, `importing`).
+      `moduleDetails` innehåller dessutom `lastAttempt`, `lastCompleted`, felstatus,
+      serverns intervallbaserade `staleDeadline` samt dess auktoritativa `live`- och
+      `ready`-värden; dashboarden använder dessa fält i stället för egna gränsvärden.
 - [ ] `curl $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)

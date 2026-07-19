@@ -98,7 +98,7 @@ function moduleHealthRows() {
     const never = !status.lastAttempt;
     const lastAttempt = never ? null : new Date(status.lastAttempt);
     const failures = status.consecutiveFailures || 0;
-    const unhealthy = !status.live || failures >= 3;
+    const unhealthy = !status.ready;
     let label = never ? 'Har aldrig körts' : lastAttempt.toLocaleTimeString('sv-SE');
     if (failures > 0) label += ` (${failures} fel i rad)`;
     return `

@@ -195,10 +195,10 @@ func main() {
 		out := make(map[string]observ.ModuleStatus, len(statuses))
 		for name, status := range statuses {
 			out[name] = observ.ModuleStatus{
-				LastAttempt: status.LastAttempt, LastSuccess: status.LastSuccess,
-				LastErrorAt: status.LastErrorAt, LastError: status.LastError,
-				ConsecutiveFailures: status.ConsecutiveFailures,
-				StaleDeadline:       status.StaleDeadline, Live: status.Live,
+				LastAttempt: status.LastAttempt, LastCompleted: status.LastCompleted,
+				LastSuccess: status.LastSuccess, LastErrorAt: status.LastErrorAt,
+				LastError: status.LastError, ConsecutiveFailures: status.ConsecutiveFailures,
+				StaleDeadline: status.StaleDeadline, Live: status.Live, Ready: status.Ready,
 			}
 		}
 		return out
@@ -243,10 +243,11 @@ func main() {
 	cancelStartup()
 
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
-	runtimeErr := runRuntime(ctx, srv, listener, runner)
-	closeErr := st.Close()
-	if runtimeErr != nil || closeErr != nil {
-		logger.Error("slskdarr stopped with error", "runtime_err", runtimeErr, "close_store_err", closeErr)
+	outcome := runRuntime(ctx, srv, listener, runner, lifecycleShutdownTimeout)
+	closeErr := closeStoreAfterRuntime(outcome, st.Close)
+	if outcome.err != nil || closeErr != nil {
+		logger.Error("slskdarr stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,
+			"store_close_safe", outcome.storeCloseSafe)
 		os.Exit(1)
 	}
 	logger.Info("slskdarr stopped cleanly")
@@ -256,11 +257,30 @@ func listenHTTP(ctx context.Context, addr string) (net.Listener, error) {
 	return (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 }
 
+type runtimeRunner interface {
+	Run(context.Context) error
+}
+
+type runtimeOutcome struct {
+	err            error
+	storeCloseSafe bool
+}
+
+// closeStoreAfterRuntime closes the shared store only after all pipeline
+// modules and HTTP handlers have relinquished ownership of it.
+func closeStoreAfterRuntime(outcome runtimeOutcome, closeStore func() error) error {
+	if !outcome.storeCloseSafe {
+		return nil
+	}
+	return closeStore()
+}
+
 // runRuntime ties the HTTP listener and pipeline runner into one lifecycle.
 // An unexpected listener failure cancels the pipeline and is returned as a
 // fatal error. Signal-driven shutdown is bounded even if a module or HTTP
-// connection does not cooperate.
-func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, runner *pipeline.Runner) error {
+// connection does not cooperate. storeCloseSafe is false if bounded shutdown
+// expires while a module or handler may still own the shared store.
+func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, runner runtimeRunner, shutdownTimeout time.Duration) runtimeOutcome {
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -276,6 +296,7 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 	go func() { runnerDone <- runner.Run(runtimeCtx) }()
 
 	var runtimeErr error
+	storeCloseSafe := true
 	serverFinished, runnerFinished := false, false
 	select {
 	case <-ctx.Done():
@@ -290,15 +311,19 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 		runnerFinished = true
 		if err != nil {
 			runtimeErr = err
+			if errors.Is(err, pipeline.ErrShutdownTimeout) {
+				storeCloseSafe = false
+			}
 		} else if ctx.Err() == nil {
 			runtimeErr = errors.New("pipeline runner stopped unexpectedly")
 		}
 	}
 	cancel()
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), lifecycleShutdownTimeout)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		storeCloseSafe = false
 		runtimeErr = errors.Join(runtimeErr, fmt.Errorf("shutdown status server: %w", err))
 	}
 	if !serverFinished {
@@ -308,6 +333,7 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 				runtimeErr = errors.Join(runtimeErr, fmt.Errorf("status server failed: %w", err))
 			}
 		case <-shutdownCtx.Done():
+			storeCloseSafe = false
 			runtimeErr = errors.Join(runtimeErr, errors.New("status server shutdown timed out"))
 		}
 	}
@@ -315,11 +341,15 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 		select {
 		case err := <-runnerDone:
 			runtimeErr = errors.Join(runtimeErr, err)
+			if errors.Is(err, pipeline.ErrShutdownTimeout) {
+				storeCloseSafe = false
+			}
 		case <-shutdownCtx.Done():
+			storeCloseSafe = false
 			runtimeErr = errors.Join(runtimeErr, errors.New("pipeline shutdown timed out"))
 		}
 	}
-	return runtimeErr
+	return runtimeOutcome{err: runtimeErr, storeCloseSafe: storeCloseSafe}
 }
 
 // runHealthcheck loads the config to find the observ listen port, then GETs

@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,25 @@ type runtimeTestModule struct{}
 func (runtimeTestModule) Name() string                          { return "test" }
 func (runtimeTestModule) Interval() time.Duration               { return time.Second }
 func (runtimeTestModule) Tick(context.Context, time.Time) error { return nil }
+
+type contextRuntimeRunner struct{}
+
+func (contextRuntimeRunner) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
+type timeoutRuntimeRunner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r timeoutRuntimeRunner) Run(ctx context.Context) error {
+	go func() { <-r.release }()
+	close(r.started)
+	<-ctx.Done()
+	return pipeline.ErrShutdownTimeout
+}
 
 type failingListener struct{ err error }
 
@@ -54,8 +75,105 @@ func TestRunRuntimeTreatsListenerFailureAsFatal(t *testing.T) {
 	srv := &http.Server{Handler: http.NewServeMux()}
 	listenErr := errors.New("accept failed")
 
-	err = runRuntime(context.Background(), srv, failingListener{err: listenErr}, runner)
-	if err == nil || !strings.Contains(err.Error(), listenErr.Error()) {
-		t.Fatalf("runRuntime error = %v, want listener failure", err)
+	outcome := runRuntime(context.Background(), srv, failingListener{err: listenErr}, runner, time.Second)
+	if outcome.err == nil || !strings.Contains(outcome.err.Error(), listenErr.Error()) {
+		t.Fatalf("runRuntime error = %v, want listener failure", outcome.err)
+	}
+	if !outcome.storeCloseSafe {
+		t.Fatal("completed runner/server shutdown should permit store close")
+	}
+	var closed atomic.Bool
+	if err := closeStoreAfterRuntime(outcome, func() error { closed.Store(true); return nil }); err != nil {
+		t.Fatalf("closeStoreAfterRuntime: %v", err)
+	}
+	if !closed.Load() {
+		t.Fatal("store was not closed after bounded owners completed")
+	}
+}
+
+func TestRunRuntimeDoesNotCloseStoreWhenModuleMaySurvive(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	runner := timeoutRuntimeRunner{started: make(chan struct{}), release: release}
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomes := make(chan runtimeOutcome, 1)
+	go func() {
+		outcomes <- runRuntime(ctx, &http.Server{Handler: http.NewServeMux()}, listener, runner, 50*time.Millisecond)
+	}()
+	<-runner.started
+	cancel()
+	outcome := <-outcomes
+	if !errors.Is(outcome.err, pipeline.ErrShutdownTimeout) {
+		t.Fatalf("runRuntime error = %v, want ErrShutdownTimeout", outcome.err)
+	}
+	assertStoreNotClosed(t, outcome)
+}
+
+func TestRunRuntimeDoesNotCloseStoreWhenHandlerMaySurvive(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomes := make(chan runtimeOutcome, 1)
+	go func() { outcomes <- runRuntime(ctx, srv, listener, contextRuntimeRunner{}, 25*time.Millisecond) }()
+
+	requestDone := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + listener.Addr().String())
+		if err == nil {
+			resp.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	cancel()
+	var outcome runtimeOutcome
+	select {
+	case outcome = <-outcomes:
+	case <-time.After(time.Second):
+		t.Fatal("runRuntime did not honor bounded HTTP shutdown")
+	}
+	if outcome.err == nil || !strings.Contains(outcome.err.Error(), "shutdown status server") {
+		t.Fatalf("runRuntime error = %v, want server shutdown timeout", outcome.err)
+	}
+	assertStoreNotClosed(t, outcome)
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked request did not finish after release")
+	}
+}
+
+func assertStoreNotClosed(t *testing.T, outcome runtimeOutcome) {
+	t.Helper()
+	if outcome.storeCloseSafe {
+		t.Fatal("runtime reported store close safe while an owner may survive")
+	}
+	var closed atomic.Bool
+	if err := closeStoreAfterRuntime(outcome, func() error { closed.Store(true); return nil }); err != nil {
+		t.Fatalf("closeStoreAfterRuntime: %v", err)
+	}
+	if closed.Load() {
+		t.Fatal("shared store was closed while a runtime owner may survive")
 	}
 }

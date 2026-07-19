@@ -155,12 +155,14 @@ type HealthyFunc func() bool
 // ModuleStatus is the diagnostic runtime state surfaced for one module.
 type ModuleStatus struct {
 	LastAttempt         time.Time
+	LastCompleted       time.Time
 	LastSuccess         time.Time
 	LastErrorAt         time.Time
 	LastError           string
 	ConsecutiveFailures int
 	StaleDeadline       time.Time
 	Live                bool
+	Ready               bool
 }
 
 // ModulesFunc reports each pipeline module's runtime state for /status.
@@ -206,12 +208,14 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		}
 		type moduleStatusDTO struct {
 			LastAttempt         string `json:"lastAttempt"`
+			LastCompleted       string `json:"lastCompleted"`
 			LastSuccess         string `json:"lastSuccess"`
 			LastErrorAt         string `json:"lastErrorAt"`
 			LastError           string `json:"lastError"`
 			ConsecutiveFailures int    `json:"consecutiveFailures"`
 			StaleDeadline       string `json:"staleDeadline"`
 			Live                bool   `json:"live"`
+			Ready               bool   `json:"ready"`
 		}
 		moduleTicks := make(map[string]string)
 		moduleDetails := make(map[string]moduleStatusDTO)
@@ -220,10 +224,14 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 				LastError:           module.LastError,
 				ConsecutiveFailures: module.ConsecutiveFailures,
 				Live:                module.Live,
+				Ready:               module.Ready,
 			}
 			if !module.LastAttempt.IsZero() {
 				formatted.LastAttempt = module.LastAttempt.Format(timeFormat)
-				moduleTicks[name] = formatted.LastAttempt
+			}
+			if !module.LastCompleted.IsZero() {
+				formatted.LastCompleted = module.LastCompleted.Format(timeFormat)
+				moduleTicks[name] = formatted.LastCompleted
 			} else {
 				moduleTicks[name] = ""
 			}

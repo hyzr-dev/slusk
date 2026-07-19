@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -69,15 +70,16 @@ func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 	attempted := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	completed := attempted.Add(4 * time.Second)
 	succeeded := attempted.Add(-time.Minute)
-	errored := attempted.Add(-time.Second)
+	errored := completed
 	staleDeadline := attempted.Add(90 * time.Second)
 	modules := func() map[string]ModuleStatus {
 		return map[string]ModuleStatus{
 			"wanted_sync": {
-				LastAttempt: attempted, LastSuccess: succeeded, LastErrorAt: errored,
+				LastAttempt: attempted, LastCompleted: completed, LastSuccess: succeeded, LastErrorAt: errored,
 				LastError: "temporary failure", ConsecutiveFailures: 2,
-				StaleDeadline: staleDeadline, Live: true,
+				StaleDeadline: staleDeadline, Live: true, Ready: true,
 			},
 			"discovery": {},
 		}
@@ -93,12 +95,14 @@ func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	}
 	type moduleDetail struct {
 		LastAttempt         string `json:"lastAttempt"`
+		LastCompleted       string `json:"lastCompleted"`
 		LastSuccess         string `json:"lastSuccess"`
 		LastErrorAt         string `json:"lastErrorAt"`
 		LastError           string `json:"lastError"`
 		ConsecutiveFailures int    `json:"consecutiveFailures"`
 		StaleDeadline       string `json:"staleDeadline"`
 		Live                bool   `json:"live"`
+		Ready               bool   `json:"ready"`
 	}
 	var got struct {
 		Modules       map[string]string       `json:"modules"`
@@ -107,21 +111,25 @@ func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Modules["wanted_sync"] != attempted.Format(timeFormat) || got.Modules["discovery"] != "" {
-		t.Errorf("modules compatibility map = %+v", got.Modules)
+	wantCompatibility := map[string]string{
+		"wanted_sync": completed.Format(timeFormat),
+		"discovery":   "",
+	}
+	if !reflect.DeepEqual(got.Modules, wantCompatibility) {
+		t.Errorf("modules compatibility map = %#v, want exactly %#v", got.Modules, wantCompatibility)
 	}
 	module := got.ModuleDetails["wanted_sync"]
-	if module.LastAttempt != attempted.Format(timeFormat) || module.LastSuccess != succeeded.Format(timeFormat) || module.LastErrorAt != errored.Format(timeFormat) {
+	if module.LastAttempt != attempted.Format(timeFormat) || module.LastCompleted != completed.Format(timeFormat) || module.LastSuccess != succeeded.Format(timeFormat) || module.LastErrorAt != errored.Format(timeFormat) {
 		t.Errorf("unexpected module timestamps: %+v", module)
 	}
 	if module.LastError != "temporary failure" || module.ConsecutiveFailures != 2 {
 		t.Errorf("unexpected module failure state: %+v", module)
 	}
-	if module.StaleDeadline != staleDeadline.Format(timeFormat) || !module.Live {
-		t.Errorf("unexpected authoritative liveness: %+v", module)
+	if module.StaleDeadline != staleDeadline.Format(timeFormat) || !module.Live || !module.Ready {
+		t.Errorf("unexpected authoritative health: %+v", module)
 	}
-	if got.ModuleDetails["discovery"].LastAttempt != "" {
-		t.Errorf("never-attempted module should have empty timestamps: %+v", got.ModuleDetails["discovery"])
+	if discovery := got.ModuleDetails["discovery"]; discovery.LastAttempt != "" || discovery.LastCompleted != "" {
+		t.Errorf("never-attempted module should have empty timestamps: %+v", discovery)
 	}
 }
 
