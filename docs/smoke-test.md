@@ -130,7 +130,7 @@ när allt gått igenom grönt.
 
 Webb-gränsnittet är nu serverat från samma `observ`-server som `/status` och `/metrics`.
 
-- [ ] Öppna `http://<observ.listen_addr>/` i en webbläsare (t.ex. `http://192.168.86.33:9090/`). Webbläsarens HTTP Basic-dialog accepterar valfritt användarnamn och `observ.auth_token` som lösenord. Använd TLS via reverse proxy utanför ett betrott privat nät.
+- [ ] Öppna `http://<observ.listen_addr>/` i en webbläsare (t.ex. `http://192.168.86.33:9090/`). Webbläsarens HTTP Basic-dialog accepterar valfritt användarnamn och `observ.auth_token` som lösenord. Använd TLS via reverse proxy utanför ett betrott privat nät. Reverse proxyn måste bevara den ursprungliga `Host`-headern, ta bort eventuell klientskickad `X-Forwarded-Proto` och sätta exakt ett betrott värde (`http` eller `https`); skicka aldrig vidare en lista eller en opålitlig header.
 - [ ] Sidan laddar med **mörktemat** och visar:
   - [ ] Sidofält med nav-knapparna `Översikt` och `Kö`.
   - [ ] **Översikt-vyn:** stat-kort för Köad, Aktiv, Stannad, Klar (även om de visar 0).

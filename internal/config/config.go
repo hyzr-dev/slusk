@@ -182,6 +182,8 @@ type StoreConfig struct {
 	DSN string `toml:"dsn"`
 }
 
+const observAuthTokenPlaceholder = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+
 // ObservConfig is the observability configuration.
 type ObservConfig struct {
 	ListenAddr string `toml:"listen_addr"`
@@ -326,6 +328,9 @@ func (c Config) Validate() error {
 			problems = append(problems, "observ.listen_addr must be a valid host:port")
 		} else if c.Observ.AuthToken == "" && !isLoopbackHost(host) {
 			problems = append(problems, "observ.auth_token is required when observ.listen_addr is not loopback-only")
+		}
+		if c.Observ.AuthToken == observAuthTokenPlaceholder {
+			problems = append(problems, "observ.auth_token must be replaced with a generated token")
 		}
 		if strings.ContainsAny(c.Observ.AuthToken, " \t\r\n") {
 			problems = append(problems, "observ.auth_token must not contain whitespace")

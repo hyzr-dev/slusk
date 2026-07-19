@@ -101,8 +101,11 @@ dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 # API and Prometheus clients send: Authorization: Bearer <token>
 # Browsers use HTTP Basic auth with any username and this token as the password.
 # Keep the token out of URLs and logs, and terminate TLS at a trusted reverse
-# proxy before exposing the listener beyond a trusted private network.
-auth_token = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
+# proxy before exposing the listener beyond a trusted private network. The
+# proxy must preserve Host, discard any client X-Forwarded-Proto header, and
+# set exactly one trusted X-Forwarded-Proto value (http or https).
+# Set this to a generated token before using the non-loopback listener below.
+auth_token = ""
 listen_addr = "0.0.0.0:9090"
 
 [paths]

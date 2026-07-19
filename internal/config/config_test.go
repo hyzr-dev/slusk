@@ -191,6 +191,7 @@ func TestObservAuthPolicy(t *testing.T) {
 		{name: "localhost without token", listenAddr: "localhost:9090"},
 		{name: "wildcard with token", listenAddr: "0.0.0.0:9090", token: "a-secret-token"},
 		{name: "wildcard without token", listenAddr: "0.0.0.0:9090", wantError: "observ.auth_token"},
+		{name: "repository placeholder token", listenAddr: "0.0.0.0:9090", token: "REPLACE_WITH_A_LONG_RANDOM_TOKEN", wantError: "must be replaced with a generated token"},
 		{name: "token with whitespace", listenAddr: "0.0.0.0:9090", token: "not a bearer token", wantError: "must not contain whitespace"},
 		{name: "empty host without token", listenAddr: ":9090", wantError: "observ.auth_token"},
 		{name: "LAN address without token", listenAddr: "192.168.1.20:9090", wantError: "observ.auth_token"},

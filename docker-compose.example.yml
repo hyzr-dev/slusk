@@ -39,9 +39,10 @@ services:
       # Public: /healthz only. Dashboard, API, /status, and /metrics require the
       # [observ] auth_token from config.toml. Keep that file out of source
       # control and send the token in Authorization, never in a URL/query.
-      # Bind the host side to 127.0.0.1 for local-only development, or put this
-      # behind a TLS reverse proxy before exposing it outside a trusted network.
-      - "9090:9090"
+      # The host side is bound to loopback for local-only development. A TLS
+      # reverse proxy may expose it, but must preserve Host and replace any
+      # client X-Forwarded-Proto with exactly one trusted http/https value.
+      - "127.0.0.1:9090:9090"
 
 volumes:
   slskdarr-pgdata:
