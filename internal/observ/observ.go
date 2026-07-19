@@ -147,30 +147,51 @@ const (
 // occurred (typically backed by the store's RetryFailedJob).
 type RetryFunc func(ctx context.Context, jobID int64) (RetryResult, error)
 
-// HealthyFunc reports whether the pipeline's modules are still making
-// progress. Unlike /status (a plain DB read that stays up even if a module
-// goroutine deadlocks), this is the liveness signal Docker/Swarm should poll.
+// HealthyFunc reports either liveness or readiness. /healthz uses liveness
+// (modules continue attempting work), while /readyz additionally requires
+// successful work and tolerates only a short run of consecutive failures.
 type HealthyFunc func() bool
 
-// ModulesFunc reports each pipeline module's last completed tick (see
-// pipeline.Runner.Health), surfaced at /status so an operator can see which
-// module (if any) has gone stale without needing metrics/log access. A zero
-// time.Time means the module has never completed a tick.
-type ModulesFunc func() map[string]time.Time
+// ModuleStatus is the diagnostic runtime state surfaced for one module.
+type ModuleStatus struct {
+	LastAttempt         time.Time
+	LastSuccess         time.Time
+	LastErrorAt         time.Time
+	LastError           string
+	ConsecutiveFailures int
+}
 
-// NewServer returns an http.Handler exposing /metrics, /status, /healthz,
-// /api/jobs, /api/jobs/{id}/cancel, /api/jobs/{id}/retry, /api/jobs/{id}/detail,
-// /api/jobs/{id}/events, /api/events, /api/peers, and the dashboard UI at /.
-// failedRetryAfter and maxCandidates are engine config values surfaced in
-// /api/jobs so the dashboard can show a job's retry ETA and candidate budget.
+// ModulesFunc reports each pipeline module's runtime state for /status.
+type ModulesFunc func() map[string]ModuleStatus
+
+// NewServer returns the observability handler with the same function used for
+// both health checks. Call NewServerWithReadiness when liveness and readiness
+// have distinct semantics.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	healthy HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
+		live, live, modules, retry, failedRetryAfter, maxCandidates)
+}
+
+// NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
+// /healthz, /readyz, the dashboard APIs, and the dashboard UI. failedRetryAfter
+// and maxCandidates are engine values surfaced by the existing job API.
+func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
+	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
+	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if !healthy() {
+		if !live() {
 			http.Error(w, "pipeline module stalled", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !ready() {
+			http.Error(w, "pipeline not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -181,18 +202,34 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		moduleTicks := map[string]string{}
-		for name, t := range modules() {
-			if !t.IsZero() {
-				moduleTicks[name] = t.Format(timeFormat)
-			} else {
-				moduleTicks[name] = ""
+		type moduleStatusDTO struct {
+			LastAttempt         string `json:"lastAttempt"`
+			LastSuccess         string `json:"lastSuccess"`
+			LastErrorAt         string `json:"lastErrorAt"`
+			LastError           string `json:"lastError"`
+			ConsecutiveFailures int    `json:"consecutiveFailures"`
+		}
+		moduleStatuses := make(map[string]moduleStatusDTO)
+		for name, module := range modules() {
+			formatted := moduleStatusDTO{
+				LastError:           module.LastError,
+				ConsecutiveFailures: module.ConsecutiveFailures,
 			}
+			if !module.LastAttempt.IsZero() {
+				formatted.LastAttempt = module.LastAttempt.Format(timeFormat)
+			}
+			if !module.LastSuccess.IsZero() {
+				formatted.LastSuccess = module.LastSuccess.Format(timeFormat)
+			}
+			if !module.LastErrorAt.IsZero() {
+				formatted.LastErrorAt = module.LastErrorAt.Format(timeFormat)
+			}
+			moduleStatuses[name] = formatted
 		}
 		resp := struct {
 			StatusReport
-			Modules map[string]string `json:"modules"`
-		}{report, moduleTicks}
+			Modules map[string]moduleStatusDTO `json:"modules"`
+		}{report, moduleStatuses}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})

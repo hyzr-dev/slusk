@@ -73,12 +73,12 @@ function statCards() {
   ).join('');
 }
 
-// --- Module health (per-pipeline-module liveness from /status's modules map) ---
+// --- Module health (per-pipeline-module runtime state from /status) ---
 
 let modules = {};
 
 // MODULE_STALE_AFTER_MS is a client-side approximation of the server's
-// per-module staleness window (Runner.Healthy uses each module's own
+// per-module staleness window (Runner.Live uses each module's own
 // Interval()*3 + tickTimeout, not available here) — good enough to flag a
 // module that has clearly stopped ticking without needing that per-module
 // metadata threaded through /status.
@@ -102,15 +102,17 @@ function moduleHealthRows() {
   const names = Object.keys(modules).sort();
   const now = new Date();
   el.innerHTML = names.map(name => {
-    const raw = modules[name];
-    const never = !raw;
-    const lastTick = never ? null : new Date(raw);
-    const stale = never || (now - lastTick) > MODULE_STALE_AFTER_MS;
-    const label = never ? 'Har aldrig tickat' : lastTick.toLocaleTimeString('sv-SE');
+    const status = modules[name] || {};
+    const never = !status.lastAttempt;
+    const lastAttempt = never ? null : new Date(status.lastAttempt);
+    const failures = status.consecutiveFailures || 0;
+    const unhealthy = never || (now - lastAttempt) > MODULE_STALE_AFTER_MS || failures >= 3;
+    let label = never ? 'Har aldrig körts' : lastAttempt.toLocaleTimeString('sv-SE');
+    if (failures > 0) label += ` (${failures} fel i rad)`;
     return `
       <tr>
         <td>${escapeHtml(name)}</td>
-        <td class="${stale ? 'module-stale' : ''}">${label}</td>
+        <td class="${unhealthy ? 'module-stale' : ''}" title="${escapeHtml(status.lastError || '')}">${label}</td>
       </tr>
     `;
   }).join('');

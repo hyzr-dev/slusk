@@ -452,6 +452,35 @@ func TestSearchTimeoutDoesNotDeleteSearchInGraceFallback(t *testing.T) {
 	}
 }
 
+func TestSearchCleanupFallbackIsBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v0/searches/s1":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			<-r.Context().Done() // the final harvest must cancel this request
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+	c.stopGrace = 20 * time.Millisecond
+	c.searchRetries = 0
+	started := time.Now()
+	_, err := c.Search(context.Background(), "q", 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected the deliberately blocked final harvest to fail")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded cleanup took %v", elapsed)
+	}
+}
+
 // TestSearchStopsIncompleteSearchToHarvestPartial pins the fix for a live bug:
 // slskd only persists a search's responses when the search is finalized
 // (isComplete), so harvesting /responses from a still-InProgress search

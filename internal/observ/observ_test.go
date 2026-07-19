@@ -26,7 +26,7 @@ func noopJobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, error)  {
 func noopRecentEvents(ctx context.Context, limit int) ([]core.JobEvent, error) { return nil, nil }
 func noopPeers(ctx context.Context) ([]core.PeerRow, error)                    { return nil, nil }
 func noopHealthy() bool                                                        { return true }
-func noopModules() map[string]time.Time                                        { return nil }
+func noopModules() map[string]ModuleStatus                                     { return nil }
 func noopRetry(ctx context.Context, jobID int64) (RetryResult, error)          { return RetryResultOK, nil }
 
 // newTestHandler builds a NewServer with no-op status/jobs/cancel funcs, for
@@ -63,18 +63,22 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 	}
 }
 
-// TestStatusEndpointIncludesModules verifies /status surfaces each pipeline
-// module's last-tick time (RFC3339) alongside the StatusReport fields, and
-// renders a never-ticked module (zero time.Time) as an empty string rather
-// than a zero-value timestamp.
-func TestStatusEndpointIncludesModules(t *testing.T) {
+func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
-	ticked := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	modules := func() map[string]time.Time {
-		return map[string]time.Time{"wanted_sync": ticked, "discovery": {}}
+	attempted := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	succeeded := attempted.Add(-time.Minute)
+	errored := attempted.Add(-time.Second)
+	modules := func() map[string]ModuleStatus {
+		return map[string]ModuleStatus{
+			"wanted_sync": {
+				LastAttempt: attempted, LastSuccess: succeeded, LastErrorAt: errored,
+				LastError: "temporary failure", ConsecutiveFailures: 2,
+			},
+			"discovery": {},
+		}
 	}
 	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, modules, noopRetry, testFailedRetryAfter, testMaxCandidates)
 
@@ -86,42 +90,62 @@ func TestStatusEndpointIncludesModules(t *testing.T) {
 		t.Fatalf("status code = %d", rec.Code)
 	}
 	var got struct {
-		Modules map[string]string `json:"modules"`
+		Modules map[string]struct {
+			LastAttempt         string `json:"lastAttempt"`
+			LastSuccess         string `json:"lastSuccess"`
+			LastErrorAt         string `json:"lastErrorAt"`
+			LastError           string `json:"lastError"`
+			ConsecutiveFailures int    `json:"consecutiveFailures"`
+		} `json:"modules"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Modules["wanted_sync"] != ticked.Format(timeFormat) {
-		t.Errorf("Modules[wanted_sync] = %q, want %q", got.Modules["wanted_sync"], ticked.Format(timeFormat))
+	module := got.Modules["wanted_sync"]
+	if module.LastAttempt != attempted.Format(timeFormat) || module.LastSuccess != succeeded.Format(timeFormat) || module.LastErrorAt != errored.Format(timeFormat) {
+		t.Errorf("unexpected module timestamps: %+v", module)
 	}
-	if got.Modules["discovery"] != "" {
-		t.Errorf("Modules[discovery] = %q, want empty string for a never-ticked module", got.Modules["discovery"])
+	if module.LastError != "temporary failure" || module.ConsecutiveFailures != 2 {
+		t.Errorf("unexpected module failure state: %+v", module)
+	}
+	if got.Modules["discovery"].LastAttempt != "" {
+		t.Errorf("never-attempted module should have empty timestamps: %+v", got.Modules["discovery"])
 	}
 }
 
-func TestHealthzEndpointReflectsLiveness(t *testing.T) {
+func TestHealthEndpointsSeparateLivenessAndReadiness(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 	cancel := func(ctx context.Context, jobID int64) (CancelResult, error) { return CancelResultOK, nil }
 
-	healthy := true
-	healthyFn := func() bool { return healthy }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, healthyFn, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates)
+	live, ready := true, false
+	h := NewServerWithReadiness(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers,
+		func() bool { return live }, func() bool { return ready }, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("healthy: status code = %d", rec.Code)
+	for _, tt := range []struct {
+		path string
+		want int
+	}{{"/healthz", http.StatusOK}, {"/readyz", http.StatusServiceUnavailable}} {
+		req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tt.want {
+			t.Errorf("%s status = %d, want %d", tt.path, rec.Code, tt.want)
+		}
 	}
 
-	healthy = false
-	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("stalled: status code = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	live, ready = false, true
+	for _, tt := range []struct {
+		path string
+		want int
+	}{{"/healthz", http.StatusServiceUnavailable}, {"/readyz", http.StatusOK}} {
+		req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tt.want {
+			t.Errorf("%s status = %d, want %d", tt.path, rec.Code, tt.want)
+		}
 	}
 }
 

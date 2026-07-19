@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -30,29 +31,42 @@ type Store struct {
 // well before any such idle timeout turns that indefinite hang into, at worst,
 // one query retried on a fresh connection.
 const (
-	connMaxIdleTime = 2 * time.Minute
-	connMaxLifetime = 5 * time.Minute
+	connMaxIdleTime    = 2 * time.Minute
+	connMaxLifetime    = 5 * time.Minute
+	defaultOpenTimeout = 30 * time.Second
 )
 
-// Open connects to the PostgreSQL database at dsn (a postgres:// URL or
-// key=value connection string), verifies the connection with a ping, and
-// applies the schema idempotently.
+// Open connects to PostgreSQL with a bounded default startup context.
 func Open(dsn string) (*Store, error) {
-	return openWithLimits(dsn, connMaxIdleTime, connMaxLifetime)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpenTimeout)
+	defer cancel()
+	return OpenContext(ctx, dsn)
+}
+
+// OpenContext connects to PostgreSQL, verifies the connection, and applies the
+// schema within the caller's startup deadline.
+func OpenContext(ctx context.Context, dsn string) (*Store, error) {
+	return openWithLimitsContext(ctx, dsn, connMaxIdleTime, connMaxLifetime)
 }
 
 func openWithLimits(dsn string, maxIdleTime, maxLifetime time.Duration) (*Store, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpenTimeout)
+	defer cancel()
+	return openWithLimitsContext(ctx, dsn, maxIdleTime, maxLifetime)
+}
+
+func openWithLimitsContext(ctx context.Context, dsn string, maxIdleTime, maxLifetime time.Duration) (*Store, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	db.SetConnMaxIdleTime(maxIdleTime)
 	db.SetConnMaxLifetime(maxLifetime)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
-	if err := applySchema(db, schemaSQL); err != nil {
+	if err := applySchemaContext(ctx, db, schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
@@ -63,12 +77,18 @@ func openWithLimits(dsn string, maxIdleTime, maxLifetime time.Duration) (*Store,
 // Every statement is either CREATE/ALTER ... IF (NOT) EXISTS or a DO block
 // guarded the same way, so the apply is idempotent.
 func applySchema(db *sql.DB, schemaSQL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpenTimeout)
+	defer cancel()
+	return applySchemaContext(ctx, db, schemaSQL)
+}
+
+func applySchemaContext(ctx context.Context, db *sql.DB, schemaSQL string) error {
 	for _, stmt := range splitStatements(schemaSQL) {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue
 		}
-		if _, err := db.Exec(stmt); err != nil {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}

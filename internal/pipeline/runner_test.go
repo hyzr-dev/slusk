@@ -5,21 +5,20 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// tickRecorder is a fake Module used across these tests: it counts
-// completed ticks and can be told to error, panic, or hang (ignoring ctx)
-// on every tick so the runner's fault tolerance can be exercised directly.
 type tickRecorder struct {
 	name     string
 	interval time.Duration
 	ticks    atomic.Int64
 	err      error
 	panics   bool
-	block    chan struct{} // non-nil: Tick blocks on this until it is closed, ignoring ctx entirely (hang simulation)
+	block    chan struct{}
 }
 
 func (t *tickRecorder) Name() string            { return t.name }
@@ -35,24 +34,66 @@ func (t *tickRecorder) Tick(_ context.Context, _ time.Time) error {
 	return t.err
 }
 
-// discardLogger returns a slog.Logger that never writes to stderr, so test
-// output stays clean even when panics/errors are deliberately triggered.
+type sequenceModule struct {
+	name        string
+	interval    time.Duration
+	mu          sync.Mutex
+	results     []error
+	calls       int
+	blockBefore int
+	release     <-chan struct{}
+}
+
+func (m *sequenceModule) Name() string            { return m.name }
+func (m *sequenceModule) Interval() time.Duration { return m.interval }
+func (m *sequenceModule) Tick(_ context.Context, _ time.Time) error {
+	m.mu.Lock()
+	idx := m.calls
+	m.calls++
+	m.mu.Unlock()
+	if m.release != nil && idx == m.blockBefore {
+		<-m.release
+	}
+	if idx >= len(m.results) {
+		return nil
+	}
+	return m.results[idx]
+}
+
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+}
+
+func newTestRunner(t *testing.T, timeout time.Duration, modules ...Module) *Runner {
+	t.Helper()
+	r, err := NewRunner(discardLogger(), timeout, modules...)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	return r
+}
+
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition was not met before timeout")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestRunnerTicksEveryModuleIndependently(t *testing.T) {
 	m1 := &tickRecorder{name: "m1", interval: 10 * time.Millisecond}
 	m2 := &tickRecorder{name: "m2", interval: 10 * time.Millisecond}
-	r := NewRunner(discardLogger(), 50*time.Millisecond, m1, m2)
+	r := newTestRunner(t, 50*time.Millisecond, m1, m2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-
 	if err := r.Run(ctx); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-
 	if got := m1.ticks.Load(); got < 5 {
 		t.Errorf("m1 ticks = %d, want >= 5", got)
 	}
@@ -61,88 +102,150 @@ func TestRunnerTicksEveryModuleIndependently(t *testing.T) {
 	}
 }
 
-func TestRunnerSurvivesPanicAndError(t *testing.T) {
-	panicker := &tickRecorder{name: "panicker", interval: 10 * time.Millisecond, panics: true}
-	erroring := &tickRecorder{name: "erroring", interval: 10 * time.Millisecond, err: errors.New("boom")}
-	healthy := &tickRecorder{name: "healthy", interval: 10 * time.Millisecond}
-	r := NewRunner(discardLogger(), 50*time.Millisecond, panicker, erroring, healthy)
+func TestRunnerTracksRepeatedErrorsAndPanic(t *testing.T) {
+	panicker := &tickRecorder{name: "panicker", interval: 5 * time.Millisecond, panics: true}
+	erroring := &tickRecorder{name: "erroring", interval: 5 * time.Millisecond, err: errors.New("boom")}
+	r := newTestRunner(t, 20*time.Millisecond, panicker, erroring)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitFor(t, time.Second, func() bool {
+		h := r.Health()
+		return h["panicker"].ConsecutiveFailures >= 3 && h["erroring"].ConsecutiveFailures >= 3
+	})
 
-	if err := r.Run(ctx); err != nil {
+	if !r.Live() {
+		t.Error("repeated returned failures must not fail liveness")
+	}
+	if r.Ready() {
+		t.Error("three consecutive failures must fail readiness")
+	}
+	for _, name := range []string{"panicker", "erroring"} {
+		status := r.Health()[name]
+		if status.LastAttempt.IsZero() || status.LastErrorAt.IsZero() || status.LastError == "" {
+			t.Errorf("%s status missing attempt/error details: %+v", name, status)
+		}
+		if !status.LastSuccess.IsZero() {
+			t.Errorf("%s unexpectedly recorded success: %+v", name, status)
+		}
+	}
+	if got := r.Health()["panicker"].LastError; !strings.Contains(got, "panic") {
+		t.Errorf("panic LastError = %q, want panic detail", got)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
+}
 
-	// The panicking module's ticks counter never increments (it panics
-	// before reaching ticks.Add), but its lastTick must still advance -
-	// checked separately below via Health/Healthy in other tests. Here we
-	// only assert the process survived and the other modules kept going.
-	if got := erroring.ticks.Load(); got < 5 {
-		t.Errorf("erroring module ticks = %d, want >= 5", got)
+func TestRunnerReadinessRecoversAfterSuccess(t *testing.T) {
+	boom := errors.New("temporary")
+	releaseRecovery := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRecovery) }) }
+	m := &sequenceModule{
+		name: "recovering", interval: 10 * time.Millisecond,
+		results: []error{nil, boom, boom, boom, nil}, blockBefore: 4, release: releaseRecovery,
 	}
-	if got := healthy.ticks.Load(); got < 5 {
-		t.Errorf("healthy module ticks = %d, want >= 5", got)
+	r := newTestRunner(t, 50*time.Millisecond, m)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		release()
+		cancel()
+	}()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	waitFor(t, time.Second, func() bool { return r.Health()[m.name].ConsecutiveFailures == 3 })
+	if r.Ready() {
+		t.Fatal("runner remained ready after three consecutive failures")
+	}
+	release()
+	waitFor(t, time.Second, r.Ready)
+	status := r.Health()[m.name]
+	if status.ConsecutiveFailures != 0 {
+		t.Errorf("ConsecutiveFailures = %d, want 0 after recovery", status.ConsecutiveFailures)
+	}
+	if status.LastSuccess.IsZero() {
+		t.Error("recovery did not update LastSuccess")
+	}
+	if status.LastError == "" {
+		t.Error("LastError should be retained after recovery for diagnostics")
 	}
 
-	if lastTick := r.Health()["panicker"]; lastTick.IsZero() {
-		t.Error("panicker module never recorded a completed tick despite panicking")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
 	}
 }
 
-func TestRunnerHealthyReflectsStaleModule(t *testing.T) {
-	fast := &tickRecorder{name: "fast", interval: 10 * time.Millisecond}
+func TestRunnerLiveReflectsStaleAttempt(t *testing.T) {
 	block := make(chan struct{})
-	slow := &tickRecorder{name: "slow", interval: 10 * time.Millisecond, block: block}
-
-	r := NewRunner(discardLogger(), 10*time.Millisecond, fast, slow)
-
+	m := &tickRecorder{name: "slow", interval: 5 * time.Millisecond, block: block}
+	r := newTestRunner(t, 5*time.Millisecond, m)
 	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- r.Run(ctx) }()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
 
-	// slow's first tick is blocked on `block`, ignoring ctx entirely, well
-	// past the 10ms tickTimeout; fast keeps ticking normally in the
-	// meantime, so overall health must still report unhealthy.
-	time.Sleep(60 * time.Millisecond)
-
-	if fast.ticks.Load() == 0 {
-		t.Fatal("expected fast module to have ticked while slow module was hung")
-	}
-	if r.Healthy() {
-		t.Fatal("expected Healthy() == false while slow module has never completed a tick")
+	waitFor(t, time.Second, func() bool { return !r.Health()[m.name].LastAttempt.IsZero() })
+	waitFor(t, time.Second, func() bool { return !r.Live() })
+	if r.Ready() {
+		t.Error("stale module must not be ready")
 	}
 
-	close(block) // release slow's hung tick
+	close(block)
 	cancel()
-
-	select {
-	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("Run returned error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Run did not return within 1s of ctx cancel + unblocking the hung tick")
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned error: %v", err)
 	}
 }
 
-func TestRunnerStopsOnContextCancel(t *testing.T) {
-	m := &tickRecorder{name: "m", interval: 10 * time.Millisecond}
-	r := NewRunner(discardLogger(), 50*time.Millisecond, m)
-
+func TestRunnerShutdownIsBoundedWhenModuleIgnoresContext(t *testing.T) {
+	block := make(chan struct{})
+	m := &tickRecorder{name: "blocked", interval: time.Second, block: block}
+	r := newTestRunner(t, 5*time.Millisecond, m)
+	r.shutdownTimeout = 25 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- r.Run(ctx) }()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitFor(t, time.Second, func() bool { return !r.Health()[m.name].LastAttempt.IsZero() })
 
-	time.Sleep(20 * time.Millisecond)
+	started := time.Now()
 	cancel()
+	if err := <-done; !errors.Is(err, ErrShutdownTimeout) {
+		t.Fatalf("Run error = %v, want ErrShutdownTimeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("bounded shutdown took %v", elapsed)
+	}
+	close(block)
+}
 
-	select {
-	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("Run returned error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Run did not return within 1s of ctx cancel")
+func TestNewRunnerRejectsInvalidModules(t *testing.T) {
+	valid := func(name string, interval time.Duration) Module {
+		return &tickRecorder{name: name, interval: interval}
+	}
+	var typedNil *tickRecorder
+	tests := []struct {
+		name        string
+		tickTimeout time.Duration
+		modules     []Module
+	}{
+		{name: "nonpositive tick timeout", tickTimeout: 0, modules: []Module{valid("ok", time.Second)}},
+		{name: "nil module", tickTimeout: time.Second, modules: []Module{nil}},
+		{name: "typed nil module", tickTimeout: time.Second, modules: []Module{typedNil}},
+		{name: "blank name", tickTimeout: time.Second, modules: []Module{valid("", time.Second)}},
+		{name: "untrimmed name", tickTimeout: time.Second, modules: []Module{valid(" bad ", time.Second)}},
+		{name: "duplicate name", tickTimeout: time.Second, modules: []Module{valid("same", time.Second), valid("same", time.Second)}},
+		{name: "nonpositive interval", tickTimeout: time.Second, modules: []Module{valid("bad", 0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewRunner(discardLogger(), tt.tickTimeout, tt.modules...); err == nil {
+				t.Fatal("NewRunner returned nil error")
+			}
+		})
 	}
 }
