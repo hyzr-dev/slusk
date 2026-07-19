@@ -116,10 +116,8 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 // ResetJobToWanted deletes the job's candidates (and their transfers) and
 // returns it to WANTED in one tx. retries/notBefore are written as given
 // (exhaustion passes bumped values; TTL expiry and manual retry pass
-// job.Retries-as-is / 0 and nil). Transfers must go with the candidates:
-// transfers has a global UNIQUE(username, filename), so a leftover row from
-// the wiped cycle would collide when a later cycle re-attempts the same
-// peer+file.
+// job.Retries-as-is / 0 and nil). Transfers must go with the candidates to
+// satisfy transfer ownership/FK integrity and leave no stale cycle data.
 // The job UPDATE is guarded on the caller-supplied `from` state (per the
 // single-writer invariant every transition UPDATE must be conditional): every
 // caller resets a SELECTING job, so a job WantedSync cancelled underneath us
@@ -159,10 +157,8 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 // RetryFailedJob manually revives one FAILED job: retries 0, not_before/failed_at
 // cleared, candidates deleted, state WANTED. Returns false when the job is not
 // FAILED (the dashboard button raced a state change) or does not exist.
-// Candidates/transfers must go with the reset for the same reason as
-// ResetJobToWanted: transfers has a global UNIQUE(username, filename), so a
-// leftover row from the failed cycle would collide when the revived job
-// re-attempts the same peer+file.
+// Candidates/transfers must go with the reset for the same ownership/FK and
+// clean-slate reason as ResetJobToWanted.
 func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -287,9 +283,8 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 		return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: rows affected: %w", err)
 	}
 	if reentered > 0 {
-		// Wipe the stale cycle's candidates+transfers for the same reason as
-		// RetryFailedJob: transfers has a global UNIQUE(username, filename), so a
-		// leftover row would collide when the revived job re-attempts the peer+file.
+		// Wipe the stale cycle's candidates+transfers for the same ownership/FK
+		// and clean-slate reason as RetryFailedJob.
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1))`,
 			lidarrAlbumID); err != nil {

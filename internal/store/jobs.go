@@ -42,28 +42,23 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 }
 
 // RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a QUEUED
-// transfer with no slskd id BEFORE slskd is called. It is idempotent on the
-// (username, filename) key: a re-enqueue updates the existing row's candidate
-// and deadline and returns that row, rather than violating the UNIQUE constraint.
+// transfer with no slskd id BEFORE slskd is called. It is idempotent within the
+// owning candidate; another job attempting the same remote file must retain its
+// own row rather than stealing this transfer's ownership.
 func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error) {
-	_, err := s.db.ExecContext(ctx,
+	var id int64
+	if err := s.db.QueryRowContext(ctx,
 		`INSERT INTO transfers (candidate_id, username, filename, state, deadline, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
-		 ON CONFLICT(username, filename) DO UPDATE SET
-		   candidate_id = excluded.candidate_id,
+		 ON CONFLICT(candidate_id, username, filename) DO UPDATE SET
 		   state = excluded.state,
 		   deadline = excluded.deadline,
 		   slskd_id = '',
 		   bytes_done = 0,
-		   updated_at = excluded.updated_at`,
-		candidateID, username, filename, string(core.TransferQueued), deadline, now)
-	if err != nil {
+		   updated_at = excluded.updated_at
+		 RETURNING id`,
+		candidateID, username, filename, string(core.TransferQueued), deadline, now).Scan(&id); err != nil {
 		return 0, fmt.Errorf("upsert transfer intent: %w", err)
-	}
-	var id int64
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM transfers WHERE username = $1 AND filename = $2`, username, filename).Scan(&id); err != nil {
-		return 0, fmt.Errorf("read transfer id: %w", err)
 	}
 	return id, nil
 }
@@ -72,16 +67,16 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, user
 // has not yet handed to slskd, as a PENDING transfer carrying its size in
 // bytes_total. The pipeline promotes a bounded number of these to QUEUED per
 // peer at a time (via RecordEnqueueIntent) so a burst never trips a peer's
-// per-user queued-megabyte limit. Idempotent on the (username, filename) key,
-// mirroring RecordEnqueueIntent. The deadline is a placeholder; the real one
-// is set when the file is actually sent, since PENDING transfers are never
+// per-user queued-megabyte limit. Idempotent on the candidate-owned
+// (candidate_id, username, filename) key, mirroring RecordEnqueueIntent. The
+// deadline is a placeholder; the real one is set when the file is actually
+// sent, since PENDING transfers are never
 // deadline-reaped.
 func (s *Store) RecordPendingTransfer(ctx context.Context, candidateID int64, username, filename string, size int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transfers (candidate_id, username, filename, state, bytes_total, deadline, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT(username, filename) DO UPDATE SET
-		   candidate_id = excluded.candidate_id,
+		 ON CONFLICT(candidate_id, username, filename) DO UPDATE SET
 		   state = excluded.state,
 		   bytes_total = excluded.bytes_total,
 		   slskd_id = '',
@@ -107,11 +102,15 @@ func (s *Store) AttachTransferID(ctx context.Context, transferID int64, slskdID 
 	return nil
 }
 
-// FindTransferByFallback recovers a transfer by its (username, filename) key,
-// used after a crash between RecordEnqueueIntent and AttachTransferID.
-func (s *Store) FindTransferByFallback(ctx context.Context, username, filename string) (core.Transfer, bool, error) {
+// FindTransferByFallback recovers a candidate-owned transfer by its remote
+// (username, filename) key, used after a crash between RecordEnqueueIntent and
+// AttachTransferID.
+func (s *Store) FindTransferByFallback(ctx context.Context, candidateID int64, username, filename string) (core.Transfer, bool, error) {
 	tr, err := scanTransfer(s.db.QueryRowContext(ctx,
-		transferSelect+` WHERE username = $1 AND filename = $2`, username, filename))
+		transferSelect+` WHERE candidate_id = $1 AND username = $2 AND filename = $3
+		 AND state IN ($4, $5, $6, $7)`,
+		candidateID, username, filename, string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.Transfer{}, false, nil
 	}

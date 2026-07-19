@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS transfers (
     last_progress_at TIMESTAMPTZ,
     updated_at       TIMESTAMPTZ NOT NULL,
     retries          BIGINT NOT NULL DEFAULT 0,
-    UNIQUE(username, filename)
+    CONSTRAINT transfers_candidate_username_filename_key
+        UNIQUE(candidate_id, username, filename)
 );
 
 -- Pre-rewrite migration, and it MUST run before idx_transfers_candidate below:
@@ -67,6 +68,30 @@ DO $$ BEGIN
         ALTER TABLE transfers RENAME COLUMN attempt_id TO candidate_id;
     END IF;
 END $$;
+
+-- The original write-ahead schema made (username, filename) globally unique.
+-- That lets a second job attempting the same remote file silently move the
+-- first job's transfer row to its own candidate via ON CONFLICT, leaving the
+-- first DOWNLOADING job with an incomplete set. Idempotently replace that key
+-- with candidate-scoped ownership after the legacy candidate_id rename above.
+-- The old global key guarantees existing data cannot conflict while the new
+-- key is added.
+ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_username_filename_key;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'transfers_candidate_username_filename_key') THEN
+        ALTER TABLE transfers ADD CONSTRAINT transfers_candidate_username_filename_key
+            UNIQUE (candidate_id, username, filename);
+    END IF;
+END $$;
+
+-- Only one candidate may own an unsettled remote file at a time. This keeps
+-- username+filename crash fallback unambiguous without imposing global
+-- uniqueness on terminal history, which later candidates/jobs may legitimately
+-- retry. A conflicting activation fails inside its transaction and rolls back.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transfers_live_remote_owner
+    ON transfers(username, filename)
+    WHERE state IN ('PENDING', 'QUEUED', 'IN_PROGRESS', 'STALLED');
 
 -- Pre-rewrite databases had these indexes on the now-gone candidate_attempts
 -- table and the old attempt_id-named transfers index; drop them on upgrade.

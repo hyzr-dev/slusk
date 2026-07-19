@@ -177,6 +177,72 @@ func TestSelectingRespectsMaxActive(t *testing.T) {
 	}
 }
 
+func TestSelectingLiveOwnerConflictDoesNotStarveLaterJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+	p.MaxActive = 3
+
+	seed := func(albumID int64, username, filename string, updatedAt time.Time) (core.AlbumJob, core.Candidate) {
+		t.Helper()
+		job, err := st.UpsertWantedJob(ctx, albumID, updatedAt)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := st.InsertCandidates(ctx, job.ID, []store.NewCandidate{{
+			Username: username, Score: 1,
+			Files: []core.CandidateFile{{Filename: filename, Size: 10}},
+		}}, updatedAt); err != nil {
+			t.Fatalf("InsertCandidates: %v", err)
+		}
+		if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, updatedAt); err != nil {
+			t.Fatalf("AdvanceJobState: %v", err)
+		}
+		cand, found, err := st.NextNewCandidate(ctx, job.ID)
+		if err != nil || !found {
+			t.Fatalf("NextNewCandidate: found=%v err=%v", found, err)
+		}
+		return job, cand
+	}
+
+	ownerJob, owner := seed(13, "shared", "same.flac", now.Add(-5*time.Minute))
+	if activated, _, err := st.ActivateCandidateWithTransfers(ctx, owner.ID, ownerJob.ID, p.MaxActive, now.Add(-5*time.Minute)); err != nil || !activated {
+		t.Fatalf("activate live owner: activated=%v err=%v", activated, err)
+	}
+
+	// Fill the entire first FIFO query (limit=MaxActive) with conflicts. If
+	// skips remain at the head unchanged, laterJob is permanently invisible.
+	var blockedJobs []core.AlbumJob
+	for i := 0; i < p.MaxActive; i++ {
+		job, _ := seed(int64(14+i), "shared", "same.flac", now.Add(time.Duration(-4+i)*time.Minute))
+		blockedJobs = append(blockedJobs, job)
+	}
+	laterJob, _ := seed(17, "other", "other.flac", now.Add(-time.Minute))
+
+	sel := NewSelecting(p)
+	if err := sel.Tick(ctx, now); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, laterJob.ID); got != core.StateSelecting {
+		t.Fatalf("later job state after conflict-only batch = %v, want SELECTING", got)
+	}
+	if err := sel.Tick(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+	for _, blockedJob := range blockedJobs {
+		if got := jobStateFor(t, st, blockedJob.ID); got != core.StateSelecting {
+			t.Errorf("conflicting job %d state = %v, want SELECTING for retry", blockedJob.ID, got)
+		}
+	}
+	if got := jobStateFor(t, st, laterJob.ID); got != core.StateDownloading {
+		t.Errorf("later unrelated job state = %v, want DOWNLOADING", got)
+	}
+	if len(searcher.enqueued) != 1 || searcher.enqueued[0] != "other.flac" {
+		t.Errorf("enqueued = %v, want only later unrelated file", searcher.enqueued)
+	}
+}
+
 func TestSelectingExhaustionBacksOffToWanted(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
