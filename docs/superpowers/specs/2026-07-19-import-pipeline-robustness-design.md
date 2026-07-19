@@ -1,7 +1,7 @@
 # Import pipeline robustness — design
 
 **Date:** 2026-07-19
-**Status:** Approved for planning
+**Status:** Implemented
 **Touches:** `internal/lidarr/client.go`, `internal/core/models.go`, `internal/store` (schema + wanted/candidates), `internal/pipeline/wanted.go`, `internal/pipeline/discovery.go`, `internal/pipeline/importing.go`, `go.mod`
 
 ## Motivation
