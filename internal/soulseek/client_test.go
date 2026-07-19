@@ -121,6 +121,25 @@ func readFrameCode(conn net.Conn) (uint32, error) {
 	return binary.LittleEndian.Uint32(buf[:4]), nil
 }
 
+func drainInitialTreeAdvertisements(conn net.Conn) error {
+	want := []uint32{
+		uint32(server.CodeHaveNoParent),
+		uint32(server.CodeBranchRoot),
+		uint32(server.CodeBranchLevel),
+		uint32(server.CodeAcceptChildren),
+	}
+	for _, wantCode := range want {
+		code, err := readFrameCode(conn)
+		if err != nil {
+			return err
+		}
+		if code != wantCode {
+			return fmt.Errorf("initial tree code = %d, want %d", code, wantCode)
+		}
+	}
+	return nil
+}
+
 // --- fake server harness ---
 
 type fakeServer struct {
@@ -358,6 +377,12 @@ func TestClientRelogged(t *testing.T) {
 			t.Logf("write login success: %v", err)
 			return
 		}
+		if _, err := readFrameCode(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
 		if _, err := conn.Write(reloggedFrame(t)); err != nil {
 			t.Logf("write relogged: %v", err)
 		}
@@ -547,10 +572,14 @@ func TestClientSendsPing(t *testing.T) {
 			t.Logf("write login success: %v", err)
 			return
 		}
-		// The client sends SetListenPort right after login, before the
-		// first ping; discard it before waiting for the ping.
+		// The client sends SetListenPort and its initial distributed-tree
+		// advertisements after login, before the first ping.
 		if _, err := readFrameCode(conn); err != nil {
 			t.Logf("read set listen port frame after login: %v", err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			t.Logf("read initial tree advertisements: %v", err)
 			return
 		}
 		code, err := readFrameCode(conn)

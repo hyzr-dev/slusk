@@ -12,9 +12,9 @@ import (
 
 const CodeBranchRoot Code = 5
 
-// BranchRoot code 5 we tell our distributed children the username of the root of the
-// branch we’re in on the distributed network. This message should not be sent
-// when we’re the branch root.
+// BranchRoot code 5 tells distributed children the username of the branch root.
+// Current clients send it to every accepted child, including when the sender is
+// itself the branch root.
 type BranchRoot struct {
 	Root string
 }

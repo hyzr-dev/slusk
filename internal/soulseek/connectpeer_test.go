@@ -135,9 +135,13 @@ func startConnectedClient(t *testing.T, handle func(conn net.Conn)) (*Client, st
 			t.Logf("write login success: %v", err)
 			return
 		}
-		// The client always sends SetListenPort right after login.
+		// The client sends SetListenPort and its initial tree state after login.
 		if _, _, err := readRawFrame(conn); err != nil {
 			t.Logf("read set listen port: %v", err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			t.Logf("read initial tree advertisements: %v", err)
 			return
 		}
 		handle(conn)
@@ -415,6 +419,9 @@ func TestConnectPeerServerDisconnectFailsPending(t *testing.T) {
 			t.Logf("read set listen port: %v", err)
 			return
 		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
 		serverConn = conn
 		close(connReady)
 		// Read (and drop) the GetPeerAddress request, then go silent and let
@@ -474,6 +481,9 @@ func TestConnectPeerServerDisconnectFailsPendingIndirectDance(t *testing.T) {
 		}
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
 			t.Logf("read set listen port: %v", err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
 			return
 		}
 		serverConn = conn
@@ -585,6 +595,9 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
 			return
 		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
 
 		payload := new(bytes.Buffer)
 		mustWrite(t, writeUint32(payload, uint32(server.CodeConnectToPeer)))
@@ -655,6 +668,9 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 			return
 		}
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
 			return
 		}
 

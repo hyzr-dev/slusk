@@ -91,6 +91,9 @@ type Config struct {
 	sessionWriteQueue int
 	// peerIdleTimeout retires ordinary retained P sessions. Default 2m.
 	peerIdleTimeout time.Duration
+	// parentCandidateTimeout bounds one direct D candidate's opportunity to
+	// provide valid metadata and a search. Default 10s.
+	parentCandidateTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -137,6 +140,7 @@ type Client struct {
 
 	tokens       *tokenAllocator
 	sessions     *sessionRegistry
+	tree         *distributedTree
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
@@ -190,6 +194,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.peerIdleTimeout <= 0 {
 		cfg.peerIdleTimeout = defaultPeerIdleTimeout
 	}
+	if cfg.parentCandidateTimeout <= 0 {
+		cfg.parentCandidateTimeout = defaultParentCandidateTimeout
+	}
 
 	c := &Client{
 		cfg:            cfg,
@@ -198,11 +205,12 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		pending:        make(map[soul.Token]*pendingAttempt),
 		tokens:         newTokenAllocator(),
 		sessions:       newSessionRegistry(nil),
-		sessionHooks:   discardSessionHooks{},
 		inboundSlots:   make(chan struct{}, cfg.inboundPeerLimit),
 		handshakeConns: make(map[net.Conn]struct{}),
 		establishes:    make(map[sessionKey]*sessionEstablishment),
 	}
+	c.tree = newDistributedTree(c)
+	c.sessionHooks = composedSessionHooks{c.tree, discardSessionHooks{}}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
@@ -211,7 +219,8 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // types this package actually sends, rather than reusing server package's
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
-	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress |
+		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch
 	Serialize(M) ([]byte, error)
 }
 
@@ -436,13 +445,17 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		}
 		c.mu.Unlock()
 		c.serverWriteMu.Unlock()
+		c.tree.deactivate(generation)
 		c.sessions.CloseGeneration("D", generation, errNoServerConnection)
 		c.failAllAddrWaiters(errNoServerConnection)
 		c.failAllPendingAttempts(errNoServerConnection)
 	}()
 
-	if err := sendToServer(c, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
+	if err := sendToServerGeneration(c, generation, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
 		return fmt.Errorf("write set listen port: %w", err)
+	}
+	if err := c.tree.activate(generation); err != nil {
+		return fmt.Errorf("initialize distributed tree: %w", err)
 	}
 
 	readErrs := make(chan error, 1)
@@ -526,6 +539,69 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 		}
 		c.handleCantConnectToPeer(*msg)
 		return nil
+
+	case server.CodePossibleParents:
+		msg := &server.PossibleParents{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize possible parents: %w", err)
+		}
+		generation := c.currentServerGeneration()
+		c.tree.offerParents(ctx, generation, msg.Parents)
+		return nil
+
+	case server.CodeResetDistributed:
+		msg := &server.ResetDistributed{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize reset distributed: %w", err)
+		}
+		c.tree.reset(c.currentServerGeneration())
+		return nil
+
+	case server.CodeEmbeddedMessage:
+		msg := &server.EmbeddedMessage{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize embedded message: %w", err)
+		}
+		if err := c.tree.handleServerEmbedded(c.currentServerGeneration(), *msg); err != nil {
+			return fmt.Errorf("handle embedded distributed message: %w", err)
+		}
+		return nil
+
+	case server.CodeParentMinSpeed:
+		msg := &server.ParentMinSpeed{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize parent minimum speed: %w", err)
+		}
+		c.tree.updateParentMinSpeed(c.currentServerGeneration(), msg.MinSpeed)
+		return nil
+
+	case server.CodeParentSpeedRatio:
+		msg := &server.ParentSpeedRatio{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize parent speed ratio: %w", err)
+		}
+		c.tree.updateParentRatio(c.currentServerGeneration(), msg.SpeedRatio)
+		return nil
+
+	case server.CodeWatchUser:
+		msg := &server.WatchUser{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize watch user: %w", err)
+		}
+		if msg.Username == c.cfg.Username && msg.Exists {
+			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.AverageSpeed)
+		}
+		return nil
+
+	case server.CodeGetUserStats:
+		msg := &server.GetUserStats{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize user stats: %w", err)
+		}
+		if msg.Username == c.cfg.Username {
+			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.Speed)
+		}
+		return nil
 	}
 
 	if c.logger != nil {
@@ -578,6 +654,16 @@ func (c *Client) recordTransientFailure(err error) int {
 // Copied from internal/pipeline/backoff.go rather than exported from there,
 // since pipeline is a separate scheduling concern and this package should
 // not depend on it.
+func (c *Client) currentServerGeneration() uint64 {
+	c.mu.Lock()
+	generation := c.serverGeneration
+	if c.serverConn == nil {
+		generation = 0
+	}
+	c.mu.Unlock()
+	return generation
+}
+
 func (c *Client) isServerGenerationActive(generation uint64) bool {
 	c.mu.Lock()
 	active := c.serverConn != nil && c.serverGeneration == generation
