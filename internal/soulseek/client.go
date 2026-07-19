@@ -117,6 +117,8 @@ func (c *Client) Run(ctx context.Context) error {
 		// waits exactly backoffBase; failures is 1 on the first transient
 		// failure, hence the -1.
 		wait := nextBackoff(failures-1, c.cfg.backoffBase, c.cfg.backoffCap)
+		c.logger.Warn("soulseek connection failed; reconnecting",
+			"err", err, "backoff", wait, "consecutive_failures", failures)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -160,6 +162,8 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 
 	c.recordConnected()
+	c.logger.Info("logged in to soulseek server",
+		"address", c.cfg.Address, "username", c.cfg.Username)
 
 	return c.serveConnected(ctx, conn)
 }
