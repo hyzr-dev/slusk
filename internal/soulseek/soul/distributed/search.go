@@ -10,7 +10,12 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
 )
 
-const CodeSearch Code = 3
+const (
+	CodeSearch       Code   = 3
+	searchIdentifier uint32 = '1'
+)
+
+var errInvalidSearchIdentifier = errors.New("invalid distributed search identifier")
 
 // Search code 3 request that arrives through the distributed network.
 // We transmit the search request to our child peers.
@@ -28,7 +33,7 @@ func (s *Search) Serialize(message *Search) ([]byte, error) {
 		return nil, err
 	}
 
-	err = internal.WriteUint32(buf, uint32(0))
+	err = internal.WriteUint32(buf, searchIdentifier)
 	if err != nil {
 		return nil, err
 	}
@@ -68,9 +73,12 @@ func (s *Search) Deserialize(reader io.Reader) error {
 			fmt.Errorf("expected code %d, got %d", CodeSearch, code))
 	}
 
-	_, err = internal.ReadUint32(reader)
+	identifier, err := internal.ReadUint32(reader)
 	if err != nil {
 		return err
+	}
+	if identifier != searchIdentifier {
+		return fmt.Errorf("%w: expected %d, got %d", errInvalidSearchIdentifier, searchIdentifier, identifier)
 	}
 
 	s.Username, err = internal.ReadString(reader)
