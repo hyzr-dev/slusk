@@ -104,3 +104,12 @@ listen_addr = "0.0.0.0:9090"
 
 [paths]
 slskd_complete_dir = "/music/slskd-downloads"
+
+# Optional: enable a direct connection to the central Soulseek server,
+# separate from the [slskd] daemon. Uncomment and fill in credentials to
+# enable it; leaving the whole section absent (or every field blank) keeps
+# it disabled.
+# [soulseek]
+# server_address = "server.slsknet.org:2242"
+# username = "CHANGEME"
+# password = "CHANGEME"

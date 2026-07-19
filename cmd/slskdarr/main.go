@@ -27,6 +27,7 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/observ"
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -89,6 +90,15 @@ func main() {
 	}, cfg.Pipeline.MinBitrate)
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
+
+	var soulClient *soulseek.Client
+	if cfg.Soulseek.Enabled() {
+		soulClient = soulseek.New(soulseek.Config{
+			Address:  cfg.Soulseek.ServerAddress,
+			Username: cfg.Soulseek.Username,
+			Password: cfg.Soulseek.Password,
+		}, logger)
+	}
 
 	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{
 		Music:             lidarrClient,
@@ -185,13 +195,28 @@ func main() {
 	readyFn := func() bool { return runner.Ready() }
 	modulesFn := func() map[string]observ.ModuleStatus {
 		statuses := runner.Health()
-		out := make(map[string]observ.ModuleStatus, len(statuses))
+		out := make(map[string]observ.ModuleStatus, len(statuses)+1)
 		for name, status := range statuses {
 			out[name] = observ.ModuleStatus{
 				LastAttempt: status.LastAttempt, LastCompleted: status.LastCompleted,
 				LastSuccess: status.LastSuccess, LastErrorAt: status.LastErrorAt,
 				LastError: status.LastError, ConsecutiveFailures: status.ConsecutiveFailures,
 				StaleDeadline: status.StaleDeadline, Live: status.Live, Ready: status.Ready,
+			}
+		}
+		// The soulseek connection is not a pipeline.Runner module - it does
+		// not gate liveFn/readyFn - but its status is still surfaced here so
+		// it shows up alongside the pipeline modules on /status.
+		if soulClient != nil {
+			soulStatus := soulClient.Status()
+			out["soulseek"] = observ.ModuleStatus{
+				LastAttempt:         soulStatus.LastAttempt,
+				LastSuccess:         soulStatus.LastConnectedAt,
+				LastErrorAt:         soulStatus.LastErrorAt,
+				LastError:           soulStatus.LastError,
+				ConsecutiveFailures: soulStatus.ConsecutiveFailures,
+				Live:                soulStatus.State != soulseek.StateFailed,
+				Ready:               soulStatus.State == soulseek.StateConnected,
 			}
 		}
 		return out
@@ -219,8 +244,27 @@ func main() {
 	}
 	cancelStartup()
 
+	var soulDone chan error
+	if soulClient != nil {
+		soulDone = make(chan error, 1)
+		go func() {
+			err := soulClient.Run(ctx)
+			if err != nil {
+				logger.Error("soulseek connection stopped permanently", "err", err)
+			}
+			soulDone <- err
+		}()
+	}
+
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
 	outcome := runRuntime(ctx, srv, listener, runner, lifecycleShutdownTimeout)
+	if soulDone != nil {
+		select {
+		case <-soulDone:
+		case <-time.After(lifecycleShutdownTimeout):
+			logger.Error("soulseek connection did not stop within the shutdown timeout")
+		}
+	}
 	closeErr := closeStoreAfterRuntime(outcome, st.Close)
 	if outcome.err != nil || closeErr != nil {
 		logger.Error("slskdarr stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,

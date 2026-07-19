@@ -232,3 +232,42 @@ func TestValidationErrorDoesNotExposeObservToken(t *testing.T) {
 		t.Fatalf("validation error exposed auth token: %v", err)
 	}
 }
+
+func TestLoadWithoutSoulseekSectionLeavesItDisabled(t *testing.T) {
+	cfg, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Soulseek.Enabled() {
+		t.Fatalf("Soulseek.Enabled() = true, want false for a config with no [soulseek] section")
+	}
+}
+
+func TestLoadSoulseekValid(t *testing.T) {
+	cfg, err := Load("testdata/soulseek_valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Soulseek.Enabled() {
+		t.Fatal("Soulseek.Enabled() = false, want true")
+	}
+	if cfg.Soulseek.Username != "souluser" {
+		t.Errorf("Username = %q", cfg.Soulseek.Username)
+	}
+	if cfg.Soulseek.Password != "soulpass" {
+		t.Errorf("Password = %q", cfg.Soulseek.Password)
+	}
+	if cfg.Soulseek.ServerAddress != "server.slsknet.org:2242" {
+		t.Errorf("ServerAddress = %q, want the default", cfg.Soulseek.ServerAddress)
+	}
+}
+
+func TestLoadSoulseekMissingPassword(t *testing.T) {
+	_, err := Load("testdata/soulseek_missing_password.toml")
+	if err == nil {
+		t.Fatal("expected error for missing soulseek.password, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.password") {
+		t.Errorf("error should name the missing field: %v", err)
+	}
+}
