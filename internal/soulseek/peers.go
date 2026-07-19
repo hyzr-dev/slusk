@@ -337,8 +337,8 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 // request to us. We dial the peer back - on the plain (non-obfuscated) port
 // only; ObfuscatedPort is deliberately unsupported here - and reply with
 // PierceFirewall carrying the relayed token. Runs in its own goroutine so a
-// slow or unreachable peer cannot stall message handling. ctx is the
-// Client's current connection lifetime (see serveConnected): tying the dial
+// slow or unreachable peer cannot stall message handling. ctx is Run's
+// shutdown lifetime (shared across reconnects): tying the dial
 // to it lets shutdown cancel an in-flight dial-back instead of leaving it to
 // run out its own timeout.
 func (c *Client) handleConnectToPeer(ctx context.Context, msg server.ConnectToPeer) {

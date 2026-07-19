@@ -398,8 +398,8 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 }
 
 // readLoop reads messages from conn until it fails or handleMessage reports
-// a terminal condition (Relogged). ctx is threaded down to handleConnectToPeer
-// so its dial-back goroutine is tied to the same lifetime as the connection.
+// a terminal condition (Relogged). ctx (Run's shutdown ctx) is threaded down to
+// handleConnectToPeer so shutdown can cancel an in-flight dial-back.
 func (c *Client) readLoop(ctx context.Context, conn net.Conn) error {
 	for {
 		message, _, code, err := server.Read(conn)

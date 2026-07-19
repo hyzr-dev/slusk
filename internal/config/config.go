@@ -374,7 +374,7 @@ func (c Config) Validate() error {
 			// only fail much later, at bind time.
 			problems = append(problems, "soulseek.listen_addr must have a numeric port")
 		} else if portNum <= 0 || portNum > 65535 {
-			problems = append(problems, "soulseek.listen_addr must have a nonzero port")
+			problems = append(problems, "soulseek.listen_addr port must be between 1 and 65535")
 		}
 	}
 	if c.Observ.ListenAddr == "" {
