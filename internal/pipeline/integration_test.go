@@ -50,19 +50,18 @@ func newLifecycleModules(t *testing.T, music *fakeMusic, search *fakeSearcher, n
 	})
 
 	discover := NewDiscovery(DiscoveryParams{
-		Store:                 st,
-		Peers:                 search,
-		Music:                 music,
-		Ranker:                matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
-		WantedSource:          wanted,
-		SearchTimeout:         5 * time.Second,
-		MaxCandidates:         5,
-		MaxCandidateFileRatio: 2.0,
-		MaxRetries:            maxRetries,
-		BackoffBase:           15 * time.Minute,
-		BackoffCap:            24 * time.Hour,
-		Interval:              30 * time.Second,
-		Logger:                logger,
+		Store:         st,
+		Peers:         search,
+		Music:         music,
+		Ranker:        matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
+		WantedSource:  wanted,
+		SearchTimeout: 5 * time.Second,
+		MaxCandidates: 5,
+		MaxRetries:    maxRetries,
+		BackoffBase:   15 * time.Minute,
+		BackoffCap:    24 * time.Hour,
+		Interval:      30 * time.Second,
+		Logger:        logger,
 	})
 
 	selectS := NewSelecting(SelectingParams{

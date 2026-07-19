@@ -36,6 +36,9 @@ type DiscoveryStore interface {
 	// ReliabilityFor batch-looks-up known peer reliability history for a set
 	// of usernames against one artist, for use in Ranker.Rank.
 	ReliabilityFor(ctx context.Context, artistID int64, usernames []string) (map[string]core.PeerReliability, error)
+	// SetJobTrackBand caches the album's valid track-count band on the job,
+	// read later by Importing's coverage gate.
+	SetJobTrackBand(ctx context.Context, jobID int64, minTracks, maxTracks int) error
 }
 
 // DiscoveryParams configures a Discovery.
@@ -48,18 +51,10 @@ type DiscoveryParams struct {
 
 	SearchTimeout time.Duration
 	MaxCandidates int
-	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
-	// album's known Lidarr track count by more than this multiple (e.g. 2
-	// means a candidate offering more than 2x the expected tracks is
-	// skipped). Guards against a Soulseek share that dumps an artist's whole
-	// discography into one flat folder being mistaken for a single album.
-	// Ignored when the album's expected track count is unknown (0), since
-	// Lidarr is the final arbiter of import correctness downstream.
-	MaxCandidateFileRatio float64
-	MaxRetries            int
-	BackoffBase           time.Duration
-	BackoffCap            time.Duration
-	Interval              time.Duration
+	MaxRetries    int
+	BackoffBase   time.Duration
+	BackoffCap    time.Duration
+	Interval      time.Duration
 
 	Logger *slog.Logger
 }
@@ -167,18 +162,26 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		"results", len(results), "candidates", len(ranked))
 	d.recordEvent(ctx, job.ID, core.EventSearch, searchDetail, now)
 
-	// Fetch the album's expected track count once per searchJob call (not per
-	// candidate) to size-sanity-check candidates below. total == 0 means
-	// Lidarr has no reliable count for this album right now, so the check is
-	// skipped entirely rather than risk rejecting a legitimate candidate on
-	// bad data. An error here is not counted against the job's retry budget:
-	// it aborts this search pass early - log and return nil so the job stays
-	// WANTED, untouched, and is retried on a later tick without spending
-	// retry budget.
-	_, total, err := d.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+	// Fetch the album's releases once per searchJob call to compute the valid
+	// track-count band [min, max] across all editions — a candidate matching
+	// any real edition's track count is viable, since manual import runs with
+	// release switching enabled and Lidarr picks the matching edition itself.
+	// A (0,0) band means Lidarr has no usable release data right now, so the
+	// filter is skipped entirely rather than risk rejecting a legitimate
+	// candidate on bad data. An error here is not counted against the job's
+	// retry budget: it aborts this search pass early - log and return nil so
+	// the job stays WANTED, untouched, and is retried on a later tick.
+	releases, err := d.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
 	if err != nil {
-		d.log().Error("album status failed", "album_job", job.ID, "err", err)
+		d.log().Error("album releases failed", "album_job", job.ID, "err", err)
 		return nil
+	}
+	minTracks, maxTracks := trackBand(releases)
+	// Persisted (not just used inline) because Importing's coverage gate needs
+	// MinTrackCount long after this search: a candidate covering the smallest
+	// valid edition must not be rejected against the canonical (larger) count.
+	if err := d.p.Store.SetJobTrackBand(ctx, job.ID, minTracks, maxTracks); err != nil {
+		return err
 	}
 
 	// Candidates are cached per search cycle - the previously-tried-username
@@ -191,22 +194,19 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		if len(survivors) >= d.p.MaxCandidates {
 			break
 		}
-		if total > 0 && float64(len(cand.Files)) > float64(total)*d.p.MaxCandidateFileRatio {
-			// A share this oversized for the expected album is almost certainly
-			// not a single release (e.g. an artist's whole discography dumped
-			// into one flat folder) - skip it rather than cache it.
-			detail := fmt.Sprintf("candidate %s file count implausible for album (%d files, expected %d), skipping", cand.Username, len(cand.Files), total)
-			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+		if maxTracks > 0 && len(cand.Files) > maxTracks {
+			// More files than the largest known edition — almost certainly not
+			// a single release (e.g. a whole discography in one flat folder).
+			detail := fmt.Sprintf("candidate %s has more files than any known release (%d files, max %d), skipping", cand.Username, len(cand.Files), maxTracks)
+			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "max", maxTracks)
 			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 			continue
 		}
-		if total > 0 && len(cand.Files) < total {
-			// A candidate that can't even cover the expected track count is
-			// guaranteed to be rejected by the VERIFYING completeness gate after
-			// burning a full download cycle - so caching it is guaranteed wasted
-			// work. Skip it rather than cache it.
-			detail := fmt.Sprintf("candidate %s has fewer files than expected tracks (%d of %d), skipping", cand.Username, len(cand.Files), total)
-			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "expected", total)
+		if minTracks > 0 && len(cand.Files) < minTracks {
+			// Can't cover even the smallest edition — guaranteed to fail the
+			// IMPORTING coverage gate after burning a full download cycle.
+			detail := fmt.Sprintf("candidate %s has fewer files than the smallest release (%d files, min %d), skipping", cand.Username, len(cand.Files), minTracks)
+			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "min", minTracks)
 			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 			continue
 		}
@@ -247,6 +247,24 @@ func newCandidateFrom(cand matcher.Candidate) store.NewCandidate {
 		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
 	}
 	return store.NewCandidate{Username: cand.Username, Score: cand.Score, Files: files}
+}
+
+// trackBand computes the valid track-count band across an album's releases:
+// the smallest and largest positive track count. Releases with no track count
+// (0) are ignored; (0, 0) means no usable release data at all.
+func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
+	for _, r := range releases {
+		if r.TrackCount <= 0 {
+			continue
+		}
+		if minTracks == 0 || r.TrackCount < minTracks {
+			minTracks = r.TrackCount
+		}
+		if r.TrackCount > maxTracks {
+			maxTracks = r.TrackCount
+		}
+	}
+	return minTracks, maxTracks
 }
 
 // uniqueUsernames returns the distinct usernames present in results, in

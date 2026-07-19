@@ -163,6 +163,43 @@ func TestAlbumStatus(t *testing.T) {
 	}
 }
 
+func TestAlbumReleases(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/albumrelease" {
+			t.Errorf("path = %q, want /api/v1/albumrelease", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("albumId"); got != "42" {
+			t.Errorf("albumId = %q, want 42", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "key" {
+			t.Errorf("api key = %q, want key", got)
+		}
+		fmt.Fprint(w, `[
+			{"id":1,"albumId":42,"trackCount":12,"monitored":true},
+			{"id":2,"albumId":42,"trackCount":10,"monitored":false}
+		]`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key")
+	rels, err := c.AlbumReleases(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("AlbumReleases: %v", err)
+	}
+	want := []AlbumRelease{
+		{ID: 1, TrackCount: 12, Monitored: true},
+		{ID: 2, TrackCount: 10, Monitored: false},
+	}
+	if len(rels) != len(want) {
+		t.Fatalf("got %d releases, want %d", len(rels), len(want))
+	}
+	for i := range want {
+		if rels[i] != want[i] {
+			t.Errorf("release %d = %+v, want %+v", i, rels[i], want[i])
+		}
+	}
+}
+
 func TestExecuteManualImportBuildsCorrectPayload(t *testing.T) {
 	var captured map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

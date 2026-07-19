@@ -32,8 +32,7 @@ type WantedAlbum struct {
 	// ArtistID is Lidarr's artist id, cached onto AlbumJob so peer reliability
 	// history (artist_user_reliability) can be keyed by artist rather than by
 	// artist name, which can be renamed.
-	ArtistID   int64
-	TrackCount int
+	ArtistID int64
 	// ReleaseDate is Lidarr's raw release date/datetime string for the album.
 	ReleaseDate string
 }
@@ -51,9 +50,6 @@ type wantedMissingPage struct {
 			ID         int64  `json:"id"`
 			ArtistName string `json:"artistName"`
 		} `json:"artist"`
-		Statistics struct {
-			TrackCount int `json:"trackCount"`
-		} `json:"statistics"`
 	} `json:"records"`
 }
 
@@ -96,7 +92,7 @@ func (c *Client) WantedMissing(ctx context.Context) ([]WantedAlbum, error) {
 			break
 		}
 		for _, r := range body.Records {
-			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, ArtistID: r.Artist.ID, TrackCount: r.Statistics.TrackCount, ReleaseDate: r.ReleaseDate})
+			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, ArtistID: r.Artist.ID, ReleaseDate: r.ReleaseDate})
 		}
 		if len(out) >= body.TotalRecords {
 			break
@@ -230,6 +226,49 @@ func (c *Client) AlbumStatus(ctx context.Context, albumID int64) (present, total
 		return 0, 0, err
 	}
 	return body.Statistics.TrackFileCount, body.Statistics.TrackCount, nil
+}
+
+// AlbumRelease is one release (edition/pressing) of an album in Lidarr, with
+// its own track count. Different releases of the same album legitimately have
+// different track counts (bonus tracks, deluxe editions), and any of them is a
+// valid import target since manual import runs with release switching enabled.
+type AlbumRelease struct {
+	ID         int64
+	TrackCount int
+	Monitored  bool
+}
+
+// AlbumReleases lists every release of an album, used by discovery to compute
+// the valid track-count band [min, max] across all editions rather than
+// filtering against the single canonical count.
+func (c *Client) AlbumReleases(ctx context.Context, albumID int64) ([]AlbumRelease, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/albumrelease?albumId=%d", c.baseURL, albumID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("lidarr albumrelease: status %d", resp.StatusCode)
+	}
+	var raw []struct {
+		ID         int64 `json:"id"`
+		TrackCount int   `json:"trackCount"`
+		Monitored  bool  `json:"monitored"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := make([]AlbumRelease, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, AlbumRelease{ID: r.ID, TrackCount: r.TrackCount, Monitored: r.Monitored})
+	}
+	return out, nil
 }
 
 // ExecuteManualImport tells Lidarr to import the given items (move mode).

@@ -164,11 +164,14 @@ func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand c
 
 // verify is the verify-phase gate (ImportSubmittedAt is NULL): it asks Lidarr
 // what it would import from the album folder and decides whether to import at
-// all. A candidate with any rejection fails outright (SELECTING, next
-// candidate tried immediately - no cooldown). A clean candidate that cannot
-// cover the whole release is also failed, rather than importing a partial
-// album. A clean, complete candidate is imported and ImportSubmittedAt is set
-// so the next tick's confirm phase can confirm Lidarr accepted it.
+// all. Files Lidarr assigned a real track ID are imported even if it also
+// stamped a folder-level rejection on them (e.g. "Has unmatched tracks", which
+// Lidarr applies to every file in a non-bijective folder); a candidate with no
+// matched file at all fails outright (SELECTING, next candidate tried
+// immediately - no cooldown). A clean candidate that cannot cover the smallest
+// valid edition is also failed, rather than importing a partial album. A
+// clean, complete candidate is imported and ImportSubmittedAt is set so the
+// next tick's confirm phase can confirm Lidarr accepted it.
 //
 // Ported from the legacy Discoverer.advanceImporting's per-job body
 // (engine/discovery.go:677-774).
@@ -182,6 +185,21 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		names = append(names, t.Filename)
 	}
 	folder := AlbumFolder(m.p.CompleteDir, names)
+	if folder != m.p.CompleteDir {
+		// Best-effort dedup before Lidarr scans the folder: a messy share can
+		// contain the same track twice (mixed formats, stray copies), which
+		// makes Lidarr's matching ambiguous. Skipped when AlbumFolder fell
+		// back to the download root itself — deduping there could remove
+		// other albums' files. A dedup failure (e.g. folder already imported
+		// and gone) must not block verify; the scan below copes either way.
+		if removed, err := dedupAlbumFolder(m.log(), folder); err != nil {
+			m.log().Warn("dedup album folder failed", "album_job", job.ID, "folder", folder, "err", err)
+		} else if len(removed) > 0 {
+			detail := fmt.Sprintf("removed %d duplicate track file(s) before import", len(removed))
+			m.log().Info(detail, "album_job", job.ID, "folder", folder, "removed", removed)
+			m.recordEvent(ctx, job.ID, core.EventDedup, detail, now)
+		}
+	}
 	items, err := m.p.Music.ManualImportCandidates(ctx, folder)
 	if err != nil {
 		m.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)
@@ -202,35 +220,59 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		cleanupCompletedFolder(m.log(), job.ID, m.p.CompleteDir, names)
 		return nil
 	}
+	// Classify by TrackIDs rather than Lidarr's per-file Importable flag:
+	// Lidarr stamps folder-level rejections like "Has unmatched tracks" on
+	// every file in a folder that isn't a perfect bijection against the
+	// release — including files it did match to a track. A file with one or
+	// more real track IDs was matched and is importable; only files with no
+	// track ID at all are genuinely unmatched.
 	var importable []lidarr.ManualImportItem
 	var rejections []string
 	for _, it := range items {
-		if it.Importable {
+		if len(it.TrackIDs) > 0 {
 			importable = append(importable, it)
 		} else {
 			rejections = append(rejections, it.Rejections...)
 		}
 	}
-	if len(rejections) > 0 || len(importable) == 0 {
-		// Rejected like a failed download: other candidates usually remain, so
-		// the next SELECTING tick tries one immediately - no cooldown.
+	if len(importable) == 0 {
+		// Nothing matched at all — rejected like a failed download: other
+		// candidates usually remain, so the next SELECTING tick tries one
+		// immediately — no cooldown.
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
 		return m.failCandidate(ctx, job, cand, names, "import rejected", now)
 	}
-	_, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
-	if err != nil {
-		m.log().Error("album status failed", "album_job", job.ID, "err", err)
-		return m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
+	if len(rejections) > 0 {
+		// Unmatched extras don't fail the candidate — the coverage gate below
+		// decides completeness. They are left behind in the download folder
+		// (cleanupCompletedFolder already leaves non-empty folders in place).
+		m.log().Info("ignoring unmatched files in album folder",
+			"album_job", job.ID, "folder", folder, "unmatched", len(items)-len(importable), "reasons", rejections)
 	}
-	if coverage(importable) < total {
-		// A source that can't complete the release is rejected outright rather
-		// than partially imported, to keep the library free of half albums.
-		// Other candidates usually remain, so use the no-cooldown fail path.
-		incompleteDetail := fmt.Sprintf("incomplete download, rejecting (folder %s, covered %d/%d)", folder, coverage(importable), total)
+	// Completeness is judged against the smallest valid edition
+	// (MinTrackCount, cached by Discovery from Lidarr's release list): with
+	// release switching enabled, a candidate matching any real edition is a
+	// full album. Fall back to the live canonical total only when the band was
+	// never cached (0) — e.g. a job searched before the band existed.
+	minRequired := job.MinTrackCount
+	if minRequired == 0 {
+		_, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+		if err != nil {
+			m.log().Error("album status failed", "album_job", job.ID, "err", err)
+			return m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
+		}
+		minRequired = total
+	}
+	if coverage(importable) < minRequired {
+		// A source that can't complete any valid edition is rejected outright
+		// rather than partially imported, to keep the library free of half
+		// albums. Other candidates usually remain, so use the no-cooldown
+		// fail path.
+		incompleteDetail := fmt.Sprintf("incomplete download, rejecting (folder %s, covered %d/%d)", folder, coverage(importable), minRequired)
 		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
-			"covered", coverage(importable), "total", total)
+			"covered", coverage(importable), "required", minRequired)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
 		return m.failCandidate(ctx, job, cand, names, "incomplete download", now)
 	}

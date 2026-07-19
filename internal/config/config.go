@@ -79,12 +79,6 @@ type PipelineConfig struct {
 	// MaxTransferRetries caps how many times a transfer rejected for a
 	// transient reason is re-queued before it is given up on.
 	MaxTransferRetries int `toml:"max_transfer_retries"`
-	// MaxCandidateFileRatio rejects a candidate whose file count exceeds the
-	// album's known Lidarr track count by more than this multiple (e.g. 2.0
-	// means a candidate offering more than 2x the expected tracks is skipped).
-	// Guards against a Soulseek share dumping an artist's whole discography into
-	// one flat folder being mistaken for a single album.
-	MaxCandidateFileRatio float64 `toml:"max_candidate_file_ratio"`
 	// Weights are the tunable scoring weights for the matcher.
 	Weights Weights `toml:"weights"`
 	// MaxActive caps jobs simultaneously active across the pipeline
@@ -265,9 +259,6 @@ func (c Config) Validate() error {
 	}
 	if c.Pipeline.MaxTransferRetries < 0 {
 		problems = append(problems, "pipeline.max_transfer_retries must be >= 0")
-	}
-	if c.Pipeline.MaxCandidateFileRatio <= 0 {
-		problems = append(problems, "pipeline.max_candidate_file_ratio must be > 0")
 	}
 	if c.Pipeline.Weights.KnownUser < 0 {
 		problems = append(problems, "pipeline.weights.known_user must be >= 0")

@@ -47,6 +47,11 @@ type fakeMusic struct {
 	albumTotal     int
 	albumStatusErr error
 
+	// albumReleases/albumReleasesErr drive AlbumReleases, Discovery's source
+	// for the album's valid track-count band.
+	albumReleases    []lidarr.AlbumRelease
+	albumReleasesErr error
+
 	// manualImportItems/manualImportErr drive ManualImportCandidates; folders
 	// records every folder it was called with, in order, so tests can assert
 	// AlbumFolder computed the expected path.
@@ -88,6 +93,13 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 		return 0, 0, f.albumStatusErr
 	}
 	return f.albumPresent, f.albumTotal, nil
+}
+
+func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error) {
+	if f.albumReleasesErr != nil {
+		return nil, f.albumReleasesErr
+	}
+	return f.albumReleases, nil
 }
 
 // fakeNetwork is an in-memory PeerNetwork fake for the Downloading module's

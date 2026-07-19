@@ -10,14 +10,14 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at FROM album_jobs`
+const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at, min_track_count, max_track_count FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
 		var state string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)
@@ -311,4 +311,19 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	}
 	j.State = core.AlbumJobState(state)
 	return j, nil
+}
+
+// SetJobTrackBand caches the album's valid track-count band (min/max across
+// all Lidarr releases) on the job, written by Discovery once per search. Like
+// BackfillJobMetadataIfEmpty this is a metadata cache write, so updated_at is
+// deliberately not bumped — the band must not reset fairness ordering or
+// stuck-detection clocks.
+func (s *Store) SetJobTrackBand(ctx context.Context, jobID int64, minTracks, maxTracks int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET min_track_count = $1, max_track_count = $2 WHERE id = $3`,
+		minTracks, maxTracks, jobID)
+	if err != nil {
+		return fmt.Errorf("set job track band: %w", err)
+	}
+	return nil
 }

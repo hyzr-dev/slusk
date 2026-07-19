@@ -73,6 +73,7 @@ const (
 	EventTransferStalled   JobEventType = "transfer_stalled"
 	EventImportOK          JobEventType = "import_ok"
 	EventImportRejected    JobEventType = "import_rejected"
+	EventDedup             JobEventType = "dedup"
 	EventJobFailed         JobEventType = "job_failed"
 )
 
