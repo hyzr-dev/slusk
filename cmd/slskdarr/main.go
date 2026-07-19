@@ -42,6 +42,7 @@ const (
 func main() {
 	configPath := flag.String("config", "/config/config.toml", "path to config file")
 	healthcheck := flag.Bool("healthcheck", false, "check the running instance's /healthz and exit 0 (healthy) or 1 (unhealthy); used by Docker HEALTHCHECK since the distroless image has no shell/curl")
+	migrateDestructive := flag.Bool("migrate-destructive", false, "apply pending destructive database migrations (see internal/store/migrate.go) and exit 0, without starting the normal app pipeline")
 	flag.Parse()
 
 	if *healthcheck {
@@ -58,6 +59,14 @@ func main() {
 	if err != nil {
 		logger.Error("load config", "err", err)
 		os.Exit(1)
+	}
+
+	if *migrateDestructive {
+		if err := runMigrateDestructive(cfg, logger); err != nil {
+			logger.Error("apply destructive migrations", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -379,6 +388,26 @@ func runHealthcheck(configPath string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	return nil
+}
+
+// runMigrateDestructive opens the store (which, as always, applies pending
+// routine migrations) and then applies any pending destructive migrations
+// (internal/store/migrate.go), logging what was applied. It never starts the
+// pipeline runner or HTTP server - the process exits immediately afterward.
+func runMigrateDestructive(cfg config.Config, logger *slog.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+
+	st, err := store.OpenContext(ctx, cfg.Store.DSN)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	if err := st.ApplyDestructiveMigrations(ctx, logger); err != nil {
+		return fmt.Errorf("apply destructive migrations: %w", err)
 	}
 	return nil
 }

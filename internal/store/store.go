@@ -6,16 +6,12 @@ package store
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
-	"strings"
+	"log/slog"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-//go:embed schema.sql
-var schemaSQL string
 
 // Store wraps the database handle. Construct it with Open.
 type Store struct {
@@ -43,8 +39,8 @@ func Open(dsn string) (*Store, error) {
 	return OpenContext(ctx, dsn)
 }
 
-// OpenContext connects to PostgreSQL, verifies the connection, and applies the
-// schema within the caller's startup deadline.
+// OpenContext connects to PostgreSQL, verifies the connection, and applies
+// pending migrations within the caller's startup deadline.
 func OpenContext(ctx context.Context, dsn string) (*Store, error) {
 	return openWithLimitsContext(ctx, dsn, connMaxIdleTime, connMaxLifetime)
 }
@@ -66,88 +62,22 @@ func openWithLimitsContext(ctx context.Context, dsn string, maxIdleTime, maxLife
 		db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
-	if err := applySchemaContext(ctx, db, schemaSQL); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	return &Store{db: db}, nil
-}
-
-// applySchema splits the schema SQL into statements and executes each one.
-// Every statement is either CREATE/ALTER ... IF (NOT) EXISTS or a DO block
-// guarded the same way, so the apply is idempotent.
-func applySchema(db *sql.DB, schemaSQL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultOpenTimeout)
-	defer cancel()
-	return applySchemaContext(ctx, db, schemaSQL)
-}
-
-func applySchemaContext(ctx context.Context, db *sql.DB, schemaSQL string) error {
-	for _, stmt := range splitStatements(schemaSQL) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// splitStatements splits schemaSQL on ';' the same way applySchema always
-// has, EXCEPT:
-//   - inside a $$ ... $$ dollar-quoted block (used by DO blocks for
-//     conditional migrations, e.g. a guarded RENAME COLUMN): Postgres has no
-//     "IF EXISTS" form for RENAME COLUMN or ADD CONSTRAINT, so those guards
-//     need a DO block whose body itself contains semicolons that must NOT be
-//     treated as statement boundaries.
-//   - inside a "--" line comment, where a ';' is just text and must not
-//     split the statement it is documenting.
-//
-// Tagged dollar-quotes (e.g. $tag$ ... $tag$) are NOT supported - only the
-// bare $$ form used by this schema's DO blocks is recognized. If a tagged
-// form is ever needed, this parser must be extended first.
-func splitStatements(schemaSQL string) []string {
-	var out []string
-	var cur strings.Builder
-	inDollarQuote := false
-	inLineComment := false
-	for i := 0; i < len(schemaSQL); i++ {
-		c := schemaSQL[i]
-		if inLineComment {
-			cur.WriteByte(c)
-			if c == '\n' {
-				inLineComment = false
-			}
-			continue
-		}
-		if c == '-' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '-' {
-			inLineComment = true
-			cur.WriteString("--")
-			i++
-			continue
-		}
-		if c == '$' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '$' {
-			inDollarQuote = !inDollarQuote
-			cur.WriteString("$$")
-			i++
-			continue
-		}
-		if c == ';' && !inDollarQuote {
-			out = append(out, cur.String())
-			cur.Reset()
-			continue
-		}
-		cur.WriteByte(c)
-	}
-	if strings.TrimSpace(cur.String()) != "" {
-		out = append(out, cur.String())
-	}
-	return out
 }
 
 // Close closes the underlying database handle.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ApplyDestructiveMigrations applies every embedded destructive migration
+// (see the migrate.go package doc) not yet recorded in schema_migrations.
+// Unlike Open/OpenContext, this must be invoked explicitly - it is never run
+// automatically on startup.
+func (s *Store) ApplyDestructiveMigrations(ctx context.Context, logger *slog.Logger) error {
+	return ApplyDestructive(ctx, s.db, logger)
 }
