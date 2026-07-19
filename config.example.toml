@@ -94,6 +94,15 @@ known_user = 1.0
 dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 
 [observ]
+# /healthz is public and contains only liveness. The dashboard, JSON API,
+# /status, and /metrics require this token. A token is mandatory whenever the
+# listener is not loopback-only. Generate one, for example, with:
+#   openssl rand -hex 32
+# API and Prometheus clients send: Authorization: Bearer <token>
+# Browsers use HTTP Basic auth with any username and this token as the password.
+# Keep the token out of URLs and logs, and terminate TLS at a trusted reverse
+# proxy before exposing the listener beyond a trusted private network.
+auth_token = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
 listen_addr = "0.0.0.0:9090"
 
 [paths]

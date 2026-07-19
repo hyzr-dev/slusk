@@ -7,10 +7,12 @@ och ner — varje fas bygger på den föregående.
 Nyttiga kommandon (byt ut värden mot dina):
 ```bash
 STATUS=http://192.168.86.33:9090        # observ.listen_addr
+TOKEN='värdet-från-observ.auth_token'    # lägg aldrig token i URL/query
 PGDSN='postgres://slskdarr:password@localhost:5432/slskdarr'  # store.dsn
 docker logs -f slskdarr                 # strukturerad JSON-logg
-curl -s $STATUS/status | jq             # köade/aktiva/stannade/orphanade
-curl -s $STATUS/metrics | grep slskdarr # Prometheus-mätvärden
+curl -s $STATUS/healthz                 # publik, minimal liveness
+curl -s -H "Authorization: Bearer $TOKEN" $STATUS/status | jq
+curl -s -H "Authorization: Bearer $TOKEN" $STATUS/metrics | grep slskdarr
 psql "$PGDSN" -c 'SELECT id,lidarr_album_id,state,candidates_tried FROM album_jobs'
 ```
 (Distroless-imagen har ingen shell; kör `psql` från host mot Postgres-instansen,
@@ -22,7 +24,9 @@ eller `docker exec` in i Postgres-containern.)
 
 - [ ] `config.toml` monterad på `/config/config.toml`; **fel** i den ska ge en tydlig
       logg-rad och exit (testa: stava fel en nyckel → containern ska dö högljutt, inte
-      tyst defaulta).
+      tyst defaulta). En listener utanför loopback ska dessutom vägra starta utan
+      `observ.auth_token`; loopback-only (`127.0.0.1`/`::1`/`localhost`) får köras utan
+      token för lokal utveckling.
 - [ ] Containern kör som **oprivilegierad UID** (`docker inspect slskdarr` → `User: nonroot`).
 - [ ] Schemat skapas i Postgres-databasen vid start (`psql "$PGDSN" -c '\dt'` visar
       `album_jobs`, `candidates`, `transfers`, `job_events` m.fl.).
@@ -30,11 +34,13 @@ eller `docker exec` in i Postgres-containern.)
 
 ## Fas 2 — Anslutning + observability
 
-- [ ] `curl $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...}}`).
+- [ ] `curl $STATUS/healthz` svarar utan autentisering och utan intern statusdata.
+- [ ] Anrop utan token till `/`, `/status`, `/api/*` och `/metrics` svarar `401`.
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...}}`).
       `modules` listar varje pipeline-modul (`wanted_sync`, `discovery`, `selecting`,
       `downloading`, `importing`) med tidpunkten för dess senast avslutade tick — en
       modul som slutat synas där (eller vars tid slutat röra sig) har fastnat.
-- [ ] `curl $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)
 - [ ] `slskdarr_unknown_transfers` speglar rimligt antal (dina ev. manuella slskd-nedladdningar
@@ -49,7 +55,7 @@ eller `docker exec` in i Postgres-containern.)
 - [ ] Nästa tick: jobbet går `WANTED → SELECTING` (kandidatsökning/matchning i
       `candidates`-tabellen). Så snart en kandidat väljs går jobbet vidare
       `SELECTING → DOWNLOADING`, och en/flera rader i `transfers` skapas.
-      `curl $STATUS/status` visar `active > 0`.
+      det autentiserade status-anropet ovan visar `active > 0`.
 - [ ] I slskd:s eget UI syns nedladdningarna starta (samma filer slskdarr enqueue:ade).
 - [ ] `slskdarr_downloads_active` > 0 i metrics.
 
@@ -124,7 +130,7 @@ när allt gått igenom grönt.
 
 Webb-gränsnittet är nu serverat från samma `observ`-server som `/status` och `/metrics`.
 
-- [ ] Öppna `http://<observ.listen_addr>/` i en webbläsare (t.ex. `http://192.168.86.33:9090/`).
+- [ ] Öppna `http://<observ.listen_addr>/` i en webbläsare (t.ex. `http://192.168.86.33:9090/`). Webbläsarens HTTP Basic-dialog accepterar valfritt användarnamn och `observ.auth_token` som lösenord. Använd TLS via reverse proxy utanför ett betrott privat nät.
 - [ ] Sidan laddar med **mörktemat** och visar:
   - [ ] Sidofält med nav-knapparna `Översikt` och `Kö`.
   - [ ] **Översikt-vyn:** stat-kort för Köad, Aktiv, Stannad, Klar (även om de visar 0).
@@ -136,6 +142,6 @@ Webb-gränsnittet är nu serverat från samma `observ`-server som `/status` och 
   - [ ] Ingen särskild logg-rad förväntas vid en lyckad avbrytning — endast om det underliggande slskd-anropet misslyckas loggas en varning.
 
 ## Om något fastnar
-Kolla i ordning: `docker logs slskdarr` (JSON, sök `err`) → `curl $STATUS/status` →
+Kolla i ordning: `docker logs slskdarr` (JSON, sök `err`) → autentiserat anrop till `$STATUS/status` →
 `album_jobs.state` i DB → slskd:s eget transfer-UI → Lidarrs egen aktivitetslogg.
 Tillstånd lever i DB:n, så du kan alltid se exakt var ett jobb står.

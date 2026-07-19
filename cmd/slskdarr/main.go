@@ -193,9 +193,17 @@ func main() {
 		}
 		return observ.RetryResultOK, nil
 	}
-	srv := &http.Server{Addr: cfg.Observ.ListenAddr, Handler: observ.NewServer(reg, statusFn, jobsFn, cancelFn,
+	handler := observ.NewServer(reg, statusFn, jobsFn, cancelFn,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn, modulesFn, retryFn,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)}
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)
+	var authenticator observ.Authenticator
+	if cfg.Observ.AuthToken != "" {
+		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
+	}
+	srv := &http.Server{
+		Addr:    cfg.Observ.ListenAddr,
+		Handler: observ.ProtectPrivateEndpoints(handler, authenticator),
+	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("status server", "err", err)
