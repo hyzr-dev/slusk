@@ -199,6 +199,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 			return err
 		}
+		cleanupCompletedFolder(m.log(), job.ID, m.p.CompleteDir, names)
 		return nil
 	}
 	var importable []lidarr.ManualImportItem
@@ -319,6 +320,15 @@ func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Ca
 		m.recordOutcome(ctx, job, cand.Username, true, now)
 		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 			return err
+		}
+		if transfers, err := m.p.Store.TransfersForCandidate(ctx, cand.ID); err != nil {
+			m.log().Error("list transfers for completed folder cleanup failed", "album_job", job.ID, "err", err)
+		} else {
+			names := make([]string, 0, len(transfers))
+			for _, t := range transfers {
+				names = append(names, t.Filename)
+			}
+			cleanupCompletedFolder(m.log(), job.ID, m.p.CompleteDir, names)
 		}
 		return nil
 	}
