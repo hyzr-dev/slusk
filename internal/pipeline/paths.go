@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
@@ -63,6 +65,40 @@ func AlbumFolder(completeDir string, filenames []string) string {
 		return completeDir
 	}
 	return path.Join(completeDir, leaf)
+}
+
+// cleanupCompletedFolder best-effort removes the per-album folder slskd
+// created under completeDir once Lidarr has confirmed the import, so a
+// completed job doesn't leave an empty leftover directory behind forever.
+// Unlike cleanupFolder (used for a failed/rejected candidate via slskd's
+// recursive DeleteDownloadFolder API), this only ever removes an
+// already-verified-empty directory with os.Remove: if anything remains
+// (e.g. a partial import), os.Remove fails safely rather than deleting real
+// files, and that failure is only logged - it must never block the job's
+// own DONE transition, which has already committed by the time this runs.
+func cleanupCompletedFolder(log *slog.Logger, jobID int64, completeDir string, filenames []string) {
+	leaf := commonLeaf(filenames)
+	if leaf == "" {
+		return
+	}
+	folder := filepath.Join(completeDir, leaf)
+	entries, err := os.ReadDir(folder)
+	switch {
+	case err == nil:
+		if len(entries) > 0 {
+			log.Info("completed album folder not empty, leaving in place", "album_job", jobID, "folder", folder, "entries", len(entries))
+			return
+		}
+		if err := os.Remove(folder); err != nil {
+			log.Error("remove completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
+			return
+		}
+		log.Info("removed empty completed album folder", "album_job", jobID, "folder", folder)
+	case os.IsNotExist(err):
+		log.Info("completed album folder already gone", "album_job", jobID, "folder", folder)
+	default:
+		log.Error("read completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
+	}
 }
 
 // commonLeaf returns the base name of filenames' single common directory, or

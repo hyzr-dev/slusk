@@ -1,6 +1,13 @@
 package pipeline
 
-import "testing"
+import (
+	"bytes"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestAlbumFolder(t *testing.T) {
 	complete := "/music/slskd-downloads"
@@ -61,5 +68,98 @@ func TestCommonLeafEmptyWhenAmbiguous(t *testing.T) {
 	files := []string{`a\1.flac`, `b\2.flac`}
 	if got := commonLeaf(files); got != "" {
 		t.Errorf("no common dir should yield \"\", got %q", got)
+	}
+}
+
+// newTestLogger returns a *slog.Logger writing to buf, so cleanupCompletedFolder
+// tests can assert on the specific log level (Info vs Error) emitted.
+func newTestLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, nil))
+}
+
+func TestCleanupCompletedFolderRemovesEmptyDir(t *testing.T) {
+	completeDir := t.TempDir()
+	folder := filepath.Join(completeDir, "1000 Forms of Fear (2014)")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	files := []string{
+		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
+		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
+	}
+
+	var buf bytes.Buffer
+	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+
+	if _, err := os.Stat(folder); !os.IsNotExist(err) {
+		t.Errorf("expected empty folder to be removed, stat err = %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line, got %q", logged)
+	}
+	if !strings.Contains(logged, "level=INFO") {
+		t.Errorf("expected an INFO log line, got %q", logged)
+	}
+}
+
+func TestCleanupCompletedFolderSkipsNonEmptyDir(t *testing.T) {
+	completeDir := t.TempDir()
+	folder := filepath.Join(completeDir, "1000 Forms of Fear (2014)")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "leftover.txt"), []byte("junk"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	files := []string{
+		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
+		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
+	}
+
+	var buf bytes.Buffer
+	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+
+	if _, err := os.Stat(folder); err != nil {
+		t.Errorf("expected non-empty folder to remain, stat err = %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line for a non-empty folder, got %q", logged)
+	}
+	if !strings.Contains(logged, "level=INFO") {
+		t.Errorf("expected an INFO log line, got %q", logged)
+	}
+}
+
+func TestCleanupCompletedFolderSkipsAmbiguousLeaf(t *testing.T) {
+	completeDir := t.TempDir()
+	// Files don't share a common directory -> commonLeaf returns "".
+	files := []string{`a\1.flac`, `b\2.flac`}
+
+	var buf bytes.Buffer
+	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+
+	if logged := buf.String(); logged != "" {
+		t.Errorf("expected no filesystem interaction or logging for an ambiguous leaf, got %q", logged)
+	}
+}
+
+func TestCleanupCompletedFolderLogsMissingDirQuietly(t *testing.T) {
+	completeDir := t.TempDir()
+	files := []string{
+		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
+		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
+	}
+
+	var buf bytes.Buffer
+	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+
+	logged := buf.String()
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line for a missing folder, got %q", logged)
+	}
+	if !strings.Contains(logged, "level=INFO") {
+		t.Errorf("expected an INFO log line, got %q", logged)
 	}
 }

@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -320,5 +322,125 @@ func TestImportingStuckEscalation(t *testing.T) {
 	}
 	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
 		t.Errorf("stuck escalation should clean up the folder, got %+v", peers.deletedFolders)
+	}
+}
+
+// hasErrorLog reports whether buf (a slog text-handler's output) contains an
+// ERROR-level line, so cleanup-on-confirm tests can assert a cleanup failure
+// (or a "not empty"/"already gone" case) never escalates to an ERROR log,
+// which would be noisy for a routine, expected condition.
+func hasErrorLog(buf *strings.Builder) bool {
+	return strings.Contains(buf.String(), "level=ERROR")
+}
+
+// TestImportingConfirmRemovesEmptyAlbumFolder drives confirm() to DONE via the
+// present>=total path and asserts the empty per-album folder slskd left behind
+// under CompleteDir is removed once the import is confirmed.
+func TestImportingConfirmRemovesEmptyAlbumFolder(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumTotal: 2, albumPresent: 2}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	completeDir := t.TempDir()
+	p.CompleteDir = completeDir
+	var logBuf strings.Builder
+	p.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	jobID, candID := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := st.MarkImportSubmitted(ctx, candID, now); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+	albumFolder := filepath.Join(completeDir, "A")
+	if err := os.Mkdir(albumFolder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateDone {
+		t.Errorf("confirmed import should advance job to DONE, got %v", got)
+	}
+	if _, err := os.Stat(albumFolder); !os.IsNotExist(err) {
+		t.Errorf("expected empty album folder to be removed, stat err = %v", err)
+	}
+	if hasErrorLog(&logBuf) {
+		t.Errorf("expected no ERROR log line, got %q", logBuf.String())
+	}
+}
+
+// TestImportingConfirmLeavesNonEmptyAlbumFolderButStillCompletesJob covers the
+// safety case: even a confirmed import could theoretically leave stray files
+// (partial import, junk), so cleanup must never remove anything but an
+// already-verified-empty directory, and its failure to remove must never
+// block the job's own DONE transition.
+func TestImportingConfirmLeavesNonEmptyAlbumFolderButStillCompletesJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumTotal: 2, albumPresent: 2}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	completeDir := t.TempDir()
+	p.CompleteDir = completeDir
+	var logBuf strings.Builder
+	p.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	jobID, candID := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := st.MarkImportSubmitted(ctx, candID, now); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+	albumFolder := filepath.Join(completeDir, "A")
+	if err := os.Mkdir(albumFolder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(albumFolder, "leftover.txt"), []byte("junk"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateDone {
+		t.Errorf("job must still reach DONE even when cleanup can't remove the folder, got %v", got)
+	}
+	if _, err := os.Stat(albumFolder); err != nil {
+		t.Errorf("expected non-empty album folder to remain, stat err = %v", err)
+	}
+	if hasErrorLog(&logBuf) {
+		t.Errorf("expected no ERROR log line for a non-empty folder, got %q", logBuf.String())
+	}
+}
+
+// TestImportingConfirmToleratesMissingAlbumFolder covers the case where the
+// per-album folder is already gone (e.g. removed out-of-band) by the time
+// confirm runs: the job must still reach DONE without panicking or logging an
+// ERROR.
+func TestImportingConfirmToleratesMissingAlbumFolder(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumTotal: 2, albumPresent: 2}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = t.TempDir() // album subfolder deliberately never created
+	var logBuf strings.Builder
+	p.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	jobID, candID := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := st.MarkImportSubmitted(ctx, candID, now); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateDone {
+		t.Errorf("job must still reach DONE when the album folder is already gone, got %v", got)
+	}
+	if hasErrorLog(&logBuf) {
+		t.Errorf("expected no ERROR log line for an already-missing folder, got %q", logBuf.String())
 	}
 }
