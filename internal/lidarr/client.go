@@ -32,8 +32,7 @@ type WantedAlbum struct {
 	// ArtistID is Lidarr's artist id, cached onto AlbumJob so peer reliability
 	// history (artist_user_reliability) can be keyed by artist rather than by
 	// artist name, which can be renamed.
-	ArtistID   int64
-	TrackCount int
+	ArtistID int64
 	// ReleaseDate is Lidarr's raw release date/datetime string for the album.
 	ReleaseDate string
 }
@@ -51,9 +50,6 @@ type wantedMissingPage struct {
 			ID         int64  `json:"id"`
 			ArtistName string `json:"artistName"`
 		} `json:"artist"`
-		Statistics struct {
-			TrackCount int `json:"trackCount"`
-		} `json:"statistics"`
 	} `json:"records"`
 }
 
@@ -96,7 +92,7 @@ func (c *Client) WantedMissing(ctx context.Context) ([]WantedAlbum, error) {
 			break
 		}
 		for _, r := range body.Records {
-			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, ArtistID: r.Artist.ID, TrackCount: r.Statistics.TrackCount, ReleaseDate: r.ReleaseDate})
+			out = append(out, WantedAlbum{ID: r.ID, Title: r.Title, ArtistName: r.Artist.ArtistName, ArtistID: r.Artist.ID, ReleaseDate: r.ReleaseDate})
 		}
 		if len(out) >= body.TotalRecords {
 			break

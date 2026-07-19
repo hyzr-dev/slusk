@@ -12,7 +12,7 @@ api_key = "CHANGEME"
 # e.g. retention.search and retention.transfers.* (minutes).
 
 [pipeline]
-# The matcher/transfer knobs below (through max_candidate_file_ratio and
+# The matcher/transfer knobs below (through min_bitrate and
 # [pipeline.weights]) are mandatory, same as they were under the old [engine]
 # section. Everything else in [pipeline] is optional; an absent key uses the
 # default shown.
@@ -34,12 +34,6 @@ max_inflight_per_peer = 3
 # instead of failing the whole candidate. Permanent reasons ("File not shared",
 # "Banned") are never retried. 0 disables retries (optional; defaults to 0).
 max_transfer_retries = 3
-# Reject a candidate whose file count exceeds the album's known Lidarr track
-# count by more than this multiple, e.g. 2.0 rejects a candidate offering more
-# than 2x the expected tracks. Guards against a Soulseek share dumping an
-# artist's whole discography into one flat folder being mistaken for a single
-# album. Ignored (no rejection) when Lidarr's expected track count is unknown.
-max_candidate_file_ratio = 2.0
 #
 # Global cap on jobs simultaneously active across the pipeline
 # (SELECTING/DOWNLOADING/IMPORTING), regardless of how many are newly started

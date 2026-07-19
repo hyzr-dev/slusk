@@ -20,6 +20,7 @@ type MusicSource interface {
 	ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error)
 	ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error
 	AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error)
+	AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error)
 }
 
 // PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.
