@@ -101,3 +101,21 @@ connections.
     `ErrDifferentPacketSize` (wrapping `io.ErrUnexpectedEOF` for a clean
     `io.EOF`), matching `MessageRead`'s convention for the non-obfuscated
     path.
+
+## Optional trailing field policy
+
+Deserialize is strict by default: any read error is a hard error. The single
+documented exception is a trailing, protocol-optional field truncated
+exactly at its boundary — i.e. `binary.Read`/`internal.ReadString` returning
+a *clean* `io.EOF` because zero bytes remained, not `io.ErrUnexpectedEOF`
+from a partial read mid-field. That specific case is treated as "field
+absent" rather than an error, since real Soulseek peers are known to omit
+some trailing fields.
+
+- `peer/transferresponse.go` (`TransferResponse.Deserialize`): the `Reason`
+  string, only present when `Allowed` is false, is now optional under this
+  policy. A clean `io.EOF` reading it leaves `Reason` nil; a truncation
+  partway through the string is still a hard error.
+- `peer/filesearchresponse.go` has trailing fields (behind a zlib-compressed
+  section) that are a known, still-open deviation from this policy — not
+  addressed here; deferred to a follow-up issue (#54).

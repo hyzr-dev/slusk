@@ -93,11 +93,21 @@ func (t *TransferResponse) Deserialize(reader io.Reader) error {
 	if !t.Allowed {
 		r, err := internal.ReadString(reader)
 		if err != nil {
+			// The reason string is a protocol-documented optional trailing
+			// field. A clean io.EOF right at the field boundary (zero bytes
+			// remained) means the peer simply omitted it; treat that as
+			// "reason absent" rather than an error. Anything else -
+			// including a truncation partway through the field, which
+			// surfaces as io.ErrUnexpectedEOF from internal.ReadString's
+			// io.ReadFull - is still a hard error.
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
 			return err
 		}
 
 		t.Reason = Reason(r)
 	}
 
-	return err
+	return nil
 }
