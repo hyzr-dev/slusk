@@ -92,9 +92,10 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 
 // fakeNetwork is an in-memory PeerNetwork fake for the Downloading module's
 // reconcile phase; ported from internal/engine/reconciler_test.go's fakePeers.
-// downloads is what ListDownloads returns (slskd's live list); cancelled
-// records every id Cancel was called with, in order; cancelErr, when set, fails
-// every Cancel call (so tests can assert the leave-non-terminal-and-retry path).
+// downloads is what ListDownloads returns (including retained terminal
+// records); cancelled records every id Cancel was called with, in order and a
+// successful call changes the matching record to production's terminal
+// "Completed, Cancelled" state. cancelErr, when set, fails every Cancel call.
 // removed records every id Remove was called with, in order, so tests can
 // assert reconcile purges terminal transfers from slskd.
 type fakeNetwork struct {
@@ -113,6 +114,11 @@ func (f *fakeNetwork) Cancel(ctx context.Context, username, id string) error {
 		return f.cancelErr
 	}
 	f.cancelled = append(f.cancelled, id)
+	for i := range f.downloads {
+		if f.downloads[i].ID == id && f.downloads[i].Username == username {
+			f.downloads[i].State = "Completed, Cancelled"
+		}
+	}
 	return nil
 }
 

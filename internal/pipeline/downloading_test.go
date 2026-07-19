@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,67 @@ func transferStatesFor(t *testing.T, st *store.Store, candID int64) map[string]c
 		out[tr.Filename] = tr
 	}
 	return out
+}
+
+// failOnceDownloadingStore decorates a real DownloadingStore and injects one
+// failure into a selected reconcile mutation. Keeping every other method on the
+// real store makes recovery assertions exercise the production persistence
+// behavior rather than a hand-maintained fake.
+type failOnceDownloadingStore struct {
+	DownloadingStore
+	mutation      string
+	skipMutations int
+	err           error
+	failed        bool
+}
+
+func (s *failOnceDownloadingStore) fail(mutation string) error {
+	if s.mutation != mutation || s.failed {
+		return nil
+	}
+	if s.skipMutations > 0 {
+		s.skipMutations--
+		return nil
+	}
+	s.failed = true
+	return s.err
+}
+
+func (s *failOnceDownloadingStore) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
+	if err := s.fail("attach"); err != nil {
+		return err
+	}
+	return s.DownloadingStore.AttachTransferID(ctx, transferID, slskdID, now)
+}
+
+func (s *failOnceDownloadingStore) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
+	if err := s.fail("retry"); err != nil {
+		return err
+	}
+	return s.DownloadingStore.RetryTransfer(ctx, transferID, now)
+}
+
+func (s *failOnceDownloadingStore) UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error {
+	if err := s.fail("update"); err != nil {
+		return err
+	}
+	return s.DownloadingStore.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
+}
+
+func requireMutationContext(t *testing.T, err, injected error, transferID, candidateID int64, remoteID string) {
+	t.Helper()
+	if !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want wrapped injected error", err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("transfer %d", transferID),
+		fmt.Sprintf("candidate %d", candidateID),
+		fmt.Sprintf("remote %q", remoteID),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing context %q", err, want)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -500,8 +562,9 @@ func TestDownloadingReconcileFreshProgressNotStalled(t *testing.T) {
 	}
 }
 
-// If cancelling a stalled transfer in slskd fails, it must be left untouched.
-func TestDownloadingReconcileStalledCancelFailureLeavesUntouched(t *testing.T) {
+// If cancelling a stalled transfer in slskd fails, its durable STALLED intent
+// remains so the next pass can retry cancellation without losing why it ran.
+func TestDownloadingReconcileStalledCancelFailurePreservesIntent(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-2 * time.Hour)
@@ -518,12 +581,275 @@ func TestDownloadingReconcileStalledCancelFailureLeavesUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferInProgress {
-		t.Errorf("transfer must stay IN_PROGRESS after failed cancel, got %v", states["a.flac"].State)
+	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferStalled {
+		t.Errorf("transfer must preserve STALLED intent after failed cancel, got %v", states["a.flac"].State)
 	}
 	if stats.Stalled != 0 {
 		t.Errorf("Stalled = %d, want 0 (cancel failed)", stats.Stalled)
 	}
+}
+
+// A failed ID backfill must abort before progress or remote cleanup. The next
+// pass retries the write, then commits the terminal state and removes exactly
+// once.
+func TestDownloadingReconcileAttachFailureRecoversBeforeTerminalCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []slskd.Transfer{{
+		ID: "g-recovered", Username: "bob", Filename: "a.flac",
+		State: "Completed, Succeeded", Size: 100, BytesTransferred: 100,
+	}}}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
+		state: core.TransferQueued, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now,
+	})
+	injected := errors.New("attach unavailable")
+	p.Store = &failOnceDownloadingStore{DownloadingStore: st, mutation: "attach", err: injected}
+	d := NewDownloading(p)
+
+	stats, err := d.reconcile(ctx, now)
+	requireMutationContext(t, err, injected, tid, candID, "g-recovered")
+	if stats.Completed != 0 || stats.Adopted != 0 {
+		t.Errorf("stats changed before persistence: %+v", stats)
+	}
+	if len(net.removed) != 0 {
+		t.Fatalf("remote cleanup ran before persistence: %v", net.removed)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.SlskdID != "" || tr.State != core.TransferQueued {
+		t.Fatalf("transfer changed after failed attach: %+v", tr)
+	}
+
+	stats, err = d.reconcile(ctx, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("reconcile recovery: %v", err)
+	}
+	if stats.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", stats.Completed)
+	}
+	if len(net.removed) != 1 || net.removed[0] != "g-recovered" {
+		t.Errorf("recovery cleanup = %v, want [g-recovered]", net.removed)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.SlskdID != "g-recovered" || tr.State != core.TransferCompleted {
+		t.Errorf("recovered transfer = %+v", tr)
+	}
+}
+
+// A stalled transfer must persist its local intent before touching slskd. If
+// that write fails, the remote transfer remains live and a later pass retries
+// the complete sequence.
+func TestDownloadingReconcileStallIntentFailureDoesNotCancel(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []slskd.Transfer{{
+		ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress",
+		Size: 100, BytesTransferred: 40,
+	}}}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
+		state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100,
+		deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
+	})
+	injected := errors.New("stall intent unavailable")
+	p.Store = &failOnceDownloadingStore{DownloadingStore: st, mutation: "update", err: injected}
+	d := NewDownloading(p)
+
+	_, err := d.reconcile(ctx, now)
+	requireMutationContext(t, err, injected, tid, candID, "g1")
+	if len(net.cancelled) != 0 || len(net.removed) != 0 {
+		t.Fatalf("remote changed before stalled intent persisted: cancelled=%v removed=%v", net.cancelled, net.removed)
+	}
+	if net.downloads[0].State != "InProgress" {
+		t.Fatalf("remote state = %q, want InProgress", net.downloads[0].State)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferInProgress {
+		t.Fatalf("local state after failed intent = %s, want IN_PROGRESS", tr.State)
+	}
+
+	stats, err := d.reconcile(ctx, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("reconcile recovery: %v", err)
+	}
+	if stats.Stalled != 1 {
+		t.Errorf("Stalled = %d, want 1", stats.Stalled)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferPending || tr.Retries != 1 {
+		t.Fatalf("recovered transfer = %+v", tr)
+	}
+}
+
+// Every terminal route must persist before Remove. The deadline and exhausted
+// stall cases also prove successful remote cancellation is retained as a
+// terminal record until the following local write commits.
+func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name             string
+		liveState        string
+		initialState     core.TransferState
+		retries          int
+		deadline         time.Time
+		stampAt          time.Time
+		wantState        core.TransferState
+		wantAfterFailure core.TransferState
+		wantStat         string
+		wantCancel       bool
+		skipMutations    int
+	}{
+		{
+			name: "completed", liveState: "Completed, Succeeded",
+			initialState: core.TransferInProgress, deadline: now.Add(time.Hour), stampAt: now,
+			wantState: core.TransferCompleted, wantAfterFailure: core.TransferInProgress, wantStat: "completed",
+		},
+		{
+			name: "deadline cancelled", liveState: "Queued",
+			initialState: core.TransferQueued, deadline: now.Add(-time.Hour), stampAt: now,
+			wantState: core.TransferCancelled, wantAfterFailure: core.TransferQueued, wantStat: "cancelled", wantCancel: true,
+		},
+		{
+			name: "stalled errored", liveState: "InProgress", retries: 3,
+			initialState: core.TransferInProgress, deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
+			wantState: core.TransferErrored, wantAfterFailure: core.TransferStalled, wantStat: "stalled", wantCancel: true,
+			skipMutations: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			net := &fakeNetwork{downloads: []slskd.Transfer{{
+				ID: "g1", Username: "bob", Filename: "a.flac", State: tt.liveState,
+				Size: 100, BytesTransferred: 40,
+			}}}
+			p, st := newDownloadingParams(t, net, &fakeSearcher{})
+			_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+			tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
+				state: tt.initialState, slskdID: "g1", retries: tt.retries,
+				bytesDone: 40, bytesTotal: 100, deadline: tt.deadline, stampAt: tt.stampAt,
+			})
+			injected := errors.New("progress unavailable")
+			p.Store = &failOnceDownloadingStore{
+				DownloadingStore: st, mutation: "update", skipMutations: tt.skipMutations, err: injected,
+			}
+			d := NewDownloading(p)
+
+			stats, err := d.reconcile(ctx, now)
+			requireMutationContext(t, err, injected, tid, candID, "g1")
+			if stats.Completed != 0 || stats.Cancelled != 0 || stats.Lost != 0 || stats.Stalled != 0 || stats.Adopted != 0 {
+				t.Errorf("stats changed before persistence: %+v", stats)
+			}
+			if len(net.removed) != 0 {
+				t.Fatalf("remote cleanup ran after failed terminal write: %v", net.removed)
+			}
+			if got := len(net.cancelled); got != btoi(tt.wantCancel) {
+				t.Fatalf("cancel calls after failed write = %d, want %d", got, btoi(tt.wantCancel))
+			}
+			if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != tt.wantAfterFailure {
+				t.Fatalf("state after failed write = %s, want %s", tr.State, tt.wantAfterFailure)
+			}
+			if tt.wantCancel && net.downloads[0].State != "Completed, Cancelled" {
+				t.Fatalf("remote state after Cancel = %q, want Completed, Cancelled", net.downloads[0].State)
+			}
+
+			stats, err = d.reconcile(ctx, now.Add(time.Second))
+			if err != nil {
+				t.Fatalf("reconcile recovery: %v", err)
+			}
+			switch tt.wantStat {
+			case "completed":
+				if stats.Completed != 1 {
+					t.Errorf("Completed = %d, want 1", stats.Completed)
+				}
+			case "cancelled":
+				if stats.Cancelled != 1 {
+					t.Errorf("Cancelled = %d, want 1", stats.Cancelled)
+				}
+			case "stalled":
+				if stats.Stalled != 1 {
+					t.Errorf("Stalled = %d, want 1", stats.Stalled)
+				}
+			}
+			if len(net.removed) != 1 || net.removed[0] != "g1" {
+				t.Errorf("cleanup after recovery = %v, want [g1]", net.removed)
+			}
+			if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != tt.wantState {
+				t.Errorf("state after recovery = %s, want %s", tr.State, tt.wantState)
+			}
+		})
+	}
+}
+
+// A failed stalled retry must abort the pass after remote Cancel but before
+// stats or top-up. Retrying the pass converges to one PENDING row, which top-up
+// enqueues once; a second top-up observes QUEUED and does not duplicate it.
+func TestDownloadingReconcileRetryFailureConvergesWithoutDuplicateEnqueue(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []slskd.Transfer{{
+		ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress",
+		Size: 100, BytesTransferred: 40,
+	}}}
+	peers := &fakeSearcher{}
+	p, st := newDownloadingParams(t, net, peers)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
+		state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100,
+		deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
+	})
+	injected := errors.New("retry unavailable")
+	p.Store = &failOnceDownloadingStore{DownloadingStore: st, mutation: "retry", err: injected}
+	d := NewDownloading(p)
+
+	stats, err := d.reconcile(ctx, now)
+	requireMutationContext(t, err, injected, tid, candID, "g1")
+	if stats.Retried != 0 || stats.Stalled != 0 {
+		t.Errorf("stats changed before retry persistence: %+v", stats)
+	}
+	if len(net.cancelled) != 1 {
+		t.Errorf("Cancel must precede retry write, calls = %v", net.cancelled)
+	}
+	if len(net.removed) != 0 || len(peers.enqueued) != 0 {
+		t.Fatalf("cleanup/enqueue ran after retry failure: removed=%v enqueued=%v", net.removed, peers.enqueued)
+	}
+	if net.downloads[0].State != "Completed, Cancelled" {
+		t.Fatalf("remote state after Cancel = %q, want Completed, Cancelled", net.downloads[0].State)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferStalled || tr.Retries != 0 {
+		t.Fatalf("stalled intent not preserved after failed retry: %+v", tr)
+	}
+
+	// Recover after the original transfer deadline to prove the durable STALLED
+	// intent still governs our terminal remote cancellation.
+	recoveredAt := now.Add(2 * time.Hour)
+	stats, err = d.reconcile(ctx, recoveredAt)
+	if err != nil {
+		t.Fatalf("reconcile recovery: %v", err)
+	}
+	if stats.Stalled != 1 {
+		t.Errorf("Stalled = %d, want 1", stats.Stalled)
+	}
+	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferPending || tr.Retries != 1 {
+		t.Fatalf("transfer after retry recovery: %+v", tr)
+	}
+	if len(net.removed) != 1 || net.removed[0] != "g1" {
+		t.Fatalf("terminal cancellation cleanup after retry commit = %v, want [g1]", net.removed)
+	}
+	if err := d.topUpDownloads(ctx, recoveredAt.Add(time.Second)); err != nil {
+		t.Fatalf("first top-up: %v", err)
+	}
+	if err := d.topUpDownloads(ctx, recoveredAt.Add(2*time.Second)); err != nil {
+		t.Fatalf("second top-up: %v", err)
+	}
+	if len(peers.enqueued) != 1 || peers.enqueued[0] != "a.flac" {
+		t.Errorf("enqueues = %v, want exactly [a.flac]", peers.enqueued)
+	}
+}
+
+func btoi(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------
