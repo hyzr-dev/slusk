@@ -245,10 +245,12 @@ func main() {
 	cancelStartup()
 
 	var soulDone chan error
+	soulCtx, soulCancel := context.WithCancel(ctx)
+	defer soulCancel()
 	if soulClient != nil {
 		soulDone = make(chan error, 1)
 		go func() {
-			err := soulClient.Run(ctx)
+			err := soulClient.Run(soulCtx)
 			if err != nil {
 				logger.Error("soulseek connection stopped permanently", "err", err)
 			}
@@ -258,6 +260,12 @@ func main() {
 
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
 	outcome := runRuntime(ctx, srv, listener, runner, lifecycleShutdownTimeout)
+	// runRuntime may return on an abnormal exit (runner or HTTP server
+	// stopping without a signal) while ctx is still live, which would
+	// otherwise leave the soulseek client reconnecting indefinitely and
+	// force this join to burn the full shutdown timeout. Cancel its
+	// context explicitly so the join below is prompt in that case too.
+	soulCancel()
 	if soulDone != nil {
 		select {
 		case <-soulDone:

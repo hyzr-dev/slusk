@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,11 +26,11 @@ const (
 	tcpKeepAliveInterval = time.Minute
 )
 
-// ErrRelogged is returned by Run when the server reports that the account
+// errRelogged is returned by Run when the server reports that the account
 // logged in from elsewhere (a Relogged message), which the Soulseek
 // protocol uses to kick the previous connection. This is terminal: Run does
 // not reconnect after it.
-var ErrRelogged = errors.New("soulseek: account logged in elsewhere (relogged)")
+var errRelogged = errors.New("soulseek: account logged in elsewhere (relogged)")
 
 // Config configures a Client. Address, Username and Password are required;
 // the remaining fields are internal test seams with production defaults
@@ -62,11 +61,6 @@ type Client struct {
 	logger *slog.Logger
 
 	status atomic.Pointer[Status]
-
-	// writeMu serializes writes to the active connection between the
-	// connected-phase read loop's ping ticker and any future caller-driven
-	// writes.
-	writeMu sync.Mutex
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -119,7 +113,10 @@ func (c *Client) Run(ctx context.Context) error {
 
 		failures := c.recordTransientFailure(err)
 
-		wait := nextBackoff(failures, c.cfg.backoffBase, c.cfg.backoffCap)
+		// nextBackoff takes retries as a 0-based count so the first retry
+		// waits exactly backoffBase; failures is 1 on the first transient
+		// failure, hence the -1.
+		wait := nextBackoff(failures-1, c.cfg.backoffBase, c.cfg.backoffCap)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -133,7 +130,7 @@ func isTerminalErr(err error) bool {
 	return errors.Is(err, server.ErrInvalidPass) ||
 		errors.Is(err, server.ErrInvalidUsername) ||
 		errors.Is(err, server.ErrInvalidVersion) ||
-		errors.Is(err, ErrRelogged)
+		errors.Is(err, errRelogged)
 }
 
 // connectAndServe dials, logs in, and serves one connection. It returns nil
@@ -158,7 +155,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		}
 	}
 
-	if err := c.login(conn); err != nil {
+	if err := c.login(ctx, conn); err != nil {
 		return err
 	}
 
@@ -167,8 +164,26 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	return c.serveConnected(ctx, conn)
 }
 
-// login sends the Login message and waits for the server's response.
-func (c *Client) login(conn net.Conn) error {
+// login sends the Login message and waits for the server's response. The
+// handshake is bounded by a deadline (reusing dialTimeout, so a server that
+// accepts the TCP connection but never speaks the protocol cannot block Run
+// indefinitely) and by ctx (so a shutdown during a stalled handshake closes
+// the connection and returns promptly instead of waiting out the deadline).
+func (c *Client) login(ctx context.Context, conn net.Conn) error {
+	if err := conn.SetDeadline(time.Now().Add(c.cfg.dialTimeout)); err != nil {
+		return fmt.Errorf("set login deadline: %w", err)
+	}
+
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatch:
+		}
+	}()
+
 	login := &server.Login{Username: c.cfg.Username, Password: c.cfg.Password}
 	if _, err := server.Write(conn, login); err != nil {
 		return fmt.Errorf("write login: %w", err)
@@ -187,6 +202,9 @@ func (c *Client) login(conn net.Conn) error {
 		return fmt.Errorf("deserialize login response: %w", err)
 	}
 
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear login deadline: %w", err)
+	}
 	return nil
 }
 
@@ -209,9 +227,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 			return nil
 
 		case <-ticker.C:
-			c.writeMu.Lock()
 			_, err := server.Write(conn, &server.Ping{})
-			c.writeMu.Unlock()
 			if err != nil {
 				_ = conn.Close()
 				<-readErrs
@@ -247,7 +263,7 @@ func (c *Client) handleMessage(code server.Code, reader io.Reader) error {
 		if err := relogged.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize relogged: %w", err)
 		}
-		return ErrRelogged
+		return errRelogged
 	}
 
 	if c.logger != nil {
@@ -292,10 +308,10 @@ func (c *Client) recordTransientFailure(err error) int {
 	return prev.ConsecutiveFailures
 }
 
-// nextBackoff returns base * 2^retries, capped at maxBackoff. retries is the
-// post-increment failure count (first failure -> retries 1). The exponent is
-// clamped so 1<<retries never overflows an int on any platform, since callers
-// may pass arbitrarily large retry counts.
+// nextBackoff returns base * 2^retries, capped at maxBackoff. retries is
+// 0-based (the first retry -> retries 0 -> wait exactly base). The exponent
+// is clamped so 1<<retries never overflows an int on any platform, since
+// callers may pass arbitrarily large retry counts.
 //
 // Copied from internal/pipeline/backoff.go rather than exported from there,
 // since pipeline is a separate scheduling concern and this package should

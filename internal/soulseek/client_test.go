@@ -369,8 +369,8 @@ func TestClientRelogged(t *testing.T) {
 	defer cancel()
 
 	err := c.Run(ctx)
-	if !errors.Is(err, ErrRelogged) {
-		t.Fatalf("Run() = %v, want wrapping ErrRelogged", err)
+	if !errors.Is(err, errRelogged) {
+		t.Fatalf("Run() = %v, want wrapping errRelogged", err)
 	}
 	if c.Status().State != StateFailed {
 		t.Fatalf("Status().State = %q, want %q", c.Status().State, StateFailed)
@@ -454,6 +454,83 @@ func TestClientCtxCancelDuringBackoff(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("Run took %v to return during backoff, want prompt return", elapsed)
+	}
+}
+
+func TestClientStalledHandshakeTimesOut(t *testing.T) {
+	// The fake server accepts the TCP connection but never reads or writes
+	// anything, simulating a server that is up but never speaks the
+	// protocol. Without a deadline on the handshake, login's Read would
+	// block forever; with one, the connect attempt fails and Run retries.
+	srv := newFakeServer(t)
+	srv.serve(t, func(conn net.Conn) {
+		t.Cleanup(func() { _ = conn.Close() })
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "u", Password: "p"}, testLogger())
+	c.cfg.dialTimeout = 100 * time.Millisecond
+	c.cfg.backoffBase = 20 * time.Millisecond
+	c.cfg.backoffCap = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && srv.accepts.Load() < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := srv.accepts.Load(); n < 2 {
+		t.Fatalf("accepts = %d, want >= 2 (handshake deadline expired and Run retried)", n)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestClientCtxCancelDuringStalledHandshake(t *testing.T) {
+	// The fake server accepts the connection but never responds to the
+	// login request. With a handshake deadline much longer than the test's
+	// patience, ctx cancellation - not the deadline - must be what unblocks
+	// the stalled Read promptly.
+	srv := newFakeServer(t)
+	accepted := make(chan struct{}, 1)
+	srv.serve(t, func(conn net.Conn) {
+		t.Cleanup(func() { _ = conn.Close() })
+		accepted <- struct{}{}
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "u", Password: "p"}, testLogger())
+	c.cfg.dialTimeout = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never accepted a connection")
+	}
+	// Give the client a moment to be blocked in the handshake read.
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() = %v, want nil", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Run did not return promptly during a stalled handshake after ctx cancel")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Run took %v to return during a stalled handshake, want prompt return", elapsed)
 	}
 }
 
