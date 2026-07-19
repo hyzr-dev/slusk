@@ -71,11 +71,13 @@ func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	attempted := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	succeeded := attempted.Add(-time.Minute)
 	errored := attempted.Add(-time.Second)
+	staleDeadline := attempted.Add(90 * time.Second)
 	modules := func() map[string]ModuleStatus {
 		return map[string]ModuleStatus{
 			"wanted_sync": {
 				LastAttempt: attempted, LastSuccess: succeeded, LastErrorAt: errored,
 				LastError: "temporary failure", ConsecutiveFailures: 2,
+				StaleDeadline: staleDeadline, Live: true,
 			},
 			"discovery": {},
 		}
@@ -89,27 +91,37 @@ func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code = %d", rec.Code)
 	}
+	type moduleDetail struct {
+		LastAttempt         string `json:"lastAttempt"`
+		LastSuccess         string `json:"lastSuccess"`
+		LastErrorAt         string `json:"lastErrorAt"`
+		LastError           string `json:"lastError"`
+		ConsecutiveFailures int    `json:"consecutiveFailures"`
+		StaleDeadline       string `json:"staleDeadline"`
+		Live                bool   `json:"live"`
+	}
 	var got struct {
-		Modules map[string]struct {
-			LastAttempt         string `json:"lastAttempt"`
-			LastSuccess         string `json:"lastSuccess"`
-			LastErrorAt         string `json:"lastErrorAt"`
-			LastError           string `json:"lastError"`
-			ConsecutiveFailures int    `json:"consecutiveFailures"`
-		} `json:"modules"`
+		Modules       map[string]string       `json:"modules"`
+		ModuleDetails map[string]moduleDetail `json:"moduleDetails"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	module := got.Modules["wanted_sync"]
+	if got.Modules["wanted_sync"] != attempted.Format(timeFormat) || got.Modules["discovery"] != "" {
+		t.Errorf("modules compatibility map = %+v", got.Modules)
+	}
+	module := got.ModuleDetails["wanted_sync"]
 	if module.LastAttempt != attempted.Format(timeFormat) || module.LastSuccess != succeeded.Format(timeFormat) || module.LastErrorAt != errored.Format(timeFormat) {
 		t.Errorf("unexpected module timestamps: %+v", module)
 	}
 	if module.LastError != "temporary failure" || module.ConsecutiveFailures != 2 {
 		t.Errorf("unexpected module failure state: %+v", module)
 	}
-	if got.Modules["discovery"].LastAttempt != "" {
-		t.Errorf("never-attempted module should have empty timestamps: %+v", got.Modules["discovery"])
+	if module.StaleDeadline != staleDeadline.Format(timeFormat) || !module.Live {
+		t.Errorf("unexpected authoritative liveness: %+v", module)
+	}
+	if got.ModuleDetails["discovery"].LastAttempt != "" {
+		t.Errorf("never-attempted module should have empty timestamps: %+v", got.ModuleDetails["discovery"])
 	}
 }
 

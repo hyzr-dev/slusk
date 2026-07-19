@@ -159,6 +159,8 @@ type ModuleStatus struct {
 	LastErrorAt         time.Time
 	LastError           string
 	ConsecutiveFailures int
+	StaleDeadline       time.Time
+	Live                bool
 }
 
 // ModulesFunc reports each pipeline module's runtime state for /status.
@@ -208,15 +210,22 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			LastErrorAt         string `json:"lastErrorAt"`
 			LastError           string `json:"lastError"`
 			ConsecutiveFailures int    `json:"consecutiveFailures"`
+			StaleDeadline       string `json:"staleDeadline"`
+			Live                bool   `json:"live"`
 		}
-		moduleStatuses := make(map[string]moduleStatusDTO)
+		moduleTicks := make(map[string]string)
+		moduleDetails := make(map[string]moduleStatusDTO)
 		for name, module := range modules() {
 			formatted := moduleStatusDTO{
 				LastError:           module.LastError,
 				ConsecutiveFailures: module.ConsecutiveFailures,
+				Live:                module.Live,
 			}
 			if !module.LastAttempt.IsZero() {
 				formatted.LastAttempt = module.LastAttempt.Format(timeFormat)
+				moduleTicks[name] = formatted.LastAttempt
+			} else {
+				moduleTicks[name] = ""
 			}
 			if !module.LastSuccess.IsZero() {
 				formatted.LastSuccess = module.LastSuccess.Format(timeFormat)
@@ -224,12 +233,16 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			if !module.LastErrorAt.IsZero() {
 				formatted.LastErrorAt = module.LastErrorAt.Format(timeFormat)
 			}
-			moduleStatuses[name] = formatted
+			if !module.StaleDeadline.IsZero() {
+				formatted.StaleDeadline = module.StaleDeadline.Format(timeFormat)
+			}
+			moduleDetails[name] = formatted
 		}
 		resp := struct {
 			StatusReport
-			Modules map[string]moduleStatusDTO `json:"modules"`
-		}{report, moduleStatuses}
+			Modules       map[string]string          `json:"modules"`
+			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
+		}{report, moduleTicks, moduleDetails}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})

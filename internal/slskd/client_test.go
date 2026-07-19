@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -478,6 +479,35 @@ func TestSearchCleanupFallbackIsBounded(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("bounded cleanup took %v", elapsed)
+	}
+}
+
+func TestStopAndHarvestUsesOneTotalCleanupDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/responses"):
+			<-r.Context().Done()
+		default:
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+	c.stopGrace = 200 * time.Millisecond
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	_, err := c.stopAndHarvest(parent, "s1")
+	if err == nil {
+		t.Fatal("expected the blocked fallback harvest to fail")
+	}
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("cleanup restarted its deadline between phases: elapsed %v for %v total budget", elapsed, c.stopGrace)
 	}
 }
 

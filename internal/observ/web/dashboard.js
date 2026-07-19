@@ -73,23 +73,16 @@ function statCards() {
   ).join('');
 }
 
-// --- Module health (per-pipeline-module runtime state from /status) ---
+// --- Module health (authoritative per-module runtime state from /status) ---
 
-let modules = {};
-
-// MODULE_STALE_AFTER_MS is a client-side approximation of the server's
-// per-module staleness window (Runner.Live uses each module's own
-// Interval()*3 + tickTimeout, not available here) — good enough to flag a
-// module that has clearly stopped ticking without needing that per-module
-// metadata threaded through /status.
-const MODULE_STALE_AFTER_MS = 60000;
+let moduleDetails = {};
 
 async function fetchStatus() {
   try {
     const res = await fetch('/status');
     if (!res.ok) return; // keep showing last-good data on a transient error
     const data = await res.json();
-    modules = data.modules || {};
+    moduleDetails = data.moduleDetails || {};
     moduleHealthRows();
   } catch (e) {
     // network error: keep showing last-good data
@@ -99,14 +92,13 @@ async function fetchStatus() {
 function moduleHealthRows() {
   const el = document.getElementById('module-health-body');
   if (!el) return;
-  const names = Object.keys(modules).sort();
-  const now = new Date();
+  const names = Object.keys(moduleDetails).sort();
   el.innerHTML = names.map(name => {
-    const status = modules[name] || {};
+    const status = moduleDetails[name] || {};
     const never = !status.lastAttempt;
     const lastAttempt = never ? null : new Date(status.lastAttempt);
     const failures = status.consecutiveFailures || 0;
-    const unhealthy = never || (now - lastAttempt) > MODULE_STALE_AFTER_MS || failures >= 3;
+    const unhealthy = !status.live || failures >= 3;
     let label = never ? 'Har aldrig körts' : lastAttempt.toLocaleTimeString('sv-SE');
     if (failures > 0) label += ` (${failures} fel i rad)`;
     return `

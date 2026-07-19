@@ -181,7 +181,7 @@ func TestRunnerReadinessRecoversAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestRunnerLiveReflectsStaleAttempt(t *testing.T) {
+func TestRunnerHealthExposesAuthoritativeLivenessDeadline(t *testing.T) {
 	block := make(chan struct{})
 	m := &tickRecorder{name: "slow", interval: 5 * time.Millisecond, block: block}
 	r := newTestRunner(t, 5*time.Millisecond, m)
@@ -190,7 +190,19 @@ func TestRunnerLiveReflectsStaleAttempt(t *testing.T) {
 	go func() { done <- r.Run(ctx) }()
 
 	waitFor(t, time.Second, func() bool { return !r.Health()[m.name].LastAttempt.IsZero() })
-	waitFor(t, time.Second, func() bool { return !r.Live() })
+	status := r.Health()[m.name]
+	wantDeadline := status.LastAttempt.Add(3*m.interval + r.tickTimeout)
+	if !status.StaleDeadline.Equal(wantDeadline) {
+		t.Errorf("StaleDeadline = %v, want %v", status.StaleDeadline, wantDeadline)
+	}
+	if !status.Live {
+		t.Error("module became stale before its reported deadline")
+	}
+
+	waitFor(t, time.Second, func() bool { return !r.Health()[m.name].Live })
+	if r.Live() {
+		t.Error("runner liveness disagrees with per-module liveness")
+	}
 	if r.Ready() {
 		t.Error("stale module must not be ready")
 	}

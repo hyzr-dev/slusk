@@ -198,6 +198,7 @@ func main() {
 				LastAttempt: status.LastAttempt, LastSuccess: status.LastSuccess,
 				LastErrorAt: status.LastErrorAt, LastError: status.LastError,
 				ConsecutiveFailures: status.ConsecutiveFailures,
+				StaleDeadline:       status.StaleDeadline, Live: status.Live,
 			}
 		}
 		return out

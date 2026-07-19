@@ -23,7 +23,9 @@ const (
 	defaultEnqueueBackoff = 500 * time.Millisecond
 	defaultSearchRetries  = 2
 	defaultSearchBackoff  = time.Second
-	defaultStopGrace      = 10 * time.Second
+	// Search cleanup must finish before the pipeline runner and runtime's
+	// 10-second shutdown budgets so routine harvesting cannot race store close.
+	defaultStopGrace = 9 * time.Second
 )
 
 // Client talks to a slskd instance.
@@ -36,7 +38,7 @@ type Client struct {
 	enqueueBackoff time.Duration // initial delay between Enqueue retries (doubles each time)
 	searchRetries  int           // extra Search attempts when a search returns zero results
 	searchBackoff  time.Duration // delay between empty-result search retries
-	stopGrace      time.Duration // how long stopAndHarvest waits for slskd to finalize a stopped search; also the best-effort budget for deleteSearch's DELETE
+	stopGrace      time.Duration // one total deadline for stopping, finalizing, harvesting, and deleting a timed-out search
 }
 
 // New constructs a slskd client for the given base URL and API key.
@@ -350,36 +352,46 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 // the search is deliberately left undeleted for the same reason: isComplete
 // was never observed, so we cannot be sure slskd has finished writing it.
 func (c *Client) stopAndHarvest(parent context.Context, id string) ([]Result, error) {
-	// The caller may already be cancelled; cleanup gets an independent but
-	// explicitly bounded context that retains the parent's values.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.stopGrace)
-	defer cancel()
+	// The caller may already be cancelled. Every cleanup request shares this one
+	// independent deadline; no fallback stage may restart the grace period.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(parent), c.stopGrace)
+	defer cancelCleanup()
+
+	// Reserve part of the total budget for one last response harvest when slskd
+	// never reports completion. This is only an internal phase deadline; the
+	// cleanupCtx deadline remains the single upper bound for all cleanup work.
+	reserve := c.stopGrace / 2
+	if reserve > time.Second {
+		reserve = time.Second
+	}
+	cleanupDeadline, _ := cleanupCtx.Deadline()
+	finalizeCtx, cancelFinalize := context.WithDeadline(cleanupCtx, cleanupDeadline.Add(-reserve))
+	defer cancelFinalize()
 
 	// Best-effort: the search may have completed on its own in the meantime,
 	// in which case slskd has nothing to cancel and may answer with an error.
-	_ = c.do(ctx, http.MethodPut, "/api/v0/searches/"+url.PathEscape(id), nil, nil)
+	_ = c.do(cleanupCtx, http.MethodPut, "/api/v0/searches/"+url.PathEscape(id), nil, nil)
 
 	ticker := time.NewTicker(c.pollInterval)
 	defer ticker.Stop()
 	for {
 		var st searchState
-		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(id), nil, &st); err == nil && st.IsComplete {
-			res, err := c.searchResponses(ctx, id)
+		if err := c.do(finalizeCtx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(id), nil, &st); err == nil && st.IsComplete {
+			res, err := c.searchResponses(cleanupCtx, id)
 			if err == nil {
 				// Finalized (isComplete) before harvest, so deleting is safe once
 				// the responses are in hand; on a harvest error we leave it for
 				// slskd's retention rather than dropping unread responses.
-				c.deleteSearch(ctx, id)
+				c.deleteSearch(cleanupCtx, id)
 			}
 			return res, err
 		}
 		select {
-		case <-ctx.Done():
-			// Grace period expired without ever observing isComplete: allow one
-			// final bounded harvest but do NOT delete — see the doc comment above.
-			harvestCtx, harvestCancel := context.WithTimeout(context.WithoutCancel(parent), c.stopGrace)
-			defer harvestCancel()
-			return c.searchResponses(harvestCtx, id)
+		case <-finalizeCtx.Done():
+			// Completion was not observed in the finalize phase. Use only the
+			// time remaining on the same total deadline for a final harvest and
+			// do not delete a search that may still be finalizing.
+			return c.searchResponses(cleanupCtx, id)
 		case <-ticker.C:
 		}
 	}
@@ -417,8 +429,6 @@ func (c *Client) searchResponses(ctx context.Context, id string) ([]Result, erro
 // a failed delete must never fail the search, and slskd's own retention config
 // is the backstop for records that slip through (e.g. a crash between harvest
 // and delete).
-func (c *Client) deleteSearch(parent context.Context, id string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.stopGrace)
-	defer cancel()
+func (c *Client) deleteSearch(ctx context.Context, id string) {
 	_ = c.do(ctx, http.MethodDelete, "/api/v0/searches/"+url.PathEscape(id), nil, nil)
 }

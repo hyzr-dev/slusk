@@ -42,6 +42,8 @@ type ModuleStatus struct {
 	LastErrorAt         time.Time
 	LastError           string
 	ConsecutiveFailures int
+	StaleDeadline       time.Time
+	Live                bool
 }
 
 type moduleState struct {
@@ -174,11 +176,19 @@ func (r *Runner) recordOutcome(st *moduleState, attemptedAt time.Time, tickErr e
 	st.status.Store(&status)
 }
 
-// Health returns a point-in-time copy of every module's runtime status.
+// Health returns a point-in-time copy of every module's runtime status. The
+// liveness fields use the same per-module deadline as Live, so API consumers do
+// not need to approximate the runner's interval-aware policy.
 func (r *Runner) Health() map[string]ModuleStatus {
+	now := time.Now()
 	out := make(map[string]ModuleStatus, len(r.states))
 	for _, st := range r.states {
-		out[st.module.Name()] = *st.status.Load()
+		status := *st.status.Load()
+		if !status.LastAttempt.IsZero() {
+			status.StaleDeadline = status.LastAttempt.Add(st.module.Interval()*3 + r.tickTimeout)
+			status.Live = !now.After(status.StaleDeadline)
+		}
+		out[st.module.Name()] = status
 	}
 	return out
 }
@@ -187,13 +197,8 @@ func (r *Runner) Health() map[string]ModuleStatus {
 // stale beyond Interval()*3 + tickTimeout. Returned errors do not affect
 // liveness; a wedged Tick eventually does.
 func (r *Runner) Live() bool {
-	now := time.Now()
-	for _, st := range r.states {
-		status := st.status.Load()
-		if status.LastAttempt.IsZero() {
-			return false
-		}
-		if now.Sub(status.LastAttempt) > st.module.Interval()*3+r.tickTimeout {
+	for _, status := range r.Health() {
+		if !status.Live {
 			return false
 		}
 	}
