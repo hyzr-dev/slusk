@@ -188,10 +188,10 @@ type pendingResult struct {
 // attempt, registered in Client.pending under the token sent to the server
 // in a ConnectToPeer request.
 type pendingAttempt struct {
-	username     string
-	ct           soul.ConnectionType
-	done         chan pendingResult // buffered 1
-	releaseToken func()
+	username         string
+	ct               soul.ConnectionType
+	done             chan pendingResult // buffered 1
+	tokenReservation *tokenReservation
 }
 
 // registerPendingAttempt allocates a fresh token (regenerating on the
@@ -199,12 +199,12 @@ type pendingAttempt struct {
 // connection attempt for it.
 func (c *Client) registerPendingAttempt(username string, ct soul.ConnectionType) (soul.Token, *pendingAttempt) {
 	attempt := &pendingAttempt{username: username, ct: ct, done: make(chan pendingResult, 1)}
-	token, release := c.tokens.Reserve(attempt)
-	attempt.releaseToken = release
+	reservation := c.tokens.Reserve()
+	attempt.tokenReservation = reservation
 	c.pendingMu.Lock()
-	c.pending[token] = attempt
+	c.pending[reservation.token] = attempt
 	c.pendingMu.Unlock()
-	return token, attempt
+	return reservation.token, attempt
 }
 
 // deregisterPendingAttempt removes token's entry (only if it still points at
@@ -224,7 +224,7 @@ func (c *Client) registerPendingAttempt(username string, ct soul.ConnectionType)
 // case) and closes it. Without this drain, the second case would otherwise
 // leak the connection into a channel nobody reads from again.
 func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAttempt) {
-	defer attempt.releaseToken()
+	defer attempt.tokenReservation.Release()
 	c.pendingMu.Lock()
 	if cur, ok := c.pending[token]; ok && cur == attempt {
 		delete(c.pending, token)
@@ -382,7 +382,9 @@ func (c *Client) handleConnectToPeer(ctx context.Context, generation uint64, msg
 			role = sessionRoleChild
 		}
 		candidate := c.newSession(conn, sessionKey{username: msg.Username, connType: msg.Type}, sessionInitiatorRemote, role, generation, nil)
-		c.registerSession(candidate)
+		if c.registerSession(candidate) == nil {
+			return
+		}
 		if c.logger != nil {
 			c.logger.Debug("mirror peer session retained", "username", msg.Username, "type", msg.Type)
 		}

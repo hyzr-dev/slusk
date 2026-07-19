@@ -146,7 +146,7 @@ func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inbou
 		candidate := c.newSession(conn, sessionKey{username: pi.Username, connType: pi.ConnectionType}, sessionInitiatorRemote, role, generation, lease)
 		winner := c.registerSession(candidate)
 		claimed = true
-		if pi.ConnectionType == distributed.ConnectionType && winner.generation == generation && !c.isServerGenerationActive(generation) {
+		if winner != nil && pi.ConnectionType == distributed.ConnectionType && winner.generation == generation && !c.isServerGenerationActive(generation) {
 			winner.Close(errNoServerConnection)
 		}
 		if c.logger != nil {

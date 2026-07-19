@@ -1,6 +1,7 @@
 package soulseek
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
 func startSessionLifecycle(t *testing.T, c *Client) {
@@ -206,14 +209,236 @@ func TestOrdinaryPSessionRetiresWhenIdleAndReleasesLeaseOnce(t *testing.T) {
 
 func TestTokenAllocatorIdentitySafeRelease(t *testing.T) {
 	a := newTokenAllocator()
-	owner := &struct{ name string }{"pending"}
-	token, release := a.Reserve(owner)
-	if _, ok := a.owners[token]; !ok {
-		t.Fatal("token was not reserved")
+	reservation := a.Reserve()
+	if a.reservations[reservation.token] != reservation {
+		t.Fatal("token was not reserved by identity")
 	}
-	release()
-	release()
-	if _, ok := a.owners[token]; ok {
+	reservation.Release()
+	reservation.Release()
+	if _, ok := a.reservations[reservation.token]; ok {
 		t.Fatal("idempotent release left token reserved")
+	}
+}
+
+func TestTokenAllocatorStaleReleaseDoesNotFreeReplacement(t *testing.T) {
+	a := newTokenAllocator()
+	stale := a.Reserve()
+	replacement := &tokenReservation{allocator: a, token: stale.token}
+	a.mu.Lock()
+	a.reservations[stale.token] = replacement
+	a.mu.Unlock()
+
+	stale.Release()
+	if a.reservations[stale.token] != replacement {
+		t.Fatal("stale release freed the replacement reservation")
+	}
+	replacement.Release()
+	if _, ok := a.reservations[stale.token]; ok {
+		t.Fatal("replacement release left token reserved")
+	}
+}
+
+type testSessionHooks struct {
+	establishedFn func(*peerSession)
+	frameFn       func(*peerSession, sessionFrame) error
+	closedFn      func(*peerSession, error)
+}
+
+func (h testSessionHooks) established(s *peerSession) {
+	if h.establishedFn != nil {
+		h.establishedFn(s)
+	}
+}
+
+func (h testSessionHooks) frame(s *peerSession, frame sessionFrame) error {
+	if h.frameFn != nil {
+		return h.frameFn(s, frame)
+	}
+	return nil
+}
+
+func (h testSessionHooks) closed(s *peerSession, err error) {
+	if h.closedFn != nil {
+		h.closedFn(s, err)
+	}
+}
+
+func TestSessionClosedHookCanObserveDoneAndReenterClose(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	hookDone := make(chan struct{})
+	var calls atomic.Int32
+	c.sessionHooks = testSessionHooks{closedFn: func(s *peerSession, _ error) {
+		<-s.done
+		s.Close(errors.New("reentrant close"))
+		calls.Add(1)
+		close(hookDone)
+	}}
+	a, b := net.Pipe()
+	defer b.Close()
+	s := c.newSession(a, sessionKey{username: "friend", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	c.registerSession(s)
+
+	go s.Close(errors.New("test close"))
+	select {
+	case <-hookDone:
+	case <-time.After(time.Second):
+		t.Fatal("closed hook deadlocked observing done or re-entering Close")
+	}
+	s.Close(errors.New("repeat close"))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("closed hook calls = %d, want 1", got)
+	}
+}
+
+func TestSessionInboundFramesDeliverCompleteWire(t *testing.T) {
+	tests := []struct {
+		name     string
+		connType soul.ConnectionType
+		code     int
+		write    func(io.Writer) ([]byte, error)
+	}{
+		{
+			name:     "P",
+			connType: peer.ConnectionType,
+			code:     int(peer.CodeUserInfoRequest),
+			write: func(w io.Writer) ([]byte, error) {
+				var expected bytes.Buffer
+				if _, err := peer.Write(&expected, &peer.UserInfoRequest{}, false); err != nil {
+					return nil, err
+				}
+				_, err := w.Write(expected.Bytes())
+				return expected.Bytes(), err
+			},
+		},
+		{
+			name:     "D",
+			connType: distributed.ConnectionType,
+			code:     int(distributed.CodeBranchLevel),
+			write: func(w io.Writer) ([]byte, error) {
+				var expected bytes.Buffer
+				if _, err := distributed.Write(&expected, &distributed.BranchLevel{Level: 7}); err != nil {
+					return nil, err
+				}
+				_, err := w.Write(expected.Bytes())
+				return expected.Bytes(), err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+			startSessionLifecycle(t, c)
+			frames := make(chan sessionFrame, 1)
+			c.sessionHooks = testSessionHooks{frameFn: func(_ *peerSession, frame sessionFrame) error {
+				frames <- frame
+				return nil
+			}}
+			a, b := net.Pipe()
+			defer b.Close()
+			s := c.newSession(a, sessionKey{username: "friend", connType: tt.connType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+			c.registerSession(s)
+
+			expected, err := tt.write(b)
+			if err != nil {
+				t.Fatalf("write frame: %v", err)
+			}
+			select {
+			case frame := <-frames:
+				if frame.connType != tt.connType || frame.code != tt.code || !bytes.Equal(frame.wire, expected) {
+					t.Fatalf("frame = {type:%q code:%d wire:%x}, want {type:%q code:%d wire:%x}", frame.connType, frame.code, frame.wire, tt.connType, tt.code, expected)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("frame hook was not called")
+			}
+			s.Close(errors.New("test complete"))
+		})
+	}
+}
+
+func TestSessionFrameHookErrorClosesOnlySession(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	hookErr := errors.New("reject frame")
+	closedErr := make(chan error, 1)
+	c.sessionHooks = testSessionHooks{
+		frameFn:  func(*peerSession, sessionFrame) error { return hookErr },
+		closedFn: func(_ *peerSession, err error) { closedErr <- err },
+	}
+	a, b := net.Pipe()
+	defer b.Close()
+	key := sessionKey{username: "friend", connType: distributed.ConnectionType}
+	s := c.newSession(a, key, sessionInitiatorRemote, sessionRoleChild, 0, nil)
+	c.registerSession(s)
+	if _, err := distributed.Write(b, &distributed.BranchLevel{Level: 3}); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	select {
+	case err := <-closedErr:
+		if !errors.Is(err, hookErr) {
+			t.Fatalf("closed hook error = %v, want %v", err, hookErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hook error did not close session")
+	}
+	if got := c.sessions.Get(key); got != nil {
+		t.Fatal("hook-error session remained registered")
+	}
+}
+
+func TestMirrorDAttachmentRejectedAfterGenerationTeardown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	peerClosed := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			peerClosed <- err
+			return
+		}
+		defer conn.Close()
+		if _, _, _, err := peer.Read(peer.CodeInit(0), conn, false); err != nil {
+			peerClosed <- err
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		var one [1]byte
+		_, err = conn.Read(one[:])
+		peerClosed <- err
+	}()
+
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	const generation = 7
+
+	// Order teardown after the old snapshot point but before the mirror D
+	// attachment. Registration and generation invalidation share the registry
+	// lock, so this late attachment must be rejected rather than escape cleanup.
+	c.sessions.CloseGeneration(distributed.ConnectionType, generation, errNoServerConnection)
+	addr := ln.Addr().(*net.TCPAddr)
+	c.handleConnectToPeer(context.Background(), generation, server.ConnectToPeer{
+		Token:    42,
+		Username: "mirror",
+		Type:     distributed.ConnectionType,
+		IP:       addr.IP,
+		Port:     addr.Port,
+	})
+
+	select {
+	case err := <-peerClosed:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("mirror peer close error = %v, want EOF", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("late mirror D attachment was not closed")
+	}
+	key := sessionKey{username: "mirror", connType: distributed.ConnectionType}
+	if got := c.sessions.Get(key); got != nil {
+		t.Fatal("late mirror D attachment survived in registry")
 	}
 }

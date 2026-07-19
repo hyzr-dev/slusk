@@ -86,39 +86,48 @@ func (l *inboundLease) Release() {
 }
 
 // tokenAllocator is shared by indirect connection attempts and future
-// searches. The identity-bearing release prevents an old owner from freeing
-// a token assigned to another owner.
+// searches. Each reservation has private pointer identity, so a stale release
+// cannot free a token that has since been assigned to another reservation.
 type tokenAllocator struct {
-	mu     sync.Mutex
-	owners map[soul.Token]any
+	mu           sync.Mutex
+	reservations map[soul.Token]*tokenReservation
+}
+
+type tokenReservation struct {
+	allocator *tokenAllocator
+	token     soul.Token
+	once      sync.Once
 }
 
 func newTokenAllocator() *tokenAllocator {
-	return &tokenAllocator{owners: make(map[soul.Token]any)}
+	return &tokenAllocator{reservations: make(map[soul.Token]*tokenReservation)}
 }
 
-func (a *tokenAllocator) Reserve(owner any) (soul.Token, func()) {
+func (a *tokenAllocator) Reserve() *tokenReservation {
 	a.mu.Lock()
-	var token soul.Token
+	defer a.mu.Unlock()
 	for {
-		token = soul.NewToken()
-		if _, exists := a.owners[token]; !exists {
-			a.owners[token] = owner
-			break
+		token := soul.NewToken()
+		if _, exists := a.reservations[token]; exists {
+			continue
 		}
+		reservation := &tokenReservation{allocator: a, token: token}
+		a.reservations[token] = reservation
+		return reservation
 	}
-	a.mu.Unlock()
+}
 
-	var once sync.Once
-	return token, func() {
-		once.Do(func() {
-			a.mu.Lock()
-			if current, ok := a.owners[token]; ok && current == owner {
-				delete(a.owners, token)
-			}
-			a.mu.Unlock()
-		})
+func (r *tokenReservation) Release() {
+	if r == nil {
+		return
 	}
+	r.once.Do(func() {
+		r.allocator.mu.Lock()
+		if r.allocator.reservations[r.token] == r {
+			delete(r.allocator.reservations, r.token)
+		}
+		r.allocator.mu.Unlock()
+	})
 }
 
 // duplicateSessionPolicy returns the candidate to retain. The safe default
@@ -129,16 +138,21 @@ type duplicateSessionPolicy func(existing, candidate *peerSession) *peerSession
 func keepExistingSession(existing, _ *peerSession) *peerSession { return existing }
 
 type sessionRegistry struct {
-	mu       sync.Mutex
-	sessions map[sessionKey]*peerSession
-	policy   duplicateSessionPolicy
+	mu                sync.Mutex
+	sessions          map[sessionKey]*peerSession
+	closedGenerations map[soul.ConnectionType]uint64
+	policy            duplicateSessionPolicy
 }
 
 func newSessionRegistry(policy duplicateSessionPolicy) *sessionRegistry {
 	if policy == nil {
 		policy = keepExistingSession
 	}
-	return &sessionRegistry{sessions: make(map[sessionKey]*peerSession), policy: policy}
+	return &sessionRegistry{
+		sessions:          make(map[sessionKey]*peerSession),
+		closedGenerations: make(map[soul.ConnectionType]uint64),
+		policy:            policy,
+	}
 }
 
 func (r *sessionRegistry) Get(key sessionKey) *peerSession {
@@ -148,24 +162,30 @@ func (r *sessionRegistry) Get(key sessionKey) *peerSession {
 	return s
 }
 
-// Register applies duplicate arbitration under the registry lock, then closes
-// the loser only after unlocking.
+// Register atomically rejects closed generations and applies duplicate
+// arbitration under the registry lock, then closes the loser after unlocking.
 func (r *sessionRegistry) Register(candidate *peerSession) (winner *peerSession, inserted bool) {
 	var loser *peerSession
+	var loserReason = errors.New("duplicate peer session")
 	r.mu.Lock()
-	existing := r.sessions[candidate.key]
-	if existing == nil {
-		r.sessions[candidate.key] = candidate
-		winner, inserted = candidate, true
-	} else if r.policy(existing, candidate) == candidate {
-		r.sessions[candidate.key] = candidate
-		winner, inserted, loser = candidate, true, existing
+	if candidate.generation != 0 && candidate.generation <= r.closedGenerations[candidate.key.connType] {
+		loser = candidate
+		loserReason = errNoServerConnection
 	} else {
-		winner, loser = existing, candidate
+		existing := r.sessions[candidate.key]
+		if existing == nil {
+			r.sessions[candidate.key] = candidate
+			winner, inserted = candidate, true
+		} else if r.policy(existing, candidate) == candidate {
+			r.sessions[candidate.key] = candidate
+			winner, inserted, loser = candidate, true, existing
+		} else {
+			winner, loser = existing, candidate
+		}
 	}
 	r.mu.Unlock()
 	if loser != nil {
-		loser.Close(errors.New("duplicate peer session"))
+		loser.Close(loserReason)
 	}
 	return winner, inserted
 }
@@ -196,11 +216,23 @@ func (r *sessionRegistry) CloseAll(reason error) {
 	}
 }
 
+// CloseGeneration invalidates a generation under the same lock used by
+// Register, then closes its detached sessions without holding that lock.
 func (r *sessionRegistry) CloseGeneration(connType soul.ConnectionType, generation uint64, reason error) {
-	for _, session := range r.Snapshot() {
+	var closing []*peerSession
+	r.mu.Lock()
+	if generation > r.closedGenerations[connType] {
+		r.closedGenerations[connType] = generation
+	}
+	for key, session := range r.sessions {
 		if session.key.connType == connType && session.generation == generation {
-			session.Close(reason)
+			delete(r.sessions, key)
+			closing = append(closing, session)
 		}
+	}
+	r.mu.Unlock()
+	for _, session := range closing {
+		session.Close(reason)
 	}
 }
 
@@ -274,15 +306,21 @@ func (s *peerSession) Close(reason error) {
 	if reason == nil {
 		reason = net.ErrClosed
 	}
+	closed := false
 	s.closeOnce.Do(func() {
 		s.cancel()
 		_ = s.conn.Close()
 		s.lease.Release()
 		s.client.peerConns.Add(-1)
 		s.registry.RemoveIfSame(s.key, s)
-		s.hooks.closed(s, reason)
 		close(s.done)
+		closed = true
 	})
+	// Internal teardown and done notification precede the hook. Keeping the
+	// hook outside closeOnce lets it safely observe done or re-enter Close.
+	if closed {
+		s.hooks.closed(s, reason)
+	}
 }
 
 func (s *peerSession) writeLoop() {
@@ -431,6 +469,9 @@ func (c *Client) establishSession(ctx context.Context, target sessionTarget, ini
 	}
 	candidate := c.newSession(conn, key, initiator, role, generation, nil)
 	winner := c.registerSession(candidate)
+	if winner == nil {
+		return nil, errNoServerConnection
+	}
 	if generation != 0 && winner.generation == generation && !c.isServerGenerationActive(generation) {
 		winner.Close(errNoServerConnection)
 		return nil, errNoServerConnection
