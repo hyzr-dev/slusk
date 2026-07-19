@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
@@ -41,7 +40,7 @@ func newBackedStore(t *testing.T) *store.Store {
 // executeManualImportErr/executedFolders let tests inject an
 // ExecuteManualImport failure and assert what was actually submitted.
 type fakeMusic struct {
-	wanted    []lidarr.WantedAlbum
+	wanted    []core.WantedRelease
 	wantedErr error
 
 	albumPresent   int
@@ -50,30 +49,30 @@ type fakeMusic struct {
 
 	// albumReleases/albumReleasesErr drive AlbumReleases, Discovery's source
 	// for the album's valid track-count band.
-	albumReleases    []lidarr.AlbumRelease
+	albumReleases    []core.AlbumRelease
 	albumReleasesErr error
 
 	// manualImportItems/manualImportErr drive ManualImportCandidates; folders
 	// records every folder it was called with, in order, so tests can assert
 	// AlbumFolder computed the expected path.
-	manualImportItems []lidarr.ManualImportItem
+	manualImportItems []core.ImportItem
 	manualImportErr   error
 	manualImportCalls []string
 
 	// executeManualImportErr, when set, fails ExecuteManualImport; executedItems
 	// records the items it was actually called with.
 	executeManualImportErr error
-	executedItems          []lidarr.ManualImportItem
+	executedItems          []core.ImportItem
 }
 
-func (f *fakeMusic) WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error) {
+func (f *fakeMusic) WantedMissing(ctx context.Context) ([]core.WantedRelease, error) {
 	if f.wantedErr != nil {
 		return nil, f.wantedErr
 	}
 	return f.wanted, nil
 }
 
-func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error) {
+func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) ([]core.ImportItem, error) {
 	f.manualImportCalls = append(f.manualImportCalls, folder)
 	if f.manualImportErr != nil {
 		return nil, f.manualImportErr
@@ -81,7 +80,7 @@ func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) (
 	return f.manualImportItems, nil
 }
 
-func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error {
+func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []core.ImportItem) error {
 	if f.executeManualImportErr != nil {
 		return f.executeManualImportErr
 	}
@@ -96,7 +95,7 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 	return f.albumPresent, f.albumTotal, nil
 }
 
-func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error) {
+func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error) {
 	if f.albumReleasesErr != nil {
 		return nil, f.albumReleasesErr
 	}

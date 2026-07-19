@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 )
 
 // ImportingStore is the slice of the store Importing needs. Declared here (Go
@@ -226,7 +225,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// release — including files it did match to a track. A file with one or
 	// more real track IDs was matched and is importable; only files with no
 	// track ID at all are genuinely unmatched.
-	var importable []lidarr.ManualImportItem
+	var importable []core.ImportItem
 	var rejections []string
 	for _, it := range items {
 		if len(it.TrackIDs) > 0 {
@@ -320,7 +319,7 @@ func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand
 // coverage counts the distinct Lidarr track IDs covered by importable, used to
 // judge whether a candidate can complete a release's full track count. Ported
 // verbatim from the legacy engine (engine/discovery.go:829-837).
-func coverage(importable []lidarr.ManualImportItem) int {
+func coverage(importable []core.ImportItem) int {
 	seen := make(map[int64]struct{})
 	for _, it := range importable {
 		for _, id := range it.TrackIDs {

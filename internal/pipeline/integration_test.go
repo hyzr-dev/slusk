@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
@@ -163,11 +162,11 @@ func TestFullLifecycleWantedToDone(t *testing.T) {
 
 	const artistID = int64(500)
 	music := &fakeMusic{
-		wanted: []lidarr.WantedAlbum{
+		wanted: []core.WantedRelease{
 			{ID: 1, Title: "Album", ArtistName: "Artist", ArtistID: artistID},
 		},
 		albumTotal: 1,
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/peer1/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
@@ -265,9 +264,9 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	music := &fakeMusic{
-		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "Album", ArtistName: "Artist"}},
+		wanted:     []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}},
 		albumTotal: 1,
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/peer2/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
@@ -371,7 +370,7 @@ func TestFullLifecycleExhaustionToFailedAndRevival(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	const maxRetries = 2 // small budget to keep the test fast
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album", ArtistName: "Artist"}}}
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}}}
 	search := &fakeSearcher{} // no results ever, primary or fallback
 	network := &fakeNetwork{}
 	lm := newLifecycleModules(t, music, search, network, maxRetries)

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -16,7 +15,7 @@ import (
 // narrow interface rather than *WantedSync itself so tests can fake it
 // without constructing a real WantedSync.
 type WantedSource interface {
-	Wanted() map[int64]lidarr.WantedAlbum
+	Wanted() map[int64]core.WantedRelease
 }
 
 // DiscoveryStore is the slice of the store Discovery needs. It embeds
@@ -250,7 +249,7 @@ func newCandidateFrom(cand core.RankedCandidate) store.NewCandidate {
 // trackBand computes the valid track-count band across an album's releases:
 // the smallest and largest positive track count. Releases with no track count
 // (0) are ignored; (0, 0) means no usable release data at all.
-func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
+func trackBand(releases []core.AlbumRelease) (minTracks, maxTracks int) {
 	for _, r := range releases {
 		if r.TrackCount <= 0 {
 			continue

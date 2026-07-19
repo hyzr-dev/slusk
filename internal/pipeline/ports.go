@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 // MusicSource is the slice of the Lidarr client the discoverer needs.
 type MusicSource interface {
-	WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error)
-	ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error)
-	ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error
+	WantedMissing(ctx context.Context) ([]core.WantedRelease, error)
+	ManualImportCandidates(ctx context.Context, folder string) ([]core.ImportItem, error)
+	ExecuteManualImport(ctx context.Context, items []core.ImportItem) error
 	AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error)
-	AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error)
+	AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error)
 }
 
 // PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.

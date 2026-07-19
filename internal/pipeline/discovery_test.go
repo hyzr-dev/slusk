@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
@@ -17,17 +16,17 @@ import (
 // fakeWantedSource is a WantedSource fake so tests can hand Discovery an
 // album map without constructing a real WantedSync.
 type fakeWantedSource struct {
-	wanted map[int64]lidarr.WantedAlbum
+	wanted map[int64]core.WantedRelease
 }
 
-func (f *fakeWantedSource) Wanted() map[int64]lidarr.WantedAlbum { return f.wanted }
+func (f *fakeWantedSource) Wanted() map[int64]core.WantedRelease { return f.wanted }
 
 // newDiscoveryParams builds DiscoveryParams over a fresh store-backed
 // fixture. Ranker uses the real matcher.NewWeighted scorer rather than a
 // fake: its ranking logic (grouping, floor, sort order) is exactly what the
 // candidate-cap and ordering assertions below need to exercise, and
 // constructing it is trivial, so a fake would only need to reimplement it.
-func newDiscoveryParams(t *testing.T, music *fakeMusic, searcher *fakeSearcher, wanted map[int64]lidarr.WantedAlbum) (DiscoveryParams, *store.Store) {
+func newDiscoveryParams(t *testing.T, music *fakeMusic, searcher *fakeSearcher, wanted map[int64]core.WantedRelease) (DiscoveryParams, *store.Store) {
 	t.Helper()
 	st := newBackedStore(t)
 	return DiscoveryParams{
@@ -50,8 +49,8 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}, albumReleases: []lidarr.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
 	searcher := &fakeSearcher{results: []core.SearchResult{
 		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
 		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
@@ -161,8 +160,8 @@ func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
 	searcher := &fakeSearcher{} // no results ever, primary or fallback
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 
@@ -218,8 +217,8 @@ func TestDiscoveryFailsJobAtMaxRetries(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
 	searcher := &fakeSearcher{}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 	p.MaxRetries = 3
@@ -254,8 +253,8 @@ func TestDiscoveryFallbackQuery(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
 	primary := "Artist Album (Deluxe Edition)"
 	fallback := normalizeQuery(primary)
 	searcher := &fakeSearcher{resultsForQuery: map[string][]core.SearchResult{
@@ -312,11 +311,11 @@ func TestDiscoveryOrdersByReleaseDateDesc(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{
+	wanted := map[int64]core.WantedRelease{
 		1: {ID: 1, Title: "Old", ArtistName: "Artist", ReleaseDate: "2020-01-01"},
 		2: {ID: 2, Title: "New", ArtistName: "Artist", ReleaseDate: "2025-01-01"},
 	}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1], wanted[2]}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1], wanted[2]}}
 	searcher := &fakeSearcher{} // empty results either way; we only care which query fires
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 
@@ -355,23 +354,23 @@ func TestDiscoveryTrackBandFilter(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{
-		wanted: []lidarr.WantedAlbum{wanted[1]},
-		albumReleases: []lidarr.AlbumRelease{
+		wanted: []core.WantedRelease{wanted[1]},
+		albumReleases: []core.AlbumRelease{
 			{ID: 1, TrackCount: 12, Monitored: true},
 			{ID: 2, TrackCount: 10},
 		},
 	}
-	var results []slskd.Result
+	var results []core.SearchResult
 	for i := 1; i <= 9; i++ {
-		results = append(results, slskd.Result{Username: "toosmall", Filename: fmt.Sprintf("toosmall/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "toosmall", Filename: fmt.Sprintf("toosmall/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	for i := 1; i <= 11; i++ {
-		results = append(results, slskd.Result{Username: "justright", Filename: fmt.Sprintf("justright/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "justright", Filename: fmt.Sprintf("justright/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	for i := 1; i <= 30; i++ {
-		results = append(results, slskd.Result{Username: "toobig", Filename: fmt.Sprintf("toobig/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "toobig", Filename: fmt.Sprintf("toobig/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	searcher := &fakeSearcher{results: results}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
@@ -412,9 +411,9 @@ func TestDiscoveryTrackBandUnknownSkipsFilter(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}, albumReleases: nil}
-	searcher := &fakeSearcher{results: []slskd.Result{
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: nil}
+	searcher := &fakeSearcher{results: []core.SearchResult{
 		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
 		{Username: "peer", Filename: "peer/02.flac", Size: 10, BitRate: 900},
 		{Username: "peer", Filename: "peer/03.flac", Size: 10, BitRate: 900},
@@ -447,9 +446,9 @@ func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 
-	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}, albumReleasesErr: errors.New("boom")}
-	searcher := &fakeSearcher{results: []slskd.Result{
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleasesErr: errors.New("boom")}
+	searcher := &fakeSearcher{results: []core.SearchResult{
 		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
