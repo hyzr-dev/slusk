@@ -33,7 +33,7 @@ const reliabilityGlobalInfluence = 0.5
 // reliabilitySigmoidScale sets how much decayed net history is needed for
 // ReliabilityHistoryScore to approach its 0/1 extremes. It is a shape
 // constant, not a tunable weight - the overall strength of the boost is
-// config.Weights.KnownUser, applied by the caller.
+// matcher.Weights.KnownUser, applied by the caller.
 const reliabilitySigmoidScale = 5.0
 
 // decayedCount applies an exponential recency weight to a raw count: a count

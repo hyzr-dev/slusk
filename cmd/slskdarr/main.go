@@ -72,7 +72,11 @@ func main() {
 	}
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
-	scorer := matcher.NewWeighted(cfg.Pipeline.Weights, cfg.Pipeline.MinBitrate)
+	w := cfg.Pipeline.Weights
+	scorer := matcher.NewWeighted(matcher.Weights{
+		Format: w.Format, Bitrate: w.Bitrate, Reliability: w.Reliability,
+		FileCount: w.FileCount, KnownUser: w.KnownUser,
+	}, cfg.Pipeline.MinBitrate)
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
 

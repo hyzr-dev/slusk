@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
@@ -53,7 +52,7 @@ func newLifecycleModules(t *testing.T, music *fakeMusic, search *fakeSearcher, n
 		Store:         st,
 		Peers:         search,
 		Music:         music,
-		Ranker:        matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
+		Ranker:        matcher.NewWeighted(matcher.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
 		WantedSource:  wanted,
 		SearchTimeout: 5 * time.Second,
 		MaxCandidates: 5,
@@ -172,7 +171,7 @@ func TestFullLifecycleWantedToDone(t *testing.T) {
 			{ID: 1, Path: "/music/complete/peer1/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
-	search := &fakeSearcher{results: []slskd.Result{
+	search := &fakeSearcher{results: []core.SearchResult{
 		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
 	}}
 	network := &fakeNetwork{}
@@ -272,7 +271,7 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 			{ID: 1, Path: "/music/complete/peer2/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
-	search := &fakeSearcher{results: []slskd.Result{
+	search := &fakeSearcher{results: []core.SearchResult{
 		// peer1 scores higher (better bitrate) so it is tried first.
 		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
 		{Username: "peer2", Filename: "peer2/01.flac", Size: 10, BitRate: 320},

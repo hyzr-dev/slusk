@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
@@ -150,9 +151,9 @@ type fakeSearcher struct {
 	// resultsForQuery, when set, overrides results on a per-query basis
 	// (falling back to results for queries not present in the map). Used to
 	// give the primary and normalized fallback query different results.
-	resultsForQuery map[string][]slskd.Result
+	resultsForQuery map[string][]core.SearchResult
 	// results is the default returned for a query absent from resultsForQuery.
-	results []slskd.Result
+	results []core.SearchResult
 	// searchErrForQuery injects a Search error for a specific query, so tests
 	// can fail e.g. only the fallback search while the primary succeeds.
 	searchErrForQuery map[string]error
@@ -175,7 +176,7 @@ type fakeSearcher struct {
 	cancelErr error
 }
 
-func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
+func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error) {
 	f.queries = append(f.queries, query)
 	if err, ok := f.searchErrForQuery[query]; ok {
 		return nil, err

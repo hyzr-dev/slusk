@@ -8,11 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -36,7 +34,7 @@ func newDiscoveryParams(t *testing.T, music *fakeMusic, searcher *fakeSearcher, 
 		Store:         st,
 		Peers:         searcher,
 		Music:         music,
-		Ranker:        matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
+		Ranker:        matcher.NewWeighted(matcher.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
 		WantedSource:  &fakeWantedSource{wanted: wanted},
 		SearchTimeout: 5 * time.Second,
 		MaxCandidates: 2,
@@ -54,7 +52,7 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 
 	wanted := map[int64]lidarr.WantedAlbum{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}, albumReleases: []lidarr.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
-	searcher := &fakeSearcher{results: []slskd.Result{
+	searcher := &fakeSearcher{results: []core.SearchResult{
 		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
 		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
 		{Username: "good2", Filename: "good2/01.flac", Size: 10, BitRate: 900},
@@ -70,7 +68,7 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	// Add a third, oversized candidate directly to the fake results so the
 	// track-band filter has something to reject: 5 files against a band of
 	// [2, 2] (the album's one known release has 2 tracks).
-	searcher.results = append(searcher.results, []slskd.Result{
+	searcher.results = append(searcher.results, []core.SearchResult{
 		{Username: "toobig", Filename: "toobig/01.flac", Size: 10, BitRate: 900},
 		{Username: "toobig", Filename: "toobig/02.flac", Size: 10, BitRate: 900},
 		{Username: "toobig", Filename: "toobig/03.flac", Size: 10, BitRate: 900},
@@ -260,7 +258,7 @@ func TestDiscoveryFallbackQuery(t *testing.T) {
 	music := &fakeMusic{wanted: []lidarr.WantedAlbum{wanted[1]}}
 	primary := "Artist Album (Deluxe Edition)"
 	fallback := normalizeQuery(primary)
-	searcher := &fakeSearcher{resultsForQuery: map[string][]slskd.Result{
+	searcher := &fakeSearcher{resultsForQuery: map[string][]core.SearchResult{
 		fallback: {
 			{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
 		},

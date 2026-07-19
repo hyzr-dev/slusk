@@ -8,8 +8,6 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -239,9 +237,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	return nil
 }
 
-// newCandidateFrom converts a ranked matcher.Candidate into the store's
+// newCandidateFrom converts a ranked core.RankedCandidate into the store's
 // persisted candidate shape.
-func newCandidateFrom(cand matcher.Candidate) store.NewCandidate {
+func newCandidateFrom(cand core.RankedCandidate) store.NewCandidate {
 	files := make([]core.CandidateFile, len(cand.Files))
 	for i, f := range cand.Files {
 		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
@@ -271,7 +269,7 @@ func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
 // first-seen order, used to batch-fetch reliability history for exactly the
 // peers a search actually returned rather than one query per candidate.
 // Ported from internal/engine/discovery.go.
-func uniqueUsernames(results []slskd.Result) []string {
+func uniqueUsernames(results []core.SearchResult) []string {
 	seen := make(map[string]bool, len(results))
 	out := make([]string, 0, len(results))
 	for _, r := range results {

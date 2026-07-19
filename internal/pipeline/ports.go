@@ -10,7 +10,6 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
@@ -25,7 +24,7 @@ type MusicSource interface {
 
 // PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.
 type PeerSearcher interface {
-	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
+	Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
 	// Cancel stops a still-active slskd download, so a failed attempt's live
 	// sibling transfers stop writing into a folder that is about to be cleaned
@@ -49,7 +48,7 @@ type PeerNetwork interface {
 	Remove(ctx context.Context, username, id string) error
 }
 
-// Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).
+// Ranker ranks search results into candidates (satisfied by matcher.Scorer).
 type Ranker interface {
-	Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []matcher.Candidate
+	Rank(results []core.SearchResult, rel map[string]core.PeerReliability, now time.Time) []core.RankedCandidate
 }

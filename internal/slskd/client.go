@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 const (
@@ -88,9 +90,11 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &ae) && ae.status == http.StatusNotFound
 }
 
-// Result is one search result file offered by a peer, enriched with the peer's
-// upload-availability signals (copied from the per-user response group).
-type Result struct {
+// result is one search result file offered by a peer, enriched with the
+// peer's upload-availability signals (copied from the per-user response
+// group) — slskd's wire shape. Search maps it to core.SearchResult so callers
+// never depend on this type.
+type result struct {
 	Username          string `json:"username"`
 	Filename          string `json:"filename"`
 	Size              int64  `json:"size"`
@@ -99,6 +103,19 @@ type Result struct {
 	HasFreeUploadSlot bool   `json:"-"`
 	QueueLength       int    `json:"-"`
 	UploadSpeed       int    `json:"-"`
+}
+
+// toCore maps slskd's wire result shape to the provider-neutral core type.
+func (r result) toCore() core.SearchResult {
+	return core.SearchResult{
+		Username:          r.Username,
+		Filename:          r.Filename,
+		Size:              r.Size,
+		BitRate:           r.BitRate,
+		HasFreeUploadSlot: r.HasFreeUploadSlot,
+		QueueLength:       r.QueueLength,
+		UploadSpeed:       r.UploadSpeed,
+	}
 }
 
 // Transfer is one download slskd currently knows about.
@@ -257,7 +274,7 @@ type searchResponse struct {
 	HasFreeUploadSlot bool     `json:"hasFreeUploadSlot"`
 	QueueLength       int      `json:"queueLength"`
 	UploadSpeed       int      `json:"uploadSpeed"`
-	Files             []Result `json:"files"`
+	Files             []result `json:"files"`
 }
 
 // Search runs a slskd search, retrying when it comes back empty. slskd's search
@@ -266,20 +283,33 @@ type searchResponse struct {
 // moments later. Up to searchRetries extra attempts are made on an empty result
 // before concluding the query genuinely has no matches. A non-empty result or a
 // real error returns immediately; the caller's context bounds the total time.
-func (c *Client) Search(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
-	var out []Result
+func (c *Client) Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error) {
+	var out []result
 	var err error
 	for attempt := 0; ; attempt++ {
 		out, err = c.searchOnce(ctx, query, timeout)
 		if err != nil || len(out) > 0 || attempt >= c.searchRetries || ctx.Err() != nil {
-			return out, err
+			return toCoreResults(out), err
 		}
 		select {
 		case <-ctx.Done():
-			return out, err
+			return toCoreResults(out), err
 		case <-time.After(c.searchBackoff):
 		}
 	}
+}
+
+// toCoreResults maps a slice of slskd's wire result shape to the
+// provider-neutral core type.
+func toCoreResults(in []result) []core.SearchResult {
+	if in == nil {
+		return nil
+	}
+	out := make([]core.SearchResult, len(in))
+	for i, r := range in {
+		out[i] = r.toCore()
+	}
+	return out
 }
 
 // searchOnce starts one async slskd search, polls until it completes or timeout,
@@ -291,7 +321,7 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 // could drop responses. On the timeout path below, completion (and the delete)
 // is handled by stopAndHarvest, which deletes only once slskd reports the
 // search complete and otherwise leaves it for slskd's own retention.
-func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Duration) ([]Result, error) {
+func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Duration) ([]result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -351,7 +381,7 @@ func (c *Client) searchOnce(ctx context.Context, query string, timeout time.Dura
 // stopGrace, a best-effort harvest happens anyway — and in that fallback case
 // the search is deliberately left undeleted for the same reason: isComplete
 // was never observed, so we cannot be sure slskd has finished writing it.
-func (c *Client) stopAndHarvest(parent context.Context, id string) ([]Result, error) {
+func (c *Client) stopAndHarvest(parent context.Context, id string) ([]result, error) {
 	// The caller may already be cancelled. Every cleanup request shares this one
 	// independent deadline; no fallback stage may restart the grace period.
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(parent), c.stopGrace)
@@ -398,12 +428,12 @@ func (c *Client) stopAndHarvest(parent context.Context, id string) ([]Result, er
 }
 
 // searchResponses fetches and flattens a completed search's responses.
-func (c *Client) searchResponses(ctx context.Context, id string) ([]Result, error) {
+func (c *Client) searchResponses(ctx context.Context, id string) ([]result, error) {
 	var groups []searchResponse
 	if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(id)+"/responses", nil, &groups); err != nil {
 		return nil, err
 	}
-	var out []Result
+	var out []result
 	for _, g := range groups {
 		for _, f := range g.Files {
 			if f.IsLocked {
