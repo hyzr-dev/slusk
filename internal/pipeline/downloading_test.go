@@ -600,7 +600,7 @@ func TestDownloadingReconcileAttachFailureRecoversBeforeTerminalCleanup(t *testi
 		State: "Completed, Succeeded", Size: 100, BytesTransferred: 100,
 	}}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
 		state: core.TransferQueued, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now,
 	})
@@ -646,7 +646,7 @@ func TestDownloadingReconcileStallIntentFailureDoesNotCancel(t *testing.T) {
 		Size: 100, BytesTransferred: 40,
 	}}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
 		state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100,
 		deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
@@ -722,7 +722,7 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 				Size: 100, BytesTransferred: 40,
 			}}}
 			p, st := newDownloadingParams(t, net, &fakeSearcher{})
-			_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+			_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 			tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
 				state: tt.initialState, slskdID: "g1", retries: tt.retries,
 				bytesDone: 40, bytesTotal: 100, deadline: tt.deadline, stampAt: tt.stampAt,
@@ -791,7 +791,7 @@ func TestDownloadingReconcileRetryFailureConvergesWithoutDuplicateEnqueue(t *tes
 	}}}
 	peers := &fakeSearcher{}
 	p, st := newDownloadingParams(t, net, peers)
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
 		state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100,
 		deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
