@@ -20,7 +20,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	status := func(context.Context) (StatusReport, error) { return StatusReport{}, nil }
 	jobs := func(context.Context) ([]core.JobView, error) { return nil, nil }
 	if cancel == nil {
-		cancel = func(context.Context, int64) (CancelResult, error) { return CancelResultOK, nil }
+		cancel = func(context.Context, int64) error { return nil }
 	}
 	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates)
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
@@ -109,9 +109,9 @@ func TestReadyzRemainsPublic(t *testing.T) {
 
 func TestMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	calls := 0
-	cancel := func(context.Context, int64) (CancelResult, error) {
+	cancel := func(context.Context, int64) error {
 		calls++
-		return CancelResultOK, nil
+		return nil
 	}
 	h := newSecuredTestHandler(t, cancel)
 

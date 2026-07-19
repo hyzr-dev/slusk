@@ -7,12 +7,14 @@ package observ
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/samuelenocsson/slskdarr/internal/app"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
@@ -119,33 +121,16 @@ const timeFormat = "2006-01-02T15:04:05Z07:00"
 // store's ListJobsWithTransfer).
 type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 
-// CancelResult is the outcome of a CancelFunc call.
-type CancelResult int
+// CancelFunc cancels a job by id (typically backed by app.Jobs.Cancel).
+// Errors are mapped to a status code by the /api/jobs/{id}/cancel handler:
+// errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
+type CancelFunc func(ctx context.Context, jobID int64) error
 
-const (
-	CancelResultOK CancelResult = iota
-	CancelResultNotFound
-	CancelResultFailed
-)
-
-// CancelFunc cancels a job by id, returning which outcome occurred.
-type CancelFunc func(ctx context.Context, jobID int64) (CancelResult, error)
-
-// RetryResult is the outcome of a RetryFunc call.
-type RetryResult int
-
-const (
-	RetryResultOK RetryResult = iota
-	RetryResultNotFound
-	// RetryResultConflict means the job exists but is not FAILED — the
-	// dashboard button raced a state change (e.g. WantedSync revived it, or a
-	// module already advanced it).
-	RetryResultConflict
-)
-
-// RetryFunc manually revives one FAILED job by id, returning which outcome
-// occurred (typically backed by the store's RetryFailedJob).
-type RetryFunc func(ctx context.Context, jobID int64) (RetryResult, error)
+// RetryFunc manually revives one FAILED job by id (typically backed by
+// app.Jobs.Retry). Errors are mapped to a status code by the
+// /api/jobs/{id}/retry handler: errors.Is(err, app.ErrJobNotFound) -> 404,
+// errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
+type RetryFunc func(ctx context.Context, jobID int64) error
 
 // HealthyFunc reports either liveness or readiness. /healthz uses liveness
 // (modules continue attempting work), while /readyz additionally requires
@@ -279,18 +264,14 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		result, err := cancel(r.Context(), jobID)
-		switch result {
-		case CancelResultNotFound:
-			http.Error(w, "job not found", http.StatusNotFound)
-		case CancelResultFailed:
-			msg := "cancel failed"
-			if err != nil {
-				msg = err.Error()
-			}
-			http.Error(w, msg, http.StatusBadGateway)
-		default:
+		err = cancel(r.Context(), jobID)
+		switch {
+		case err == nil:
 			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrJobNotFound):
+			http.Error(w, "job not found", http.StatusNotFound)
+		default:
+			http.Error(w, err.Error(), http.StatusBadGateway)
 		}
 	})
 	mux.HandleFunc("/api/jobs/{id}/retry", func(w http.ResponseWriter, r *http.Request) {
@@ -303,18 +284,16 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		result, err := retry(r.Context(), jobID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		switch result {
-		case RetryResultNotFound:
+		err = retry(r.Context(), jobID)
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		case RetryResultConflict:
+		case errors.Is(err, app.ErrJobNotRetryable):
 			http.Error(w, "job is not FAILED", http.StatusConflict)
 		default:
-			w.WriteHeader(http.StatusNoContent)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 	mux.HandleFunc("/api/jobs/{id}/detail", func(w http.ResponseWriter, r *http.Request) {
