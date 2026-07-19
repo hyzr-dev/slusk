@@ -547,6 +547,12 @@ func TestClientSendsPing(t *testing.T) {
 			t.Logf("write login success: %v", err)
 			return
 		}
+		// The client sends SetListenPort right after login, before the
+		// first ping; discard it before waiting for the ping.
+		if _, err := readFrameCode(conn); err != nil {
+			t.Logf("read set listen port frame after login: %v", err)
+			return
+		}
 		code, err := readFrameCode(conn)
 		if err != nil {
 			t.Logf("read frame after login: %v", err)

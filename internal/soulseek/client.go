@@ -20,11 +20,17 @@ import (
 )
 
 const (
-	defaultDialTimeout   = 10 * time.Second
-	defaultPingInterval  = 5 * time.Minute
-	defaultBackoffBase   = 5 * time.Second
-	defaultBackoffCap    = 10 * time.Minute
-	tcpKeepAliveInterval = time.Minute
+	defaultDialTimeout     = 10 * time.Second
+	defaultPingInterval    = 5 * time.Minute
+	defaultBackoffBase     = 5 * time.Second
+	defaultBackoffCap      = 10 * time.Minute
+	tcpKeepAliveInterval   = time.Minute
+	defaultPeerInitTimeout = 10 * time.Second
+	// defaultListenAddr is used only when Config.ListenAddr is left blank,
+	// which production configuration never does (see config.SoulseekConfig);
+	// it exists so tests that don't care about the peer listener don't have
+	// to set one.
+	defaultListenAddr = "127.0.0.1:0"
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -48,6 +54,13 @@ type Config struct {
 	Username string
 	Password string
 
+	// ListenAddr is the host:port this Client listens on for incoming peer
+	// connections, advertised to the server via SetListenPort after login.
+	// Defaults to "127.0.0.1:0" (a random loopback port) when blank, which
+	// is only appropriate for tests: production configuration always
+	// supplies a real, routable ListenAddr (see config.SoulseekConfig).
+	ListenAddr string
+
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
 	// pingInterval is how often a keepalive Ping is sent once connected.
@@ -57,6 +70,9 @@ type Config struct {
 	// Defaults 5s and 10m.
 	backoffBase time.Duration
 	backoffCap  time.Duration
+	// peerInitTimeout bounds how long an accepted peer connection has to
+	// send its first (PeerInit or PierceFirewall) frame. Default 10s.
+	peerInitTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -79,6 +95,13 @@ type Client struct {
 	// in-flight ConnectPeer calls (see peers.go), keyed by username.
 	addrMu       sync.Mutex
 	pendingAddrs map[string][]chan addrResult
+
+	// listenPort is the actual bound port of the peer listener started once
+	// by Run (see listener.go), advertised to the server via SetListenPort.
+	// It is written exactly once, before Run's reconnect loop starts, and
+	// only ever read afterward (by the same goroutine chain, via
+	// serveConnected), so it needs no synchronization.
+	listenPort int
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -95,6 +118,12 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.backoffCap <= 0 {
 		cfg.backoffCap = defaultBackoffCap
+	}
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = defaultListenAddr
+	}
+	if cfg.peerInitTimeout <= 0 {
+		cfg.peerInitTimeout = defaultPeerInitTimeout
 	}
 
 	c := &Client{cfg: cfg, logger: logger, pendingAddrs: make(map[string][]chan addrResult)}
@@ -131,13 +160,31 @@ func (c *Client) Status() Status {
 	return *c.status.Load()
 }
 
-// Run dials the server, logs in, and serves the connection until ctx is
-// cancelled or a terminal error occurs. On a transient failure it
-// reconnects after an exponential backoff. Run returns nil only when ctx is
-// cancelled; it returns a non-nil error for a terminal failure (invalid
-// credentials, outdated protocol version, or the account logging in
+// Run starts the peer listener, then dials the server, logs in, and serves
+// the connection until ctx is cancelled or a terminal error occurs. On a
+// transient server-connection failure it reconnects after an exponential
+// backoff; the peer listener itself is started exactly once and lives across
+// every reconnect. Run returns nil only when ctx is cancelled; it returns a
+// non-nil error for a terminal failure (the peer listener failing to start,
+// invalid credentials, outdated protocol version, or the account logging in
 // elsewhere), and never reconnects afterward.
 func (c *Client) Run(ctx context.Context) error {
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	}
+	c.listenPort = ln.Addr().(*net.TCPAddr).Port
+
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		c.acceptPeers(ctx, ln)
+	}()
+	defer func() {
+		_ = ln.Close()
+		<-acceptDone
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -270,6 +317,10 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		c.mu.Unlock()
 		c.failAllAddrWaiters(errNoServerConnection)
 	}()
+
+	if err := sendToServer(c, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
+		return fmt.Errorf("write set listen port: %w", err)
+	}
 
 	readErrs := make(chan error, 1)
 	go func() {

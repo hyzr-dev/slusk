@@ -193,6 +193,7 @@ type PathsConfig struct {
 }
 
 const defaultSoulseekServerAddress = "server.slsknet.org:2242"
+const defaultSoulseekListenAddr = "0.0.0.0:2234"
 
 // SoulseekConfig configures the direct connection to the central Soulseek
 // server (as opposed to the [slskd] daemon). The whole section is optional:
@@ -204,22 +205,32 @@ type SoulseekConfig struct {
 	ServerAddress string `toml:"server_address"`
 	Username      string `toml:"username"`
 	Password      string `toml:"password"`
+	// ListenAddr is the host:port slskdarr listens on for incoming peer
+	// connections, advertised to the server after login. Defaults to
+	// 0.0.0.0:2234 when the section is enabled and this is blank. Peers must
+	// be able to reach this port: with Docker port mapping, the published
+	// host port must equal it (there is no separate "advertised port"
+	// concept - the listen port itself is what gets advertised).
+	ListenAddr string `toml:"listen_addr"`
 }
 
 // Enabled reports whether any field of the section was set, meaning the
 // direct Soulseek connection should be started.
 func (s SoulseekConfig) Enabled() bool {
-	return s.ServerAddress != "" || s.Username != "" || s.Password != ""
+	return s.ServerAddress != "" || s.Username != "" || s.Password != "" || s.ListenAddr != ""
 }
 
-// applyDefaults fills ServerAddress with its documented default when the
-// section is enabled and the field was left blank.
+// applyDefaults fills ServerAddress and ListenAddr with their documented
+// defaults when the section is enabled and the field was left blank.
 func (s *SoulseekConfig) applyDefaults() {
 	if !s.Enabled() {
 		return
 	}
 	if s.ServerAddress == "" {
 		s.ServerAddress = defaultSoulseekServerAddress
+	}
+	if s.ListenAddr == "" {
+		s.ListenAddr = defaultSoulseekListenAddr
 	}
 }
 
@@ -353,6 +364,11 @@ func (c Config) Validate() error {
 		}
 		if _, _, err := net.SplitHostPort(c.Soulseek.ServerAddress); err != nil {
 			problems = append(problems, "soulseek.server_address must be a valid host:port")
+		}
+		if _, port, err := net.SplitHostPort(c.Soulseek.ListenAddr); err != nil {
+			problems = append(problems, "soulseek.listen_addr must be a valid host:port")
+		} else if port == "" || port == "0" {
+			problems = append(problems, "soulseek.listen_addr must have a nonzero port")
 		}
 	}
 	if c.Observ.ListenAddr == "" {
