@@ -218,7 +218,7 @@ func (f *FileSearchResponse) Deserialize(reader io.Reader) error {
 	}
 
 	f.PrivateResults, err = f.walkRead(privateResults, zr)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return err
 	}
 
@@ -251,7 +251,7 @@ func (f *FileSearchResponse) walkRead(numberOfFiles uint32, zr io.ReadCloser) (f
 
 		var attributes uint32
 		attributes, err = internal.ReadUint32(zr)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return
 		}
 		for j := uint32(0); j < attributes; j++ {
@@ -266,7 +266,7 @@ func (f *FileSearchResponse) walkRead(numberOfFiles uint32, zr io.ReadCloser) (f
 			attribute.Code = FileAttributeType(code)
 
 			attribute.Value, err = internal.ReadUint32(zr)
-			if err != nil && !errors.Is(err, io.EOF) {
+			if err != nil {
 				return
 			}
 

@@ -15,6 +15,9 @@ var ErrMismatchingCodes = errors.New("mismatching codes")
 // ErrDifferentPacketSize is returned when the declared size of the package does not match the size of the actual read.
 var ErrDifferentPacketSize = errors.New("the declared size of the package does not match the size of the actual read")
 
+// ErrMessageTooLarge is returned when a message declares a size larger than internal.MaxMessageSize.
+var ErrMessageTooLarge = errors.New("message declares a size larger than the maximum allowed message size")
+
 // Token is a unique identifier of type uint32 that is used throughout the protocol.
 type Token uint32
 

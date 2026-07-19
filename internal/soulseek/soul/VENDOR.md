@@ -41,4 +41,39 @@ other code was changed as part of this rewrite.
 
 ## Local modifications
 
-None beyond the import path rewrite described above.
+Beyond the import path rewrite, the codec layer was hardened against
+malicious or corrupted input, and its error handling convention was made
+stricter:
+
+- `soul.go`: added sentinel `ErrMessageTooLarge`.
+- `internal/internal.go`:
+  - Added `MaxMessageSize = 64 << 20` (64 MiB).
+  - `MessageRead` now rejects any declared message size larger than
+    `MaxMessageSize` before allocating or reading the message body — in both
+    the plain and obfuscated (`deobfuscate`) code paths.
+  - `ReadString` and `ReadBytes` reject a declared size larger than
+    `MaxMessageSize` before calling `make` for the buffer.
+  - Removed the upstream convention of treating `io.EOF` as a "soft" error
+    to be swallowed at each read-helper call site. Every read helper
+    (`ReadUint8`, `ReadUint32`, `ReadUint64`, `ReadInt32`, `ReadInt32ToInt`,
+    `ReadUint32ToInt`, `ReadUint32ToToken`, `ReadUint64ToInt`, `ReadBool`,
+    `ReadBytes`, `ReadString`) now returns `(zero, err)` on any error and
+    `(val, nil)` on success — there is no longer a case where a non-nil error
+    is returned alongside a "valid" zero value.
+  - In `MessageRead`, a short copy while filling the message buffer is now a
+    hard error: `ErrDifferentPacketSize` wrapping `io.ErrUnexpectedEOF` (a
+    clean `io.EOF` from the underlying reader is normalized to
+    `io.ErrUnexpectedEOF`, matching `io.ReadFull`'s convention), instead of
+    being silently tolerated.
+  - Also added a declared-size-vs-already-read-prefix sanity check in
+    `MessageRead` (`ErrDifferentPacketSize` if the declared size is smaller
+    than the code prefix already consumed).
+- `server/`, `peer/`, `file/`, `distributed/`: mechanically swept all
+  `if err != nil && !errors.Is(err, io.EOF)` call-site carve-outs down to
+  plain `if err != nil` checks, now that the read helpers never return a
+  soft `io.EOF`. No behavioral change beyond removing the now-impossible
+  "successful read that also returns io.EOF" case.
+
+`peer/`, `file/`, and `distributed/` have no test coverage yet — they are
+unused by the rest of this module until a later issue wires up peer
+connections.

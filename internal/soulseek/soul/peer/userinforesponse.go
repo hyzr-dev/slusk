@@ -126,7 +126,7 @@ func (u *UserInfoResponse) Deserialize(reader io.Reader) error {
 
 	var upload uint32
 	upload, err = internal.ReadUint32(reader)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return err
 	}
 

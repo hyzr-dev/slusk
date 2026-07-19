@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -18,6 +19,12 @@ const (
 	// VersionMinor is a known accepted client version accepted by the SoulSeek network.
 	VersionMinor uint32 = 1
 )
+
+// MaxMessageSize is the largest declared message size we are willing to
+// allocate a buffer for. Messages declaring a larger size are rejected
+// before any allocation or read is attempted, protecting against malicious
+// or corrupted size fields causing excessive memory use.
+const MaxMessageSize = 64 << 20
 
 // CodeServer messages are used by clients to interface with the server over a connection (TCP).
 type CodeServer int
@@ -80,6 +87,10 @@ func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *b
 		return nil, 0, 0, err
 	}
 
+	if size > MaxMessageSize {
+		return nil, 0, 0, soul.ErrMessageTooLarge
+	}
+
 	// Read the code of the message.
 	var readAlready int64
 	switch isInitOrDistributed {
@@ -106,14 +117,27 @@ func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *b
 		readAlready = 4
 	}
 
+	if int64(size) < readAlready {
+		return nil, 0, 0, soul.ErrDifferentPacketSize
+	}
+
 	// Now we simply copy a packet size read from the connection to the message buffer.
 	// This continues writing the message buffer from where the TeeReader left off.
 	// The size of the actual message read needs -4 to account for the packet
 	// size and code reads that happened above.
 	var n int64
-	n, err = io.CopyN(message, connection, int64(size)-int64(readAlready))
-	if err != nil && !errors.Is(err, io.EOF) {
-		return
+	n, err = io.CopyN(message, connection, int64(size)-readAlready)
+	if err != nil {
+		// A short copy while filling the message buffer is unrecoverable: the
+		// declared size promised more data than the connection delivered.
+		// Normalize a clean EOF into ErrUnexpectedEOF, matching io.ReadFull's
+		// convention, so callers never mistake a truncated frame for a
+		// graceful disconnect.
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+
+		return nil, 0, 0, fmt.Errorf("%w: %w", soul.ErrDifferentPacketSize, err)
 	}
 
 	// Conversely, we need to add 4 to the size of the total read to account for the
@@ -192,6 +216,11 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 		case 0:
 			size, err = ReadUint32(bytes.NewBuffer(deobfuscated4bytes.Bytes()))
 			if err != nil {
+				return
+			}
+
+			if size > MaxMessageSize {
+				err = soul.ErrMessageTooLarge
 				return
 			}
 
@@ -387,11 +416,11 @@ func Pack(data []byte) ([]byte, error) {
 func ReadUint8(buf io.Reader) (uint8, error) {
 	var val uint8
 	err := binary.Read(buf, binary.LittleEndian, &val)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return val, err
+	return val, nil
 }
 
 // WriteUint8 writes a uint8 value to the buffer.
@@ -403,11 +432,11 @@ func WriteUint8(buf io.Writer, val uint8) error {
 func ReadInt32(buf io.Reader) (int32, error) {
 	var val int32
 	err := binary.Read(buf, binary.LittleEndian, &val)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return val, err
+	return val, nil
 }
 
 // WriteInt32 writes an int32 value to the buffer.
@@ -418,22 +447,22 @@ func WriteInt32(buf io.Writer, val int32) error {
 // ReadInt32ToInt reads an int32 value from the buffer and converts it to an int.
 func ReadInt32ToInt(buf io.Reader) (int, error) {
 	val, err := ReadInt32(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return int(val), err
+	return int(val), nil
 }
 
 // ReadUint32 reads a uint32 value from the buffer.
 func ReadUint32(buf io.Reader) (uint32, error) {
 	var val uint32
 	err := binary.Read(buf, binary.LittleEndian, &val)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return val, err
+	return val, nil
 }
 
 // WriteUint32 writes a uint32 value to the buffer.
@@ -444,32 +473,32 @@ func WriteUint32(buf io.Writer, val uint32) error {
 // ReadUint32ToInt reads a uint32 value from the buffer and converts it to an int.
 func ReadUint32ToInt(buf io.Reader) (int, error) {
 	v, err := ReadUint32(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return int(v), err
+	return int(v), nil
 }
 
 // ReadUint32ToToken reads a uint32 value from the buffer and converts it to a Token.
 func ReadUint32ToToken(buf io.Reader) (soul.Token, error) {
 	v, err := ReadUint32(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return soul.Token(v), err
+	return soul.Token(v), nil
 }
 
 // ReadUint64 reads a uint64 value from the buffer.
 func ReadUint64(reader io.Reader) (uint64, error) {
 	var val uint64
 	err := binary.Read(reader, binary.LittleEndian, &val)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return val, err
+	return val, nil
 }
 
 // WriteUint64 writes a uint64 value to the buffer.
@@ -480,11 +509,11 @@ func WriteUint64(buf io.Writer, val uint64) error {
 // ReadUint64ToInt reads a uint64 value from the buffer and converts it to an int.
 func ReadUint64ToInt(buf io.Reader) (int, error) {
 	val, err := ReadUint64(buf)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return 0, err
 	}
 
-	return int(val), err
+	return int(val), nil
 }
 
 // NewString creates a byte slice from a string.
@@ -503,6 +532,10 @@ func ReadString(reader io.Reader) (string, error) {
 	size, err := ReadUint32(reader)
 	if err != nil {
 		return "", err
+	}
+
+	if size > MaxMessageSize {
+		return "", soul.ErrMessageTooLarge
 	}
 
 	buf := make([]byte, size)
@@ -534,11 +567,11 @@ func ReadBool(reader io.Reader) (bool, error) {
 	var val uint8
 
 	err := binary.Read(reader, binary.LittleEndian, &val)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return false, err
 	}
 
-	return val == 1, err
+	return val == 1, nil
 }
 
 // WriteBool writes a bool value to the buffer.
@@ -558,13 +591,17 @@ func ReadBytes(reader io.Reader) (buf []byte, err error) {
 		return nil, err
 	}
 
+	if size > MaxMessageSize {
+		return nil, soul.ErrMessageTooLarge
+	}
+
 	buf = make([]byte, size)
 	_, err = io.ReadFull(reader, buf)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return nil, err
 	}
 
-	return buf, err
+	return buf, nil
 }
 
 // WriteBytes writes a byte slice to the buffer.

@@ -115,7 +115,7 @@ func (l *Login) Deserialize(reader io.Reader) error {
 
 	if !success {
 		errMessage, err := internal.ReadString(reader)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return err
 		}
 

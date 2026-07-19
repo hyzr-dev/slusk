@@ -65,7 +65,7 @@ func (u *UploadDenied) Deserialize(reader io.Reader) error {
 	}
 
 	r, err := internal.ReadString(reader)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return err
 	}
 

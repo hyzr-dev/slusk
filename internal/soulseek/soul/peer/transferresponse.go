@@ -92,7 +92,7 @@ func (t *TransferResponse) Deserialize(reader io.Reader) error {
 
 	if !t.Allowed {
 		r, err := internal.ReadString(reader)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return err
 		}
 

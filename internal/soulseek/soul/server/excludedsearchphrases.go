@@ -39,7 +39,7 @@ func (e *ExcludedSearchPhrases) Deserialize(reader io.Reader) error {
 
 	for range int(numberOfPhrases) {
 		phrase, err := internal.ReadString(reader)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return err
 		}
 

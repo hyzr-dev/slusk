@@ -270,7 +270,7 @@ func (s *SharedFileListResponse) walkRead(numberOfDirectories uint32, zr io.Read
 			}
 
 			attributes, err := internal.ReadUint32(zr)
-			if err != nil && !errors.Is(err, io.EOF) {
+			if err != nil {
 				return nil, err
 			}
 
@@ -285,7 +285,7 @@ func (s *SharedFileListResponse) walkRead(numberOfDirectories uint32, zr io.Read
 				a.Code = FileAttributeType(code)
 
 				a.Value, err = internal.ReadUint32(zr)
-				if err != nil && !errors.Is(err, io.EOF) {
+				if err != nil {
 					return nil, err
 				}
 

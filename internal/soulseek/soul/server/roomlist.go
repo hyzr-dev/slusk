@@ -168,7 +168,7 @@ func (r *RoomList) Deserialize(reader io.Reader) (err error) {
 	for i := range int(numberOfOperatedPrivateRooms) {
 		var no uint32
 		no, err = internal.ReadUint32(reader)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return
 		}
 

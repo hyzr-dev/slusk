@@ -39,7 +39,7 @@ func (p *PrivilegedUsers) Deserialize(reader io.Reader) (err error) {
 	for range int(numberOfUsers) {
 		var user string
 		user, err = internal.ReadString(reader)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if err != nil {
 			return
 		}
 

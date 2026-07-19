@@ -34,7 +34,7 @@ func (s *SharedFileListRequest) Deserialize(reader io.Reader) error {
 	}
 
 	code, err := internal.ReadUint32(reader) // code 4
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil {
 		return err
 	}
 
