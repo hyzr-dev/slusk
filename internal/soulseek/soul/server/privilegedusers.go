@@ -1,0 +1,50 @@
+package server
+
+import (
+	"errors"
+	"fmt"
+	"io"
+
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+)
+
+const CodePrivilegedUsers Code = 69
+
+type PrivilegedUsers struct {
+	Users []string
+}
+
+func (p *PrivilegedUsers) Deserialize(reader io.Reader) (err error) {
+	_, err = internal.ReadUint32(reader) // size
+	if err != nil {
+		return
+	}
+
+	code, err := internal.ReadUint32(reader) // code 69
+	if err != nil {
+		return
+	}
+
+	if code != uint32(CodePrivilegedUsers) {
+		return errors.Join(soul.ErrMismatchingCodes,
+			fmt.Errorf("expected code %d, got %d", CodePrivilegedUsers, code))
+	}
+
+	numberOfUsers, err := internal.ReadUint32(reader)
+	if err != nil {
+		return
+	}
+
+	for range int(numberOfUsers) {
+		var user string
+		user, err = internal.ReadString(reader)
+		if err != nil {
+			return
+		}
+
+		p.Users = append(p.Users, user)
+	}
+
+	return
+}

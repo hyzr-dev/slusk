@@ -20,6 +20,7 @@ type Config struct {
 	Store    StoreConfig    `toml:"store"`
 	Observ   ObservConfig   `toml:"observ"`
 	Paths    PathsConfig    `toml:"paths"`
+	Soulseek SoulseekConfig `toml:"soulseek"`
 }
 
 // LidarrConfig is the Lidarr music server integration configuration. There is
@@ -191,6 +192,37 @@ type PathsConfig struct {
 	SlskdCompleteDir string `toml:"slskd_complete_dir"`
 }
 
+const defaultSoulseekServerAddress = "server.slsknet.org:2242"
+
+// SoulseekConfig configures the direct connection to the central Soulseek
+// server (as opposed to the [slskd] daemon). The whole section is optional:
+// a wholly absent [soulseek] section, or one with every field blank, leaves
+// the direct connection disabled.
+type SoulseekConfig struct {
+	// ServerAddress is the Soulseek server's host:port. Defaults to
+	// server.slsknet.org:2242 when the section is enabled and this is blank.
+	ServerAddress string `toml:"server_address"`
+	Username      string `toml:"username"`
+	Password      string `toml:"password"`
+}
+
+// Enabled reports whether any field of the section was set, meaning the
+// direct Soulseek connection should be started.
+func (s SoulseekConfig) Enabled() bool {
+	return s.ServerAddress != "" || s.Username != "" || s.Password != ""
+}
+
+// applyDefaults fills ServerAddress with its documented default when the
+// section is enabled and the field was left blank.
+func (s *SoulseekConfig) applyDefaults() {
+	if !s.Enabled() {
+		return
+	}
+	if s.ServerAddress == "" {
+		s.ServerAddress = defaultSoulseekServerAddress
+	}
+}
+
 // Duration wraps time.Duration so TOML strings like "5m" decode directly.
 type Duration struct{ time.Duration }
 
@@ -216,6 +248,7 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unknown config keys: %v", undecoded)
 	}
 	cfg.Pipeline.applyDefaults()
+	cfg.Soulseek.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -310,6 +343,17 @@ func (c Config) Validate() error {
 	}
 	if c.Store.DSN == "" {
 		problems = append(problems, "store.dsn is required")
+	}
+	if c.Soulseek.Enabled() {
+		if c.Soulseek.Username == "" {
+			problems = append(problems, "soulseek.username is required when the soulseek section is enabled")
+		}
+		if c.Soulseek.Password == "" {
+			problems = append(problems, "soulseek.password is required when the soulseek section is enabled")
+		}
+		if _, _, err := net.SplitHostPort(c.Soulseek.ServerAddress); err != nil {
+			problems = append(problems, "soulseek.server_address must be a valid host:port")
+		}
 	}
 	if c.Observ.ListenAddr == "" {
 		problems = append(problems, "observ.listen_addr is required")
