@@ -37,6 +37,12 @@ let jobs = [];
 let searchTerm = '';
 let statusFilter = '';
 
+// --- View / hash routing ---
+
+let currentView = 'overview';
+let detailJobId = null;
+const jobEventsCache = {};
+
 function fmtBytes(n) {
   if (!n) return '0 MB';
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
@@ -124,7 +130,7 @@ function overviewActiveRows() {
 
 function matchesSearch(j) {
   if (!searchTerm) return true;
-  const hay = (j.title + ' ' + j.artist + ' ' + j.peer).toLowerCase();
+  const hay = ('#' + j.id + ' ' + j.title + ' ' + j.artist + ' ' + j.peer).toLowerCase();
   return hay.includes(searchTerm.toLowerCase());
 }
 
@@ -161,9 +167,9 @@ function jobDetailLine(j) {
   return `<br><span style="color:#7c828d;font-size:11.5px;">${parts.join(' · ')}</span>`;
 }
 
-let expandedId = null;
 // jobDetails caches per-job detail (attempt/transfer history) fetched lazily
-// on expand, keyed by job id, so re-rendering while expanded doesn't refetch.
+// when the job detail page is opened, keyed by job id, so re-rendering while
+// viewing doesn't refetch.
 const jobDetails = {};
 
 async function loadJobDetail(id) {
@@ -171,9 +177,20 @@ async function loadJobDetail(id) {
     const res = await fetch(`/api/jobs/${id}/detail`);
     if (!res.ok) return;
     jobDetails[id] = await res.json();
-    if (expandedId === id) queueRows();
+    if (detailJobId === id) renderJobDetail();
   } catch (e) {
     // network error: leave any previously loaded detail in place
+  }
+}
+
+async function loadJobEvents(id) {
+  try {
+    const res = await fetch(`/api/jobs/${id}/events`);
+    if (!res.ok) return;
+    jobEventsCache[id] = await res.json();
+    if (detailJobId === id) renderJobDetail();
+  } catch (e) {
+    // network error: leave any previously loaded events in place
   }
 }
 
@@ -196,59 +213,109 @@ function attemptHistoryHtml(id) {
 function queueRows() {
   const filtered = jobs.filter(matchesFilters);
   const body = document.getElementById('queue-body');
-  body.innerHTML = filtered.map(j => {
-    const rows = [`
-      <tr class="job-row" data-id="${j.id}">
-        <td><span class="pill ${j.status}">${STATE_LABEL[j.state] || j.status}</span></td>
-        <td>${escapeHtml(j.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(j.artist)}</span>${jobDetailLine(j)}</td>
-        <td>${escapeHtml(j.peer)}</td>
-        <td>${j.bytesTotal ? `<div style="font-size:11px;color:#7c828d;margin-bottom:3px;">${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>` : ''}<div class="bar"><div class="bar-fill" style="width:${pct(j)}%"></div></div></td>
-        <td></td>
-      </tr>
-    `];
-    if (expandedId === j.id) {
-      rows.push(`
-        <tr class="detail-row">
-          <td colspan="5">
-            <div>Peer: ${escapeHtml(j.peer) || '—'}</div>
-            <div>Nedladdat: ${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>
-            <button class="action" data-cancel="${j.id}">Avbryt</button>
-            ${j.state === 'FAILED' ? `<button class="action" data-retry="${j.id}">Försök igen</button>` : ''}
-            <div style="margin-top:12px;">${attemptHistoryHtml(j.id)}</div>
-          </td>
-        </tr>
-      `);
-    }
-    return rows.join('');
-  }).join('');
+  body.innerHTML = filtered.map(j => `
+    <tr class="job-row" data-id="${j.id}">
+      <td class="mono">#${j.id}</td>
+      <td><span class="pill ${j.status}">${STATE_LABEL[j.state] || j.status}</span></td>
+      <td>${escapeHtml(j.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(j.artist)}</span>${jobDetailLine(j)}</td>
+      <td>${escapeHtml(j.peer)}</td>
+      <td>${j.bytesTotal ? `<div style="font-size:11px;color:#7c828d;margin-bottom:3px;">${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>` : ''}<div class="bar"><div class="bar-fill" style="width:${pct(j)}%"></div></div></td>
+    </tr>
+  `).join('');
 
   body.querySelectorAll('tr.job-row').forEach(tr => {
     tr.addEventListener('click', () => {
       const id = Number(tr.getAttribute('data-id'));
-      if (expandedId === id) {
-        expandedId = null;
-      } else {
-        expandedId = id;
-        if (!jobDetails[id]) loadJobDetail(id); // fetched lazily, once per expand
-      }
-      queueRows();
+      location.hash = '#/jobs/' + id;
     });
   });
-  body.querySelectorAll('button[data-cancel]').forEach(btn => {
-    btn.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      const id = btn.getAttribute('data-cancel');
+}
+
+// --- Job detail page ---
+
+function jobEventsHtml(id) {
+  const list = jobEventsCache[id];
+  if (!list) return '<div style="color:#7c828d;">Laddar…</div>';
+  if (!list.length) return '<div style="color:#7c828d;">Inga händelser.</div>';
+  return `
+    <table>
+      <thead><tr><th>Tid</th><th>Händelse</th><th>Detalj</th></tr></thead>
+      <tbody>
+        ${list.map(e => `
+          <tr>
+            <td class="mono" style="white-space:nowrap;">${new Date(e.createdAt).toLocaleString('sv-SE')}</td>
+            <td>${escapeHtml(EVENT_LABEL[e.event] || e.event)}</td>
+            <td>${escapeHtml(e.detail)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderJobDetail() {
+  if (detailJobId == null) return;
+  const id = detailJobId;
+  const j = jobs.find(x => x.id === id);
+  const detail = jobDetails[id];
+  const el = document.getElementById('view-job-detail');
+
+  let header;
+  if (j) {
+    header = `
+      <span class="pill ${j.status}">${STATE_LABEL[j.state] || j.status}</span>
+      <h1 style="display:inline;margin-left:8px;">Jobb #${id}</h1>
+      <div style="margin-top:10px;">${escapeHtml(j.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(j.artist)}</span></div>
+      <div style="color:#7c828d;font-size:11.5px;margin-top:4px;">Peer: ${escapeHtml(j.peer) || '—'}</div>
+      <div style="color:#7c828d;font-size:11.5px;margin-top:4px;">Nedladdat: ${fmtBytes(j.bytesDone)} / ${fmtBytes(j.bytesTotal)}</div>
+    `;
+  } else if (detail) {
+    header = `
+      <h1 style="display:inline;">Jobb #${id}</h1>
+      <span style="color:#7c828d;font-size:11.5px;margin-left:8px;">${escapeHtml(STATE_LABEL[detail.state] || detail.state)}</span>
+      <div style="margin-top:10px;">${escapeHtml(detail.title)}<br><span style="color:#7c828d;font-size:11.5px;">${escapeHtml(detail.artist)}</span></div>
+    `;
+  } else {
+    header = `<h1>Jobb #${id}</h1><div style="color:#7c828d;">Laddar…</div>`;
+  }
+
+  const isFailed = (j && j.state === 'FAILED') || (detail && detail.state === 'FAILED');
+
+  el.innerHTML = `
+    <a class="joblink" href="#" id="job-detail-back">← Tillbaka</a>
+    <div style="margin-top:12px;">${header}</div>
+    <div style="margin-top:14px;">
+      <button class="action" data-cancel="${id}">Avbryt</button>
+      ${isFailed ? `<button class="action" data-retry="${id}">Försök igen</button>` : ''}
+    </div>
+    <h1 style="margin-top:22px;">Försökshistorik</h1>
+    <div>${attemptHistoryHtml(id)}</div>
+    <h1 style="margin-top:22px;">Händelser</h1>
+    <div>${jobEventsHtml(id)}</div>
+  `;
+
+  const back = document.getElementById('job-detail-back');
+  back.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    currentView = 'queue';
+    location.hash = '';
+  });
+
+  el.querySelectorAll('button[data-cancel]').forEach(btn => {
+    btn.addEventListener('click', async () => {
       await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
       await fetchJobs();
+      loadJobDetail(id);
+      loadJobEvents(id);
     });
   });
-  body.querySelectorAll('button[data-retry]').forEach(btn => {
-    btn.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      const id = btn.getAttribute('data-retry');
+  el.querySelectorAll('button[data-retry]').forEach(btn => {
+    btn.addEventListener('click', async () => {
       await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
-      delete jobDetails[id]; // candidate history was wiped by the retry, refetch on next expand
+      delete jobDetails[id]; // candidate history was wiped by the retry, refetch
       await fetchJobs();
+      loadJobDetail(id);
+      loadJobEvents(id);
     });
   });
 }
@@ -281,7 +348,7 @@ function eventRows() {
   body.innerHTML = filtered.map(e => `
     <tr>
       <td class="mono" style="white-space:nowrap;">${new Date(e.createdAt).toLocaleString('sv-SE')}</td>
-      <td class="mono">#${e.jobId}</td>
+      <td class="mono"><a class="joblink" href="#/jobs/${e.jobId}">#${e.jobId}</a></td>
       <td>${escapeHtml(EVENT_LABEL[e.event] || e.event)}</td>
       <td>${escapeHtml(e.detail)}</td>
     </tr>
@@ -378,16 +445,48 @@ function render() {
   statCards();
   overviewActiveRows();
   queueRows();
+  if (detailJobId != null) renderJobDetail();
 }
 
+function showTab(name) {
+  currentView = name;
+  document.querySelectorAll('nav button[data-view]').forEach(b => {
+    b.classList.toggle('active', b.getAttribute('data-view') === name);
+  });
+  document.querySelectorAll('.view').forEach(v => {
+    v.classList.toggle('active', v.id === 'view-' + name);
+  });
+}
+
+function showJobDetail(id) {
+  detailJobId = id;
+  document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-job-detail').classList.add('active');
+  if (!jobDetails[id]) loadJobDetail(id);
+  loadJobEvents(id);
+  renderJobDetail();
+}
+
+function router() {
+  const m = location.hash.match(/^#\/jobs\/(\d+)$/);
+  if (m) {
+    showJobDetail(Number(m[1]));
+  } else {
+    detailJobId = null;
+    showTab(currentView);
+  }
+}
 
 function setupNav() {
   document.querySelectorAll('nav button[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById('view-' + btn.getAttribute('data-view')).classList.add('active');
+      currentView = btn.getAttribute('data-view');
+      if (location.hash) {
+        location.hash = ''; // triggers hashchange -> router -> showTab
+      } else {
+        showTab(currentView);
+      }
     });
   });
 }
@@ -417,7 +516,15 @@ fetchJobs();
 fetchEvents();
 fetchPeers();
 fetchStatus();
+window.addEventListener('hashchange', router);
+router();
 setInterval(fetchJobs, 3000);
 setInterval(fetchEvents, 3000);
 setInterval(fetchPeers, 5000);
 setInterval(fetchStatus, 5000);
+setInterval(() => {
+  if (detailJobId != null) {
+    loadJobDetail(detailJobId);
+    loadJobEvents(detailJobId);
+  }
+}, 3000);
