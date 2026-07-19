@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,16 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
+)
+
+const (
+	startupTimeout           = 30 * time.Second
+	lifecycleShutdownTimeout = 10 * time.Second
+	httpReadHeaderTimeout    = 5 * time.Second
+	httpReadTimeout          = 15 * time.Second
+	httpWriteTimeout         = 30 * time.Second
+	httpIdleTimeout          = 60 * time.Second
+	healthcheckTimeout       = 5 * time.Second
 )
 
 func main() {
@@ -49,13 +60,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, err := store.Open(cfg.Store.DSN)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
+	defer cancelStartup()
+
+	st, err := store.OpenContext(startupCtx, cfg.Store.DSN)
 	if err != nil {
 		logger.Error("open store", "err", err)
 		os.Exit(1)
 	}
-	defer st.Close()
-
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
 	scorer := matcher.NewWeighted(cfg.Pipeline.Weights, cfg.Pipeline.MinBitrate)
@@ -122,8 +136,12 @@ func main() {
 		ImportConfirmTimeout: cfg.Pipeline.ImportConfirmTimeout.Duration,
 		Interval:             cfg.Pipeline.ImportingInterval.Duration,
 	})
-	runner := pipeline.NewRunner(logger, cfg.Pipeline.TickTimeout.Duration,
+	runner, err := pipeline.NewRunner(logger, cfg.Pipeline.TickTimeout.Duration,
 		wantedSync, discovery, selecting, downloading, importing)
+	if err != nil {
+		logger.Error("configure pipeline runner", "err", err)
+		os.Exit(1)
+	}
 
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
 		active, err := st.ActiveTransfers(ctx)
@@ -168,11 +186,23 @@ func main() {
 		}
 		return observ.CancelResultOK, nil
 	}
-	// healthyFn/modulesFn surface the Runner's per-module liveness: healthy
-	// only once every module has ticked at least once and none is stale
-	// beyond its own staleness window (see pipeline.Runner.Healthy).
-	healthyFn := func() bool { return runner.Healthy() }
-	modulesFn := func() map[string]time.Time { return runner.Health() }
+	// Liveness only requires modules to keep attempting work. Readiness also
+	// requires successful work and fails after sustained errors.
+	liveFn := func() bool { return runner.Live() }
+	readyFn := func() bool { return runner.Ready() }
+	modulesFn := func() map[string]observ.ModuleStatus {
+		statuses := runner.Health()
+		out := make(map[string]observ.ModuleStatus, len(statuses))
+		for name, status := range statuses {
+			out[name] = observ.ModuleStatus{
+				LastAttempt: status.LastAttempt, LastCompleted: status.LastCompleted,
+				LastSuccess: status.LastSuccess, LastErrorAt: status.LastErrorAt,
+				LastError: status.LastError, ConsecutiveFailures: status.ConsecutiveFailures,
+				StaleDeadline: status.StaleDeadline, Live: status.Live, Ready: status.Ready,
+			}
+		}
+		return out
+	}
 	// retryFn manually revives a FAILED job from the dashboard: NotFound if no
 	// such job exists, Conflict if it exists but is not currently FAILED (the
 	// dashboard button raced a state change).
@@ -193,32 +223,137 @@ func main() {
 		}
 		return observ.RetryResultOK, nil
 	}
-	handler := observ.NewServer(reg, statusFn, jobsFn, cancelFn,
-		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, healthyFn, modulesFn, retryFn,
+	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, cancelFn,
+		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, retryFn,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
 	}
 	srv := &http.Server{
-		Addr:    cfg.Observ.ListenAddr,
-		Handler: observ.ProtectPrivateEndpoints(handler, authenticator),
+		Addr:              cfg.Observ.ListenAddr,
+		Handler:           observ.ProtectPrivateEndpoints(handler, authenticator),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("status server", "err", err)
-		}
-	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	listener, err := listenHTTP(startupCtx, cfg.Observ.ListenAddr)
+	if err != nil {
+		logger.Error("listen status server", "err", err)
+		_ = st.Close()
+		os.Exit(1)
+	}
+	cancelStartup()
 
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
-	if err := runner.Run(ctx); err != nil {
-		logger.Error("pipeline runner stopped", "err", err)
+	outcome := runRuntime(ctx, srv, listener, runner, lifecycleShutdownTimeout)
+	closeErr := closeStoreAfterRuntime(outcome, st.Close)
+	if outcome.err != nil || closeErr != nil {
+		logger.Error("slskdarr stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,
+			"store_close_safe", outcome.storeCloseSafe)
+		os.Exit(1)
 	}
-	_ = srv.Shutdown(context.Background())
 	logger.Info("slskdarr stopped cleanly")
+}
+
+func listenHTTP(ctx context.Context, addr string) (net.Listener, error) {
+	return (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+}
+
+type runtimeRunner interface {
+	Run(context.Context) error
+}
+
+type runtimeOutcome struct {
+	err            error
+	storeCloseSafe bool
+}
+
+// closeStoreAfterRuntime closes the shared store only after all pipeline
+// modules and HTTP handlers have relinquished ownership of it.
+func closeStoreAfterRuntime(outcome runtimeOutcome, closeStore func() error) error {
+	if !outcome.storeCloseSafe {
+		return nil
+	}
+	return closeStore()
+}
+
+// runRuntime ties the HTTP listener and pipeline runner into one lifecycle.
+// An unexpected listener failure cancels the pipeline and is returned as a
+// fatal error. Signal-driven shutdown is bounded even if a module or HTTP
+// connection does not cooperate. storeCloseSafe is false if bounded shutdown
+// expires while a module or handler may still own the shared store.
+func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, runner runtimeRunner, shutdownTimeout time.Duration) runtimeOutcome {
+	runtimeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		err := srv.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serverDone <- err
+	}()
+	runnerDone := make(chan error, 1)
+	go func() { runnerDone <- runner.Run(runtimeCtx) }()
+
+	var runtimeErr error
+	storeCloseSafe := true
+	serverFinished, runnerFinished := false, false
+	select {
+	case <-ctx.Done():
+	case err := <-serverDone:
+		serverFinished = true
+		if err != nil {
+			runtimeErr = fmt.Errorf("status server failed: %w", err)
+		} else if ctx.Err() == nil {
+			runtimeErr = errors.New("status server stopped unexpectedly")
+		}
+	case err := <-runnerDone:
+		runnerFinished = true
+		if err != nil {
+			runtimeErr = err
+			if errors.Is(err, pipeline.ErrShutdownTimeout) {
+				storeCloseSafe = false
+			}
+		} else if ctx.Err() == nil {
+			runtimeErr = errors.New("pipeline runner stopped unexpectedly")
+		}
+	}
+	cancel()
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		storeCloseSafe = false
+		runtimeErr = errors.Join(runtimeErr, fmt.Errorf("shutdown status server: %w", err))
+	}
+	if !serverFinished {
+		select {
+		case err := <-serverDone:
+			if err != nil {
+				runtimeErr = errors.Join(runtimeErr, fmt.Errorf("status server failed: %w", err))
+			}
+		case <-shutdownCtx.Done():
+			storeCloseSafe = false
+			runtimeErr = errors.Join(runtimeErr, errors.New("status server shutdown timed out"))
+		}
+	}
+	if !runnerFinished {
+		select {
+		case err := <-runnerDone:
+			runtimeErr = errors.Join(runtimeErr, err)
+			if errors.Is(err, pipeline.ErrShutdownTimeout) {
+				storeCloseSafe = false
+			}
+		case <-shutdownCtx.Done():
+			storeCloseSafe = false
+			runtimeErr = errors.Join(runtimeErr, errors.New("pipeline shutdown timed out"))
+		}
+	}
+	return runtimeOutcome{err: runtimeErr, storeCloseSafe: storeCloseSafe}
 }
 
 // runHealthcheck loads the config to find the observ listener, then GETs its
@@ -236,7 +371,7 @@ func runHealthcheck(configPath string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: healthcheckTimeout}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)

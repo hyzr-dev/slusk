@@ -97,6 +97,16 @@ func TestHealthzRemainsPublicAndMinimal(t *testing.T) {
 	}
 }
 
+func TestReadyzRemainsPublic(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (readiness probe must not require auth)", rec.Code)
+	}
+}
+
 func TestMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	calls := 0
 	cancel := func(context.Context, int64) (CancelResult, error) {

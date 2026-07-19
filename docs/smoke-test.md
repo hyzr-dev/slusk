@@ -35,11 +35,14 @@ eller `docker exec` in i Postgres-containern.)
 ## Fas 2 — Anslutning + observability
 
 - [ ] `curl $STATUS/healthz` svarar utan autentisering och utan intern statusdata.
+- [ ] `curl $STATUS/readyz` svarar utan autentisering (`200` när modulerna hinner med, annars `503`).
 - [ ] Anrop utan token till `/`, `/status`, `/api/*` och `/metrics` svarar `401`.
-- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...}}`).
-      `modules` listar varje pipeline-modul (`wanted_sync`, `discovery`, `selecting`,
-      `downloading`, `importing`) med tidpunkten för dess senast avslutade tick — en
-      modul som slutat synas där (eller vars tid slutat röra sig) har fastnat.
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`).
+      `modules` behåller den kompatibla kartan med senast avslutad tick för varje
+      pipeline-modul (`wanted_sync`, `discovery`, `selecting`, `downloading`, `importing`).
+      `moduleDetails` innehåller dessutom `lastAttempt`, `lastCompleted`, felstatus,
+      serverns intervallbaserade `staleDeadline` samt dess auktoritativa `live`- och
+      `ready`-värden; dashboarden använder dessa fält i stället för egna gränsvärden.
 - [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)

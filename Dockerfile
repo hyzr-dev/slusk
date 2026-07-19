@@ -14,8 +14,9 @@ ENTRYPOINT ["/usr/local/bin/slskdarr", "--config", "/config/config.toml"]
 
 # distroless has no shell/curl/wget, so HEALTHCHECK execs the binary itself in
 # --healthcheck mode: it hits its own /healthz over loopback and exits 0/1.
-# /healthz is the sole public endpoint and returns only pipeline liveness, not
+# /healthz reflects pipeline liveness (recent module attempts) and /readyz
+# reports whether modules are succeeding; both are public probes that return no
 # credentials or internal status. Private UI/API/metrics endpoints require the
-# configured observ token. See pipeline.Runner.Healthy.
+# configured observ token. See pipeline.Runner.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["/usr/local/bin/slskdarr", "--config", "/config/config.toml", "--healthcheck"]

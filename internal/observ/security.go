@@ -48,16 +48,16 @@ func requestToken(r *http.Request) (string, bool) {
 	return token, true
 }
 
-// ProtectPrivateEndpoints leaves only /healthz public. Every other UI, API,
-// and metrics request must pass auth. Browser POSTs additionally need a valid
-// same-origin Origin header; bearer-authenticated non-browser clients may omit
-// Origin, but cannot override a conflicting one.
+// ProtectPrivateEndpoints leaves only the /healthz and /readyz probes public.
+// Every other UI, API, and metrics request must pass auth. Browser POSTs
+// additionally need a valid same-origin Origin header; bearer-authenticated
+// non-browser clients may omit Origin, but cannot override a conflicting one.
 func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler {
 	if auth == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

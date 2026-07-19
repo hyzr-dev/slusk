@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"strings"
@@ -25,6 +26,18 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+func TestOpenContextHonorsCancelledStartup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, err := OpenContext(ctx, "postgres://127.0.0.1:1/unreachable?sslmode=disable"); err == nil {
+		t.Fatal("OpenContext returned nil error for cancelled startup")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancelled OpenContext took %v", elapsed)
+	}
 }
 
 func TestOpenAppliesSchema(t *testing.T) {

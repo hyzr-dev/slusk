@@ -44,4 +44,11 @@ func TestDashboardJSServed(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Errorf("Content-Type = %q, want javascript", ct)
 	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "data.moduleDetails") || !strings.Contains(body, "status.ready") {
+		t.Error("dashboard must use server-provided per-module readiness")
+	}
+	if strings.Contains(body, "MODULE_STALE_AFTER_MS") || strings.Contains(body, "60000") || strings.Contains(body, "failures >= 3") {
+		t.Error("dashboard must not duplicate server health thresholds")
+	}
 }
