@@ -20,7 +20,10 @@ The schema rewrite is transformed as follows:
 - every `candidate_attempts` row becomes a `candidates` row with the same ID,
   album-job relationship, username, score, terminal state, failure reason, and
   timestamps; its cached `files` JSON is reconstructed losslessly from that
-  attempt's transfers (`filename` and `bytes_total`);
+  attempt's transfers (`filename` and `bytes_total`). The current model has no
+  per-candidate scheduling field (its backoff is job-scoped), so a source with
+  any non-NULL `candidate_attempts.backoff_until` is rejected rather than
+  silently dropping the timestamp or changing its scope;
 - legacy `PENDING` attempts become `ACTIVE`: `CreateAttempt` wrote `PENDING` and
   the legacy engine never promoted that column, so it denoted the selected,
   active attempt. Existing `ACTIVE`, `SUCCEEDED`, and `FAILED` meanings are

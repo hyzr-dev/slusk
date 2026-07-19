@@ -241,6 +241,11 @@ func validateSource(src *sql.DB) error {
 		name  string
 		query string
 	}{
+		// The current candidates model never retries a failed candidate and has
+		// no per-candidate scheduling column. Mapping this value to album-level
+		// not_before would change its scope, so only NULL can be represented
+		// without silently changing or discarding legacy data.
+		{"candidate_attempts.backoff_until (no safe current equivalent; it must be NULL)", `SELECT COUNT(*) FROM candidate_attempts WHERE backoff_until IS NOT NULL`},
 		{"candidate_attempts.album_job_id", `SELECT COUNT(*) FROM candidate_attempts a LEFT JOIN album_jobs j ON j.id = a.album_job_id WHERE j.id IS NULL`},
 		{"transfers.attempt_id", `SELECT COUNT(*) FROM transfers t LEFT JOIN candidate_attempts a ON a.id = t.attempt_id WHERE a.id IS NULL`},
 		{"artist_user_reliability.user_id", `SELECT COUNT(*) FROM artist_user_reliability r LEFT JOIN known_users u ON u.id = r.user_id WHERE u.id IS NULL`},
@@ -338,7 +343,7 @@ type candidateFile struct {
 }
 
 func copyCandidates(src *sql.DB, tx *sql.Tx) (int, error) {
-	rows, err := src.Query(`SELECT a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, j.state, j.updated_at FROM candidate_attempts a JOIN album_jobs j ON j.id = a.album_job_id`)
+	rows, err := src.Query(`SELECT a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.backoff_until, a.created_at, a.updated_at, j.state, j.updated_at FROM candidate_attempts a JOIN album_jobs j ON j.id = a.album_job_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -354,9 +359,12 @@ func copyCandidates(src *sql.DB, tx *sql.Tx) (int, error) {
 		var id, jobID int64
 		var username, state, failReason, jobState string
 		var score float64
-		var createdAt, updatedAt, jobUpdatedAt sql.NullTime
-		if err := rows.Scan(&id, &jobID, &username, &score, &state, &failReason, &createdAt, &updatedAt, &jobState, &jobUpdatedAt); err != nil {
+		var backoffUntil, createdAt, updatedAt, jobUpdatedAt sql.NullTime
+		if err := rows.Scan(&id, &jobID, &username, &score, &state, &failReason, &backoffUntil, &createdAt, &updatedAt, &jobState, &jobUpdatedAt); err != nil {
 			return 0, err
+		}
+		if backoffUntil.Valid {
+			return 0, fmt.Errorf("candidate_attempts id %d has non-null backoff_until with no safe current equivalent", id)
 		}
 		files, err := filesForAttempt(src, id)
 		if err != nil {
