@@ -19,6 +19,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/samuelenocsson/slskdarr/internal/app"
 	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
@@ -81,7 +82,11 @@ func main() {
 	}
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
-	scorer := matcher.NewWeighted(cfg.Pipeline.Weights, cfg.Pipeline.MinBitrate)
+	w := cfg.Pipeline.Weights
+	scorer := matcher.NewWeighted(matcher.Weights{
+		Format: w.Format, Bitrate: w.Bitrate, Reliability: w.Reliability,
+		FileCount: w.FileCount, KnownUser: w.KnownUser,
+	}, cfg.Pipeline.MinBitrate)
 	reg := prometheus.NewRegistry()
 	metrics := observ.NewMetrics(reg)
 
@@ -173,27 +178,7 @@ func main() {
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
-	// cancelFn cancels a job locally even if the remote slskd cancel call
-	// fails: the job's local state must advance to cancelled regardless, since
-	// any stale slskd-side entry gets cleaned up by the next reconcile pass.
-	cancelFn := func(ctx context.Context, jobID int64) (observ.CancelResult, error) {
-		view, found, err := st.JobWithTransfer(ctx, jobID)
-		if err != nil {
-			return observ.CancelResultFailed, err
-		}
-		if !found {
-			return observ.CancelResultNotFound, nil
-		}
-		if view.Transfer != nil && view.Transfer.SlskdID != "" {
-			if err := peers.Cancel(ctx, view.Transfer.Username, view.Transfer.SlskdID); err != nil {
-				logger.Warn("slskd cancel failed, still advancing job state", "job_id", jobID, "err", err)
-			}
-		}
-		if err := st.AdvanceJobState(ctx, jobID, core.StateCancelled, time.Now()); err != nil {
-			return observ.CancelResultFailed, err
-		}
-		return observ.CancelResultOK, nil
-	}
+	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger}
 	// Liveness only requires modules to keep attempting work. Readiness also
 	// requires successful work and fails after sustained errors.
 	liveFn := func() bool { return runner.Live() }
@@ -211,28 +196,8 @@ func main() {
 		}
 		return out
 	}
-	// retryFn manually revives a FAILED job from the dashboard: NotFound if no
-	// such job exists, Conflict if it exists but is not currently FAILED (the
-	// dashboard button raced a state change).
-	retryFn := func(ctx context.Context, jobID int64) (observ.RetryResult, error) {
-		_, found, err := st.JobWithTransfer(ctx, jobID)
-		if err != nil {
-			return observ.RetryResultOK, err // result is ignored by the handler when err != nil
-		}
-		if !found {
-			return observ.RetryResultNotFound, nil
-		}
-		ok, err := st.RetryFailedJob(ctx, jobID, time.Now())
-		if err != nil {
-			return observ.RetryResultOK, err // result is ignored by the handler when err != nil
-		}
-		if !ok {
-			return observ.RetryResultConflict, nil
-		}
-		return observ.RetryResultOK, nil
-	}
-	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, cancelFn,
-		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, retryFn,
+	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
+		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {

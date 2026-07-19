@@ -4,9 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 func timePtr(t time.Time) *time.Time { return &t }
@@ -97,9 +95,9 @@ func TestReliabilityHistoryScoreGlobalIsFallbackAtHalfInfluence(t *testing.T) {
 
 func TestRankKnownGoodPeerWinsTieOverUnknownPeer(t *testing.T) {
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	w := config.Weights{Format: 1, Bitrate: 1, FileCount: 1, KnownUser: 1.0}
+	w := Weights{Format: 1, Bitrate: 1, FileCount: 1, KnownUser: 1.0}
 	s := NewWeighted(w, 192)
-	results := []slskd.Result{
+	results := []core.SearchResult{
 		{Username: "unknown", Filename: "a.flac", BitRate: 900},
 		{Username: "known_good", Filename: "a.flac", BitRate: 900},
 	}
@@ -114,9 +112,9 @@ func TestRankKnownGoodPeerWinsTieOverUnknownPeer(t *testing.T) {
 
 func TestRankRecentFailuresSuppressPeerBelowUnknown(t *testing.T) {
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	w := config.Weights{Format: 1, Bitrate: 1, FileCount: 1, KnownUser: 1.0}
+	w := Weights{Format: 1, Bitrate: 1, FileCount: 1, KnownUser: 1.0}
 	s := NewWeighted(w, 192)
-	results := []slskd.Result{
+	results := []core.SearchResult{
 		{Username: "unknown", Filename: "a.flac", BitRate: 900},
 		{Username: "known_bad", Filename: "a.flac", BitRate: 900},
 	}
@@ -136,13 +134,13 @@ func TestRankKnownUserHistoryDoesNotBeatFreshFlacOverMP3(t *testing.T) {
 	// small relative to a real format/bitrate gap across a whole album.
 	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	// Mirrors config.example.toml's [engine.weights] defaults.
-	w := config.Weights{Format: 1.0, Bitrate: 0.5, Reliability: 0.8, FileCount: 1.0, KnownUser: 1.0}
+	w := Weights{Format: 1.0, Bitrate: 0.5, Reliability: 0.8, FileCount: 1.0, KnownUser: 1.0}
 	s := NewWeighted(w, 192)
-	var results []slskd.Result
+	var results []core.SearchResult
 	for i := 1; i <= 10; i++ {
 		results = append(results,
-			slskd.Result{Username: "mp3_known", Filename: trackFile("mp3_known", i, "mp3"), BitRate: 320},
-			slskd.Result{Username: "flac_unknown", Filename: trackFile("flac_unknown", i, "flac"), BitRate: 900},
+			core.SearchResult{Username: "mp3_known", Filename: trackFile("mp3_known", i, "mp3"), BitRate: 320},
+			core.SearchResult{Username: "flac_unknown", Filename: trackFile("flac_unknown", i, "flac"), BitRate: 900},
 		)
 	}
 	rel := map[string]core.PeerReliability{

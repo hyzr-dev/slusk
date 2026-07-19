@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -90,7 +89,7 @@ func TestImportingVerifyRejectionFailsCandidateToSelecting(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
 		},
 	}
@@ -118,7 +117,7 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
 		},
 		albumTotal: 2, // only 1 track ID covered, out of 2 in the release
@@ -158,7 +157,7 @@ func TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection(t *testing.
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: []int64{1}, Rejections: []string{"Has unmatched tracks"}},
 			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: []int64{2}, Rejections: []string{"Has unmatched tracks"}},
 			{ID: 3, Path: "/music/complete/A/03.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
@@ -206,7 +205,7 @@ func TestImportingVerifyAllUnmatchedStillFailsCandidate(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
 			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
 		},
@@ -237,7 +236,7 @@ func TestImportingCoverageUsesMinTrackCountBand(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{1}},
 			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: true, TrackIDs: []int64{2}},
 		},
@@ -292,7 +291,7 @@ func TestImportingVerifyDedupsFolderBeforeImportScan(t *testing.T) {
 	}
 
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: filepath.Join(albumDir, "one.flac"), Importable: true, TrackIDs: []int64{1}},
 		},
 	}
@@ -328,7 +327,7 @@ func TestImportingHappyPathSubmitsThenConfirmsToDone(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101, 102}},
 		},
 		albumTotal:   2,

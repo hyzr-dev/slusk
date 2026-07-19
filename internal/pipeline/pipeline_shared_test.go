@@ -6,8 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
@@ -40,7 +39,7 @@ func newBackedStore(t *testing.T) *store.Store {
 // executeManualImportErr/executedFolders let tests inject an
 // ExecuteManualImport failure and assert what was actually submitted.
 type fakeMusic struct {
-	wanted    []lidarr.WantedAlbum
+	wanted    []core.WantedRelease
 	wantedErr error
 
 	albumPresent   int
@@ -49,30 +48,30 @@ type fakeMusic struct {
 
 	// albumReleases/albumReleasesErr drive AlbumReleases, Discovery's source
 	// for the album's valid track-count band.
-	albumReleases    []lidarr.AlbumRelease
+	albumReleases    []core.AlbumRelease
 	albumReleasesErr error
 
 	// manualImportItems/manualImportErr drive ManualImportCandidates; folders
 	// records every folder it was called with, in order, so tests can assert
 	// AlbumFolder computed the expected path.
-	manualImportItems []lidarr.ManualImportItem
+	manualImportItems []core.ImportItem
 	manualImportErr   error
 	manualImportCalls []string
 
 	// executeManualImportErr, when set, fails ExecuteManualImport; executedItems
 	// records the items it was actually called with.
 	executeManualImportErr error
-	executedItems          []lidarr.ManualImportItem
+	executedItems          []core.ImportItem
 }
 
-func (f *fakeMusic) WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error) {
+func (f *fakeMusic) WantedMissing(ctx context.Context) ([]core.WantedRelease, error) {
 	if f.wantedErr != nil {
 		return nil, f.wantedErr
 	}
 	return f.wanted, nil
 }
 
-func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error) {
+func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) ([]core.ImportItem, error) {
 	f.manualImportCalls = append(f.manualImportCalls, folder)
 	if f.manualImportErr != nil {
 		return nil, f.manualImportErr
@@ -80,7 +79,7 @@ func (f *fakeMusic) ManualImportCandidates(ctx context.Context, folder string) (
 	return f.manualImportItems, nil
 }
 
-func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error {
+func (f *fakeMusic) ExecuteManualImport(ctx context.Context, items []core.ImportItem) error {
 	if f.executeManualImportErr != nil {
 		return f.executeManualImportErr
 	}
@@ -95,7 +94,7 @@ func (f *fakeMusic) AlbumStatus(ctx context.Context, albumID int64) (present, to
 	return f.albumPresent, f.albumTotal, nil
 }
 
-func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error) {
+func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error) {
 	if f.albumReleasesErr != nil {
 		return nil, f.albumReleasesErr
 	}
@@ -111,13 +110,13 @@ func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.
 // removed records every id Remove was called with, in order, so tests can
 // assert reconcile purges terminal transfers from slskd.
 type fakeNetwork struct {
-	downloads []slskd.Transfer
+	downloads []core.RemoteTransfer
 	cancelled []string
 	cancelErr error
 	removed   []string
 }
 
-func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]slskd.Transfer, error) {
+func (f *fakeNetwork) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error) {
 	return f.downloads, nil
 }
 
@@ -128,7 +127,7 @@ func (f *fakeNetwork) Cancel(ctx context.Context, username, id string) error {
 	f.cancelled = append(f.cancelled, id)
 	for i := range f.downloads {
 		if f.downloads[i].ID == id && f.downloads[i].Username == username {
-			f.downloads[i].State = "Completed, Cancelled"
+			f.downloads[i].State = core.TransferCancelled
 		}
 	}
 	return nil
@@ -150,9 +149,9 @@ type fakeSearcher struct {
 	// resultsForQuery, when set, overrides results on a per-query basis
 	// (falling back to results for queries not present in the map). Used to
 	// give the primary and normalized fallback query different results.
-	resultsForQuery map[string][]slskd.Result
+	resultsForQuery map[string][]core.SearchResult
 	// results is the default returned for a query absent from resultsForQuery.
-	results []slskd.Result
+	results []core.SearchResult
 	// searchErrForQuery injects a Search error for a specific query, so tests
 	// can fail e.g. only the fallback search while the primary succeeds.
 	searchErrForQuery map[string]error
@@ -169,13 +168,13 @@ type fakeSearcher struct {
 	// Downloading's two-phase fail path and cleanup can be asserted.
 	cancelled      []string
 	deletedFolders []string
-	// cancelErr, when set, fails every Cancel call (an slskd.IsNotFound error
+	// cancelErr, when set, fails every Cancel call (a core.ErrRemoteNotFound error
 	// exercises the treat-as-already-terminal branch; any other error the
 	// leave-active-and-retry branch).
 	cancelErr error
 }
 
-func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error) {
+func (f *fakeSearcher) Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error) {
 	f.queries = append(f.queries, query)
 	if err, ok := f.searchErrForQuery[query]; ok {
 		return nil, err

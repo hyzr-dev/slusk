@@ -6,11 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -53,7 +50,7 @@ func newLifecycleModules(t *testing.T, music *fakeMusic, search *fakeSearcher, n
 		Store:         st,
 		Peers:         search,
 		Music:         music,
-		Ranker:        matcher.NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
+		Ranker:        matcher.NewWeighted(matcher.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 0),
 		WantedSource:  wanted,
 		SearchTimeout: 5 * time.Second,
 		MaxCandidates: 5,
@@ -119,11 +116,11 @@ func newLifecycleModules(t *testing.T, music *fakeMusic, search *fakeSearcher, n
 func completeTransfers(t *testing.T, lm *lifecycleModules, candID int64, username string, files []core.CandidateFile, now time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	var downloads []slskd.Transfer
+	var downloads []core.RemoteTransfer
 	for _, f := range files {
-		downloads = append(downloads, slskd.Transfer{
+		downloads = append(downloads, core.RemoteTransfer{
 			ID: "slskd-" + f.Filename, Username: username, Filename: f.Filename,
-			State: "Completed, Succeeded", Size: f.Size, BytesTransferred: f.Size,
+			State: core.TransferCompleted, Size: f.Size, BytesDone: f.Size,
 		})
 	}
 	lm.network.downloads = downloads
@@ -141,11 +138,11 @@ func completeTransfers(t *testing.T, lm *lifecycleModules, candID int64, usernam
 func failTransfersTerminally(t *testing.T, lm *lifecycleModules, username string, files []core.CandidateFile, now time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	var downloads []slskd.Transfer
+	var downloads []core.RemoteTransfer
 	for _, f := range files {
-		downloads = append(downloads, slskd.Transfer{
+		downloads = append(downloads, core.RemoteTransfer{
 			ID: "slskd-" + f.Filename, Username: username, Filename: f.Filename,
-			State: "Completed, Errored", Size: f.Size,
+			State: core.TransferErrored, Size: f.Size,
 		})
 	}
 	lm.network.downloads = downloads
@@ -164,15 +161,15 @@ func TestFullLifecycleWantedToDone(t *testing.T) {
 
 	const artistID = int64(500)
 	music := &fakeMusic{
-		wanted: []lidarr.WantedAlbum{
+		wanted: []core.WantedRelease{
 			{ID: 1, Title: "Album", ArtistName: "Artist", ArtistID: artistID},
 		},
 		albumTotal: 1,
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/peer1/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
-	search := &fakeSearcher{results: []slskd.Result{
+	search := &fakeSearcher{results: []core.SearchResult{
 		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
 	}}
 	network := &fakeNetwork{}
@@ -266,13 +263,13 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	music := &fakeMusic{
-		wanted:     []lidarr.WantedAlbum{{ID: 1, Title: "Album", ArtistName: "Artist"}},
+		wanted:     []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}},
 		albumTotal: 1,
-		manualImportItems: []lidarr.ManualImportItem{
+		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/peer2/01.flac", Importable: true, TrackIDs: []int64{101}},
 		},
 	}
-	search := &fakeSearcher{results: []slskd.Result{
+	search := &fakeSearcher{results: []core.SearchResult{
 		// peer1 scores higher (better bitrate) so it is tried first.
 		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
 		{Username: "peer2", Filename: "peer2/01.flac", Size: 10, BitRate: 320},
@@ -372,7 +369,7 @@ func TestFullLifecycleExhaustionToFailedAndRevival(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	const maxRetries = 2 // small budget to keep the test fast
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "Album", ArtistName: "Artist"}}}
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}}}
 	search := &fakeSearcher{} // no results ever, primary or fallback
 	network := &fakeNetwork{}
 	lm := newLifecycleModules(t, music, search, network, maxRetries)

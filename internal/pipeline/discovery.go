@@ -7,9 +7,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -18,7 +15,7 @@ import (
 // narrow interface rather than *WantedSync itself so tests can fake it
 // without constructing a real WantedSync.
 type WantedSource interface {
-	Wanted() map[int64]lidarr.WantedAlbum
+	Wanted() map[int64]core.WantedRelease
 }
 
 // DiscoveryStore is the slice of the store Discovery needs. It embeds
@@ -239,9 +236,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	return nil
 }
 
-// newCandidateFrom converts a ranked matcher.Candidate into the store's
+// newCandidateFrom converts a ranked core.RankedCandidate into the store's
 // persisted candidate shape.
-func newCandidateFrom(cand matcher.Candidate) store.NewCandidate {
+func newCandidateFrom(cand core.RankedCandidate) store.NewCandidate {
 	files := make([]core.CandidateFile, len(cand.Files))
 	for i, f := range cand.Files {
 		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
@@ -252,7 +249,7 @@ func newCandidateFrom(cand matcher.Candidate) store.NewCandidate {
 // trackBand computes the valid track-count band across an album's releases:
 // the smallest and largest positive track count. Releases with no track count
 // (0) are ignored; (0, 0) means no usable release data at all.
-func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
+func trackBand(releases []core.AlbumRelease) (minTracks, maxTracks int) {
 	for _, r := range releases {
 		if r.TrackCount <= 0 {
 			continue
@@ -271,7 +268,7 @@ func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
 // first-seen order, used to batch-fetch reliability history for exactly the
 // peers a search actually returned rather than one query per candidate.
 // Ported from internal/engine/discovery.go.
-func uniqueUsernames(results []slskd.Result) []string {
+func uniqueUsernames(results []core.SearchResult) []string {
 	seen := make(map[string]bool, len(results))
 	out := make([]string, 0, len(results))
 	for _, r := range results {

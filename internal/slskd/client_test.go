@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 func TestEnqueueSendsFilenameAndSize(t *testing.T) {
@@ -124,7 +127,7 @@ func TestDeleteDownloadFolderReturnsErrorOnFailure(t *testing.T) {
 	}
 }
 
-func TestIsNotFoundRecognizesA404(t *testing.T) {
+func TestNotFoundWrapsErrRemoteNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -135,12 +138,12 @@ func TestIsNotFoundRecognizesA404(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	if !IsNotFound(err) {
-		t.Errorf("IsNotFound(%v) = false, want true", err)
+	if !errors.Is(err, core.ErrRemoteNotFound) {
+		t.Errorf("errors.Is(%v, core.ErrRemoteNotFound) = false, want true", err)
 	}
 }
 
-func TestIsNotFoundRejectsOtherStatuses(t *testing.T) {
+func TestOtherStatusesDoNotWrapErrRemoteNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -151,8 +154,8 @@ func TestIsNotFoundRejectsOtherStatuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	if IsNotFound(err) {
-		t.Errorf("IsNotFound(%v) = true, want false", err)
+	if errors.Is(err, core.ErrRemoteNotFound) {
+		t.Errorf("errors.Is(%v, core.ErrRemoteNotFound) = true, want false", err)
 	}
 }
 
@@ -199,8 +202,73 @@ func TestListDownloadsFlattens(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "g1" || got[0].Username != "bob" {
 		t.Fatalf("unexpected transfers: %+v", got)
 	}
-	if got[0].BytesTransferred != 40 {
-		t.Errorf("bytesTransferred = %d", got[0].BytesTransferred)
+	if got[0].BytesDone != 40 {
+		t.Errorf("bytesDone = %d", got[0].BytesDone)
+	}
+}
+
+// TestTransferToCore covers transfer.toCore()'s translation of slskd's wire
+// state string and failure reason: State (via mapTransferState) and
+// Retryable (via isTransientFailure) together, since both are private and
+// only reachable through the adapter's ListDownloads mapping otherwise.
+func TestTransferToCore(t *testing.T) {
+	tests := []struct {
+		name          string
+		state         string
+		exception     string
+		wantState     core.TransferState
+		wantRetryable bool
+	}{
+		{name: "succeeded", state: "Completed, Succeeded", wantState: core.TransferCompleted, wantRetryable: true},
+		{name: "cancelled", state: "Completed, Cancelled", wantState: core.TransferCancelled, wantRetryable: true},
+		{name: "canceled (American spelling)", state: "Completed, Canceled", wantState: core.TransferCancelled, wantRetryable: true},
+		{name: "timed out", state: "Completed, TimedOut", wantState: core.TransferErrored, wantRetryable: true},
+		{name: "aborted", state: "Completed, Aborted", wantState: core.TransferErrored, wantRetryable: true},
+		{
+			name: "rejected, transient (too many megabytes)", state: "Completed, Rejected",
+			exception: "Too many megabytes", wantState: core.TransferErrored, wantRetryable: true,
+		},
+		{
+			name: "rejected, permanent (file not shared)", state: "Completed, Rejected",
+			exception: "File not shared.", wantState: core.TransferErrored, wantRetryable: false,
+		},
+		{
+			name: "errored, permanent (not shared)", state: "Completed, Errored",
+			exception: "not shared", wantState: core.TransferErrored, wantRetryable: false,
+		},
+		{
+			name: "errored, permanent (banned)", state: "Completed, Errored",
+			exception: "banned", wantState: core.TransferErrored, wantRetryable: false,
+		},
+		{
+			name: "errored, permanent, case-insensitive", state: "Completed, Errored",
+			exception: "Banned", wantState: core.TransferErrored, wantRetryable: false,
+		},
+		{name: "errored, empty exception is retryable", state: "Completed, Errored", exception: "", wantState: core.TransferErrored, wantRetryable: true},
+		{name: "in progress", state: "InProgress", wantState: core.TransferInProgress, wantRetryable: true},
+		{name: "queued", state: "Queued", wantState: core.TransferQueued, wantRetryable: true},
+		{name: "unrecognized state falls back to queued", state: "SomethingNew", wantState: core.TransferQueued, wantRetryable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr := transfer{
+				ID: "g1", Username: "bob", Filename: "a.flac",
+				State: tt.state, Size: 100, BytesTransferred: 50, Exception: tt.exception,
+			}
+			got := tr.toCore()
+			if got.State != tt.wantState {
+				t.Errorf("State = %v, want %v", got.State, tt.wantState)
+			}
+			if got.Retryable != tt.wantRetryable {
+				t.Errorf("Retryable = %v, want %v", got.Retryable, tt.wantRetryable)
+			}
+			if got.Failure != tt.exception {
+				t.Errorf("Failure = %q, want %q", got.Failure, tt.exception)
+			}
+			if got.ID != "g1" || got.Username != "bob" || got.Filename != "a.flac" || got.Size != 100 || got.BytesDone != 50 {
+				t.Errorf("passthrough fields not preserved: %+v", got)
+			}
+		})
 	}
 }
 

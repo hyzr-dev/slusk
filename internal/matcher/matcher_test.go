@@ -5,14 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 func TestRankPrefersHigherBitrateFlac(t *testing.T) {
-	w := config.Weights{Format: 1.0, Bitrate: 1.0, Reliability: 0, FileCount: 1.0}
+	w := Weights{Format: 1.0, Bitrate: 1.0, Reliability: 0, FileCount: 1.0}
 	s := NewWeighted(w, 192)
-	results := []slskd.Result{
+	results := []core.SearchResult{
 		{Username: "low", Filename: "a.mp3", BitRate: 200},
 		{Username: "high", Filename: "a.flac", BitRate: 1000},
 	}
@@ -26,8 +25,8 @@ func TestRankPrefersHigherBitrateFlac(t *testing.T) {
 }
 
 func TestRankGroupsByUser(t *testing.T) {
-	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "bob", Filename: "01.flac", BitRate: 900},
 		{Username: "bob", Filename: "02.flac", BitRate: 900},
 	}
@@ -41,8 +40,8 @@ func TestRankGroupsByUser(t *testing.T) {
 }
 
 func TestRankDropsBelowBitrateFloor(t *testing.T) {
-	s := NewWeighted(config.Weights{Format: 1, Bitrate: 1, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, Bitrate: 1, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "lowmp3", Filename: "a.mp3", BitRate: 128}, // below floor -> dropped
 		{Username: "flac", Filename: "a.flac", BitRate: 0},    // lossless -> kept even with 0 bitrate
 	}
@@ -58,8 +57,8 @@ func TestRankDropsBelowBitrateFloor(t *testing.T) {
 }
 
 func TestRankRewardsReliableUploader(t *testing.T) {
-	s := NewWeighted(config.Weights{Format: 1, Bitrate: 0, Reliability: 10, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, Bitrate: 0, Reliability: 10, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "busy", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: false, QueueLength: 20},
 		{Username: "free", Filename: "a.flac", BitRate: 900, HasFreeUploadSlot: true, QueueLength: 0},
 	}
@@ -75,8 +74,8 @@ func TestRankDedupesTracksWithinSameDirectory(t *testing.T) {
 	// (user, dir) group they become ONE candidate — but every track must appear
 	// only once, keeping the best-scoring format, or Lidarr rejects the whole
 	// album as "has unmatched tracks".
-	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "tau", Filename: `music\Eden\01 First Light.flac`, BitRate: 900},
 		{Username: "tau", Filename: `music\Eden\01 First Light.mp3`, BitRate: 320},
 		{Username: "tau", Filename: `music\Eden\02 Second Light.flac`, BitRate: 900},
@@ -100,8 +99,8 @@ func TestRankDedupeKeepsWholeReleaseOneFormat(t *testing.T) {
 	// If the winning format (FLAC) doesn't cover every track, the MP3 fallback for
 	// the missing track must NOT be kept either -- one release means one format,
 	// even at the cost of a gap, so Lidarr never receives a mixed-format album.
-	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "tau", Filename: `music\Eden\01 First Light.flac`, BitRate: 900},
 		{Username: "tau", Filename: `music\Eden\01 First Light.mp3`, BitRate: 320},
 		{Username: "tau", Filename: `music\Eden\02 Second Light.mp3`, BitRate: 320}, // no FLAC counterpart
@@ -121,8 +120,8 @@ func TestRankDedupeKeepsWholeReleaseOneFormat(t *testing.T) {
 func TestRankGroupsPerReleaseNotPerUser(t *testing.T) {
 	// One user sharing two releases of the same album (FLAC + MP3) must yield TWO
 	// candidates (one per directory), so we never enqueue both versions at once.
-	s := NewWeighted(config.Weights{Format: 1, FileCount: 1}, 192)
-	results := []slskd.Result{
+	s := NewWeighted(Weights{Format: 1, FileCount: 1}, 192)
+	results := []core.SearchResult{
 		{Username: "tau", Filename: `music\Belvedere\Seven Years FLAC\01.flac`, BitRate: 900},
 		{Username: "tau", Filename: `music\Belvedere\Seven Years FLAC\02.flac`, BitRate: 900},
 		{Username: "tau", Filename: `music\Belvedere\Seven Years MP3\01.mp3`, BitRate: 320},

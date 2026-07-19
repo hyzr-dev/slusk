@@ -8,14 +8,13 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 )
 
 // WantedMusicSource is the slice of the Lidarr client WantedSync needs. A
 // narrower interface than the full pipeline.MusicSource: WantedSync only
 // ever fetches the wanted-missing list.
 type WantedMusicSource interface {
-	WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error)
+	WantedMissing(ctx context.Context) ([]core.WantedRelease, error)
 }
 
 // WantedSyncStore is the slice of the store WantedSync needs.
@@ -46,7 +45,7 @@ type WantedSync struct {
 	p WantedSyncParams
 
 	mu     sync.Mutex
-	wanted map[int64]lidarr.WantedAlbum
+	wanted map[int64]core.WantedRelease
 }
 
 // NewWantedSync constructs a WantedSync.
@@ -71,10 +70,10 @@ func (w *WantedSync) log() *slog.Logger {
 // metadata when building its search query): it is read-only advisory data,
 // never state that anything downstream persists. A fresh copy is returned
 // each call so callers may not mutate WantedSync's own map.
-func (w *WantedSync) Wanted() map[int64]lidarr.WantedAlbum {
+func (w *WantedSync) Wanted() map[int64]core.WantedRelease {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make(map[int64]lidarr.WantedAlbum, len(w.wanted))
+	out := make(map[int64]core.WantedRelease, len(w.wanted))
 	for k, v := range w.wanted {
 		out[k] = v
 	}
@@ -155,7 +154,7 @@ func (w *WantedSync) Tick(ctx context.Context, now time.Time) error {
 		return err
 	}
 
-	snapshot := make(map[int64]lidarr.WantedAlbum, len(albums))
+	snapshot := make(map[int64]core.WantedRelease, len(albums))
 	for _, a := range albums {
 		snapshot[a.ID] = a
 	}

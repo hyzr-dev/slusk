@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 func TestWantedMissing(t *testing.T) {
@@ -186,7 +188,7 @@ func TestAlbumReleases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AlbumReleases: %v", err)
 	}
-	want := []AlbumRelease{
+	want := []core.AlbumRelease{
 		{ID: 1, TrackCount: 12, Monitored: true},
 		{ID: 2, TrackCount: 10, Monitored: false},
 	}
@@ -211,7 +213,7 @@ func TestExecuteManualImportBuildsCorrectPayload(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "k")
-	items := []ManualImportItem{
+	items := []core.ImportItem{
 		{
 			ID: 1, Path: "/music/slskd-downloads/A/01.flac",
 			ArtistID: 5, AlbumID: 9, AlbumReleaseID: 13,

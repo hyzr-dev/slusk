@@ -193,9 +193,9 @@ func requireMutationContext(t *testing.T, err, injected error, transferID, candi
 func TestDownloadingReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 60},
-		{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100, BytesTransferred: 0},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 60},
+		{ID: "g2", Username: "eve", Filename: "b.flac", State: core.TransferQueued, Size: 100, BytesDone: 0},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -237,8 +237,8 @@ func TestDownloadingReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 func TestDownloadingReconcileRemovesTerminalTransfer(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Succeeded", Size: 100, BytesTransferred: 100},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferCompleted, Size: 100, BytesDone: 100},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -311,8 +311,8 @@ func TestDownloadingReconcileMarksLostWhenRetriesExhausted(t *testing.T) {
 func TestDownloadingReconcileOverlapCountedOnce(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 10},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 10},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -341,7 +341,7 @@ func TestDownloadingReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{
-		downloads: []slskd.Transfer{{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100}},
+		downloads: []core.RemoteTransfer{{ID: "g2", Username: "eve", Filename: "b.flac", State: core.TransferQueued, Size: 100}},
 		cancelErr: errors.New("peer offline"),
 	}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
@@ -366,8 +366,8 @@ func TestDownloadingReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 func TestDownloadingReconcileBackfillsMissingID(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 20},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 20},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -387,8 +387,8 @@ func TestDownloadingReconcileBackfillsMissingID(t *testing.T) {
 func TestDownloadingReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g-live", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g-live", Username: "eve", Filename: "b.flac", State: core.TransferQueued, Size: 100},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "eve", []core.CandidateFile{{Filename: "b.flac", Size: 100}}, now)
@@ -415,8 +415,8 @@ func TestDownloadingReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 func TestDownloadingReconcileRetriesRejectedWhenRetryable(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "Too many megabytes"},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferErrored, Size: 100, Failure: "Too many megabytes", Retryable: true},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -439,8 +439,8 @@ func TestDownloadingReconcileRetriesRejectedWhenRetryable(t *testing.T) {
 func TestDownloadingReconcileRejectedErrorsWhenExhausted(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "Too many megabytes"},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferErrored, Size: 100, Failure: "Too many megabytes", Retryable: true},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -459,8 +459,8 @@ func TestDownloadingReconcileRejectedErrorsWhenExhausted(t *testing.T) {
 func TestDownloadingReconcileRejectedTerminalReasonDoesNotRetry(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "File not shared."},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferErrored, Size: 100, Failure: "File not shared.", Retryable: false},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -480,8 +480,8 @@ func TestDownloadingReconcileStalledCancelsAndRetries(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-2 * time.Hour)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -508,8 +508,8 @@ func TestDownloadingReconcileStalledErrorsWhenExhausted(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-2 * time.Hour)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -542,8 +542,8 @@ func TestDownloadingReconcileFreshProgressNotStalled(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	fresh := now.Add(-5 * time.Minute)
-	net := &fakeNetwork{downloads: []slskd.Transfer{
-		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{
+		{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -569,7 +569,7 @@ func TestDownloadingReconcileStalledCancelFailurePreservesIntent(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-2 * time.Hour)
 	net := &fakeNetwork{
-		downloads: []slskd.Transfer{{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40}},
+		downloads: []core.RemoteTransfer{{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, Size: 100, BytesDone: 40}},
 		cancelErr: errors.New("peer offline"),
 	}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
@@ -595,9 +595,9 @@ func TestDownloadingReconcileStalledCancelFailurePreservesIntent(t *testing.T) {
 func TestDownloadingReconcileAttachFailureRecoversBeforeTerminalCleanup(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{{
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{{
 		ID: "g-recovered", Username: "bob", Filename: "a.flac",
-		State: "Completed, Succeeded", Size: 100, BytesTransferred: 100,
+		State: core.TransferCompleted, Size: 100, BytesDone: 100,
 	}}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -641,9 +641,9 @@ func TestDownloadingReconcileAttachFailureRecoversBeforeTerminalCleanup(t *testi
 func TestDownloadingReconcileStallIntentFailureDoesNotCancel(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{{
-		ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress",
-		Size: 100, BytesTransferred: 40,
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{{
+		ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress,
+		Size: 100, BytesDone: 40,
 	}}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -660,7 +660,7 @@ func TestDownloadingReconcileStallIntentFailureDoesNotCancel(t *testing.T) {
 	if len(net.cancelled) != 0 || len(net.removed) != 0 {
 		t.Fatalf("remote changed before stalled intent persisted: cancelled=%v removed=%v", net.cancelled, net.removed)
 	}
-	if net.downloads[0].State != "InProgress" {
+	if net.downloads[0].State != core.TransferInProgress {
 		t.Fatalf("remote state = %q, want InProgress", net.downloads[0].State)
 	}
 	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferInProgress {
@@ -686,7 +686,7 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name             string
-		liveState        string
+		liveState        core.TransferState
 		initialState     core.TransferState
 		retries          int
 		deadline         time.Time
@@ -698,17 +698,17 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 		skipMutations    int
 	}{
 		{
-			name: "completed", liveState: "Completed, Succeeded",
+			name: "completed", liveState: core.TransferCompleted,
 			initialState: core.TransferInProgress, deadline: now.Add(time.Hour), stampAt: now,
 			wantState: core.TransferCompleted, wantAfterFailure: core.TransferInProgress, wantStat: "completed",
 		},
 		{
-			name: "deadline cancelled", liveState: "Queued",
+			name: "deadline cancelled", liveState: core.TransferQueued,
 			initialState: core.TransferQueued, deadline: now.Add(-time.Hour), stampAt: now,
 			wantState: core.TransferCancelled, wantAfterFailure: core.TransferQueued, wantStat: "cancelled", wantCancel: true,
 		},
 		{
-			name: "stalled errored", liveState: "InProgress", retries: 3,
+			name: "stalled errored", liveState: core.TransferInProgress, retries: 3,
 			initialState: core.TransferInProgress, deadline: now.Add(time.Hour), stampAt: now.Add(-2 * time.Hour),
 			wantState: core.TransferErrored, wantAfterFailure: core.TransferStalled, wantStat: "stalled", wantCancel: true,
 			skipMutations: 1,
@@ -717,9 +717,9 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			net := &fakeNetwork{downloads: []slskd.Transfer{{
+			net := &fakeNetwork{downloads: []core.RemoteTransfer{{
 				ID: "g1", Username: "bob", Filename: "a.flac", State: tt.liveState,
-				Size: 100, BytesTransferred: 40,
+				Size: 100, BytesDone: 40,
 			}}}
 			p, st := newDownloadingParams(t, net, &fakeSearcher{})
 			_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
@@ -747,7 +747,7 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 			if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != tt.wantAfterFailure {
 				t.Fatalf("state after failed write = %s, want %s", tr.State, tt.wantAfterFailure)
 			}
-			if tt.wantCancel && net.downloads[0].State != "Completed, Cancelled" {
+			if tt.wantCancel && net.downloads[0].State != core.TransferCancelled {
 				t.Fatalf("remote state after Cancel = %q, want Completed, Cancelled", net.downloads[0].State)
 			}
 
@@ -785,9 +785,9 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 func TestDownloadingReconcileRetryFailureConvergesWithoutDuplicateEnqueue(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	net := &fakeNetwork{downloads: []slskd.Transfer{{
-		ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress",
-		Size: 100, BytesTransferred: 40,
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{{
+		ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress,
+		Size: 100, BytesDone: 40,
 	}}}
 	peers := &fakeSearcher{}
 	p, st := newDownloadingParams(t, net, peers)
@@ -811,7 +811,7 @@ func TestDownloadingReconcileRetryFailureConvergesWithoutDuplicateEnqueue(t *tes
 	if len(net.removed) != 0 || len(peers.enqueued) != 0 {
 		t.Fatalf("cleanup/enqueue ran after retry failure: removed=%v enqueued=%v", net.removed, peers.enqueued)
 	}
-	if net.downloads[0].State != "Completed, Cancelled" {
+	if net.downloads[0].State != core.TransferCancelled {
 		t.Fatalf("remote state after Cancel = %q, want Completed, Cancelled", net.downloads[0].State)
 	}
 	if tr := transferStatesFor(t, st, candID)["a.flac"]; tr.State != core.TransferStalled || tr.Retries != 0 {
@@ -1070,7 +1070,7 @@ func TestDownloadingCancelNotFoundTreatsAsAlreadyCancelled(t *testing.T) {
 	defer notFound.Close()
 	client := slskd.New(notFound.URL, "key")
 	cancelErr := client.Cancel(context.Background(), "someone", "some-id")
-	if !slskd.IsNotFound(cancelErr) {
+	if !errors.Is(cancelErr, core.ErrRemoteNotFound) {
 		t.Fatalf("expected a 404 from the test server, got %v", cancelErr)
 	}
 

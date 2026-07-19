@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -31,7 +30,7 @@ func TestWantedSyncUpsertsAndCancels(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{
+	music := &fakeMusic{wanted: []core.WantedRelease{
 		{ID: 1, Title: "A", ArtistName: "X"},
 		{ID: 2, Title: "B", ArtistName: "Y"},
 	}}
@@ -69,7 +68,7 @@ func TestWantedSyncRevivesOldFailed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}}}
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "A", ArtistName: "X"}}}
 	p, st := newWantedSyncParams(t, music)
 
 	// FAILED job for album 1 (still wanted), failed 31 days ago.
@@ -158,7 +157,7 @@ func TestWantedSyncReentersCancelledAlbum(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 7, Title: "A", ArtistName: "X"}}}
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 7, Title: "A", ArtistName: "X"}}}
 	p, st := newWantedSyncParams(t, music)
 
 	job, err := st.UpsertWantedJob(ctx, 7, now)
@@ -183,7 +182,7 @@ func TestWantedSyncKeepsSnapshotOnLidarrError(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
-	music := &fakeMusic{wanted: []lidarr.WantedAlbum{{ID: 1, Title: "A", ArtistName: "X"}}}
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "A", ArtistName: "X"}}}
 	p, st := newWantedSyncParams(t, music)
 
 	w := NewWantedSync(p)

@@ -9,23 +9,20 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
 )
 
 // MusicSource is the slice of the Lidarr client the discoverer needs.
 type MusicSource interface {
-	WantedMissing(ctx context.Context) ([]lidarr.WantedAlbum, error)
-	ManualImportCandidates(ctx context.Context, folder string) ([]lidarr.ManualImportItem, error)
-	ExecuteManualImport(ctx context.Context, items []lidarr.ManualImportItem) error
+	WantedMissing(ctx context.Context) ([]core.WantedRelease, error)
+	ManualImportCandidates(ctx context.Context, folder string) ([]core.ImportItem, error)
+	ExecuteManualImport(ctx context.Context, items []core.ImportItem) error
 	AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error)
-	AlbumReleases(ctx context.Context, albumID int64) ([]lidarr.AlbumRelease, error)
+	AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error)
 }
 
 // PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.
 type PeerSearcher interface {
-	Search(ctx context.Context, query string, timeout time.Duration) ([]slskd.Result, error)
+	Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
 	// Cancel stops a still-active slskd download, so a failed attempt's live
 	// sibling transfers stop writing into a folder that is about to be cleaned
@@ -38,7 +35,7 @@ type PeerSearcher interface {
 
 // PeerNetwork is the slice of the slskd client the engine needs.
 type PeerNetwork interface {
-	ListDownloads(ctx context.Context) ([]slskd.Transfer, error)
+	ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error)
 	Cancel(ctx context.Context, username, id string) error
 	// Remove purges a terminal transfer's leftover record from slskd (DELETE
 	// ?remove=true). reconcile calls it immediately after the store marks a
@@ -49,7 +46,7 @@ type PeerNetwork interface {
 	Remove(ctx context.Context, username, id string) error
 }
 
-// Ranker ranks slskd results into candidates (satisfied by matcher.Scorer).
+// Ranker ranks search results into candidates (satisfied by matcher.Scorer).
 type Ranker interface {
-	Rank(results []slskd.Result, rel map[string]core.PeerReliability, now time.Time) []matcher.Candidate
+	Rank(results []core.SearchResult, rel map[string]core.PeerReliability, now time.Time) []core.RankedCandidate
 }

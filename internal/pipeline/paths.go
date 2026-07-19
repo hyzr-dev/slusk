@@ -2,13 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 // FolderCleaner is the minimal slice of PeerSearcher that cleanupFolder needs:
@@ -44,7 +45,7 @@ func cleanupFolder(ctx context.Context, peers FolderCleaner, log *slog.Logger, j
 	err := peers.DeleteDownloadFolder(ctx, leaf)
 	switch {
 	case err == nil:
-	case slskd.IsNotFound(err):
+	case errors.Is(err, core.ErrRemoteNotFound):
 		log.Info("nothing to clean up for failed attempt", "album_job", jobID, "folder", leaf)
 	default:
 		log.Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
