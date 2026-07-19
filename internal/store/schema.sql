@@ -193,3 +193,9 @@ END $$;
 -- candidate_attempts is gone: candidates (above) replaces it in the pipeline
 -- rewrite, and the legacy engine that wrote it is deleted.
 DROP TABLE IF EXISTS candidate_attempts;
+
+-- Import-pipeline robustness (spec 2026-07-19): the album's valid track-count
+-- band across all Lidarr releases (editions), cached by Discovery at search
+-- time and read by Importing's coverage gate. (0,0) means unknown.
+ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS min_track_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS max_track_count BIGINT NOT NULL DEFAULT 0;

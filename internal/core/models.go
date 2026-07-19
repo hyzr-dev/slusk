@@ -29,6 +29,13 @@ type AlbumJob struct {
 	// FailedAt is set when the job enters FAILED; WantedSync revives the job
 	// once it is older than failed_revive_after and the album is still wanted.
 	FailedAt *time.Time
+	// MinTrackCount/MaxTrackCount is the album's valid track-count band across
+	// all Lidarr releases (editions), cached by Discovery at search time.
+	// Importing's coverage gate accepts any candidate covering at least
+	// MinTrackCount tracks. (0,0) means unknown — the gate then falls back to
+	// the live AlbumStatus total.
+	MinTrackCount int
+	MaxTrackCount int
 }
 
 // CandidateFile is one file of a cached search result, persisted as JSONB on

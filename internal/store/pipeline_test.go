@@ -371,3 +371,32 @@ func TestMarkJobFailedBouncesWhenCancelled(t *testing.T) {
 		t.Errorf("job must stay CANCELLED, got %v", got)
 	}
 }
+
+func TestSetJobTrackBand(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 400, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if job.MinTrackCount != 0 || job.MaxTrackCount != 0 {
+		t.Fatalf("fresh job band = (%d,%d), want (0,0)", job.MinTrackCount, job.MaxTrackCount)
+	}
+
+	if err := s.SetJobTrackBand(ctx, job.ID, 10, 12); err != nil {
+		t.Fatalf("SetJobTrackBand: %v", err)
+	}
+
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	if jobs[0].MinTrackCount != 10 || jobs[0].MaxTrackCount != 12 {
+		t.Errorf("band = (%d,%d), want (10,12)", jobs[0].MinTrackCount, jobs[0].MaxTrackCount)
+	}
+}
