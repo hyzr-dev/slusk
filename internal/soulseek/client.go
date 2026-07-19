@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,11 @@ const (
 // protocol uses to kick the previous connection. This is terminal: Run does
 // not reconnect after it.
 var errRelogged = errors.New("soulseek: account logged in elsewhere (relogged)")
+
+// errNoServerConnection fails any in-flight server round-trip (currently:
+// GetPeerAddress waiters and pending peer-connection dances, see peers.go)
+// when the server connection is torn down while they were waiting on it.
+var errNoServerConnection = errors.New("soulseek: server connection lost")
 
 // Config configures a Client. Address, Username and Password are required;
 // the remaining fields are internal test seams with production defaults
@@ -61,6 +67,18 @@ type Client struct {
 	logger *slog.Logger
 
 	status atomic.Pointer[Status]
+
+	// mu serializes writes to the server connection (the vendored server.Write
+	// takes an io.Writer directly; nothing about it is safe for concurrent
+	// use) and guards serverConn itself. serverConn is non-nil only while
+	// serveConnected is running for the current connection.
+	mu         sync.Mutex
+	serverConn net.Conn
+
+	// addrMu guards pendingAddrs, the GetPeerAddress waiters registered by
+	// in-flight ConnectPeer calls (see peers.go), keyed by username.
+	addrMu       sync.Mutex
+	pendingAddrs map[string][]chan addrResult
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -79,9 +97,33 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		cfg.backoffCap = defaultBackoffCap
 	}
 
-	c := &Client{cfg: cfg, logger: logger}
+	c := &Client{cfg: cfg, logger: logger, pendingAddrs: make(map[string][]chan addrResult)}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
+}
+
+// serverMessage constrains sendToServer to the handful of server message
+// types this package actually sends, rather than reusing server package's
+// own (unexported) message[M] constraint.
+type serverMessage[M any] interface {
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer
+	Serialize(M) ([]byte, error)
+}
+
+// sendToServer serializes writes to the server connection behind c.mu, since
+// multiple goroutines (the ping ticker, peer-connection establishment) may
+// write concurrently. It reports an error if no server connection is
+// currently established.
+func sendToServer[M serverMessage[M]](c *Client, msg M) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.serverConn == nil {
+		return errors.New("soulseek: not connected to server")
+	}
+
+	_, err := server.Write(c.serverConn, msg)
+	return err
 }
 
 // Status returns a point-in-time snapshot of the client's connection state.
@@ -213,8 +255,22 @@ func (c *Client) login(ctx context.Context, conn net.Conn) error {
 }
 
 // serveConnected keeps the connection alive with periodic pings and reads
-// incoming messages until ctx is cancelled or a read fails.
+// incoming messages until ctx is cancelled or a read fails. It owns
+// c.serverConn for the duration of the connection: set once at the top, so
+// sendToServer (and any goroutine it starts, e.g. peer dials) can write to
+// the server, and cleared on every exit path, at which point any pending
+// GetPeerAddress waiter is failed rather than left to time out.
 func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
+	c.mu.Lock()
+	c.serverConn = conn
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.serverConn = nil
+		c.mu.Unlock()
+		c.failAllAddrWaiters(errNoServerConnection)
+	}()
+
 	readErrs := make(chan error, 1)
 	go func() {
 		readErrs <- c.readLoop(conn)
@@ -231,8 +287,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 			return nil
 
 		case <-ticker.C:
-			_, err := server.Write(conn, &server.Ping{})
-			if err != nil {
+			if err := sendToServer(c, &server.Ping{}); err != nil {
 				_ = conn.Close()
 				<-readErrs
 				return fmt.Errorf("write ping: %w", err)
@@ -259,15 +314,40 @@ func (c *Client) readLoop(conn net.Conn) error {
 	}
 }
 
-// handleMessage dispatches one server message. Only Relogged is
-// understood; everything else is logged at debug level and dropped.
+// handleMessage dispatches one server message. Everything not explicitly
+// understood is logged at debug level and dropped.
 func (c *Client) handleMessage(code server.Code, reader io.Reader) error {
-	if code == server.CodeRelogged {
+	switch code {
+	case server.CodeRelogged:
 		relogged := &server.Relogged{}
 		if err := relogged.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize relogged: %w", err)
 		}
 		return errRelogged
+
+	case server.CodeGetPeerAddress:
+		msg := &server.GetPeerAddress{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize get peer address: %w", err)
+		}
+		c.deliverAddr(msg.Username, addrResult{msg: *msg})
+		return nil
+
+	case server.CodeConnectToPeer:
+		msg := &server.ConnectToPeer{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize connect to peer: %w", err)
+		}
+		c.handleConnectToPeer(*msg)
+		return nil
+
+	case server.CodeCantConnectToPeer:
+		msg := &server.CantConnectToPeer{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize cant connect to peer: %w", err)
+		}
+		c.handleCantConnectToPeer(*msg)
+		return nil
 	}
 
 	if c.logger != nil {
