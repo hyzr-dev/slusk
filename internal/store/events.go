@@ -1,4 +1,4 @@
-// Package store: events.go holds the job_events audit trail (see schema.sql).
+// Package store: events.go holds the job_events audit trail (see migrations/0001_baseline_schema.sql).
 // Writes are best-effort from the engine's perspective — see the callers in
 // internal/engine — but the store's own write/read paths use normal error
 // semantics like every other store method.
