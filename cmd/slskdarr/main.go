@@ -94,9 +94,10 @@ func main() {
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
 		soulClient = soulseek.New(soulseek.Config{
-			Address:  cfg.Soulseek.ServerAddress,
-			Username: cfg.Soulseek.Username,
-			Password: cfg.Soulseek.Password,
+			Address:    cfg.Soulseek.ServerAddress,
+			Username:   cfg.Soulseek.Username,
+			Password:   cfg.Soulseek.Password,
+			ListenAddr: cfg.Soulseek.ListenAddr,
 		}, logger)
 	}
 

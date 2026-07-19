@@ -260,6 +260,9 @@ func TestLoadSoulseekValid(t *testing.T) {
 	if cfg.Soulseek.ServerAddress != "server.slsknet.org:2242" {
 		t.Errorf("ServerAddress = %q, want the default", cfg.Soulseek.ServerAddress)
 	}
+	if cfg.Soulseek.ListenAddr != "0.0.0.0:2234" {
+		t.Errorf("ListenAddr = %q, want the default", cfg.Soulseek.ListenAddr)
+	}
 }
 
 func TestLoadSoulseekMissingPassword(t *testing.T) {
@@ -269,5 +272,38 @@ func TestLoadSoulseekMissingPassword(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "soulseek.password") {
 		t.Errorf("error should name the missing field: %v", err)
+	}
+}
+
+func TestLoadSoulseekInvalidListenAddr(t *testing.T) {
+	_, err := Load("testdata/soulseek_invalid_listen_addr.toml")
+	if err == nil {
+		t.Fatal("expected error for an invalid soulseek.listen_addr, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.listen_addr") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+func TestLoadSoulseekZeroPortListenAddr(t *testing.T) {
+	_, err := Load("testdata/soulseek_zero_port_listen_addr.toml")
+	if err == nil {
+		t.Fatal("expected error for a zero-port soulseek.listen_addr, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.listen_addr") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+func TestLoadSoulseekNonNumericPortListenAddr(t *testing.T) {
+	// net.SplitHostPort only validates the host:port shape, not that the
+	// port is actually numeric; "0.0.0.0:abc" must still be rejected here
+	// rather than only failing later, at bind time.
+	_, err := Load("testdata/soulseek_non_numeric_port_listen_addr.toml")
+	if err == nil {
+		t.Fatal("expected error for a non-numeric-port soulseek.listen_addr, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.listen_addr") {
+		t.Errorf("error should name the invalid field: %v", err)
 	}
 }

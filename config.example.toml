@@ -113,3 +113,10 @@ slskd_complete_dir = "/music/slskd-downloads"
 # server_address = "server.slsknet.org:2242"
 # username = "CHANGEME"
 # password = "CHANGEME"
+#
+# listen_addr is where slskdarr listens for incoming peer connections and is
+# what gets advertised to the server after login - there is no separate
+# "advertised port" concept, so other peers must be able to reach this port
+# directly. With Docker port mapping, the published host port MUST equal the
+# container port (e.g. "2234:2234"), or use host networking instead.
+# listen_addr = "0.0.0.0:2234"

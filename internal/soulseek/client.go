@@ -12,18 +12,28 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
 const (
-	defaultDialTimeout   = 10 * time.Second
-	defaultPingInterval  = 5 * time.Minute
-	defaultBackoffBase   = 5 * time.Second
-	defaultBackoffCap    = 10 * time.Minute
-	tcpKeepAliveInterval = time.Minute
+	defaultDialTimeout      = 10 * time.Second
+	defaultPingInterval     = 5 * time.Minute
+	defaultBackoffBase      = 5 * time.Second
+	defaultBackoffCap       = 10 * time.Minute
+	tcpKeepAliveInterval    = time.Minute
+	defaultPeerInitTimeout  = 10 * time.Second
+	defaultPeerDialTimeout  = 10 * time.Second
+	defaultEstablishTimeout = 30 * time.Second
+	// defaultListenAddr is used only when Config.ListenAddr is left blank,
+	// which production configuration never does (see config.SoulseekConfig);
+	// it exists so tests that don't care about the peer listener don't have
+	// to set one.
+	defaultListenAddr = "127.0.0.1:0"
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -31,6 +41,11 @@ const (
 // protocol uses to kick the previous connection. This is terminal: Run does
 // not reconnect after it.
 var errRelogged = errors.New("soulseek: account logged in elsewhere (relogged)")
+
+// errNoServerConnection fails any in-flight server round-trip (currently:
+// GetPeerAddress waiters and pending peer-connection dances, see peers.go)
+// when the server connection is torn down while they were waiting on it.
+var errNoServerConnection = errors.New("soulseek: server connection lost")
 
 // Config configures a Client. Address, Username and Password are required;
 // the remaining fields are internal test seams with production defaults
@@ -42,6 +57,13 @@ type Config struct {
 	Username string
 	Password string
 
+	// ListenAddr is the host:port this Client listens on for incoming peer
+	// connections, advertised to the server via SetListenPort after login.
+	// Defaults to "127.0.0.1:0" (a random loopback port) when blank, which
+	// is only appropriate for tests: production configuration always
+	// supplies a real, routable ListenAddr (see config.SoulseekConfig).
+	ListenAddr string
+
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
 	// pingInterval is how often a keepalive Ping is sent once connected.
@@ -51,6 +73,17 @@ type Config struct {
 	// Defaults 5s and 10m.
 	backoffBase time.Duration
 	backoffCap  time.Duration
+	// peerInitTimeout bounds how long an accepted peer connection has to
+	// send its first (PeerInit or PierceFirewall) frame. Default 10s.
+	peerInitTimeout time.Duration
+	// peerDialTimeout bounds a single outbound peer TCP dial attempt (both
+	// the direct path in ConnectPeer and the mirror dial-back in
+	// handleConnectToPeer). Default 10s.
+	peerDialTimeout time.Duration
+	// establishTimeout bounds the whole of ConnectPeer: resolving the peer's
+	// address, the direct dial attempt, and - if that fails - the indirect
+	// NAT-traversal fallback. Default 30s.
+	establishTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -61,6 +94,38 @@ type Client struct {
 	logger *slog.Logger
 
 	status atomic.Pointer[Status]
+
+	// mu serializes writes to the server connection (the vendored server.Write
+	// takes an io.Writer directly; nothing about it is safe for concurrent
+	// use) and guards serverConn itself. serverConn is non-nil only while
+	// serveConnected is running for the current connection.
+	mu         sync.Mutex
+	serverConn net.Conn
+
+	// addrMu guards pendingAddrs, the GetPeerAddress waiters registered by
+	// in-flight ConnectPeer calls (see peers.go), keyed by username.
+	addrMu       sync.Mutex
+	pendingAddrs map[string][]chan addrResult
+
+	// listenPort is the actual bound port of the peer listener started once
+	// by Run (see listener.go), advertised to the server via SetListenPort.
+	// It is written exactly once, before Run's reconnect loop starts, and
+	// only ever read afterward (by the same goroutine chain, via
+	// serveConnected), so it needs no synchronization.
+	listenPort int
+	// boundListenAddr holds the peer listener's bound address (host:port),
+	// for Status(). Set once by Run.
+	boundListenAddr atomic.Pointer[string]
+
+	// pendingMu guards pending, the in-flight indirect (NAT-traversal)
+	// ConnectPeer attempts (see peers.go), keyed by the token sent in the
+	// server.ConnectToPeer request.
+	pendingMu sync.Mutex
+	pending   map[soul.Token]*pendingAttempt
+
+	// peerConns counts currently-open peer connections established via
+	// ConnectPeer or the mirror (inbound-indirect) path, for Status().
+	peerConns atomic.Int64
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -78,24 +143,94 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.backoffCap <= 0 {
 		cfg.backoffCap = defaultBackoffCap
 	}
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = defaultListenAddr
+	}
+	if cfg.peerInitTimeout <= 0 {
+		cfg.peerInitTimeout = defaultPeerInitTimeout
+	}
+	if cfg.peerDialTimeout <= 0 {
+		cfg.peerDialTimeout = defaultPeerDialTimeout
+	}
+	if cfg.establishTimeout <= 0 {
+		cfg.establishTimeout = defaultEstablishTimeout
+	}
 
-	c := &Client{cfg: cfg, logger: logger}
+	c := &Client{
+		cfg:          cfg,
+		logger:       logger,
+		pendingAddrs: make(map[string][]chan addrResult),
+		pending:      make(map[soul.Token]*pendingAttempt),
+	}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
 
-// Status returns a point-in-time snapshot of the client's connection state.
-func (c *Client) Status() Status {
-	return *c.status.Load()
+// serverMessage constrains sendToServer to the handful of server message
+// types this package actually sends, rather than reusing server package's
+// own (unexported) message[M] constraint.
+type serverMessage[M any] interface {
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress
+	Serialize(M) ([]byte, error)
 }
 
-// Run dials the server, logs in, and serves the connection until ctx is
-// cancelled or a terminal error occurs. On a transient failure it
-// reconnects after an exponential backoff. Run returns nil only when ctx is
-// cancelled; it returns a non-nil error for a terminal failure (invalid
-// credentials, outdated protocol version, or the account logging in
+// sendToServer serializes writes to the server connection behind c.mu, since
+// multiple goroutines (the ping ticker, peer-connection establishment) may
+// write concurrently. It reports an error if no server connection is
+// currently established.
+func sendToServer[M serverMessage[M]](c *Client, msg M) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.serverConn == nil {
+		return errors.New("soulseek: not connected to server")
+	}
+
+	_, err := server.Write(c.serverConn, msg)
+	return err
+}
+
+// Status returns a point-in-time snapshot of the client's connection state.
+// PeerConns and ListenAddr are composed in here from their own atomics
+// rather than stored in the Status snapshots written by record*, so a
+// concurrent peer-connection open/close never races a read-modify-write
+// against the connection-lifecycle state.
+func (c *Client) Status() Status {
+	s := *c.status.Load()
+	s.PeerConns = int(c.peerConns.Load())
+	if addr := c.boundListenAddr.Load(); addr != nil {
+		s.ListenAddr = *addr
+	}
+	return s
+}
+
+// Run starts the peer listener, then dials the server, logs in, and serves
+// the connection until ctx is cancelled or a terminal error occurs. On a
+// transient server-connection failure it reconnects after an exponential
+// backoff; the peer listener itself is started exactly once and lives across
+// every reconnect. Run returns nil only when ctx is cancelled; it returns a
+// non-nil error for a terminal failure (the peer listener failing to start,
+// invalid credentials, outdated protocol version, or the account logging in
 // elsewhere), and never reconnects afterward.
 func (c *Client) Run(ctx context.Context) error {
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	}
+	c.listenPort = ln.Addr().(*net.TCPAddr).Port
+	boundAddr := ln.Addr().String()
+	c.boundListenAddr.Store(&boundAddr)
+
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		c.acceptPeers(ctx, ln)
+	}()
+	defer func() {
+		_ = ln.Close()
+		<-acceptDone
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -213,11 +348,30 @@ func (c *Client) login(ctx context.Context, conn net.Conn) error {
 }
 
 // serveConnected keeps the connection alive with periodic pings and reads
-// incoming messages until ctx is cancelled or a read fails.
+// incoming messages until ctx is cancelled or a read fails. It owns
+// c.serverConn for the duration of the connection: set once at the top, so
+// sendToServer (and any goroutine it starts, e.g. peer dials) can write to
+// the server, and cleared on every exit path, at which point any pending
+// GetPeerAddress waiter is failed rather than left to time out.
 func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
+	c.mu.Lock()
+	c.serverConn = conn
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.serverConn = nil
+		c.mu.Unlock()
+		c.failAllAddrWaiters(errNoServerConnection)
+		c.failAllPendingAttempts(errNoServerConnection)
+	}()
+
+	if err := sendToServer(c, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
+		return fmt.Errorf("write set listen port: %w", err)
+	}
+
 	readErrs := make(chan error, 1)
 	go func() {
-		readErrs <- c.readLoop(conn)
+		readErrs <- c.readLoop(ctx, conn)
 	}()
 
 	ticker := time.NewTicker(c.cfg.pingInterval)
@@ -231,8 +385,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 			return nil
 
 		case <-ticker.C:
-			_, err := server.Write(conn, &server.Ping{})
-			if err != nil {
+			if err := sendToServer(c, &server.Ping{}); err != nil {
 				_ = conn.Close()
 				<-readErrs
 				return fmt.Errorf("write ping: %w", err)
@@ -245,29 +398,55 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 }
 
 // readLoop reads messages from conn until it fails or handleMessage reports
-// a terminal condition (Relogged).
-func (c *Client) readLoop(conn net.Conn) error {
+// a terminal condition (Relogged). ctx (Run's shutdown ctx) is threaded down to
+// handleConnectToPeer so shutdown can cancel an in-flight dial-back.
+func (c *Client) readLoop(ctx context.Context, conn net.Conn) error {
 	for {
 		message, _, code, err := server.Read(conn)
 		if err != nil {
 			return fmt.Errorf("read message: %w", err)
 		}
 
-		if err := c.handleMessage(code, message); err != nil {
+		if err := c.handleMessage(ctx, code, message); err != nil {
 			return err
 		}
 	}
 }
 
-// handleMessage dispatches one server message. Only Relogged is
-// understood; everything else is logged at debug level and dropped.
-func (c *Client) handleMessage(code server.Code, reader io.Reader) error {
-	if code == server.CodeRelogged {
+// handleMessage dispatches one server message. Everything not explicitly
+// understood is logged at debug level and dropped.
+func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.Reader) error {
+	switch code {
+	case server.CodeRelogged:
 		relogged := &server.Relogged{}
 		if err := relogged.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize relogged: %w", err)
 		}
 		return errRelogged
+
+	case server.CodeGetPeerAddress:
+		msg := &server.GetPeerAddress{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize get peer address: %w", err)
+		}
+		c.deliverAddr(msg.Username, addrResult{msg: *msg})
+		return nil
+
+	case server.CodeConnectToPeer:
+		msg := &server.ConnectToPeer{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize connect to peer: %w", err)
+		}
+		c.handleConnectToPeer(ctx, *msg)
+		return nil
+
+	case server.CodeCantConnectToPeer:
+		msg := &server.CantConnectToPeer{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize cant connect to peer: %w", err)
+		}
+		c.handleCantConnectToPeer(*msg)
+		return nil
 	}
 
 	if c.logger != nil {

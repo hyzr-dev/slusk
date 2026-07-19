@@ -78,6 +78,12 @@ services:
       # URL/query. Terminate TLS at a trusted reverse proxy before exposing
       # this port outside a trusted private network.
       - "9090:9090"
+      # Soulseek peer listener; uncomment when [soulseek] is enabled in
+      # config.toml. The published host port MUST equal the container port
+      # (soulseek.listen_addr's port), or use host networking instead - there
+      # is no separate "advertised port" concept, so a mismatched mapping
+      # would advertise a port peers can't actually reach.
+      # - "2234:2234"
 
 # --- Option: run inside your existing arr-stack network ---
 # If slskd/lidarr are on a shared Docker network, attach slskdarr to it and use

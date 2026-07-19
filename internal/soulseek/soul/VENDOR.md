@@ -77,3 +77,56 @@ stricter:
 `peer/`, `file/`, and `distributed/` have no test coverage yet — they are
 unused by the rest of this module until a later issue wires up peer
 connections.
+
+- `internal/internal.go` (`deobfuscate`): hardened against malicious or
+  corrupted declared sizes in the obfuscated frame path.
+  - The initial 4-byte obfuscation key read now returns immediately on a
+    short copy instead of setting an error that a later loop iteration could
+    silently overwrite.
+  - The body-length accounting (`size - readSoFar`, deciding how many bytes
+    remain to read in the last chunk) now uses signed arithmetic and is
+    computed before every body read, not just applied retroactively after the
+    default-case body write. Previously: (1) an unsigned underflow when
+    `readSoFar` exceeded a corrupted `size` made the remaining-bytes check
+    always false, so the loop kept requesting 4-byte chunks from the
+    connection indefinitely (buffering until the connection's EOF); (2) the
+    adjustment only ran in the default (body) case, so a body shorter than 4
+    bytes was mis-read as a full 4-byte chunk on its first iteration. Both are
+    fixed: a `size` smaller than what has already been read now fails fast
+    with `ErrDifferentPacketSize`, and a short first body chunk is sized
+    correctly from the start.
+  - A declared `size` of 0 (a frame with no code at all) is now rejected with
+    `ErrDifferentPacketSize` immediately after the size field is parsed.
+  - A short copy while filling a body chunk is now normalized to
+    `ErrDifferentPacketSize` (wrapping `io.ErrUnexpectedEOF` for a clean
+    `io.EOF`), matching `MessageRead`'s convention for the non-obfuscated
+    path.
+
+## Optional trailing field policy
+
+Deserialize is strict by default: any read error is a hard error. The single
+documented exception is a trailing, protocol-optional field truncated
+exactly at its boundary — i.e. `binary.Read`/`internal.ReadString` returning
+a *clean* `io.EOF` because zero bytes remained, not `io.ErrUnexpectedEOF`
+from a partial read mid-field. That specific case is treated as "field
+absent" rather than an error, since real Soulseek peers are known to omit
+some trailing fields.
+
+- `peer/transferresponse.go` (`TransferResponse.Deserialize`): the `Reason`
+  string, only present when `Allowed` is false, is now optional under this
+  policy. A clean `io.EOF` reading it leaves `Reason` nil; a truncation
+  partway through the string is still a hard error.
+  - Refinement: "absent" is judged strictly from the length prefix, not the
+    whole call. `internal.ReadString` used to be called as one step, so a
+    frame ending immediately after a complete 4-byte length prefix declaring
+    a nonzero-length body also produced a clean `io.EOF` (from
+    `io.ReadFull` reading zero of N bytes) and was misclassified as "reason
+    absent" instead of a truncated field. `Deserialize` now reads the length
+    prefix (`internal.ReadStringLen`) and body (`internal.ReadStringBody`)
+    as separate steps: only a clean `io.EOF` from the length-prefix read
+    itself - meaning zero bytes remained in the frame at all - counts as
+    "absent"; any error reading the body, even a clean `io.EOF`, is a hard
+    error.
+- `peer/filesearchresponse.go` has trailing fields (behind a zlib-compressed
+  section) that are a known, still-open deviation from this policy — not
+  addressed here; deferred to a follow-up issue (#54).

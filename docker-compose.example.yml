@@ -43,6 +43,12 @@ services:
       # reverse proxy may expose it, but must preserve Host and replace any
       # client X-Forwarded-Proto with exactly one trusted http/https value.
       - "127.0.0.1:9090:9090"
+      # Soulseek peer listener; uncomment when [soulseek] is enabled in
+      # config.toml. The published host port MUST equal the container port
+      # (soulseek.listen_addr's port) - there is no separate "advertised
+      # port" concept, so a mismatched mapping would advertise a port peers
+      # can't actually reach.
+      # - "2234:2234"
 
 volumes:
   slskdarr-pgdata:
