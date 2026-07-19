@@ -42,7 +42,7 @@ func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 	}
 
 	// Simulate a crash before AttachTransferID: recover by fallback key.
-	tr, found, err := s.FindTransferByFallback(ctx, "bob", "album/01.flac")
+	tr, found, err := s.FindTransferByFallback(ctx, candidateID, "bob", "album/01.flac")
 	if err != nil || !found {
 		t.Fatalf("FindTransferByFallback found=%v err=%v", found, err)
 	}
@@ -60,7 +60,7 @@ func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 	if err := s.AttachTransferID(ctx, tid, "slskd-guid-1", now); err != nil {
 		t.Fatalf("AttachTransferID: %v", err)
 	}
-	tr2, _, _ := s.FindTransferByFallback(ctx, "bob", "album/01.flac")
+	tr2, _, _ := s.FindTransferByFallback(ctx, candidateID, "bob", "album/01.flac")
 	if tr2.SlskdID != "slskd-guid-1" {
 		t.Errorf("slskd_id = %q, want slskd-guid-1", tr2.SlskdID)
 	}
@@ -83,7 +83,7 @@ func TestTransfersPastDeadline(t *testing.T) {
 	}
 }
 
-func TestRecordEnqueueIntentIsConflictSafe(t *testing.T) {
+func TestRecordEnqueueIntentIsConflictSafeWithinCandidate(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -93,14 +93,51 @@ func TestRecordEnqueueIntentIsConflictSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first intent: %v", err)
 	}
-	// A later candidate re-enqueues the same (username, filename) — must not error,
-	// and must return the existing row rather than creating a duplicate.
 	id2, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(2*time.Hour), now)
 	if err != nil {
 		t.Fatalf("second intent (conflict) errored: %v", err)
 	}
 	if id1 != id2 {
-		t.Errorf("expected same transfer row on conflict, got %d and %d", id1, id2)
+		t.Errorf("expected same transfer row within one candidate, got %d and %d", id1, id2)
+	}
+}
+
+func TestRecordEnqueueIntentAllowsTerminalHistoryReuseWithoutMovingOwnership(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	_, a1 := newActiveCandidate(t, s, ctx, 301, "bob", 1.0, now)
+	_, a2 := newActiveCandidate(t, s, ctx, 302, "bob", 1.0, now)
+
+	id1, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("first candidate intent: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, id1, core.TransferCompleted, 10, 10, now); err != nil {
+		t.Fatalf("complete first candidate transfer: %v", err)
+	}
+	if _, found, err := s.FindTransferByFallback(ctx, a1, "bob", "same.flac"); err != nil || found {
+		t.Fatalf("terminal transfer must not participate in fallback: found=%v err=%v", found, err)
+	}
+
+	id2, err := s.RecordEnqueueIntent(ctx, a2, "bob", "same.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("reuse terminal remote key for second candidate: %v", err)
+	}
+	if id1 == id2 {
+		t.Fatalf("different candidates unexpectedly share transfer row %d", id1)
+	}
+	for _, tc := range []struct {
+		candidateID int64
+		transferID  int64
+	}{{a1, id1}, {a2, id2}} {
+		transfers, err := s.TransfersForCandidate(ctx, tc.candidateID)
+		if err != nil || len(transfers) != 1 {
+			t.Fatalf("candidate %d transfers: count=%d err=%v", tc.candidateID, len(transfers), err)
+		}
+		if transfers[0].ID != tc.transferID || transfers[0].CandidateID != tc.candidateID {
+			t.Errorf("candidate %d ownership moved: %+v", tc.candidateID, transfers[0])
+		}
 	}
 }
 
@@ -157,7 +194,7 @@ func TestUpdateTransferProgressLastProgressAtTracksBytes(t *testing.T) {
 
 	read := func() core.Transfer {
 		t.Helper()
-		tr, found, err := s.FindTransferByFallback(ctx, "bob", "p.flac")
+		tr, found, err := s.FindTransferByFallback(ctx, a, "bob", "p.flac")
 		if err != nil || !found {
 			t.Fatalf("FindTransferByFallback found=%v err=%v", found, err)
 		}
@@ -211,7 +248,7 @@ func TestRetryTransferResetsStallClock(t *testing.T) {
 
 	read := func() core.Transfer {
 		t.Helper()
-		tr, found, err := s.FindTransferByFallback(ctx, "bob", "r.flac")
+		tr, found, err := s.FindTransferByFallback(ctx, a, "bob", "r.flac")
 		if err != nil || !found {
 			t.Fatalf("FindTransferByFallback found=%v err=%v", found, err)
 		}

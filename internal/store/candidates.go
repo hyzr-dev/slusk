@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
@@ -210,51 +211,141 @@ func (s *Store) MarkImportSubmitted(ctx context.Context, candidateID int64, now 
 	return nil
 }
 
-// ActivateCandidate atomically (single tx): re-checks the job is still in
-// SELECTING, counts jobs in DOWNLOADING+IMPORTING, and if < maxActive sets the
-// candidate ACTIVE and the job DOWNLOADING. Returns false when the cap is full
-// or the job left SELECTING — the caller just moves on.
-func (s *Store) ActivateCandidate(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (bool, error) {
+// ActivateCandidateWithTransfers atomically makes a NEW candidate runnable. It
+// serializes cap decisions, locks and re-checks the candidate/job ownership and
+// states, validates and creates every cached file as a PENDING transfer, and
+// only then marks the candidate ACTIVE and the job DOWNLOADING. Any failure
+// rolls all of those writes back, so Downloading can never observe a partially
+// prepared job.
+//
+// capFull distinguishes a shared-cap block from a candidate-specific skip. A
+// live remote-file ownership conflict is an expected skip (false, false, nil):
+// the candidate remains NEW for a later tick while Selecting continues with
+// unrelated jobs.
+func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (activated, capFull bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer tx.Rollback()
+
+	// COUNT followed by UPDATE is not concurrency-safe under READ COMMITTED by
+	// itself: concurrent selectors could all observe the same free slot. A
+	// transaction-scoped advisory lock serializes only activation/cap decisions
+	// without blocking unrelated album_jobs writes.
+	const activationLockKey int64 = 0x736c736b64617272 // "slskdarr"
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, activationLockKey); err != nil {
+		return false, false, fmt.Errorf("lock candidate activation: %w", err)
+	}
+
+	var username string
+	var files []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT c.username, c.files
+		   FROM candidates c
+		   JOIN album_jobs j ON j.id = c.album_job_id
+		  WHERE c.id = $1 AND c.album_job_id = $2
+		    AND c.state = $3 AND j.state = $4
+		  FOR UPDATE OF c, j`,
+		candidateID, jobID, string(core.CandidateNew), string(core.StateSelecting)).Scan(&username, &files); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("check candidate activation eligibility: %w", err)
+	}
+
+	var candidateFiles []core.CandidateFile
+	if err := json.Unmarshal(files, &candidateFiles); err != nil {
+		return false, false, fmt.Errorf("validate candidate files: %w", err)
+	}
+	if len(candidateFiles) == 0 {
+		return false, false, errors.New("validate candidate files: empty file set")
+	}
+	seen := make(map[string]struct{}, len(candidateFiles))
+	for i, file := range candidateFiles {
+		if file.Filename == "" || file.Size < 0 {
+			return false, false, fmt.Errorf("validate candidate files: invalid file at index %d", i)
+		}
+		if _, duplicate := seen[file.Filename]; duplicate {
+			return false, false, fmt.Errorf("validate candidate files: duplicate filename %q", file.Filename)
+		}
+		seen[file.Filename] = struct{}{}
+	}
 
 	var active int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM album_jobs WHERE state IN ($1, $2)`,
 		string(core.StateDownloading), string(core.StateImporting)).Scan(&active); err != nil {
-		return false, fmt.Errorf("count active jobs: %w", err)
+		return false, false, fmt.Errorf("count active jobs: %w", err)
 	}
 	if active >= maxActive {
-		return false, nil
+		return false, true, nil
+	}
+
+	// Preserve the cached JSON array's order so database-trigger failure tests
+	// can exercise rollback after the first, middle, and final logical insert.
+	// More importantly, this single set-based statement creates the complete
+	// write-ahead set before either lifecycle row becomes visible as active.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO transfers
+		   (candidate_id, username, filename, state, bytes_total, deadline, updated_at)
+		 SELECT $1, $2, f.value->>'filename', $3,
+		        (f.value->>'size')::bigint, $4, $4
+		   FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY AS f(value, ord)
+		  ORDER BY f.ord`,
+		candidateID, username, string(core.TransferPending), now, string(files)); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_transfers_live_remote_owner" {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("create pending transfer set: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
-		string(core.StateDownloading), now, jobID, string(core.StateSelecting))
+		`UPDATE candidates SET state = $1, updated_at = $2
+		  WHERE id = $3 AND album_job_id = $4 AND state = $5`,
+		string(core.CandidateActive), now, candidateID, jobID, string(core.CandidateNew))
 	if err != nil {
-		return false, fmt.Errorf("advance job to downloading: %w", err)
+		return false, false, fmt.Errorf("activate candidate: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("advance job to downloading: rows affected: %w", err)
+		return false, false, fmt.Errorf("activate candidate: rows affected: %w", err)
 	}
-	if n == 0 {
-		return false, nil
+	if n != 1 {
+		return false, false, nil
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE candidates SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
-		string(core.CandidateActive), now, candidateID, string(core.CandidateNew)); err != nil {
-		return false, fmt.Errorf("activate candidate: %w", err)
+	res, err = tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
+		string(core.StateDownloading), now, jobID, string(core.StateSelecting))
+	if err != nil {
+		return false, false, fmt.Errorf("advance job to downloading: %w", err)
+	}
+	n, err = res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("advance job to downloading: rows affected: %w", err)
+	}
+	if n != 1 {
+		return false, false, nil
 	}
 
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, nil
+	return true, false, nil
+}
+
+// DeferSelectingJob moves a candidate-specific activation skip behind its FIFO
+// peers without changing lifecycle state. The guard makes it a no-op if the job
+// left SELECTING after the activation attempt.
+func (s *Store) DeferSelectingJob(ctx context.Context, jobID int64, now time.Time) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET updated_at = $1 WHERE id = $2 AND state = $3`,
+		now, jobID, string(core.StateSelecting)); err != nil {
+		return fmt.Errorf("defer selecting job: %w", err)
+	}
+	return nil
 }
 
 // TransfersForCandidate returns all transfers belonging to a candidate.

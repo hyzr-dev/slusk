@@ -58,7 +58,7 @@ func seedActiveCandidate(t *testing.T, st *store.Store, albumID int64, username 
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
-	activated, err := st.ActivateCandidate(ctx, cand.ID, job.ID, 100, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidate: %v activated=%v", err, activated)
 	}
@@ -136,7 +136,7 @@ func TestDownloadingReconcileAdoptsLiveAndCancelsOverdue(t *testing.T) {
 		{ID: "g2", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100, BytesTransferred: 0},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 	seedTransfer(t, st, candID, "eve", "b.flac", txfOpts{state: core.TransferQueued, slskdID: "g2", deadline: now.Add(-time.Hour), stampAt: now})
 
@@ -179,7 +179,7 @@ func TestDownloadingReconcileRemovesTerminalTransfer(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Succeeded", Size: 100, BytesTransferred: 100},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -202,7 +202,7 @@ func TestDownloadingReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{downloads: nil} // slskd forgot everything
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -228,7 +228,7 @@ func TestDownloadingReconcileMarksLostWhenRetriesExhausted(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{downloads: nil}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -253,7 +253,7 @@ func TestDownloadingReconcileOverlapCountedOnce(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 10},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	// Past-deadline AND still non-terminal: appears in both overdue and active.
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 10, bytesTotal: 100, deadline: now.Add(-time.Hour), stampAt: now})
 
@@ -283,7 +283,7 @@ func TestDownloadingReconcileCancelFailureLeavesNonTerminal(t *testing.T) {
 		cancelErr: errors.New("peer offline"),
 	}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "eve", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "eve", []core.CandidateFile{{Filename: "b.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "eve", "b.flac", txfOpts{state: core.TransferQueued, slskdID: "g2", deadline: now.Add(-time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -308,7 +308,7 @@ func TestDownloadingReconcileBackfillsMissingID(t *testing.T) {
 		{ID: "g-recovered", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 20},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "", bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -329,7 +329,7 @@ func TestDownloadingReconcileOverdueEmptyIDCancelsViaBackfill(t *testing.T) {
 		{ID: "g-live", Username: "eve", Filename: "b.flac", State: "Queued", Size: 100},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "eve", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "eve", []core.CandidateFile{{Filename: "b.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "eve", "b.flac", txfOpts{state: core.TransferQueued, slskdID: "", deadline: now.Add(-time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -357,7 +357,7 @@ func TestDownloadingReconcileRetriesRejectedWhenRetryable(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "Too many megabytes"},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferQueued, slskdID: "g1", deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -381,7 +381,7 @@ func TestDownloadingReconcileRejectedErrorsWhenExhausted(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "Too many megabytes"},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferQueued, slskdID: "g1", retries: 3, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -401,7 +401,7 @@ func TestDownloadingReconcileRejectedTerminalReasonDoesNotRetry(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "Completed, Rejected", Size: 100, Exception: "File not shared."},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferQueued, slskdID: "g1", retries: 0, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
@@ -422,7 +422,7 @@ func TestDownloadingReconcileStalledCancelsAndRetries(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: stale})
 
 	d := NewDownloading(p)
@@ -450,7 +450,7 @@ func TestDownloadingReconcileStalledErrorsWhenExhausted(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 40, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: stale})
 
 	d := NewDownloading(p)
@@ -484,7 +484,7 @@ func TestDownloadingReconcileFreshProgressNotStalled(t *testing.T) {
 		{ID: "g1", Username: "bob", Filename: "a.flac", State: "InProgress", Size: 100, BytesTransferred: 40},
 	}}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: fresh})
 
 	d := NewDownloading(p)
@@ -510,7 +510,7 @@ func TestDownloadingReconcileStalledCancelFailureLeavesUntouched(t *testing.T) {
 		cancelErr: errors.New("peer offline"),
 	}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
-	_, candID := seedActiveCandidate(t, st, 1, "bob", nil, now)
+	_, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", bytesDone: 40, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: stale})
 
 	d := NewDownloading(p)
@@ -824,8 +824,8 @@ func TestDownloadingFirstTickResolvesStaleBacklog(t *testing.T) {
 	const n = 4 // < MaxActive(5): one resolve tick handles the whole backlog
 	jobIDs := make([]int64, n)
 	for i := 0; i < n; i++ {
-		// Distinct peer per job: transfers has a global UNIQUE(username, filename),
-		// so reusing one peer+filename across jobs would collide.
+		// Distinct peer per job keeps this cap test's live transfer fixtures
+		// independent; cross-candidate ownership is covered by store tests.
 		user := fmt.Sprintf("bob%d", i)
 		jobID, candID := seedActiveCandidate(t, st, int64(1000+i), user,
 			[]core.CandidateFile{{Filename: `A\01.flac`, Size: 10}}, now)

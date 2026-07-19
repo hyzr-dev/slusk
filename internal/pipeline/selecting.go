@@ -20,12 +20,13 @@ type SelectingStore interface {
 	RunnableJobsInState(ctx context.Context, state core.AlbumJobState, now time.Time, limit int) ([]core.AlbumJob, error)
 	// NextNewCandidate returns a job's best untried cached candidate.
 	NextNewCandidate(ctx context.Context, jobID int64) (core.Candidate, bool, error)
-	// ActivateCandidate atomically re-checks the MaxActive cap and, if room
-	// remains, activates the candidate and advances the job to DOWNLOADING.
-	ActivateCandidate(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (bool, error)
-	// RecordPendingTransfer write-aheads one of a newly-activated candidate's
-	// files as PENDING, before any of them are handed to slskd.
-	RecordPendingTransfer(ctx context.Context, candidateID int64, username, filename string, size int64, now time.Time) error
+	// ActivateCandidateWithTransfers atomically re-checks ownership, lifecycle
+	// eligibility, and MaxActive, then creates the complete PENDING transfer set
+	// before activating the candidate and advancing its job to DOWNLOADING.
+	ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (activated, capFull bool, err error)
+	// DeferSelectingJob moves a candidate-specific skip behind FIFO peers so a
+	// full batch of live-owner conflicts cannot starve later unrelated jobs.
+	DeferSelectingJob(ctx context.Context, jobID int64, now time.Time) error
 
 	// The remaining methods are topUpDeps's store half (see topUpCandidate):
 	// declared again here, rather than embedding topUpDeps directly, so this
@@ -153,12 +154,10 @@ func (s *Selecting) Tick(ctx context.Context, now time.Time) error {
 }
 
 // selectJob tries to activate one job's best cached candidate. The returned
-// bool tells Tick whether to keep working the rest of this tick's batch:
-// false only when ActivateCandidate reports the MaxActive cap is full (or the
-// job left SELECTING underneath us), since every later job in the batch would
-// hit the same cap check and fail identically - stopping early saves the
-// round trips. Every other outcome (exhaustion, TTL expiry) returns true so
-// the batch keeps going.
+// bool tells Tick whether to keep working the rest of this tick's batch: false
+// only when ActivateCandidateWithTransfers reports the shared MaxActive cap is
+// full, since every later job would hit the same cap. Candidate-specific skips
+// are deferred behind FIFO peers and return true so unrelated work continues.
 func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.Time) (bool, error) {
 	cand, ok, err := s.p.Store.NextNewCandidate(ctx, job.ID)
 	if err != nil {
@@ -198,26 +197,23 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		return true, nil
 	}
 
-	activated, err := s.p.Store.ActivateCandidate(ctx, cand.ID, job.ID, s.p.MaxActive, now)
+	activated, capFull, err := s.p.Store.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, s.p.MaxActive, now)
 	if err != nil {
 		return false, err
 	}
 	if !activated {
-		// Either the MaxActive cap is already full, or the job left SELECTING
-		// underneath us (e.g. cancelled). Either way there is nothing to do
-		// now; the next tick re-evaluates from RunnableJobsInState.
-		s.log().Info("candidate activation skipped, cap full or job left selecting",
-			"album_job", job.ID, "candidate", cand.ID)
-		return false, nil
-	}
-
-	// Write-ahead every file as PENDING (survives a restart) before handing
-	// any of them to slskd - ported from legacy startJob's back half
-	// (engine/discovery.go:328-351).
-	for _, f := range cand.Files {
-		if err := s.p.Store.RecordPendingTransfer(ctx, cand.ID, cand.Username, f.Filename, f.Size, now); err != nil {
-			return false, err
+		// Only a full shared cap blocks the rest of the FIFO batch. Candidate-
+		// specific skips (job left SELECTING, or another live candidate owns the
+		// same remote file) are moved behind their FIFO peers so even a whole
+		// batch of conflicts cannot starve unrelated jobs on later ticks.
+		if !capFull {
+			if err := s.p.Store.DeferSelectingJob(ctx, job.ID, now); err != nil {
+				return false, err
+			}
 		}
+		s.log().Info("candidate activation skipped",
+			"album_job", job.ID, "candidate", cand.ID, "cap_full", capFull)
+		return !capFull, nil
 	}
 
 	sent, err := topUpCandidate(ctx, s.p, cand.ID, now, s.p.MaxInflightPerPeer, s.p.MaxTransferRetries, s.p.TransferDeadline, s.log())
@@ -253,7 +249,7 @@ type topUpDeps interface {
 // maxInflightPerPeer transfers are in flight, sending more only as earlier
 // ones finish. Keeping the queued count bounded stops the peer's per-user
 // queued-megabyte limit from rejecting a burst. PENDING files carry their
-// size in bytes_total (set at RecordPendingTransfer time) so they can be
+// size in bytes_total (set during atomic candidate activation) so they can be
 // enqueued here without the original search result in hand. Files are sent
 // in filename order for deterministic progress.
 //
