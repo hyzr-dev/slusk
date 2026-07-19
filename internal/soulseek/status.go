@@ -30,4 +30,11 @@ type Status struct {
 	LastError           string
 	LastErrorAt         time.Time
 	ConsecutiveFailures int
+	// PeerConns is the number of currently-open peer connections
+	// established via Client.ConnectPeer or the mirror (inbound-indirect)
+	// path. Composed at read time in Client.Status(), not stored by record*.
+	PeerConns int
+	// ListenAddr is the peer listener's bound address (host:port), set once
+	// Client.Run has started it. Composed at read time in Client.Status().
+	ListenAddr string
 }

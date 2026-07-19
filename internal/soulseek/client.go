@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
@@ -25,7 +26,9 @@ const (
 	defaultBackoffBase     = 5 * time.Second
 	defaultBackoffCap      = 10 * time.Minute
 	tcpKeepAliveInterval   = time.Minute
-	defaultPeerInitTimeout = 10 * time.Second
+	defaultPeerInitTimeout  = 10 * time.Second
+	defaultPeerDialTimeout  = 10 * time.Second
+	defaultEstablishTimeout = 30 * time.Second
 	// defaultListenAddr is used only when Config.ListenAddr is left blank,
 	// which production configuration never does (see config.SoulseekConfig);
 	// it exists so tests that don't care about the peer listener don't have
@@ -73,6 +76,14 @@ type Config struct {
 	// peerInitTimeout bounds how long an accepted peer connection has to
 	// send its first (PeerInit or PierceFirewall) frame. Default 10s.
 	peerInitTimeout time.Duration
+	// peerDialTimeout bounds a single outbound peer TCP dial attempt (both
+	// the direct path in ConnectPeer and the mirror dial-back in
+	// handleConnectToPeer). Default 10s.
+	peerDialTimeout time.Duration
+	// establishTimeout bounds the whole of ConnectPeer: resolving the peer's
+	// address, the direct dial attempt, and - if that fails - the indirect
+	// NAT-traversal fallback. Default 30s.
+	establishTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -102,6 +113,19 @@ type Client struct {
 	// only ever read afterward (by the same goroutine chain, via
 	// serveConnected), so it needs no synchronization.
 	listenPort int
+	// boundListenAddr holds the peer listener's bound address (host:port),
+	// for Status(). Set once by Run.
+	boundListenAddr atomic.Pointer[string]
+
+	// pendingMu guards pending, the in-flight indirect (NAT-traversal)
+	// ConnectPeer attempts (see peers.go), keyed by the token sent in the
+	// server.ConnectToPeer request.
+	pendingMu sync.Mutex
+	pending   map[soul.Token]*pendingAttempt
+
+	// peerConns counts currently-open peer connections established via
+	// ConnectPeer or the mirror (inbound-indirect) path, for Status().
+	peerConns atomic.Int64
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -125,8 +149,19 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.peerInitTimeout <= 0 {
 		cfg.peerInitTimeout = defaultPeerInitTimeout
 	}
+	if cfg.peerDialTimeout <= 0 {
+		cfg.peerDialTimeout = defaultPeerDialTimeout
+	}
+	if cfg.establishTimeout <= 0 {
+		cfg.establishTimeout = defaultEstablishTimeout
+	}
 
-	c := &Client{cfg: cfg, logger: logger, pendingAddrs: make(map[string][]chan addrResult)}
+	c := &Client{
+		cfg:          cfg,
+		logger:       logger,
+		pendingAddrs: make(map[string][]chan addrResult),
+		pending:      make(map[soul.Token]*pendingAttempt),
+	}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
@@ -135,7 +170,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // types this package actually sends, rather than reusing server package's
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
-	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress
 	Serialize(M) ([]byte, error)
 }
 
@@ -156,8 +191,17 @@ func sendToServer[M serverMessage[M]](c *Client, msg M) error {
 }
 
 // Status returns a point-in-time snapshot of the client's connection state.
+// PeerConns and ListenAddr are composed in here from their own atomics
+// rather than stored in the Status snapshots written by record*, so a
+// concurrent peer-connection open/close never races a read-modify-write
+// against the connection-lifecycle state.
 func (c *Client) Status() Status {
-	return *c.status.Load()
+	s := *c.status.Load()
+	s.PeerConns = int(c.peerConns.Load())
+	if addr := c.boundListenAddr.Load(); addr != nil {
+		s.ListenAddr = *addr
+	}
+	return s
 }
 
 // Run starts the peer listener, then dials the server, logs in, and serves
@@ -174,6 +218,8 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
 	}
 	c.listenPort = ln.Addr().(*net.TCPAddr).Port
+	boundAddr := ln.Addr().String()
+	c.boundListenAddr.Store(&boundAddr)
 
 	acceptDone := make(chan struct{})
 	go func() {

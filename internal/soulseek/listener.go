@@ -40,7 +40,12 @@ func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
 // uploads, shared file listings, ...) is not implemented yet; every path
 // below logs and closes the connection. See #54.
 func (c *Client) handlePeerConn(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
+	claimed := false
+	defer func() {
+		if !claimed {
+			_ = conn.Close()
+		}
+	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(c.cfg.peerInitTimeout)); err != nil {
 		return
@@ -63,9 +68,19 @@ func (c *Client) handlePeerConn(conn net.Conn) {
 			}
 			return
 		}
-		// Matching pf.Token against a pending indirect ConnectPeer attempt
-		// and handing the connection off to it is completed in a follow-up
-		// commit; every token is treated as unknown here.
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			if c.logger != nil {
+				c.logger.Debug("clear read deadline after pierce firewall", "remote", conn.RemoteAddr(), "err", err)
+			}
+			return
+		}
+		if c.completePendingDial(pf.Token, conn) {
+			// Ownership of conn has passed to the matching ConnectPeer call
+			// (delivered via its pendingAttempt.done channel); this
+			// goroutine must not close it.
+			claimed = true
+			return
+		}
 		if c.logger != nil {
 			c.logger.Warn("pierce firewall with unknown token", "remote", conn.RemoteAddr(), "token", pf.Token)
 		}
