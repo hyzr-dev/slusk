@@ -56,6 +56,8 @@
   .detail-attempt:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0;}
   .detail-transfer{font-size:11.5px;color:#9aa0aa;padding:3px 0 3px 12px;}
   .mono{font-family:'IBM Plex Mono',monospace;}
+  a.joblink{color:var(--active);text-decoration:none;}
+  a.joblink:hover{text-decoration:underline;}
 </style>
 </head>
 <body>
@@ -102,7 +104,7 @@
       </select>
       <table>
         <thead>
-          <tr><th>Status</th><th>Album / Artist</th><th>Peer</th><th>Progress</th><th></th></tr>
+          <tr><th>ID</th><th>Status</th><th>Album / Artist</th><th>Peer</th><th>Progress</th></tr>
         </thead>
         <tbody id="queue-body"></tbody>
       </table>
@@ -117,6 +119,7 @@
         <tbody id="events-body"></tbody>
       </table>
     </div>
+    <div id="view-job-detail" class="view"></div>
     <div id="view-peers" class="view">
       <h1>Peers</h1>
       <table>
