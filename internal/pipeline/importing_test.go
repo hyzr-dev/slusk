@@ -150,6 +150,120 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 	}
 }
 
+// TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection: Lidarr
+// stamps "Has unmatched tracks" on every file in a non-bijective folder,
+// including files that individually matched a track. Files with TrackIDs must
+// be imported anyway; only genuinely unmatched files (no TrackIDs) are dropped.
+func TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []lidarr.ManualImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: []int64{1}, Rejections: []string{"Has unmatched tracks"}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: []int64{2}, Rejections: []string{"Has unmatched tracks"}},
+			{ID: 3, Path: "/music/complete/A/03.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `A\01.mp3`, Size: 10}, {Filename: `A\02.mp3`, Size: 10}, {Filename: `A\03.mp3`, Size: 10},
+	}, now)
+	if err := st.SetJobTrackBand(ctx, jobID, 2, 3); err != nil {
+		t.Fatalf("SetJobTrackBand: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.executedItems) != 2 {
+		t.Fatalf("expected exactly the 2 track-matched items submitted, got %+v", music.executedItems)
+	}
+	for _, it := range music.executedItems {
+		if len(it.TrackIDs) == 0 {
+			t.Errorf("submitted item without TrackIDs: %+v", it)
+		}
+	}
+	cand, found, err := st.ActiveCandidate(ctx, jobID)
+	if err != nil {
+		t.Fatalf("ActiveCandidate: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected candidate still ACTIVE")
+	}
+	if cand.ImportSubmittedAt == nil {
+		t.Errorf("expected ImportSubmittedAt set after successful submission")
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("job state = %v, want still IMPORTING", got)
+	}
+}
+
+// TestImportingVerifyAllUnmatchedStillFailsCandidate: when no file at all has
+// a TrackID, the candidate fails to SELECTING exactly as before.
+func TestImportingVerifyAllUnmatchedStillFailsCandidate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []lidarr.ManualImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `A\01.mp3`, Size: 10}, {Filename: `A\02.mp3`, Size: 10},
+	}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("all-unmatched import should return job to SELECTING, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventImportRejected {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventImportRejected)
+	}
+}
+
+// TestImportingCoverageUsesMinTrackCountBand: a candidate covering the
+// smallest valid edition (2 tracks) passes even though the canonical
+// AlbumStatus total is 3.
+func TestImportingCoverageUsesMinTrackCountBand(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []lidarr.ManualImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{1}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: true, TrackIDs: []int64{2}},
+		},
+		albumTotal: 3,
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `A\01.mp3`, Size: 10}, {Filename: `A\02.mp3`, Size: 10},
+	}, now)
+	if err := st.SetJobTrackBand(ctx, jobID, 2, 3); err != nil {
+		t.Fatalf("SetJobTrackBand: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.executedItems) != 2 {
+		t.Fatalf("expected import submitted (not rejected as incomplete), got executed=%+v", music.executedItems)
+	}
+	if ev := lastJobEvent(t, st, jobID); ev.Event == core.EventImportRejected {
+		t.Errorf("expected no rejection event, got %+v", ev)
+	}
+}
+
 // TestImportingHappyPathSubmitsThenConfirmsToDone drives two ticks: the first
 // verifies a clean, complete candidate and submits it (ExecuteManualImport
 // called, ImportSubmittedAt set, job stays IMPORTING); the second, with
