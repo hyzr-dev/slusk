@@ -453,6 +453,96 @@ func TestConnectPeerServerDisconnectFailsPending(t *testing.T) {
 	}
 }
 
+func TestConnectPeerServerDisconnectFailsPendingIndirectDance(t *testing.T) {
+	// Regression test for the errNoServerConnection doc comment: previously
+	// only GetPeerAddress waiters were failed when the server connection was
+	// lost (failAllAddrWaiters); an indirect ConnectPeer dance already past
+	// address resolution and waiting on a PierceFirewall/CantConnectToPeer
+	// that can now never arrive would hang until ctx's own timeout instead
+	// of failing promptly. See failAllPendingAttempts in peers.go.
+	srv := newFakeServer(t)
+	var serverConn net.Conn
+	connectToPeerSeen := make(chan struct{})
+	srv.serve(t, func(conn net.Conn) {
+		if err := drainLoginRequest(conn); err != nil {
+			t.Logf("drain login request: %v", err)
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			t.Logf("write login success: %v", err)
+			return
+		}
+		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			t.Logf("read set listen port: %v", err)
+			return
+		}
+		serverConn = conn
+
+		code, body, err := readRawFrame(conn) // GetPeerAddress
+		if err != nil || code != uint32(server.CodeGetPeerAddress) {
+			t.Logf("read get peer address request: code=%d err=%v", code, err)
+			return
+		}
+		username, err := parseGetPeerAddressRequest(body)
+		if err != nil {
+			t.Errorf("parse get peer address request: %v", err)
+			return
+		}
+		// Answer with an address nothing listens on, forcing the direct
+		// dial to fail and the indirect fallback to kick in.
+		deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Errorf("listen for dead port: %v", err)
+			return
+		}
+		deadAddr := deadLn.Addr().(*net.TCPAddr)
+		_ = deadLn.Close()
+		writeGetPeerAddressResponse(t, conn, username, deadAddr.IP, deadAddr.Port, 0)
+
+		if _, _, err := readRawFrame(conn); err != nil { // ConnectToPeer
+			t.Logf("read connect to peer request: %v", err)
+			return
+		}
+		close(connectToPeerSeen)
+		// Go silent and let the test sever the connection out from under the
+		// now-pending indirect dance.
+		_, _, _ = readRawFrame(conn)
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	c.cfg.establishTimeout = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+	waitForState(t, c, StateConnected, 2*time.Second)
+
+	connectDone := make(chan error, 1)
+	go func() {
+		_, err := c.ConnectPeer(context.Background(), "friend", peer.ConnectionType)
+		connectDone <- err
+	}()
+
+	select {
+	case <-connectToPeerSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never saw the ConnectToPeer request")
+	}
+	_ = serverConn.Close()
+
+	select {
+	case err := <-connectDone:
+		if err == nil {
+			t.Fatal("ConnectPeer: expected an error after the server connection was lost, got nil")
+		}
+		if !errors.Is(err, errNoServerConnection) {
+			t.Errorf("err = %v, want it to wrap errNoServerConnection", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConnectPeer did not return promptly after the server connection was lost")
+	}
+}
+
 func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 	peerLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

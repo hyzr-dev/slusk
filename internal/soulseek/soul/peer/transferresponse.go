@@ -91,18 +91,26 @@ func (t *TransferResponse) Deserialize(reader io.Reader) error {
 	}
 
 	if !t.Allowed {
-		r, err := internal.ReadString(reader)
+		// The reason string is a protocol-documented optional trailing
+		// field. Reading its length prefix and body as separate steps lets
+		// us tell apart the two ways this can come up short: the field may
+		// be completely absent (a clean io.EOF reading the length prefix
+		// itself, with zero bytes remaining in the frame at all), which is
+		// not an error - the peer simply omitted it - versus the length
+		// prefix being present but declaring a body that is missing or
+		// truncated, which is always a hard error even when that failure
+		// also happens to surface as a clean io.EOF (e.g. a declared
+		// nonzero-length body with zero bytes actually following it).
+		size, err := internal.ReadStringLen(reader)
 		if err != nil {
-			// The reason string is a protocol-documented optional trailing
-			// field. A clean io.EOF right at the field boundary (zero bytes
-			// remained) means the peer simply omitted it; treat that as
-			// "reason absent" rather than an error. Anything else -
-			// including a truncation partway through the field, which
-			// surfaces as io.ErrUnexpectedEOF from internal.ReadString's
-			// io.ReadFull - is still a hard error.
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+			return err
+		}
+
+		r, err := internal.ReadStringBody(reader, size)
+		if err != nil {
 			return err
 		}
 

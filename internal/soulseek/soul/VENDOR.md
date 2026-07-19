@@ -116,6 +116,17 @@ some trailing fields.
   string, only present when `Allowed` is false, is now optional under this
   policy. A clean `io.EOF` reading it leaves `Reason` nil; a truncation
   partway through the string is still a hard error.
+  - Refinement: "absent" is judged strictly from the length prefix, not the
+    whole call. `internal.ReadString` used to be called as one step, so a
+    frame ending immediately after a complete 4-byte length prefix declaring
+    a nonzero-length body also produced a clean `io.EOF` (from
+    `io.ReadFull` reading zero of N bytes) and was misclassified as "reason
+    absent" instead of a truncated field. `Deserialize` now reads the length
+    prefix (`internal.ReadStringLen`) and body (`internal.ReadStringBody`)
+    as separate steps: only a clean `io.EOF` from the length-prefix read
+    itself - meaning zero bytes remained in the frame at all - counts as
+    "absent"; any error reading the body, even a clean `io.EOF`, is a hard
+    error.
 - `peer/filesearchresponse.go` has trailing fields (behind a zlib-compressed
   section) that are a known, still-open deviation from this policy — not
   addressed here; deferred to a follow-up issue (#54).

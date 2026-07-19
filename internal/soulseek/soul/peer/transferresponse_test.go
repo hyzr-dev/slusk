@@ -109,6 +109,24 @@ func TestTransferResponseDeserializeReasonTruncatedMidString(t *testing.T) {
 	}
 }
 
+func TestTransferResponseDeserializeReasonLenPresentBodyMissing(t *testing.T) {
+	// The length prefix is fully present and declares a nonzero-length body,
+	// but the frame ends immediately after it with no body bytes at all.
+	// Reading the body then hits a clean io.EOF (io.ReadFull with zero bytes
+	// available), which - unlike a clean EOF while reading the length prefix
+	// itself - must NOT be mistaken for "reason absent": the field was
+	// declared present, so a missing body is truncation, a hard error.
+	full := packedReason(t, "Queued")
+	lengthPrefixOnly := full[:4]
+	frame := buildTransferResponseFrame(t, soul.Token(5), false, lengthPrefixOnly)
+
+	var r TransferResponse
+	err := r.Deserialize(bytes.NewReader(frame))
+	if err == nil {
+		t.Fatal("Deserialize: expected error for a present length prefix with a missing body, got nil")
+	}
+}
+
 func TestTransferResponseDeserializeAllowedNoReasonField(t *testing.T) {
 	// Allowed transfers never carry a reason field at all; nothing beyond
 	// Allowed should be read.

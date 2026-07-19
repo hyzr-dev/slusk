@@ -195,8 +195,12 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 		// size smaller than what has already been read must fail fast here
 		// instead of underflowing (size - readSoFar as unsigned math) and
 		// reading 4-byte chunks from the connection forever, buffering until
-		// EOF. This must run before the FIRST body read too, or a 1-3-byte
-		// body mis-reads by requesting a full 4-byte chunk.
+		// EOF. This must run before the FIRST body read too, since a
+		// 1-3-byte body would otherwise mis-read by requesting a full
+		// 4-byte chunk; note it still over-reads up to 3 bytes past the
+		// declared size in that case, since io.CopyN below has no way to
+		// stop mid-chunk - the next iteration's readSoFar/size accounting
+		// is what actually rejects the frame.
 		if l >= 2 {
 			remaining := int64(size) - readSoFar
 			if remaining < 0 {
@@ -562,17 +566,37 @@ func NewString(val string) ([]byte, error) {
 
 // ReadString reads a string from the buffer.
 func ReadString(reader io.Reader) (string, error) {
-	size, err := ReadUint32(reader)
+	size, err := ReadStringLen(reader)
 	if err != nil {
 		return "", err
 	}
 
+	return ReadStringBody(reader, size)
+}
+
+// ReadStringLen reads just the 4-byte length prefix of a length-prefixed
+// string, without reading the body that follows. Split out of ReadString so
+// callers for whom the whole field is optional (a protocol-documented
+// trailing field that may be omitted entirely) can distinguish "field
+// completely absent" - a clean io.EOF from this call, with zero bytes read -
+// from "field declared present but its body missing or truncated", which
+// ReadStringBody always treats as a hard error even when that also
+// surfaces as io.EOF (a declared-nonzero-size body reading zero bytes).
+func ReadStringLen(reader io.Reader) (uint32, error) {
+	return ReadUint32(reader)
+}
+
+// ReadStringBody reads a string of size bytes, given a length already
+// obtained from ReadStringLen (or equivalent). Any error here - including a
+// clean io.EOF - means the body promised by size was not fully delivered,
+// and must be treated as truncation, not absence.
+func ReadStringBody(reader io.Reader, size uint32) (string, error) {
 	if size > MaxMessageSize {
 		return "", soul.ErrMessageTooLarge
 	}
 
 	buf := make([]byte, size)
-	_, err = io.ReadFull(reader, buf)
+	_, err := io.ReadFull(reader, buf)
 	if err != nil {
 		return "", err
 	}

@@ -9,10 +9,20 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
+// acceptPeerErrBackoff is how long acceptPeers pauses after an Accept error
+// other than shutdown before retrying, so a persistent failure (e.g. the
+// process hitting its file descriptor limit) cannot busy-spin the loop.
+const acceptPeerErrBackoff = 100 * time.Millisecond
+
 // acceptPeers accepts incoming peer connections on ln until it is closed
 // (which Run does when ctx is cancelled or Run itself returns). Each
 // accepted connection is handed to handlePeerConn in its own goroutine so a
-// slow or malicious peer cannot stall other connections.
+// slow or malicious peer cannot stall other connections; per-connection
+// goroutines (and the mirror dial-back goroutines started from
+// handleConnectToPeer in peers.go) are deliberately not joined on shutdown -
+// they are time-bounded by peerInitTimeout/peerDialTimeout and ctx
+// cancellation respectively, so leaving them to exit on their own is
+// simpler than plumbing a WaitGroup through for no real benefit.
 func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -23,6 +33,7 @@ func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
 			if c.logger != nil {
 				c.logger.Debug("accept peer connection", "err", err)
 			}
+			time.Sleep(acceptPeerErrBackoff)
 			continue
 		}
 
@@ -94,7 +105,7 @@ func (c *Client) handlePeerConn(conn net.Conn) {
 			return
 		}
 		if c.logger != nil {
-			c.logger.Info("incoming peer connection", "user", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
+			c.logger.Info("incoming peer connection", "username", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
 		}
 
 	default:

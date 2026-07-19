@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -367,7 +368,12 @@ func (c Config) Validate() error {
 		}
 		if _, port, err := net.SplitHostPort(c.Soulseek.ListenAddr); err != nil {
 			problems = append(problems, "soulseek.listen_addr must be a valid host:port")
-		} else if port == "" || port == "0" {
+		} else if portNum, err := strconv.Atoi(port); err != nil {
+			// net.SplitHostPort only checks the address shape, not that the
+			// port is numeric: "0.0.0.0:abc" passes it and would otherwise
+			// only fail much later, at bind time.
+			problems = append(problems, "soulseek.listen_addr must have a numeric port")
+		} else if portNum <= 0 || portNum > 65535 {
 			problems = append(problems, "soulseek.listen_addr must have a nonzero port")
 		}
 	}

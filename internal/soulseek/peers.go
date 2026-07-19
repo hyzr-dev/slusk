@@ -105,6 +105,30 @@ func (c *Client) deliverAddr(username string, res addrResult) {
 	}
 }
 
+// deregisterAddrWaiter removes ch from username's registered waiters, e.g.
+// when resolvePeerAddress gives up on it (the request never reaching the
+// server, or ctx expiring) without deliverAddr ever firing for it. Without
+// this, an abandoned waiter would sit in pendingAddrs indefinitely - other
+// waiters for the same username may still be pending, so the whole slice
+// can't simply be cleared - until either an unrelated later GetPeerAddress
+// response for the same username incidentally flushed it via deliverAddr,
+// or the server connection is lost entirely.
+func (c *Client) deregisterAddrWaiter(username string, ch chan addrResult) {
+	c.addrMu.Lock()
+	defer c.addrMu.Unlock()
+
+	waiters := c.pendingAddrs[username]
+	for i, w := range waiters {
+		if w == ch {
+			c.pendingAddrs[username] = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(c.pendingAddrs[username]) == 0 {
+		delete(c.pendingAddrs, username)
+	}
+}
+
 // failAllAddrWaiters fails every currently registered GetPeerAddress waiter
 // with err, e.g. when the server connection is lost while they are waiting.
 func (c *Client) failAllAddrWaiters(err error) {
@@ -129,6 +153,7 @@ func (c *Client) resolvePeerAddress(ctx context.Context, username string) (serve
 	waiter := c.registerAddrWaiter(username)
 
 	if err := sendToServer(c, &server.GetPeerAddress{Username: username}); err != nil {
+		c.deregisterAddrWaiter(username, waiter)
 		return server.GetPeerAddress{}, fmt.Errorf("request address of %s: %w", username, err)
 	}
 
@@ -140,6 +165,7 @@ func (c *Client) resolvePeerAddress(ctx context.Context, username string) (serve
 		return res.msg, nil
 
 	case <-ctx.Done():
+		c.deregisterAddrWaiter(username, waiter)
 		return server.GetPeerAddress{}, fmt.Errorf("resolve address of %s: %w", username, ctx.Err())
 	}
 }
@@ -180,12 +206,21 @@ func (c *Client) registerPendingAttempt(username string, ct soul.ConnectionType)
 }
 
 // deregisterPendingAttempt removes token's entry (only if it still points at
-// attempt; a completion may have already replaced/removed it) and, either
-// way, drains and closes any connection that was delivered into attempt.done
-// in the race window between ConnectPeer's select giving up (ctx expiring)
-// and a concurrent completePendingDial or handleCantConnectToPeer call.
-// Without this, a PierceFirewall that wins that race would leak its
-// connection open forever.
+// attempt; a completion may have already removed it - see below) and, either
+// way, drains and closes any connection already sitting in attempt.done.
+//
+// completePendingDial and handleCantConnectToPeer both delete token from
+// c.pending and deliver to attempt.done atomically, under pendingMu (see
+// their comments). That makes the delete here and their delete-and-deliver
+// mutually exclusive: either this call wins the race and removes the entry
+// first, in which case neither of them will ever find the token and nothing
+// is ever sent to done, or one of them already ran to completion first, in
+// which case the value is already sitting in done (buffered, size 1) by the
+// time this call's lock acquisition returns. Either way, by the time the
+// select below runs there is nothing left to race: it either finds the
+// channel empty (first case) or finds the value already delivered (second
+// case) and closes it. Without this drain, the second case would otherwise
+// leak the connection into a channel nobody reads from again.
 func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAttempt) {
 	c.pendingMu.Lock()
 	if cur, ok := c.pending[token]; ok && cur == attempt {
@@ -206,29 +241,31 @@ func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAtte
 // pending indirect ConnectPeer attempt and, if found, delivers conn to it.
 // It reports whether the token matched a still-registered attempt; the
 // caller (handlePeerConn) closes conn itself when it did not.
+//
+// The map deletion and the channel send happen atomically under pendingMu so
+// this can never race deregisterPendingAttempt (see its comment): if
+// ConnectPeer's ctx expires concurrently, either deregisterPendingAttempt
+// removes the token first (and this call then finds it already gone), or
+// this call removes it first and deregisterPendingAttempt's own drain picks
+// up the delivered result once it acquires the lock. There is no window
+// where the token has been removed from the map but the delivery has not
+// happened yet, which is what previously let a delivery land in the channel
+// after deregisterPendingAttempt's drain had already given up, leaking the
+// connection forever. This also guarantees the send below never blocks: at
+// most one of completePendingDial / handleCantConnectToPeer ever observes
+// the token present and gets to deliver into the buffered (size 1) channel.
 func (c *Client) completePendingDial(token soul.Token, conn net.Conn) bool {
 	c.pendingMu.Lock()
-	attempt, ok := c.pending[token]
-	if ok {
-		delete(c.pending, token)
-	}
-	c.pendingMu.Unlock()
+	defer c.pendingMu.Unlock()
 
+	attempt, ok := c.pending[token]
 	if !ok {
 		return false
 	}
+	delete(c.pending, token)
 
 	pc := c.newPeerConn(conn, attempt.username, attempt.ct)
-	select {
-	case attempt.done <- pendingResult{conn: pc}:
-	default:
-		// ConnectPeer's own deregisterPendingAttempt drain (see above) is
-		// the intended consumer of this extremely unlikely case (the
-		// buffered channel already holding a value should be impossible
-		// since only one PierceFirewall can ever match a given token before
-		// it is removed from the map); close defensively rather than leak.
-		_ = pc.Close()
-	}
+	attempt.done <- pendingResult{conn: pc}
 	return true
 }
 
@@ -261,7 +298,7 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 			return nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
 		}
 		if c.logger != nil {
-			c.logger.Info("peer connection established", "user", username, "type", ct, "path", "direct")
+			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "direct")
 		}
 		return c.newPeerConn(directConn, username, ct), nil
 	}
@@ -284,7 +321,7 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 				username, token, directAddr, directErr, res.err)
 		}
 		if c.logger != nil {
-			c.logger.Info("peer connection established", "user", username, "type", ct, "path", "indirect", "direct_dial_err", directErr)
+			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "indirect", "direct_dial_err", directErr)
 		}
 		return res.conn, nil
 
@@ -300,12 +337,15 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 // request to us. We dial the peer back - on the plain (non-obfuscated) port
 // only; ObfuscatedPort is deliberately unsupported here - and reply with
 // PierceFirewall carrying the relayed token. Runs in its own goroutine so a
-// slow or unreachable peer cannot stall message handling.
-func (c *Client) handleConnectToPeer(msg server.ConnectToPeer) {
+// slow or unreachable peer cannot stall message handling. ctx is the
+// Client's current connection lifetime (see serveConnected): tying the dial
+// to it lets shutdown cancel an in-flight dial-back instead of leaving it to
+// run out its own timeout.
+func (c *Client) handleConnectToPeer(ctx context.Context, msg server.ConnectToPeer) {
 	go func() {
 		addr := net.JoinHostPort(msg.IP.String(), strconv.Itoa(msg.Port))
 		dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
-		conn, err := dialer.Dial("tcp", addr)
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			if c.logger != nil {
 				c.logger.Debug("mirror connect-to-peer dial failed", "username", msg.Username, "token", msg.Token, "addr", addr, "err", err)
@@ -325,7 +365,7 @@ func (c *Client) handleConnectToPeer(msg server.ConnectToPeer) {
 		}
 
 		if c.logger != nil {
-			c.logger.Info("peer connection established", "user", msg.Username, "type", msg.Type, "path", "indirect-inbound")
+			c.logger.Debug("mirror dial-back succeeded; closing until #54", "username", msg.Username, "type", msg.Type)
 		}
 		// Full handling of an established mirror connection (queued
 		// transfers, uploads, ...) is not implemented yet; close it rather
@@ -338,23 +378,43 @@ func (c *Client) handleConnectToPeer(msg server.ConnectToPeer) {
 // to relay a connection request to (via ConnectPeer's indirect fallback)
 // reported it could not connect back. It fails the matching pending
 // indirect-connection attempt, if one is still registered for the token.
+//
+// Like completePendingDial, the map deletion and channel send happen
+// atomically under pendingMu so this can never race
+// deregisterPendingAttempt (see its comment).
 func (c *Client) handleCantConnectToPeer(msg server.CantConnectToPeer) {
 	c.pendingMu.Lock()
 	attempt, ok := c.pending[msg.Token]
 	if ok {
 		delete(c.pending, msg.Token)
+		attempt.done <- pendingResult{err: errPeerCantConnectBack}
 	}
 	c.pendingMu.Unlock()
 
-	if !ok {
-		if c.logger != nil {
-			c.logger.Debug("received cant-connect-to-peer for unknown token", "username", msg.Username, "token", msg.Token)
-		}
-		return
+	if !ok && c.logger != nil {
+		c.logger.Debug("received cant-connect-to-peer for unknown token", "username", msg.Username, "token", msg.Token)
 	}
+}
 
-	select {
-	case attempt.done <- pendingResult{err: errPeerCantConnectBack}:
-	default:
+// failAllPendingAttempts fails every currently registered indirect
+// (NAT-traversal) ConnectPeer attempt with err, e.g. when the server
+// connection is lost while they are waiting on either a PierceFirewall
+// completion or a CantConnectToPeer relay - neither of which can now ever
+// arrive without the server. Clearing c.pending under pendingMu here rules
+// out a concurrent completePendingDial or handleCantConnectToPeer also
+// trying to deliver to the same attempt (see their comments): by the time
+// this call's lock acquisition returns, every token has already been
+// removed, so they will find nothing and neither will send.
+func (c *Client) failAllPendingAttempts(err error) {
+	c.pendingMu.Lock()
+	all := c.pending
+	c.pending = make(map[soul.Token]*pendingAttempt)
+	c.pendingMu.Unlock()
+
+	for _, attempt := range all {
+		select {
+		case attempt.done <- pendingResult{err: err}:
+		default:
+		}
 	}
 }

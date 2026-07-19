@@ -294,3 +294,16 @@ func TestLoadSoulseekZeroPortListenAddr(t *testing.T) {
 		t.Errorf("error should name the invalid field: %v", err)
 	}
 }
+
+func TestLoadSoulseekNonNumericPortListenAddr(t *testing.T) {
+	// net.SplitHostPort only validates the host:port shape, not that the
+	// port is actually numeric; "0.0.0.0:abc" must still be rejected here
+	// rather than only failing later, at bind time.
+	_, err := Load("testdata/soulseek_non_numeric_port_listen_addr.toml")
+	if err == nil {
+		t.Fatal("expected error for a non-numeric-port soulseek.listen_addr, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.listen_addr") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}

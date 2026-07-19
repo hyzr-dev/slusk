@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	defaultDialTimeout     = 10 * time.Second
-	defaultPingInterval    = 5 * time.Minute
-	defaultBackoffBase     = 5 * time.Second
-	defaultBackoffCap      = 10 * time.Minute
-	tcpKeepAliveInterval   = time.Minute
+	defaultDialTimeout      = 10 * time.Second
+	defaultPingInterval     = 5 * time.Minute
+	defaultBackoffBase      = 5 * time.Second
+	defaultBackoffCap       = 10 * time.Minute
+	tcpKeepAliveInterval    = time.Minute
 	defaultPeerInitTimeout  = 10 * time.Second
 	defaultPeerDialTimeout  = 10 * time.Second
 	defaultEstablishTimeout = 30 * time.Second
@@ -362,6 +362,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		c.serverConn = nil
 		c.mu.Unlock()
 		c.failAllAddrWaiters(errNoServerConnection)
+		c.failAllPendingAttempts(errNoServerConnection)
 	}()
 
 	if err := sendToServer(c, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
@@ -370,7 +371,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 
 	readErrs := make(chan error, 1)
 	go func() {
-		readErrs <- c.readLoop(conn)
+		readErrs <- c.readLoop(ctx, conn)
 	}()
 
 	ticker := time.NewTicker(c.cfg.pingInterval)
@@ -397,15 +398,16 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 }
 
 // readLoop reads messages from conn until it fails or handleMessage reports
-// a terminal condition (Relogged).
-func (c *Client) readLoop(conn net.Conn) error {
+// a terminal condition (Relogged). ctx is threaded down to handleConnectToPeer
+// so its dial-back goroutine is tied to the same lifetime as the connection.
+func (c *Client) readLoop(ctx context.Context, conn net.Conn) error {
 	for {
 		message, _, code, err := server.Read(conn)
 		if err != nil {
 			return fmt.Errorf("read message: %w", err)
 		}
 
-		if err := c.handleMessage(code, message); err != nil {
+		if err := c.handleMessage(ctx, code, message); err != nil {
 			return err
 		}
 	}
@@ -413,7 +415,7 @@ func (c *Client) readLoop(conn net.Conn) error {
 
 // handleMessage dispatches one server message. Everything not explicitly
 // understood is logged at debug level and dropped.
-func (c *Client) handleMessage(code server.Code, reader io.Reader) error {
+func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.Reader) error {
 	switch code {
 	case server.CodeRelogged:
 		relogged := &server.Relogged{}
@@ -435,7 +437,7 @@ func (c *Client) handleMessage(code server.Code, reader io.Reader) error {
 		if err := msg.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize connect to peer: %w", err)
 		}
-		c.handleConnectToPeer(*msg)
+		c.handleConnectToPeer(ctx, *msg)
 		return nil
 
 	case server.CodeCantConnectToPeer:
