@@ -163,6 +163,7 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 	length := int64(4)
 	if i != length {
 		err = soul.ErrDifferentPacketSize
+		return
 	}
 
 	var readSoFar int64
@@ -188,10 +189,37 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 		key.Reset()
 		key.Write(rotatedKey.Bytes())
 
-		// Read next 4 bytes of the actual message from the connection.
+		// For the message body (everything after the size and code chunks),
+		// bound the next read to however many bytes actually remain in the
+		// declared frame, using signed arithmetic. A malicious or corrupted
+		// size smaller than what has already been read must fail fast here
+		// instead of underflowing (size - readSoFar as unsigned math) and
+		// reading 4-byte chunks from the connection forever, buffering until
+		// EOF. This must run before the FIRST body read too, or a 1-3-byte
+		// body mis-reads by requesting a full 4-byte chunk.
+		if l >= 2 {
+			remaining := int64(size) - readSoFar
+			if remaining < 0 {
+				err = soul.ErrDifferentPacketSize
+				return
+			}
+			if remaining < 4 {
+				length = remaining
+			}
+		}
+
+		// Read next `length` bytes of the actual message from the connection.
 		next4bytes := new(bytes.Buffer)
 		i, err = io.CopyN(next4bytes, connection, length)
 		if err != nil {
+			// A short copy here means the declared size promised more data
+			// than the connection delivered; normalize to
+			// ErrDifferentPacketSize, matching MessageRead's convention for
+			// the non-obfuscated path.
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			err = fmt.Errorf("%w: %w", soul.ErrDifferentPacketSize, err)
 			return
 		}
 
@@ -224,6 +252,14 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 				return
 			}
 
+			// A frame must contain at least a code; reject an empty
+			// declared body immediately instead of relying on the
+			// readSoFar/size accounting to catch it later.
+			if size == 0 {
+				err = soul.ErrDifferentPacketSize
+				return
+			}
+
 			n, err = message.Write(deobfuscated4bytes.Bytes())
 			if err != nil {
 				return
@@ -232,6 +268,7 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 			// Check if the size of the packet is the same as the size of the message (4).
 			if n != int(length) {
 				err = soul.ErrDifferentPacketSize
+				return
 			}
 
 		// Code.
@@ -262,24 +299,20 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 
 			if n != int(length) {
 				err = soul.ErrDifferentPacketSize
+				return
 			}
 
 			readSoFar += int64(n)
 
 		// Message.
 		default:
-			// Write the deobfuscated 4 bytes to the deobfuscated message buffer.
+			// Write the deobfuscated bytes to the deobfuscated message buffer.
 			n, err = message.Write(deobfuscated4bytes.Bytes())
 			if err != nil {
 				return
 			}
 
 			readSoFar += int64(n)
-
-			// If there are less than 4 bytes left to read, change the length variable (default 4) to reflect the fact.
-			if (size - uint32(readSoFar)) < 4 {
-				length = int64(size) - readSoFar
-			}
 		}
 
 		// We reached the end of the message.
