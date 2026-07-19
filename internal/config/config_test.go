@@ -174,3 +174,61 @@ func TestLoadRejectsUnknownPipelineKey(t *testing.T) {
 		t.Errorf("error should mention unknown key: %v", err)
 	}
 }
+
+func TestObservAuthPolicy(t *testing.T) {
+	base, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	tests := []struct {
+		name       string
+		listenAddr string
+		token      string
+		wantError  string
+	}{
+		{name: "IPv4 loopback without token", listenAddr: "127.0.0.1:9090"},
+		{name: "IPv6 loopback without token", listenAddr: "[::1]:9090"},
+		{name: "localhost without token", listenAddr: "localhost:9090"},
+		{name: "wildcard with token", listenAddr: "0.0.0.0:9090", token: "a-secret-token"},
+		{name: "wildcard without token", listenAddr: "0.0.0.0:9090", wantError: "observ.auth_token"},
+		{name: "repository placeholder token", listenAddr: "0.0.0.0:9090", token: "REPLACE_WITH_A_LONG_RANDOM_TOKEN", wantError: "must be replaced with a generated token"},
+		{name: "token with whitespace", listenAddr: "0.0.0.0:9090", token: "not a bearer token", wantError: "must not contain whitespace"},
+		{name: "empty host without token", listenAddr: ":9090", wantError: "observ.auth_token"},
+		{name: "LAN address without token", listenAddr: "192.168.1.20:9090", wantError: "observ.auth_token"},
+		{name: "malformed listener", listenAddr: "0.0.0.0", token: "a-secret-token", wantError: "valid host:port"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Observ.ListenAddr = tt.listenAddr
+			cfg.Observ.AuthToken = tt.token
+			err := cfg.Validate()
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("Validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error = %v, want text %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidationErrorDoesNotExposeObservToken(t *testing.T) {
+	cfg, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const secret = "never-log-this-observ-token"
+	cfg.Observ.AuthToken = secret
+	cfg.Observ.ListenAddr = "malformed"
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("validation error exposed auth token: %v", err)
+	}
+}

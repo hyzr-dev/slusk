@@ -36,8 +36,13 @@ services:
       - ./config.toml:/config/config.toml:ro
 
     ports:
-      # Status API (/status) + Prometheus (/metrics) — matches observ.listen_addr.
-      - "9090:9090"
+      # Public: /healthz only. Dashboard, API, /status, and /metrics require the
+      # [observ] auth_token from config.toml. Keep that file out of source
+      # control and send the token in Authorization, never in a URL/query.
+      # The host side is bound to loopback for local-only development. A TLS
+      # reverse proxy may expose it, but must preserve Host and replace any
+      # client X-Forwarded-Proto with exactly one trusted http/https value.
+      - "127.0.0.1:9090:9090"
 
 volumes:
   slskdarr-pgdata:
