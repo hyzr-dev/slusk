@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Package-level migration runner.
@@ -194,8 +195,17 @@ func acquireMigrationLock(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
+// releaseMigrationLock releases the session advisory lock acquired by
+// acquireMigrationLock. It deliberately ignores the caller's ctx (which may
+// already be Done by the time this runs as a deferred call after a migration
+// times out or the process is signalled to stop near its deadline) and uses
+// a fresh, short-lived context instead - otherwise ExecContext would fail
+// immediately without ever reaching Postgres, leaving the advisory lock held
+// on the pooled connection until connMaxIdleTime/connMaxLifetime expires.
 func releaseMigrationLock(ctx context.Context, conn *sql.Conn) {
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrationsAdvisoryLockKey); err != nil {
+	unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1)", migrationsAdvisoryLockKey); err != nil {
 		slog.Default().Warn("release migration advisory lock", "err", err)
 	}
 }

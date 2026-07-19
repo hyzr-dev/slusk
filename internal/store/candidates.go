@@ -1,5 +1,5 @@
 // Package store: candidates.go holds the pipeline rewrite's candidates table
-// read/write paths. See schema.sql for why candidates replaces
+// read/write paths. See migrations/0001_baseline_schema.sql for why candidates replaces
 // candidate_attempts for pipeline jobs: a candidate is its own attempt (NEW →
 // ACTIVE → SUCCEEDED|FAILED) with its search result's file list cached as
 // JSONB.

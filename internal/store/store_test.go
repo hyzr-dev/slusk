@@ -225,7 +225,7 @@ func TestSplitStatements(t *testing.T) {
 	}
 }
 
-// TestSchemaMigratesLegacyShape verifies schema.sql boots cleanly against a
+// TestSchemaMigratesLegacyShape verifies migrations/0001_baseline_schema.sql boots cleanly against a
 // pre-rewrite database: transfers still named attempt_id with an inline FK to
 // candidate_attempts and the old idx_transfers_attempt index. The clean-slate
 // script only truncates - it does not drop - so production databases hit
@@ -268,7 +268,7 @@ func TestSchemaMigratesLegacyShape(t *testing.T) {
 		}
 	}
 
-	s, err := Open(dsn) // applies schema.sql against the legacy shape
+	s, err := Open(dsn) // applies migrations/0001_baseline_schema.sql against the legacy shape
 	if err != nil {
 		t.Fatalf("Open against legacy-shape database: %v", err)
 	}

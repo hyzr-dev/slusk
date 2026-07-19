@@ -150,7 +150,7 @@ func run(sqlitePath, pgDSN string) error {
 		}
 	}
 
-	// schema.sql creates this upgrade-compatible constraint NOT VALID. The
+	// migrations/0001_baseline_schema.sql creates this upgrade-compatible constraint NOT VALID. The
 	// source relationship preflight and transactional copy make it safe to
 	// validate now, leaving a fresh migrated target with fully checked FKs.
 	if _, err := tx.Exec(`ALTER TABLE transfers VALIDATE CONSTRAINT transfers_candidate_id_fkey`); err != nil {
