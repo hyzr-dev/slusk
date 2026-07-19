@@ -330,7 +330,9 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			if effectiveID == "" && lt.ID != "" {
 				// Recover the id we lost in a crash so we can actually cancel it.
 				effectiveID = lt.ID
-				_ = d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+				if err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now); err != nil {
+					return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+				}
 			}
 			// Still live in slskd: it MUST be cancelled there before we record it
 			// cancelled, otherwise we orphan an in-flight download.
@@ -339,7 +341,9 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				continue
 			}
 		}
-		_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, tr.BytesDone, tr.BytesTotal, now)
+		if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, tr.BytesDone, tr.BytesTotal, now); err != nil {
+			return stats, fmt.Errorf("mark transfer cancelled: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, effectiveID, err)
+		}
 		if matched {
 			// It existed in slskd (we just cancelled it there); purge the record.
 			d.removeFromSlskd(ctx, tr.Username, effectiveID)
@@ -367,25 +371,33 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// that keeps vanishing (rather than recovering after a restart) still
 			// errors out instead of retrying forever.
 			if tr.Retries < d.p.MaxTransferRetries {
-				_ = d.p.Store.RetryTransfer(ctx, tr.ID, now)
+				if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
+					return stats, fmt.Errorf("retry lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
+				}
 				stats.Retried++
 				continue
 			}
-			_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+			if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
+				return stats, fmt.Errorf("mark lost transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
+			}
 			stats.Lost++
 			continue
 		}
 		ourIDs[lt.ID] = true
 		if tr.SlskdID == "" && lt.ID != "" {
 			// Recover from a crash between RecordEnqueueIntent and AttachTransferID.
-			_ = d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+			if err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now); err != nil {
+				return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+			}
 		}
 		newState := mapSlskdState(lt.State)
 		// A transient rejection (e.g. a peer's "Too many megabytes" queue limit)
 		// with retries left goes back to PENDING for a later resend rather than
 		// failing the whole attempt and discarding a peer that has the album.
 		if newState == core.TransferErrored && tr.Retries < d.p.MaxTransferRetries && isRetryable(lt.Exception) {
-			_ = d.p.Store.RetryTransfer(ctx, tr.ID, now)
+			if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
+				return stats, fmt.Errorf("retry rejected transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+			}
 			stats.Retried++
 			continue
 		}
@@ -402,16 +414,22 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				continue
 			}
 			if tr.Retries < d.p.MaxTransferRetries {
-				_ = d.p.Store.RetryTransfer(ctx, tr.ID, now)
+				if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
+					return stats, fmt.Errorf("retry stalled transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+				}
 			} else {
-				_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+				if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
+					return stats, fmt.Errorf("mark stalled transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+				}
 				// Terminal now (retries exhausted): purge the record we cancelled.
 				d.removeFromSlskd(ctx, tr.Username, lt.ID)
 			}
 			stats.Stalled++
 			continue
 		}
-		_ = d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now)
+		if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, newState, lt.BytesTransferred, lt.Size, now); err != nil {
+			return stats, fmt.Errorf("update transfer progress to %s: transfer %d candidate %d remote %q: %w", newState, tr.ID, tr.CandidateID, lt.ID, err)
+		}
 		if newState == core.TransferCompleted || newState == core.TransferCancelled || newState == core.TransferErrored {
 			// Reached a terminal state and the store write above is committed, so
 			// slskd's now-stale record can be purged. slskd keeps terminal
