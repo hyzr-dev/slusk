@@ -232,6 +232,49 @@ func (c *Client) AlbumStatus(ctx context.Context, albumID int64) (present, total
 	return body.Statistics.TrackFileCount, body.Statistics.TrackCount, nil
 }
 
+// AlbumRelease is one release (edition/pressing) of an album in Lidarr, with
+// its own track count. Different releases of the same album legitimately have
+// different track counts (bonus tracks, deluxe editions), and any of them is a
+// valid import target since manual import runs with release switching enabled.
+type AlbumRelease struct {
+	ID         int64
+	TrackCount int
+	Monitored  bool
+}
+
+// AlbumReleases lists every release of an album, used by discovery to compute
+// the valid track-count band [min, max] across all editions rather than
+// filtering against the single canonical count.
+func (c *Client) AlbumReleases(ctx context.Context, albumID int64) ([]AlbumRelease, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/albumrelease?albumId=%d", c.baseURL, albumID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("lidarr albumrelease: status %d", resp.StatusCode)
+	}
+	var raw []struct {
+		ID         int64 `json:"id"`
+		TrackCount int   `json:"trackCount"`
+		Monitored  bool  `json:"monitored"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := make([]AlbumRelease, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, AlbumRelease{ID: r.ID, TrackCount: r.TrackCount, Monitored: r.Monitored})
+	}
+	return out, nil
+}
+
 // ExecuteManualImport tells Lidarr to import the given items (move mode).
 func (c *Client) ExecuteManualImport(ctx context.Context, items []ManualImportItem) error {
 	files := make([]map[string]any, 0, len(items))
