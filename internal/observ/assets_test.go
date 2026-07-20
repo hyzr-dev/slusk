@@ -55,12 +55,28 @@ func TestAssetHandlerDoesNotSwallowAPIPaths(t *testing.T) {
 }
 
 func TestAssetHandlerCachesHashedAssetsImmutably(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/assets/does-not-exist.js", nil)
+	fixture := fstest.MapFS{
+		"assets/index-abc123.js": {Data: []byte("console.log('hi')")},
+	}
 
-	newAssetHandler().ServeHTTP(rec, req)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil)
+
+	newAssetHandlerFS(fixture).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("Cache-Control = %q, want public, max-age=31536000, immutable", cc)
+	}
 
 	// Missing hashed assets must 404 rather than returning the SPA shell.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/assets/does-not-exist.js", nil)
+
+	newAssetHandlerFS(fixture).ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
