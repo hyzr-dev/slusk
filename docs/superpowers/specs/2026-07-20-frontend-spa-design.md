@@ -275,8 +275,13 @@ och #63 slår uttryckligen fast att 1.0 kan behålla filen som källa och låta 
 *validera* snarare än skriva.
 
 Fas 1 implementerar därför Inställningar som **läsvy: fälten visas ifyllda från
-konfigurationen men är inaktiverade, `Testa anslutningar` fungerar, `Spara` utgår.**
+konfigurationen men är inaktiverade. Både `Spara` och `Testa anslutningar` utgår.**
 En rad förklarar att värdena ändras i konfigfilen.
+
+Rättelse 2026-07-20: en tidigare version av den här specen påstod att
+`Testa anslutningar` skulle fungera i fas 1. Kravet föll mellan spec och
+implementationsplan, ingen task ägde det, och det upptäcktes först vid
+slutgranskningen av hela grenen. Funktionen är inte byggd. Spårad som #90.
 
 Detta är ett medvetet avsteg från designen. Skrivbar konfiguration kräver beslut om
 filskrivning, validering, omstart av moduler vid ändring och hantering av samtidiga
