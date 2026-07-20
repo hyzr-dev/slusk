@@ -13,7 +13,7 @@
 
 .input { width: 260px; }
 .sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.bytes { font-size: 11px; color: #7c828d; margin-bottom: 3px; }
+.bytes { font-size: 11px; color: var(--text-detail); margin-bottom: 3px; }
 
 /* Used by Events.tsx, which also reuses .controls/.input from this file for
    its filter box rather than duplicating the same look in its own module. */

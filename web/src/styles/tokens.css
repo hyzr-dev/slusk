@@ -10,6 +10,9 @@
   --border-subtle: #191d24;
   --text: #dfe2e8;
   --text-muted: #8a919d;
+  /* Secondary detail text — byte counts, transfer-detail lines — that reads
+     a step quieter than --text-muted but is not as faint as --text-dim. */
+  --text-detail: #7c828d;
   --text-dim: #5f6672;
 
   --accent: #35c48f;

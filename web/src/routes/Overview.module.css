@@ -6,4 +6,4 @@
 }
 
 .sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.bytes { font-size: 11px; color: #7c828d; margin-bottom: 3px; }
+.bytes { font-size: 11px; color: var(--text-detail); margin-bottom: 3px; }
