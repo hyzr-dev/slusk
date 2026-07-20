@@ -1,0 +1,9 @@
+.cards {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 13px;
+  margin-bottom: 16px;
+}
+
+.sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.bytes { font-size: 11px; color: #7c828d; margin-bottom: 3px; }
