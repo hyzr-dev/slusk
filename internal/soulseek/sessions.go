@@ -24,6 +24,11 @@ const (
 	maxPeerUsernameSize                      = int(peer.MaxPeerInitUsernameSize)
 	maxDistributedFrameSize           uint32 = 16 << 10
 	maxOrdinaryPeerFrameSize          uint32 = 16 << 20
+	// An ordinary P session may queue one maximum-sized frame or many small
+	// control/search/download frames up to the same aggregate bound. Keeping
+	// this independent of the channel depth prevents repeated browse requests
+	// from retaining hundreds of MiB of serialized responses.
+	maxOrdinaryPeerQueuedBytes int64 = int64(maxOrdinaryPeerFrameSize) + 4
 )
 
 type sessionInitiator uint8
@@ -270,7 +275,10 @@ type peerSession struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	writes           chan []byte
+	writeMu          sync.Mutex
+	writeClosed      bool
 	queuedWriteBytes atomic.Int64
+	maxWriteFrame    int64
 	maxQueuedBytes   int64
 	absoluteDeadline time.Time
 	closeOnce        sync.Once
@@ -280,8 +288,10 @@ type peerSession struct {
 func (c *Client) newSession(conn net.Conn, key sessionKey, initiator sessionInitiator, role sessionRole, generation uint64, lease *inboundLease) *peerSession {
 	ctx, cancel := context.WithCancel(c.lifecycleContext())
 	maxFrameSize := int64(maxOrdinaryPeerFrameSize) + 4 // include size prefix retained in each queued frame
+	maxQueuedBytes := maxOrdinaryPeerQueuedBytes
 	if key.connType == distributed.ConnectionType {
 		maxFrameSize = int64(maxDistributedFrameSize) + 4
+		maxQueuedBytes = maxFrameSize * int64(c.cfg.sessionWriteQueue)
 	}
 	var absoluteDeadline time.Time
 	if key.connType == peer.ConnectionType && role == sessionRoleOrdinary && lease != nil {
@@ -292,7 +302,7 @@ func (c *Client) newSession(conn net.Conn, key sessionKey, initiator sessionInit
 		key: key, initiator: initiator, role: role, generation: generation,
 		conn: conn, registry: c.sessions, hooks: c.sessionHooks, lease: lease, client: c,
 		ctx: ctx, cancel: cancel, writes: make(chan []byte, c.cfg.sessionWriteQueue),
-		maxQueuedBytes: maxFrameSize * int64(c.cfg.sessionWriteQueue), absoluteDeadline: absoluteDeadline,
+		maxWriteFrame: maxFrameSize, maxQueuedBytes: maxQueuedBytes, absoluteDeadline: absoluteDeadline,
 		done: make(chan struct{}),
 	}
 }
@@ -315,31 +325,24 @@ func (c *Client) registerSession(candidate *peerSession) *peerSession {
 // bytes cannot be mutated by the caller while the writer owns them.
 func (s *peerSession) TrySend(frame []byte) bool {
 	frameSize := int64(len(frame))
-	if frameSize <= 0 || frameSize > s.maxQueuedBytes {
+	if frameSize <= 0 || frameSize > s.maxWriteFrame {
 		return false
 	}
-	for {
-		queued := s.queuedWriteBytes.Load()
-		if queued > s.maxQueuedBytes-frameSize {
-			return false
-		}
-		if s.queuedWriteBytes.CompareAndSwap(queued, queued+frameSize) {
-			break
-		}
+	// Serialize close, budget reservation, and the nonblocking channel send.
+	// This prevents a frame from being queued after Close has drained the
+	// channel, and lets every refusal leave byte accounting unchanged. Copy
+	// only after these cheap checks so repeated backpressured browse requests
+	// do not repeatedly allocate another maximum-sized response.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.writeClosed || s.queuedWriteBytes.Load() > s.maxQueuedBytes-frameSize || len(s.writes) == cap(s.writes) {
+		return false
 	}
 	copyOfFrame := append([]byte(nil), frame...)
-	select {
-	case <-s.ctx.Done():
-		s.queuedWriteBytes.Add(-frameSize)
-		return false
-	default:
-	}
+	s.queuedWriteBytes.Add(frameSize)
 	select {
 	case s.writes <- copyOfFrame:
 		return true
-	case <-s.ctx.Done():
-		s.queuedWriteBytes.Add(-frameSize)
-		return false
 	default:
 		s.queuedWriteBytes.Add(-frameSize)
 		return false
@@ -352,7 +355,23 @@ func (s *peerSession) Close(reason error) {
 	}
 	closed := false
 	s.closeOnce.Do(func() {
+		// Refuse future sends and release every queued frame. A frame already
+		// owned by writeLoop is released by that loop when its write returns.
+		// Mark the queue closed before cancellation/socket teardown so a send
+		// racing with Close cannot report success after teardown has begun.
+		s.writeMu.Lock()
+		s.writeClosed = true
 		s.cancel()
+		for {
+			select {
+			case frame := <-s.writes:
+				s.queuedWriteBytes.Add(-int64(len(frame)))
+			default:
+				s.writeMu.Unlock()
+				goto drained
+			}
+		}
+	drained:
 		_ = s.conn.Close()
 		s.lease.Release()
 		s.client.peerConns.Add(-1)
@@ -373,8 +392,9 @@ func (s *peerSession) writeLoop() {
 		case <-s.ctx.Done():
 			return
 		case frame := <-s.writes:
+			err := writeFull(s.conn, frame)
 			s.queuedWriteBytes.Add(-int64(len(frame)))
-			if err := writeFull(s.conn, frame); err != nil {
+			if err != nil {
 				s.Close(fmt.Errorf("write peer session: %w", err))
 				return
 			}

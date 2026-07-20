@@ -118,17 +118,9 @@ func (FileSearchResponse) walkWrite(zw *zlib.Writer, files []File) error {
 			return err
 		}
 
-		if file.Size == 0 {
-			return ErrSizeZero
-		}
-
 		err = internal.WriteUint64(zw, file.Size)
 		if err != nil {
 			return err
-		}
-
-		if file.Extension == "" {
-			return ErrEmptyFileExtension
 		}
 
 		err = internal.WriteString(zw, file.Extension)

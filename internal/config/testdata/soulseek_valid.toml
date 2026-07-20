@@ -33,3 +33,8 @@ slskd_complete_dir = "/music/slskd-downloads"
 [soulseek]
 username = "souluser"
 password = "soulpass"
+upload_slots = 4
+
+[[soulseek.shared_folders]]
+name = "Music"
+path = "/shares/music"

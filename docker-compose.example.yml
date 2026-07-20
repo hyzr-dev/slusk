@@ -1,7 +1,7 @@
 # docker-compose for slskdarr.
-# slskdarr never touches the media files (it only passes the completed-downloads
-# path to Lidarr's import API), so it needs NO media mount — just config and
-# network access to Lidarr/slskd/Postgres.
+# slskdarr needs no media mount unless native Soulseek sharing is configured.
+# Named shares are scanned and served read-only; mount only those roots and use
+# their in-container paths in [[soulseek.shared_folders]].
 #
 # State lives in PostgreSQL (store.dsn in config.toml), so slskdarr itself needs
 # no data volume. This example bundles a local Postgres for development; in
@@ -34,6 +34,9 @@ services:
 
     volumes:
       - ./config.toml:/config/config.toml:ro
+      # Optional named Soulseek share; keep it read-only and ensure the
+      # configured non-root PUID:PGID can read every shared file.
+      # - /host/music:/shares/music:ro
 
     ports:
       # Public: /healthz only. Dashboard, API, /status, and /metrics require the
@@ -49,6 +52,9 @@ services:
       # port" concept, so a mismatched mapping would advertise a port peers
       # can't actually reach.
       # - "2234:2234"
+
+    # After changing share contents, atomically rescan without restarting:
+    #   docker kill --signal=HUP slskdarr
 
 volumes:
   slskdarr-pgdata:

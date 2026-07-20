@@ -3,6 +3,7 @@ package soulseek
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -210,6 +211,94 @@ func TestStreamFileShortStreamKeepsPart(t *testing.T) {
 	}
 	if !bytes.Equal(got, shortPayload) {
 		t.Error(".part content does not match the bytes actually received before the peer hung up")
+	}
+}
+
+type recordingReadConn struct {
+	net.Conn
+	read bytes.Buffer
+}
+
+func (c *recordingReadConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		_, _ = c.read.Write(p[:n])
+	}
+	return n, err
+}
+
+func TestZeroByteTransferHandshakeCreatesDestinationAndCompletesUpload(t *testing.T) {
+	downloadConn, rawUploadConn := net.Pipe()
+	uploadConn := &recordingReadConn{Conn: rawUploadConn}
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- streamUploadConn(uploadConn, 123, bytes.NewReader(nil), 0, time.Second, time.Second)
+	}()
+
+	init := &file.TransferInit{}
+	if err := init.Deserialize(downloadConn); err != nil {
+		t.Fatalf("read transfer init: %v", err)
+	}
+	if init.Token != 123 {
+		t.Fatalf("transfer token = %d, want 123", init.Token)
+	}
+	destPath := filepath.Join(t.TempDir(), "leaf", "empty.flac")
+	written, err := streamFile(downloadConn, destPath, 0, time.Second, nil)
+	if err != nil {
+		t.Fatalf("stream zero-byte file: %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
+	if err := downloadConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-uploadDone:
+		if err != nil {
+			t.Fatalf("zero-byte uploader completion: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("zero-byte uploader did not complete")
+	}
+	if got := uploadConn.read.Bytes(); len(got) < 8 || binary.LittleEndian.Uint64(got[:8]) != 0 {
+		t.Fatalf("offset bytes = %x, want Offset(0)", got)
+	}
+	info, err := os.Stat(destPath)
+	if err != nil {
+		t.Fatalf("stat empty destination: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("empty destination size = %d, want 0", info.Size())
+	}
+	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial remains after zero-byte completion: %v", err)
+	}
+}
+
+func TestCompletedEmptyPartialSkipsHandshake(t *testing.T) {
+	destPath := filepath.Join(t.TempDir(), "empty.flac")
+	if err := os.WriteFile(destPath+".part", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := streamFile(local, destPath, 0, time.Second, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("finish completed empty partial: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completed empty partial attempted a socket handshake")
+	}
+	if info, err := os.Stat(destPath); err != nil || info.Size() != 0 {
+		t.Fatalf("completed empty destination: info=%v err=%v", info, err)
 	}
 }
 

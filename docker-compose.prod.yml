@@ -5,9 +5,9 @@
 # .gitea/workflows/deploy.yml on every v* tag (release.yml auto-tags main from
 # conventional commits), tagged both :latest and :vX.Y.Z.
 #
-# slskdarr never touches the media files — it only hands Lidarr the completed-
-# downloads path via its import API — so it needs NO media mount. Just config
-# and network access to Lidarr/slskd/Postgres.
+# slskdarr needs no media mount unless native Soulseek sharing is enabled.
+# Mount only explicitly named share roots read-only and configure their
+# in-container paths under [[soulseek.shared_folders]].
 #
 # State lives in PostgreSQL: point store.dsn in config.toml at the shared
 # Postgres instance (this compose deliberately does NOT bundle one). slskdarr
@@ -70,6 +70,8 @@ services:
 
     volumes:
       - ./config.toml:/config/config.toml:ro
+      # Optional; the non-root PUID:PGID must have read permission.
+      # - /host/music:/shares/music:ro
 
     ports:
       # /healthz is public for container/orchestrator probes. Every UI/API,
@@ -84,6 +86,9 @@ services:
       # is no separate "advertised port" concept, so a mismatched mapping
       # would advertise a port peers can't actually reach.
       # - "2234:2234"
+
+    # Rescan configured shares after filesystem changes without restarting:
+    #   docker kill --signal=HUP slskdarr
 
 # --- Option: run inside your existing arr-stack network ---
 # If slskd/lidarr are on a shared Docker network, attach slskdarr to it and use
