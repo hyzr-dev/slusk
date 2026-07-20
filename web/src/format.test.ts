@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, percent, formatDateTime, formatShortTime, formatScore } from './format';
+import { formatBytes, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -41,8 +41,11 @@ describe('percent', () => {
 
 describe('date formatting', () => {
   // sv-SE is kept deliberately: ISO-like dates read better in a technical tool.
-  it('formats a full timestamp in sv-SE', () => {
-    expect(formatDateTime('2026-07-20T14:32:05Z')).toMatch(/2026-07-20/);
+  // The exact wall-clock date/time depends on the runner's TZ, so these assert
+  // shape only — asserting a literal date broke under TZ=Pacific/Auckland
+  // (UTC+12/13), where 2026-07-20T14:32:05Z rolls over to the 21st locally.
+  it('formats a full timestamp in sv-SE shape', () => {
+    expect(formatDateTime('2026-07-20T14:32:05Z')).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
   it('formats short time as HH:MM', () => {
@@ -52,6 +55,17 @@ describe('date formatting', () => {
   it('returns an em dash for empty input rather than "Invalid Date"', () => {
     expect(formatDateTime('')).toBe('—');
     expect(formatShortTime('')).toBe('—');
+  });
+});
+
+describe('formatTime', () => {
+  it('returns an em dash for empty input', () => {
+    expect(formatTime('')).toBe('—');
+  });
+
+  // Shape only, for the same TZ-rollover reason as formatDateTime above.
+  it('formats time as HH:MM:SS', () => {
+    expect(formatTime('2026-07-20T14:32:05Z')).toMatch(/^\d{2}:\d{2}:\d{2}$/);
   });
 });
 

@@ -19,7 +19,6 @@ export const t = {
     stalled: 'Stalled',
     done: 'Done',
     failed: 'Failed',
-    orphaned: 'Orphaned',
   },
   state: {
     WANTED: 'Wanted',
@@ -108,3 +107,34 @@ export const t = {
     concurrentDownloads: 'Concurrent downloads',
   },
 } as const;
+
+// `as const` narrows the maps below to literal-key object types, so indexing
+// them with a plain `string` (e.g. a backend enum value that isn't known at
+// compile time) fails under --strict with TS7053. These helpers are the
+// sanctioned way to do that dynamic lookup: unlike `MAP[key] || key` in the
+// legacy dashboard, they stay type-safe and degrade to the raw key when the
+// backend sends a code we don't recognise, instead of rendering blank.
+function lookup<T extends Record<string, string>>(map: T, key: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key as keyof T] : undefined;
+}
+
+/** Label for a job event code, falling back to the raw code if unrecognised. */
+export function eventLabel(code: string): string {
+  return lookup(t.event, code) ?? code;
+}
+
+/** Label for a candidate state, falling back to the raw state if unrecognised. */
+export function candidateStateLabel(state: string): string {
+  return lookup(t.candidateState, state) ?? state;
+}
+
+/**
+ * Label for a job state, with a deliberately asymmetric fallback: an unknown
+ * state degrades to the *translated status* (the coarser field), and only an
+ * unknown status falls back to its raw value. This mirrors the legacy
+ * dashboard's `STATE_LABEL[j.state] || j.status`, which preferred the coarser
+ * status over a raw enum string.
+ */
+export function stateLabel(state: string, status: string): string {
+  return lookup(t.state, state) ?? lookup(t.status, status) ?? status;
+}
