@@ -178,6 +178,12 @@ func TestLoadAbsentPipelineSectionYieldsDefaults(t *testing.T) {
 	if p.ImportingInterval.Duration != 30*time.Second {
 		t.Errorf("ImportingInterval = %v, want 30s", p.ImportingInterval.Duration)
 	}
+	if p.ManualImportTimeout.Duration != 10*time.Minute {
+		t.Errorf("ManualImportTimeout = %v, want 10m", p.ManualImportTimeout.Duration)
+	}
+	if p.ImportRetryCooldown.Duration != 5*time.Minute {
+		t.Errorf("ImportRetryCooldown = %v, want 5m", p.ImportRetryCooldown.Duration)
+	}
 }
 
 func TestLoadPipelineOverrides(t *testing.T) {
@@ -227,6 +233,12 @@ func TestLoadPipelineOverrides(t *testing.T) {
 	}
 	if p.ImportingInterval.Duration != 20*time.Second {
 		t.Errorf("ImportingInterval = %v, want 20s", p.ImportingInterval.Duration)
+	}
+	if p.ManualImportTimeout.Duration != 8*time.Minute {
+		t.Errorf("ManualImportTimeout = %v, want 8m", p.ManualImportTimeout.Duration)
+	}
+	if p.ImportRetryCooldown.Duration != 2*time.Minute {
+		t.Errorf("ImportRetryCooldown = %v, want 2m", p.ImportRetryCooldown.Duration)
 	}
 }
 

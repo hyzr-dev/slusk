@@ -70,6 +70,14 @@ selecting_interval = "10s"
 downloading_interval = "15s"
 # How often the importing phase runs. Default 30s.
 importing_interval = "30s"
+# Upper bound on Lidarr's manualimport folder scan, which parses audio tags
+# per file and legitimately runs far longer than a normal API call on large
+# folders (box sets, deluxe editions). Default 10m.
+manual_import_timeout = "10m"
+# How long the importing phase waits before re-attempting a failed
+# manualimport folder scan on the same job, so a slow-scanning folder is not
+# hammered every importing_interval until stuck_after. Default 5m.
+import_retry_cooldown = "5m"
 
 [pipeline.weights]
 format = 1.0

@@ -82,7 +82,8 @@ func main() {
 		os.Exit(1)
 	}
 	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
-	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
+	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
+		lidarr.WithManualImportTimeout(cfg.Pipeline.ManualImportTimeout.Duration))
 	w := cfg.Pipeline.Weights
 	scorer := matcher.NewWeighted(matcher.Weights{
 		Format: w.Format, Bitrate: w.Bitrate, Reliability: w.Reliability,
@@ -154,6 +155,7 @@ func main() {
 		StuckAfter:           cfg.Pipeline.StuckAfter.Duration,
 		ImportConfirmTimeout: cfg.Pipeline.ImportConfirmTimeout.Duration,
 		Interval:             cfg.Pipeline.ImportingInterval.Duration,
+		RetryCooldown:        cfg.Pipeline.ImportRetryCooldown.Duration,
 	})
 	runner, err := pipeline.NewRunner(logger, cfg.Pipeline.TickTimeout.Duration,
 		wantedSync, discovery, selecting, downloading, importing)
