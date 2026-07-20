@@ -10,6 +10,7 @@ import Events from './routes/Events';
 import Peers from './routes/Peers';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
+import { t } from './strings';
 
 // Renders the real route tree (mirroring App.tsx) at each path with a
 // MemoryRouter, proving every one of the seven routes mounts without
@@ -40,7 +41,9 @@ describe('route tree', () => {
   it.each([
     ['/', 'Overview'],
     ['/jobs', 'Jobs'],
-    ['/jobs/42', 'Job detail'],
+    // JobDetail with no seeded query data falls through all three header
+    // tiers (no live job, no cached detail) to the loading heading.
+    ['/jobs/42', t.jobs.loading],
     ['/events', 'Events'],
     ['/peers', 'Peers'],
     ['/health', 'Health'],

@@ -1,0 +1,54 @@
+.back { color: var(--active); text-decoration: none; font-size: 12.5px; }
+.back:hover { text-decoration: underline; }
+
+.meta {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 12.5px; color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.sleeping { color: var(--stalled); }
+.candidates { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+.failReason { font-size: 12.5px; color: var(--failed); margin-bottom: 10px; }
+
+.actions { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.action {
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(229, 89, 93, 0.28);
+  background: rgba(229, 89, 93, 0.09);
+  color: var(--orphaned);
+  font-size: 12px;
+  cursor: pointer;
+}
+.action:disabled { opacity: 0.5; cursor: default; }
+
+.error {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--failed-bg);
+  color: var(--failed);
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+
+.section { font-size: 14px; font-weight: 600; margin: 22px 0 10px; }
+.placeholder { color: var(--text-muted); font-size: 12.5px; }
+
+.attempt {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+}
+.attempt:last-child { border-bottom: none; }
+.attemptMeta { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+.transfer {
+  font-size: 11.5px;
+  /* #7c828d, not a fresh hex: Jobs.module.css already uses it for the same
+     kind of content (byte-count lines) and it has no token. Reusing it here
+     keeps this stylesheet from accumulating a second undocumented grey. */
+  color: #7c828d;
+  padding: 3px 0 3px 12px;
+  font-family: var(--font-mono);
+}
