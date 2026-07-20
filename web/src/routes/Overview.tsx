@@ -45,7 +45,7 @@ export default function Overview() {
         <tbody>
           {active.length === 0 ? (
             <tr>
-              <td className={table.empty} colSpan={3}>{t.jobs.empty}</td>
+              <td className={table.empty} colSpan={3}>{t.overview.empty}</td>
             </tr>
           ) : (
             active.map((j) => (

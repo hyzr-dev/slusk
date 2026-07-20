@@ -88,6 +88,9 @@ export const t = {
     filterPlaceholder: 'Filter events…',
     empty: 'No events.',
   },
+  overview: {
+    empty: 'No active downloads.',
+  },
   peers: {
     empty: 'No peers recorded yet.',
     noArtistHistory: 'No artist-specific history.',
