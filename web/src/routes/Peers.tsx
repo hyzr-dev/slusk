@@ -1,3 +1,5 @@
+import { t } from '../strings';
+
 export default function Peers() {
-  return <h1>Peers</h1>;
+  return <h1>{t.nav.peers}</h1>;
 }

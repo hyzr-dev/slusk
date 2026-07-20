@@ -1,3 +1,5 @@
+import { t } from '../strings';
+
 export default function JobDetail() {
-  return <h1>Job detail</h1>;
+  return <h1>{t.jobs.detail}</h1>;
 }

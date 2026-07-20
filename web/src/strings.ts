@@ -4,6 +4,7 @@ export const t = {
   app: {
     name: 'slskdarr',
     tagline: 'Lidarr → Soulseek',
+    mark: 'sl',
   },
   nav: {
     overview: 'Overview',
@@ -64,6 +65,7 @@ export const t = {
     failed: 'Failed',
   },
   jobs: {
+    detail: 'Job detail',
     searchPlaceholder: 'Search artist, album, peer…',
     allStatuses: 'All',
     empty: 'No jobs match the current filter.',

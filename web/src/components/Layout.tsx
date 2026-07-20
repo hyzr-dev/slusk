@@ -16,7 +16,7 @@ export default function Layout() {
     <div className={styles.app}>
       <aside className={styles.sidebar}>
         <div className={styles.brand}>
-          <div className={styles.brandMark}>sl</div>
+          <div className={styles.brandMark}>{t.app.mark}</div>
           <div>
             <div className={styles.brandName}>{t.app.name}</div>
             <div className={styles.brandTagline}>{t.app.tagline}</div>
