@@ -12,9 +12,12 @@ export default defineConfig({
     // dist/placeholder.html is a tracked git file that go:embed needs present
     // even before the frontend is ever built. emptyOutDir: true wipes the
     // whole outDir first, which would delete placeholder.html on every build
-    // and dirty the working tree. outDir lives outside this project's root,
-    // so Vite already defaults to leaving unrelated files alone — leave that
-    // default in place instead of forcing a full wipe.
+    // and dirty the working tree. Keep it false — but that means Vite alone
+    // does not clean up stale content-hashed bundles between local builds,
+    // which go:embed would otherwise bake into every binary. The `ui` Make
+    // target removes dist/assets and dist/index.html (sparing
+    // placeholder.html) before invoking Vite, so local builds stay clean
+    // without touching this setting. Do not flip this back to true.
     emptyOutDir: false,
   },
   server: {
