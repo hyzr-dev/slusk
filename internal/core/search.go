@@ -84,6 +84,14 @@ type RemoteTransfer struct {
 	// Retryable reports whether Failure is transient (worth re-queueing)
 	// rather than permanent. Meaningful only when State is TransferErrored.
 	Retryable bool
+	// QueuePosition is the file's place in the peer's upload queue (0 when
+	// unknown or not queued). Populated by providers that expose it natively
+	// (the internal/soulseek downloader); the slskd adapter leaves it 0.
+	QueuePosition uint32
+	// Speed is the current transfer rate in bytes per second (0 when unknown).
+	// Populated by providers that track it natively; the slskd adapter leaves
+	// it 0.
+	Speed int64
 }
 
 // ErrRemoteNotFound is returned (wrapped) by a peer-to-peer provider adapter

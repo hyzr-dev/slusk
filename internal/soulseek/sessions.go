@@ -64,14 +64,21 @@ type sessionFrame struct {
 	wire     []byte
 }
 
-// sessionHooks is the narrow integration seam for the tree and search
-// workers. Hooks run without component locks held. Returning an error from
-// frame closes only that peer session.
+// sessionHooks is the narrow integration seam for the tree, search, and
+// (future) download workers. Hooks run without component locks held.
+// Returning an error from frame closes only that peer session.
 type sessionHooks interface {
 	established(*peerSession)
 	frame(*peerSession, sessionFrame) error
 	closed(*peerSession, error)
 }
+
+// errUnhandledPeerFrame is returned by an individual hook's frame method to
+// signal that the frame's code is not owned by that hook, so the composed
+// dispatch should offer it to the next hook instead of closing the session.
+// It must never escape composedSessionHooks.frame: a code no hook claims is
+// itself an error (see composedSessionHooks.frame in tree.go).
+var errUnhandledPeerFrame = errors.New("soulseek: peer frame not handled by this hook")
 
 type discardSessionHooks struct{}
 
@@ -469,6 +476,18 @@ func readBufferedFrame(reader io.Reader) ([]byte, error) {
 // It is private and opaque; public ConnectPeer remains caller-owned.
 func (c *Client) getOrEstablishSession(ctx context.Context, target sessionTarget, initiator sessionInitiator, role sessionRole, generation uint64) (*peerSession, error) {
 	key := sessionKey{username: target.username, connType: target.connType}
+	return c.coalesceEstablish(ctx, key, func() (*peerSession, error) {
+		return c.establishSession(ctx, target, initiator, role, generation)
+	})
+}
+
+// coalesceEstablish returns the registered session for key if one already
+// exists, otherwise runs establish exactly once on behalf of all callers
+// concurrently racing to create the same session, sharing its result. establish
+// must create and register the session (or return an error). It is shared by
+// getOrEstablishSession (direct-address, distributed tree) and
+// getOrConnectPeerSession (address-resolving, ordinary "P").
+func (c *Client) coalesceEstablish(ctx context.Context, key sessionKey, establish func() (*peerSession, error)) (*peerSession, error) {
 	if existing := c.sessions.Get(key); existing != nil {
 		return existing, nil
 	}
@@ -487,7 +506,7 @@ func (c *Client) getOrEstablishSession(ctx context.Context, target sessionTarget
 	c.establishes[key] = flight
 	c.establishMu.Unlock()
 
-	flight.session, flight.err = c.establishSession(ctx, target, initiator, role, generation)
+	flight.session, flight.err = establish()
 	c.establishMu.Lock()
 	if c.establishes[key] == flight {
 		delete(c.establishes, key)

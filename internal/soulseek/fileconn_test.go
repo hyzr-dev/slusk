@@ -1,0 +1,405 @@
+package soulseek
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/file"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+)
+
+// --- streamFile: loopback TCP, no Client involved ---
+
+func TestStreamFileWritesToDisk(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake uploader: %v", err)
+	}
+	defer ln.Close()
+
+	payload := bytes.Repeat([]byte("abcdefgh"), 128) // 1024 bytes
+	offsetSeen := make(chan uint64, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		off := &file.Offset{}
+		if err := off.Deserialize(conn); err != nil {
+			t.Logf("fake uploader: read offset: %v", err)
+			return
+		}
+		offsetSeen <- off.Offset
+		if _, err := conn.Write(payload); err != nil {
+			t.Logf("fake uploader: write payload: %v", err)
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial fake uploader: %v", err)
+	}
+	defer conn.Close()
+
+	destPath := filepath.Join(t.TempDir(), "leaf", "song.flac")
+
+	var progressCalls []int64
+	written, err := streamFile(conn, destPath, int64(len(payload)), time.Second, func(n int64) {
+		progressCalls = append(progressCalls, n)
+	})
+	if err != nil {
+		t.Fatalf("streamFile: %v", err)
+	}
+	if written != int64(len(payload)) {
+		t.Errorf("written = %d, want %d", written, len(payload))
+	}
+
+	select {
+	case off := <-offsetSeen:
+		if off != 0 {
+			t.Errorf("offset sent to peer = %d, want 0 (fresh download)", off)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake uploader never saw an Offset frame")
+	}
+
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read dest file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Error("dest file content does not match the streamed payload")
+	}
+	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat .part after a successful stream: err = %v, want os.ErrNotExist", err)
+	}
+	if len(progressCalls) == 0 {
+		t.Fatal("progress callback was never called")
+	}
+	if last := progressCalls[len(progressCalls)-1]; last != int64(len(payload)) {
+		t.Errorf("last progress call = %d, want %d (cumulative, includes resume offset)", last, len(payload))
+	}
+}
+
+func TestStreamFileResumeSendsOffset(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake uploader: %v", err)
+	}
+	defer ln.Close()
+
+	destPath := filepath.Join(t.TempDir(), "song.flac")
+	existing := []byte("EXISTING-PARTIAL-DOWNLOAD-DATA")
+	if err := os.WriteFile(destPath+".part", existing, 0o644); err != nil {
+		t.Fatalf("seed partial download: %v", err)
+	}
+
+	remainder := bytes.Repeat([]byte("Z"), 50)
+	total := int64(len(existing) + len(remainder))
+
+	offsetSeen := make(chan uint64, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		off := &file.Offset{}
+		if err := off.Deserialize(conn); err != nil {
+			t.Logf("fake uploader: read offset: %v", err)
+			return
+		}
+		offsetSeen <- off.Offset
+		if _, err := conn.Write(remainder); err != nil {
+			t.Logf("fake uploader: write remainder: %v", err)
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial fake uploader: %v", err)
+	}
+	defer conn.Close()
+
+	written, err := streamFile(conn, destPath, total, time.Second, nil)
+	if err != nil {
+		t.Fatalf("streamFile: %v", err)
+	}
+	if written != total {
+		t.Errorf("written = %d, want %d", written, total)
+	}
+
+	select {
+	case off := <-offsetSeen:
+		if off != uint64(len(existing)) {
+			t.Errorf("offset sent to peer = %d, want %d", off, len(existing))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake uploader never saw an Offset frame")
+	}
+
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read dest file: %v", err)
+	}
+	want := append(append([]byte{}, existing...), remainder...)
+	if !bytes.Equal(got, want) {
+		t.Error("dest file content does not match existing-prefix + streamed remainder")
+	}
+}
+
+func TestStreamFileShortStreamKeepsPart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake uploader: %v", err)
+	}
+	defer ln.Close()
+
+	shortPayload := []byte("only-part-of-the-file")
+	const wantSize = 100 // larger than len(shortPayload)
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		off := &file.Offset{}
+		if err := off.Deserialize(conn); err != nil {
+			t.Logf("fake uploader: read offset: %v", err)
+			conn.Close()
+			return
+		}
+		if _, err := conn.Write(shortPayload); err != nil {
+			t.Logf("fake uploader: write short payload: %v", err)
+		}
+		conn.Close() // hang up before sending the promised wantSize bytes
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial fake uploader: %v", err)
+	}
+	defer conn.Close()
+
+	destPath := filepath.Join(t.TempDir(), "song.flac")
+
+	written, err := streamFile(conn, destPath, wantSize, time.Second, nil)
+	if err == nil {
+		t.Fatal("streamFile: expected an error for a short stream, got nil")
+	}
+	if written != int64(len(shortPayload)) {
+		t.Errorf("written = %d, want %d", written, len(shortPayload))
+	}
+
+	if _, statErr := os.Stat(destPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("dest file exists after a failed stream: err = %v, want os.ErrNotExist", statErr)
+	}
+	got, err := os.ReadFile(destPath + ".part")
+	if err != nil {
+		t.Fatalf("read .part after short stream: %v", err)
+	}
+	if !bytes.Equal(got, shortPayload) {
+		t.Error(".part content does not match the bytes actually received before the peer hung up")
+	}
+}
+
+// --- handleInboundFileConn: direct inbound and unknown-token paths, via the
+// same startConnectedClient/PeerInit harness connectpeer_test.go uses ---
+
+func TestHandleInboundFileConnDirect(t *testing.T) {
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	tr := newTransfer("id1", "friend", "song.flac", 100)
+	c.downloads.insert(tr)
+	const token = soul.Token(555)
+	c.downloads.registerToken(tr, token)
+	// Model runDownload parked in its negotiation select: attachFileConn only
+	// hands the F connection off to a transfer that is awaiting it.
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial client listener: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := peer.Write(conn, &peer.PeerInit{Username: "friend", ConnectionType: file.ConnectionType}, false); err != nil {
+		t.Fatalf("write peer init: %v", err)
+	}
+	if _, err := file.Write(conn, &file.TransferInit{Token: token}); err != nil {
+		t.Fatalf("write transfer init: %v", err)
+	}
+
+	select {
+	case handoff := <-tr.fileConnCh:
+		if handoff.conn == nil {
+			t.Error("delivered handoff has a nil conn")
+		}
+		if handoff.lease == nil {
+			t.Error("delivered handoff has a nil lease, want the accept-path inbound lease")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("transfer never received its file connection")
+	}
+}
+
+func TestHandleInboundFileConnUnknownTokenClosed(t *testing.T) {
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial client listener: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := peer.Write(conn, &peer.PeerInit{Username: "friend", ConnectionType: file.ConnectionType}, false); err != nil {
+		t.Fatalf("write peer init: %v", err)
+	}
+	if _, err := file.Write(conn, &file.TransferInit{Token: soul.Token(999)}); err != nil {
+		t.Fatalf("write transfer init: %v", err)
+	}
+
+	buf := make([]byte, 1)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(buf); err == nil {
+		t.Error("expected the connection with an unknown token to be closed by the client")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(c.inboundSlots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(c.inboundSlots); n != 0 {
+		t.Errorf("inbound lease not released for the unknown-token connection: inboundSlots len = %d, want 0", n)
+	}
+}
+
+// TestHandleInboundFileConnIndirectMirrorDial exercises the indirect path:
+// the server relays a ConnectToPeer for "F", the client mirror-dials the peer
+// back and writes PierceFirewall (peers.go handleConnectToPeer, mirroring
+// TestHandleConnectToPeerMirrorSuccess in connectpeer_test.go), and the fake
+// peer then plays the uploader's part by sending TransferInit on that same
+// connection. The transfer is registered before Run starts so there is no
+// race between the server's relay (which can fire immediately after login)
+// and the test's registration.
+func TestHandleInboundFileConnIndirectMirrorDial(t *testing.T) {
+	peerLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake peer: %v", err)
+	}
+	defer peerLn.Close()
+	peerAddr := peerLn.Addr().(*net.TCPAddr)
+
+	const transferToken = soul.Token(4242)
+	fileConnAccepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := peerLn.Accept()
+		if err != nil {
+			return
+		}
+		reader, _, _, err := peer.Read(peer.CodeInit(0), conn, false)
+		if err != nil {
+			t.Logf("fake peer: read pierce firewall: %v", err)
+			conn.Close()
+			return
+		}
+		pf := &peer.PierceFirewall{}
+		if err := pf.Deserialize(reader); err != nil {
+			t.Logf("fake peer: deserialize pierce firewall: %v", err)
+			conn.Close()
+			return
+		}
+		if _, err := file.Write(conn, &file.TransferInit{Token: transferToken}); err != nil {
+			t.Logf("fake peer: write transfer init: %v", err)
+			conn.Close()
+			return
+		}
+		fileConnAccepted <- conn
+	}()
+
+	srv := newFakeServer(t)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			return
+		}
+		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
+
+		payload := new(bytes.Buffer)
+		mustWrite(t, writeUint32(payload, uint32(server.CodeConnectToPeer)))
+		mustWrite(t, writeString(payload, "friend"))
+		mustWrite(t, writeString(payload, string(file.ConnectionType)))
+		payload.Write(wireIPBytes(peerAddr.IP))
+		mustWrite(t, writeUint32(payload, uint32(peerAddr.Port)))
+		mustWrite(t, writeUint32(payload, uint32(transferToken)))
+		mustWrite(t, writeBool(payload, false)) // privileged
+		mustWrite(t, writeUint32(payload, 0))   // obfuscated port
+		if _, err := conn.Write(packFrame(payload.Bytes())); err != nil {
+			t.Logf("write connect to peer: %v", err)
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+
+	// Register the transfer before Run starts dialing anything, so the
+	// server's ConnectToPeer relay (which can arrive immediately after
+	// login) can never race ahead of the registration it depends on.
+	tr := newTransfer("id1", "friend", "song.flac", 100)
+	c.downloads.insert(tr)
+	c.downloads.registerToken(tr, transferToken)
+	// Model runDownload parked in its negotiation select: attachFileConn only
+	// hands the F connection off to a transfer that is awaiting it.
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+	waitForState(t, c, StateConnected, 2*time.Second)
+
+	select {
+	case conn := <-fileConnAccepted:
+		defer conn.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake peer never completed the pierce-firewall + transfer-init handshake")
+	}
+
+	select {
+	case handoff := <-tr.fileConnCh:
+		if handoff.conn == nil {
+			t.Error("delivered handoff has a nil conn")
+		}
+		if handoff.lease != nil {
+			t.Error("mirror-dial file connection should carry no inbound lease")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("transfer never received its file connection over the indirect path")
+	}
+}
