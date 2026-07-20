@@ -451,6 +451,15 @@ func TestParentUpdatesSearchForwardingLossAndChildRejection(t *testing.T) {
 	c.tree.candidateCancel = func() {}
 	c.tree.mu.Unlock()
 	c.registerSession(parent)
+	if _, err := parentRemote.Write([]byte{1, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-parent.done:
+		t.Fatal("valid distributed ping closed candidate session")
+	default:
+	}
 	_, _ = distributed.Write(parentRemote, &distributed.BranchLevel{Level: 2})
 	_, _ = distributed.Write(parentRemote, &distributed.BranchRoot{Root: "root"})
 	_, _ = distributed.Write(parentRemote, &distributed.Search{Username: "alice", Token: 1, Query: "adopt"})
@@ -466,6 +475,18 @@ func TestParentUpdatesSearchForwardingLossAndChildRejection(t *testing.T) {
 	c.registerSession(child)
 	_ = readDistributedWire(t, childRemote)
 	_ = readDistributedWire(t, childRemote)
+
+	// Soulseek NS sends this exact code-0 D ping frame. It is a no-op for an
+	// adopted parent and must not desynchronize or close the session.
+	if _, err := parentRemote.Write([]byte{1, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-parent.done:
+		t.Fatal("valid distributed ping closed parent session")
+	default:
+	}
 
 	_, _ = distributed.Write(parentRemote, &distributed.BranchLevel{Level: 3})
 	var level distributed.BranchLevel
@@ -501,11 +522,15 @@ func TestParentUpdatesSearchForwardingLossAndChildRejection(t *testing.T) {
 		t.Fatalf("deprecated forwarding = %x, want raw %x", got, want)
 	}
 
-	_, _ = distributed.Write(childRemote, &distributed.Search{Username: "loop", Token: 4, Query: "reject"})
+	// The same raw ping is not accepted from a child; child-origin traffic is
+	// still rejected before no-op dispatch.
+	if _, err := childRemote.Write([]byte{1, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-child.done:
 	case <-time.After(time.Second):
-		t.Fatal("child-origin traffic did not close child")
+		t.Fatal("child-origin ping did not close child")
 	}
 	before := len(conn.snapshot())
 	parent.Close(errors.New("parent lost"))

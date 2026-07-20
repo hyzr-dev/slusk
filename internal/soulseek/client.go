@@ -91,6 +91,9 @@ type Config struct {
 	sessionWriteQueue int
 	// peerIdleTimeout retires ordinary retained P sessions. Default 2m.
 	peerIdleTimeout time.Duration
+	// inboundPeerSessionLifetime is an absolute lifetime for retained inbound
+	// ordinary P sessions, even while they remain active. Default 10m.
+	inboundPeerSessionLifetime time.Duration
 	// parentCandidateTimeout bounds one direct D candidate's opportunity to
 	// provide valid metadata and a search. Default 10s.
 	parentCandidateTimeout time.Duration
@@ -195,6 +198,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.peerIdleTimeout <= 0 {
 		cfg.peerIdleTimeout = defaultPeerIdleTimeout
 	}
+	if cfg.inboundPeerSessionLifetime <= 0 {
+		cfg.inboundPeerSessionLifetime = defaultInboundPeerSessionLifetime
+	}
 	if cfg.parentCandidateTimeout <= 0 {
 		cfg.parentCandidateTimeout = defaultParentCandidateTimeout
 	}
@@ -221,7 +227,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // types this package actually sends, rather than reusing server package's
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
-	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress |
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress | *server.GetUserStats |
 		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch
 	Serialize(M) ([]byte, error)
 }
@@ -459,6 +465,12 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 	}
 	if err := c.tree.activate(generation); err != nil {
 		return fmt.Errorf("initialize distributed tree: %w", err)
+	}
+	// Upload capacity is generation-scoped tree state. Request our own current
+	// stats once for every authenticated server connection so AcceptChildren
+	// can be driven by an actual server response rather than unsolicited data.
+	if err := sendToServerGeneration(c, generation, &server.GetUserStats{Username: c.cfg.Username}); err != nil {
+		return fmt.Errorf("request own user stats: %w", err)
 	}
 
 	readErrs := make(chan error, 1)

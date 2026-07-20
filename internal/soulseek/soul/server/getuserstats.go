@@ -16,6 +16,7 @@ type GetUserStats struct {
 	Username    string
 	Speed       int
 	Uploads     int
+	Unknown     uint32
 	Files       int
 	Directories int
 }
@@ -62,6 +63,11 @@ func (g *GetUserStats) Deserialize(reader io.Reader) error {
 	}
 
 	g.Uploads, err = internal.ReadUint32ToInt(reader)
+	if err != nil {
+		return err
+	}
+
+	g.Unknown, err = internal.ReadUint32(reader)
 	if err != nil {
 		return err
 	}

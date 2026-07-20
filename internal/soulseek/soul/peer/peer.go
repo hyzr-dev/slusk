@@ -122,13 +122,20 @@ func Reason(reason string) error {
 }
 
 func Read[C CodeInit | Code](c C, connection io.Reader, obfuscated bool) (io.Reader, int, C, error) {
+	return ReadLimited(c, connection, obfuscated, internal.MaxMessageSize)
+}
+
+// ReadLimited reads a peer frame with a caller-selected declared-size limit.
+// It is used by connection owners that know whether they are reading a small
+// init frame or an ordinary P frame.
+func ReadLimited[C CodeInit | Code](c C, connection io.Reader, obfuscated bool, maxMessageSize uint32) (io.Reader, int, C, error) {
 	switch any(c).(type) {
 	case CodeInit:
-		r, s, code, err := internal.MessageRead(internal.CodePeerInit(0), connection, obfuscated)
+		r, s, code, err := internal.MessageReadLimited(internal.CodePeerInit(0), connection, obfuscated, maxMessageSize)
 		return r, int(s), C(code), err
 
 	case Code:
-		r, s, code, err := internal.MessageRead(internal.CodePeer(0), connection, obfuscated)
+		r, s, code, err := internal.MessageReadLimited(internal.CodePeer(0), connection, obfuscated, maxMessageSize)
 		return r, int(s), C(code), err
 
 	default:

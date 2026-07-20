@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
@@ -77,6 +78,52 @@ func reloggedFrame(t *testing.T) []byte {
 	return packFrame(payload.Bytes())
 }
 
+func serverUint32Frame(t *testing.T, code server.Code, value uint32) []byte {
+	t.Helper()
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(code)))
+	mustWrite(t, writeUint32(payload, value))
+	return packFrame(payload.Bytes())
+}
+
+func getUserStatsResponseFrame(t *testing.T, username string, speed uint32) []byte {
+	t.Helper()
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(server.CodeGetUserStats)))
+	mustWrite(t, writeString(payload, username))
+	for _, value := range []uint32{speed, 3, 0x11223344, 50, 5} {
+		mustWrite(t, writeUint32(payload, value))
+	}
+	return packFrame(payload.Bytes())
+}
+
+func watchUserResponseFrame(t *testing.T, username string, speed uint32) []byte {
+	t.Helper()
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(server.CodeWatchUser)))
+	mustWrite(t, writeString(payload, username))
+	mustWrite(t, writeBool(payload, true))
+	for _, value := range []uint32{uint32(server.StatusOnline), speed, 2, 0xaabbccdd, 40, 4} {
+		mustWrite(t, writeUint32(payload, value))
+	}
+	mustWrite(t, writeString(payload, "SE"))
+	return packFrame(payload.Bytes())
+}
+
+func embeddedSearchFrame(t *testing.T) []byte {
+	t.Helper()
+	search := &distributed.Search{Username: "searcher", Token: 1, Query: "query"}
+	wire, err := search.Serialize(search)
+	if err != nil {
+		t.Fatalf("serialize distributed search: %v", err)
+	}
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(server.CodeEmbeddedMessage)))
+	mustWrite(t, payload.WriteByte(byte(distributed.CodeSearch)))
+	_, _ = payload.Write(wire[5:])
+	return packFrame(payload.Bytes())
+}
+
 // oversizedFrame declares a size far beyond any sane message cap, with no
 // body to back it.
 func oversizedFrame() []byte {
@@ -107,18 +154,26 @@ func drainLoginRequest(conn net.Conn) error {
 // readFrameCode reads one raw frame off the wire and returns its code (the
 // first 4 bytes of the frame's declared payload).
 func readFrameCode(conn net.Conn) (uint32, error) {
+	payload, err := readFramePayload(conn)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(payload[:4]), nil
+}
+
+func readFramePayload(conn net.Conn) ([]byte, error) {
 	var size uint32
 	if err := binary.Read(conn, binary.LittleEndian, &size); err != nil {
-		return 0, err
+		return nil, err
 	}
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if len(buf) < 4 {
-		return 0, fmt.Errorf("frame too short for a code")
+		return nil, fmt.Errorf("frame too short for a code")
 	}
-	return binary.LittleEndian.Uint32(buf[:4]), nil
+	return buf, nil
 }
 
 func drainInitialTreeAdvertisements(conn net.Conn) error {
@@ -127,6 +182,7 @@ func drainInitialTreeAdvertisements(conn net.Conn) error {
 		uint32(server.CodeBranchRoot),
 		uint32(server.CodeBranchLevel),
 		uint32(server.CodeAcceptChildren),
+		uint32(server.CodeGetUserStats),
 	}
 	for _, wantCode := range want {
 		code, err := readFrameCode(conn)
@@ -226,6 +282,159 @@ func TestClientLoginSuccess(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestClientRequestsOwnStatsAndEnablesChildrenFromRawResponse(t *testing.T) {
+	srv := newFakeServer(t)
+	observed := make(chan error, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			observed <- err
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			observed <- err
+			return
+		}
+		if code, err := readFrameCode(conn); err != nil || code != uint32(server.CodeSetListenPort) {
+			observed <- fmt.Errorf("set listen port: code=%d err=%v", code, err)
+			return
+		}
+		for _, want := range []server.Code{server.CodeHaveNoParent, server.CodeBranchRoot, server.CodeBranchLevel, server.CodeAcceptChildren} {
+			if code, err := readFrameCode(conn); err != nil || code != uint32(want) {
+				observed <- fmt.Errorf("initial tree message: code=%d want=%d err=%v", code, want, err)
+				return
+			}
+		}
+		statsRequest, err := readFramePayload(conn)
+		if err != nil {
+			observed <- err
+			return
+		}
+		if code := binary.LittleEndian.Uint32(statsRequest[:4]); code != uint32(server.CodeGetUserStats) {
+			observed <- fmt.Errorf("stats request code=%d", code)
+			return
+		}
+		requestReader := bytes.NewReader(statsRequest[4:])
+		var usernameSize uint32
+		if err := binary.Read(requestReader, binary.LittleEndian, &usernameSize); err != nil {
+			observed <- err
+			return
+		}
+		username := make([]byte, usernameSize)
+		if _, err := io.ReadFull(requestReader, username); err != nil || string(username) != "me" || requestReader.Len() != 0 {
+			observed <- fmt.Errorf("stats request username=%q trailing=%d err=%v", username, requestReader.Len(), err)
+			return
+		}
+
+		for _, frame := range [][]byte{
+			serverUint32Frame(t, server.CodeParentMinSpeed, 100),
+			serverUint32Frame(t, server.CodeParentSpeedRatio, 2),
+			getUserStatsResponseFrame(t, "me", 200),
+			embeddedSearchFrame(t),
+		} {
+			if _, err := conn.Write(frame); err != nil {
+				observed <- err
+				return
+			}
+		}
+		for {
+			payload, err := readFramePayload(conn)
+			if err != nil {
+				observed <- err
+				return
+			}
+			if binary.LittleEndian.Uint32(payload[:4]) == uint32(server.CodeAcceptChildren) && len(payload) == 5 && payload[4] == 1 {
+				observed <- nil
+				_, _ = io.Copy(io.Discard, conn)
+				return
+			}
+		}
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p"}, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+	select {
+	case err := <-observed:
+		if err != nil {
+			t.Fatalf("startup/stats exchange: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for AcceptChildren(true) from raw stats response")
+	}
+	c.tree.mu.Lock()
+	capacity, uploadKnown := c.tree.capacity, c.tree.uploadKnown
+	c.tree.mu.Unlock()
+	if capacity != 1 || !uploadKnown {
+		t.Fatalf("tree capacity=%d uploadKnown=%v, want 1/true", capacity, uploadKnown)
+	}
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+func TestClientValidRawWatchUserDoesNotDropServerConnection(t *testing.T) {
+	srv := newFakeServer(t)
+	pingSeen := make(chan error, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			pingSeen <- err
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			pingSeen <- err
+			return
+		}
+		if code, err := readFrameCode(conn); err != nil || code != uint32(server.CodeSetListenPort) {
+			pingSeen <- fmt.Errorf("set listen port: code=%d err=%v", code, err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			pingSeen <- err
+			return
+		}
+		if _, err := conn.Write(watchUserResponseFrame(t, "me", 3456)); err != nil {
+			pingSeen <- err
+			return
+		}
+		code, err := readFrameCode(conn)
+		if err != nil || code != uint32(server.CodePing) {
+			pingSeen <- fmt.Errorf("post-watch frame code=%d err=%v", code, err)
+			return
+		}
+		pingSeen <- nil
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p"}, testLogger())
+	c.cfg.pingInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+	select {
+	case err := <-pingSeen:
+		if err != nil {
+			t.Fatalf("raw WatchUser exchange: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server connection did not survive valid raw WatchUser frame")
+	}
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
 	}
 }
 

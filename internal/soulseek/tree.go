@@ -252,6 +252,10 @@ func (t *distributedTree) offerParents(ctx context.Context, generation uint64, p
 }
 
 func (t *distributedTree) runCandidates(ctx context.Context, generation, epoch uint64, parents []server.Parent) {
+	// The server list determines launch order within bounded concurrent batches.
+	// Once launched, the first candidate to provide fully valid metadata and a
+	// search wins; concurrency prevents a silent earlier entry from starving
+	// every later candidate.
 	semaphore := make(chan struct{}, maxConcurrentParentCandidates)
 	var wg sync.WaitGroup
 	seen := make(map[string]struct{}, len(parents))
@@ -443,6 +447,12 @@ func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error 
 	}
 
 	switch distributed.Code(frame.code) {
+	case distributed.Code(0):
+		// Soulseek NS sends code 0 as a periodic distributed ping. It is a
+		// no-op only for an admitted parent or parent candidate; child traffic
+		// was rejected above before reaching this switch.
+		return nil
+
 	case distributed.CodeBranchLevel:
 		var msg distributed.BranchLevel
 		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {

@@ -1,7 +1,9 @@
 package soulseek
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
@@ -103,6 +106,114 @@ func TestInboundCapCountsHandshakesAndRetainedSessions(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not join listener/session goroutines")
+	}
+}
+
+func TestInboundPeerInitLimitsAndIdentityValidation(t *testing.T) {
+	srv := newFakeServer(t)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+	waitForState(t, c, StateConnected, 2*time.Second)
+	addr := net.JoinHostPort("127.0.0.1", fmtPort(c.listenPort))
+
+	writePeerInit := func(conn net.Conn, username string, connType soul.ConnectionType) error {
+		var payload bytes.Buffer
+		if err := payload.WriteByte(byte(peer.CodePeerInit)); err != nil {
+			return err
+		}
+		if err := writeString(&payload, username); err != nil {
+			return err
+		}
+		if err := writeString(&payload, string(connType)); err != nil {
+			return err
+		}
+		if err := writeUint32(&payload, 0); err != nil {
+			return err
+		}
+		_, err := conn.Write(packFrame(payload.Bytes()))
+		return err
+	}
+	tests := []struct {
+		name  string
+		write func(net.Conn) error
+	}{
+		{
+			name: "oversized declaration",
+			write: func(conn net.Conn) error {
+				return binary.Write(conn, binary.LittleEndian, maxPeerInitFrameSize+1)
+			},
+		},
+		{
+			name: "empty username",
+			write: func(conn net.Conn) error {
+				return writePeerInit(conn, "", peer.ConnectionType)
+			},
+		},
+		{
+			name: "oversized nested username declaration",
+			write: func(conn net.Conn) error {
+				var payload bytes.Buffer
+				if err := payload.WriteByte(byte(peer.CodePeerInit)); err != nil {
+					return err
+				}
+				if err := writeUint32(&payload, uint32(maxPeerUsernameSize+1)); err != nil {
+					return err
+				}
+				_, err := conn.Write(packFrame(payload.Bytes()))
+				return err
+			},
+		},
+		{
+			name: "oversized username",
+			write: func(conn net.Conn) error {
+				return writePeerInit(conn, string(make([]byte, maxPeerUsernameSize+1)), peer.ConnectionType)
+			},
+		},
+		{
+			name: "unsupported connection type",
+			write: func(conn net.Conn) error {
+				return writePeerInit(conn, "friend", "X")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.write(conn); err != nil {
+				_ = conn.Close()
+				t.Fatalf("write hostile init: %v", err)
+			}
+			assertClosedPromptly(t, conn)
+		})
+	}
+	if got := len(c.sessions.Snapshot()); got != 0 {
+		t.Fatalf("invalid PeerInit frames retained %d sessions", got)
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
 	}
 }
 

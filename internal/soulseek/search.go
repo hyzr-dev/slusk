@@ -231,8 +231,8 @@ func appendSearchResult(subscription *searchSubscription, results *[]core.Search
 }
 
 // searchSessionHooks is the sole P-frame consumer. Framing has already been
-// validated by peerSession.readFrame; malformed code-9 payloads close only the
-// originating P session, while valid unsupported codes are ignored.
+// validated by peerSession.readFrame; malformed code-9 payloads, unsupported
+// codes, and claimed-identity mismatches close only the originating P session.
 type searchSessionHooks struct {
 	searches *searchRegistry
 }
@@ -240,13 +240,22 @@ type searchSessionHooks struct {
 func (*searchSessionHooks) established(*peerSession) {}
 
 func (h *searchSessionHooks) frame(session *peerSession, frame sessionFrame) error {
-	if frame.connType != peer.ConnectionType || frame.code != int(peer.CodeFileSearchResponse) {
+	if frame.connType != peer.ConnectionType {
 		return nil
+	}
+	if frame.code != int(peer.CodeFileSearchResponse) {
+		return fmt.Errorf("unsupported ordinary peer code %d", frame.code)
 	}
 
 	response := &peer.FileSearchResponse{}
 	if err := response.Deserialize(bytes.NewReader(frame.wire)); err != nil {
 		return fmt.Errorf("deserialize file search response: %w", err)
+	}
+	// PeerInit is only a protocol claim, not cryptographic authentication.
+	// Requiring the response to repeat the same identity prevents ambiguous
+	// attribution while keeping a mismatch isolated to this P session.
+	if response.Username != session.key.username {
+		return fmt.Errorf("file search response username %q does not match peer init username %q", response.Username, session.key.username)
 	}
 
 	subscription := h.searches.subscription(response.Token)

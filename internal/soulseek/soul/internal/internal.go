@@ -51,6 +51,13 @@ type Code interface {
 // and the code of the message. It then reads the message from the connection and
 // returns the message, the size of the message, the code of the message and an error.
 func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *bytes.Buffer, size uint32, code C, err error) {
+	return MessageReadLimited(c, connection, obfuscated, MaxMessageSize)
+}
+
+// MessageReadLimited is MessageRead with a protocol-specific declared-size
+// ceiling. The size is checked immediately after its prefix is read, before
+// the payload is allocated or consumed.
+func MessageReadLimited[C Code](c C, connection io.Reader, obfuscated bool, maxMessageSize uint32) (message *bytes.Buffer, size uint32, code C, err error) {
 	// Init and Distributed messages use uint8 for the code part of the message
 	// and thus they need to be handled differently.
 	var isInitOrDistributed bool
@@ -62,7 +69,7 @@ func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *b
 
 	if obfuscated {
 		var c CodePeer
-		message, size, c, err = deobfuscate(connection, isInitOrDistributed)
+		message, size, c, err = deobfuscateLimited(connection, isInitOrDistributed, maxMessageSize)
 		if err != nil {
 			return
 		}
@@ -87,7 +94,7 @@ func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *b
 		return nil, 0, 0, err
 	}
 
-	if size > MaxMessageSize {
+	if size > maxMessageSize {
 		return nil, 0, 0, soul.ErrMessageTooLarge
 	}
 
@@ -151,6 +158,10 @@ func MessageRead[C Code](c C, connection io.Reader, obfuscated bool) (message *b
 }
 
 func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size uint32, code CodePeer, err error) {
+	return deobfuscateLimited(connection, isInit, MaxMessageSize)
+}
+
+func deobfuscateLimited(connection io.Reader, isInit bool, maxMessageSize uint32) (message *bytes.Buffer, size uint32, code CodePeer, err error) {
 	message = new(bytes.Buffer)
 
 	// Directly read from the connection to the key buffer.
@@ -251,7 +262,7 @@ func deobfuscate(connection io.Reader, isInit bool) (message *bytes.Buffer, size
 				return
 			}
 
-			if size > MaxMessageSize {
+			if size > maxMessageSize {
 				err = soul.ErrMessageTooLarge
 				return
 			}

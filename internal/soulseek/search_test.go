@@ -161,7 +161,7 @@ func TestSearchRegistersBeforeWireAndStreamsPeerResponses(t *testing.T) {
 		return len(frame), nil
 	}
 
-	_, remote := registerTestPSession(t, c, "authenticated-peer")
+	_, remote := registerTestPSession(t, c, "claimed-peer")
 	resultCh := make(chan []core.SearchResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -178,12 +178,12 @@ func TestSearchRegistersBeforeWireAndStreamsPeerResponses(t *testing.T) {
 		t.Fatal("search token was not active before the code-26 write")
 	}
 
-	writePeerResponse(t, remote, makeSearchResponse(token, "spoofed-response-name", []peer.File{{
+	writePeerResponse(t, remote, makeSearchResponse(token, "claimed-peer", []peer.File{{
 		Name: "Album\\01.flac", Size: 111, Extension: "flac",
 		Attributes: []peer.Attribute{{Code: peer.Bitrate, Value: 900}},
 	}}))
 	writePeerResponse(t, remote, &peer.FileSearchResponse{
-		Username: "another-spoof", Token: token,
+		Username: "claimed-peer", Token: token,
 		Results:        []peer.File{{Name: "Album\\02.flac", Size: 222, Extension: "flac"}},
 		PrivateResults: []peer.File{{Name: "Private\\secret.flac", Size: 333, Extension: "flac"}},
 		FreeSlot:       false, AverageSpeed: 4321, Queue: 9,
@@ -196,13 +196,45 @@ func TestSearchRegistersBeforeWireAndStreamsPeerResponses(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want two public files: %+v", len(results), results)
 	}
-	if got := results[0]; got.Username != "authenticated-peer" || got.Filename != "Album\\01.flac" || got.Size != 111 || got.BitRate != 900 || !got.HasFreeUploadSlot || got.UploadSpeed != 1234 || got.QueueLength != 7 {
+	if got := results[0]; got.Username != "claimed-peer" || got.Filename != "Album\\01.flac" || got.Size != 111 || got.BitRate != 900 || !got.HasFreeUploadSlot || got.UploadSpeed != 1234 || got.QueueLength != 7 {
 		t.Fatalf("first result mapping = %+v", got)
 	}
-	if got := results[1]; got.Username != "authenticated-peer" || got.BitRate != 0 || got.HasFreeUploadSlot || got.UploadSpeed != 4321 || got.QueueLength != 9 {
+	if got := results[1]; got.Username != "claimed-peer" || got.BitRate != 0 || got.HasFreeUploadSlot || got.UploadSpeed != 4321 || got.QueueLength != 9 {
 		t.Fatalf("second result mapping = %+v", got)
 	}
 	assertNoActiveSearches(t, c)
+}
+
+func TestSearchRejectsFileResponseIdentityMismatch(t *testing.T) {
+	c, conn, _ := startSearchClient(t)
+	requests := make(chan []byte, 1)
+	conn.writeFn = func(frame []byte) (int, error) { requests <- frame; return len(frame), nil }
+	mismatch, mismatchRemote := registerTestPSession(t, c, "claimed-peer")
+	valid, validRemote := registerTestPSession(t, c, "valid-peer")
+
+	out := make(chan []core.SearchResult, 1)
+	go func() {
+		results, _ := c.Search(context.Background(), "identity", 100*time.Millisecond)
+		out <- results
+	}()
+	token, _ := waitSearchRequest(t, requests)
+	writePeerResponse(t, mismatchRemote, makeSearchResponse(token, "different-peer", []peer.File{{Name: "spoof.flac", Size: 1, Extension: "flac"}}))
+	select {
+	case <-mismatch.done:
+	case <-time.After(time.Second):
+		t.Fatal("identity mismatch did not close its P session")
+	}
+	select {
+	case <-valid.done:
+		t.Fatal("identity mismatch closed an unrelated P session")
+	default:
+	}
+	writePeerResponse(t, validRemote, makeSearchResponse(token, "valid-peer", []peer.File{{Name: "valid.flac", Size: 2, Extension: "flac"}}))
+
+	results := <-out
+	if len(results) != 1 || results[0].Username != "valid-peer" || results[0].Filename != "valid.flac" {
+		t.Fatalf("identity-filtered results = %+v", results)
+	}
 }
 
 func TestSearchTimeoutCancellationFailuresAndNonpositiveTimeout(t *testing.T) {
@@ -406,6 +438,7 @@ func TestSearchPeerHookLargeResponseMappingAndSessionIsolation(t *testing.T) {
 	requests := make(chan []byte, 1)
 	conn.writeFn = func(frame []byte) (int, error) { requests <- frame; return len(frame), nil }
 	bad, badRemote := registerTestPSession(t, c, "bad-peer")
+	unsupportedSession, unsupportedRemote := registerTestPSession(t, c, "unsupported-peer")
 	_, goodRemote := registerTestPSession(t, c, "good-peer")
 
 	out := make(chan []core.SearchResult, 1)
@@ -429,17 +462,23 @@ func TestSearchPeerHookLargeResponseMappingAndSessionIsolation(t *testing.T) {
 		t.Fatal("malformed code-9 response did not close its P session")
 	}
 
-	// A valid unsupported P code is ignored and framing remains synchronized.
+	// An unsupported P code closes the active hostile session so it cannot
+	// retain an inbound lease indefinitely by refreshing the idle deadline.
 	unsupported := make([]byte, 4)
 	binary.LittleEndian.PutUint32(unsupported, 0xffff)
-	if _, err := goodRemote.Write(packFrame(unsupported)); err != nil {
+	if _, err := unsupportedRemote.Write(packFrame(unsupported)); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-unsupportedSession.done:
+	case <-time.After(time.Second):
+		t.Fatal("unsupported P code did not close its session")
 	}
 	files := []peer.File{
 		{Name: "ok.flac", Size: 10, Extension: "flac"},
 		{Name: "too-large.flac", Size: uint64(math.MaxInt64) + 1, Extension: "flac"},
 	}
-	writePeerResponse(t, goodRemote, makeSearchResponse(token, "untrusted", files))
+	writePeerResponse(t, goodRemote, makeSearchResponse(token, "good-peer", files))
 	results := <-out
 	if len(results) != 1 || results[0].Filename != "ok.flac" || results[0].Username != "good-peer" {
 		t.Fatalf("good session results = %+v", results)
@@ -462,7 +501,7 @@ func TestSearchHookOneLargeResponseNeverBlocksPeerReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := &searchSessionHooks{searches: registry}
-	session := &peerSession{key: sessionKey{username: "authenticated", connType: peer.ConnectionType}}
+	session := &peerSession{key: sessionKey{username: "wire-name", connType: peer.ConnectionType}}
 	started := time.Now()
 	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeFileSearchResponse), wire: wire}); err != nil {
 		t.Fatal(err)

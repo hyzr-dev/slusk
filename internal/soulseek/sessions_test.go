@@ -3,6 +3,7 @@ package soulseek
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -204,6 +205,92 @@ func TestOrdinaryPSessionRetiresWhenIdleAndReleasesLeaseOnce(t *testing.T) {
 	s.Close(errors.New("second close"))
 	if got := len(c.inboundSlots); got != 0 {
 		t.Fatalf("permit changed after repeated close: %d", got)
+	}
+}
+
+func TestInboundOrdinaryPSessionHasAbsoluteLifetimeWhileActive(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.peerIdleTimeout = time.Second
+	c.cfg.inboundPeerSessionLifetime = 60 * time.Millisecond
+	startSessionLifecycle(t, c)
+	lease := c.acquireInboundLease()
+	if lease == nil {
+		t.Fatal("failed to acquire inbound lease")
+	}
+	local, remote := net.Pipe()
+	s := c.newSession(local, sessionKey{username: "active", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, lease)
+	c.registerSession(s)
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		response := &peer.FileSearchResponse{Username: "active", Token: 999}
+		for {
+			if _, err := peer.Write(remote, response, false); err != nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-s.done:
+	case <-time.After(time.Second):
+		t.Fatal("active inbound P session exceeded its absolute lifetime")
+	}
+	_ = remote.Close()
+	<-writerDone
+	if got := len(c.inboundSlots); got != 0 {
+		t.Fatalf("inbound permits in use = %d, want 0", got)
+	}
+}
+
+func TestSessionDeclaredSizeLimitsRejectBeforePayload(t *testing.T) {
+	tests := []struct {
+		name     string
+		connType soul.ConnectionType
+		size     uint32
+	}{
+		{name: "ordinary P", connType: peer.ConnectionType, size: maxOrdinaryPeerFrameSize + 1},
+		{name: "distributed D", connType: distributed.ConnectionType, size: maxDistributedFrameSize + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+			startSessionLifecycle(t, c)
+			local, remote := net.Pipe()
+			defer remote.Close()
+			s := c.newSession(local, sessionKey{username: "hostile", connType: tt.connType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+			defer s.Close(errors.New("test complete"))
+			writeDone := make(chan error, 1)
+			go func() { writeDone <- binary.Write(remote, binary.LittleEndian, tt.size) }()
+			_, err := s.readFrame()
+			if !errors.Is(err, soul.ErrMessageTooLarge) {
+				t.Fatalf("readFrame error = %v, want ErrMessageTooLarge", err)
+			}
+			if err := <-writeDone; err != nil {
+				t.Fatalf("write declaration: %v", err)
+			}
+		})
+	}
+}
+
+func TestDistributedWriteQueueEnforcesByteBudget(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.sessionWriteQueue = 3
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	s := c.newSession(local, sessionKey{username: "child", connType: distributed.ConnectionType}, sessionInitiatorRemote, sessionRoleChild, 0, nil)
+	defer s.Close(errors.New("test complete"))
+	frame := make([]byte, int(maxDistributedFrameSize)+4)
+	if !s.TrySend(frame) || !s.TrySend(frame) || !s.TrySend(frame) {
+		t.Fatal("legal queued D frames were rejected within byte budget")
+	}
+	if s.TrySend([]byte{0}) {
+		t.Fatal("D queue accepted bytes beyond its protocol limit times queue depth")
+	}
+	if got, want := s.queuedWriteBytes.Load(), s.maxQueuedBytes; got != want {
+		t.Fatalf("queued bytes = %d, want budget %d", got, want)
 	}
 }
 

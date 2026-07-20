@@ -94,7 +94,7 @@ func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inbou
 		return
 	}
 
-	reader, _, code, err := peer.Read(peer.CodeInit(0), conn, false)
+	reader, _, code, err := peer.ReadLimited(peer.CodeInit(0), conn, false, maxPeerInitFrameSize)
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug("read peer init frame", "remote", conn.RemoteAddr(), "err", err)
@@ -122,6 +122,9 @@ func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inbou
 	case peer.CodePeerInit:
 		pi := &peer.PeerInit{}
 		if err := pi.Deserialize(reader); err != nil {
+			return
+		}
+		if pi.Username == "" || len(pi.Username) > maxPeerUsernameSize {
 			return
 		}
 		if pi.ConnectionType != peer.ConnectionType && pi.ConnectionType != distributed.ConnectionType {
