@@ -2,7 +2,11 @@ package peer
 
 import (
 	"bytes"
+	"errors"
+	"strings"
 	"testing"
+
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 )
 
 func TestSharedFileListResponseAllowsEmptyAndFilesystemEdgeCases(t *testing.T) {
@@ -21,6 +25,42 @@ func TestSharedFileListResponseAllowsEmptyAndFilesystemEdgeCases(t *testing.T) {
 		if len(decoded.Directories) != len(original.Directories) {
 			t.Fatalf("directory count = %d, want %d", len(decoded.Directories), len(original.Directories))
 		}
+	}
+}
+
+func TestSharedFileListResponseEnforcesCountAndSerializedSizeBounds(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *SharedFileListResponse
+	}{
+		{
+			name:     "directory count",
+			response: &SharedFileListResponse{Directories: make([]Directory, maxSharedFileListDirectories+1)},
+		},
+		{
+			name: "attribute count",
+			response: &SharedFileListResponse{Directories: []Directory{{Name: "Music", Files: []File{{
+				Name: "track.flac", Attributes: make([]Attribute, maxSharedFileListAttributes+1),
+			}}}}},
+		},
+		{
+			name: "decompressed size",
+			response: func() *SharedFileListResponse {
+				name := strings.Repeat("a", maxSharedFileListStringSize)
+				files := make([]File, 17)
+				for i := range files {
+					files[i].Name = name
+				}
+				return &SharedFileListResponse{Directories: []Directory{{Name: "Music", Files: files}}}
+			}(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.response.Serialize(tt.response); !errors.Is(err, soul.ErrMessageTooLarge) {
+				t.Fatalf("Serialize error = %v, want ErrMessageTooLarge", err)
+			}
+		})
 	}
 }
 

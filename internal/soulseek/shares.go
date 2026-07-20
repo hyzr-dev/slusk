@@ -362,9 +362,12 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 	if !c.startTracked(func() {
 		defer func() { <-c.shareWorkers }()
 		results := c.shareSnapshot().match(query, maxSharedSearchResults)
-		if len(results) == 0 || !c.markSearchDelivery(username, token) {
+		if len(results) == 0 || !c.reserveSearchDelivery(username, token) {
 			return
 		}
+		delivered := false
+		defer func() { c.finishSearchDelivery(username, token, delivered) }()
+
 		ctx, cancel := context.WithTimeout(c.lifecycleContext(), c.cfg.establishTimeout)
 		defer cancel()
 		session, err := c.getOrConnectPeerSession(ctx, username)
@@ -374,10 +377,11 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 		free, queued := c.uploads.availability()
 		msg := &peer.FileSearchResponse{Username: c.cfg.Username, Token: token, Results: results, FreeSlot: free, Queue: queued}
 		wire, err := msg.Serialize(msg)
-		if err != nil || !session.TrySend(wire) {
-			if c.logger != nil {
-				c.logger.Debug("dropping share search response", "username", username, "err", err)
-			}
+		if err == nil {
+			delivered = session.TrySend(wire)
+		}
+		if !delivered && c.logger != nil {
+			c.logger.Debug("dropping share search response", "username", username, "err", err)
 		}
 	}) {
 		<-c.shareWorkers
@@ -422,28 +426,46 @@ func (s *shareSnapshot) match(query string, limit int) []peer.File {
 	return results
 }
 
-func (c *Client) markSearchDelivery(username string, token soul.Token) bool {
+func (c *Client) reserveSearchDelivery(username string, token soul.Token) bool {
 	now := time.Now()
 	key := searchDeliveryKey{username: username, token: token}
 	c.searchDeliveryMu.Lock()
 	defer c.searchDeliveryMu.Unlock()
 	for old, expiry := range c.searchDeliveries {
-		if now.After(expiry) {
+		if !now.Before(expiry) {
 			delete(c.searchDeliveries, old)
 		}
+	}
+	if _, exists := c.searchDeliveryInFlight[key]; exists {
+		return false
 	}
 	if expiry, exists := c.searchDeliveries[key]; exists && now.Before(expiry) {
 		return false
 	}
-	// Hard cap protects memory even if tokens/requesters are deliberately unique.
-	if len(c.searchDeliveries) >= 4096 {
+	// Hard cap protects memory even if tokens/requesters are deliberately
+	// unique. Never evict an in-flight reservation, since doing so could admit
+	// a concurrent duplicate; evict a completed TTL entry or reject instead.
+	if len(c.searchDeliveries)+len(c.searchDeliveryInFlight) >= 4096 {
 		for old := range c.searchDeliveries {
 			delete(c.searchDeliveries, old)
 			break
 		}
+		if len(c.searchDeliveries)+len(c.searchDeliveryInFlight) >= 4096 {
+			return false
+		}
 	}
-	c.searchDeliveries[key] = now.Add(searchResponseTTL)
+	c.searchDeliveryInFlight[key] = struct{}{}
 	return true
+}
+
+func (c *Client) finishSearchDelivery(username string, token soul.Token, delivered bool) {
+	key := searchDeliveryKey{username: username, token: token}
+	c.searchDeliveryMu.Lock()
+	delete(c.searchDeliveryInFlight, key)
+	if delivered {
+		c.searchDeliveries[key] = time.Now().Add(searchResponseTTL)
+	}
+	c.searchDeliveryMu.Unlock()
 }
 
 func (c *Client) handleDistributedShareSearch(search distributed.Search, _ []byte) {

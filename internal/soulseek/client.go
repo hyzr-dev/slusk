@@ -198,12 +198,13 @@ type Client struct {
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
-	shares           atomic.Pointer[shareSnapshot]
-	shareScanMu      sync.Mutex
-	shareWorkers     chan struct{}
-	searchDeliveryMu sync.Mutex
-	searchDeliveries map[searchDeliveryKey]time.Time
-	uploads          *uploadManager
+	shares                 atomic.Pointer[shareSnapshot]
+	shareScanMu            sync.Mutex
+	shareWorkers           chan struct{}
+	searchDeliveryMu       sync.Mutex
+	searchDeliveries       map[searchDeliveryKey]time.Time
+	searchDeliveryInFlight map[searchDeliveryKey]struct{}
+	uploads                *uploadManager
 
 	// downloads is the in-memory registry of in-flight native downloads
 	// (issue #55): this group (D) defines the type and the F-connection
@@ -290,19 +291,20 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 
 	c := &Client{
-		cfg:              cfg,
-		logger:           logger,
-		pendingAddrs:     make(map[string][]chan addrResult),
-		pending:          make(map[soul.Token]*pendingAttempt),
-		tokens:           newTokenAllocator(),
-		sessions:         newSessionRegistry(nil),
-		searches:         newSearchRegistry(),
-		inboundSlots:     make(chan struct{}, cfg.inboundPeerLimit),
-		handshakeConns:   make(map[net.Conn]struct{}),
-		establishes:      make(map[sessionKey]*sessionEstablishment),
-		downloads:        newDownloadRegistry(),
-		shareWorkers:     make(chan struct{}, maxShareWorkers),
-		searchDeliveries: make(map[searchDeliveryKey]time.Time),
+		cfg:                    cfg,
+		logger:                 logger,
+		pendingAddrs:           make(map[string][]chan addrResult),
+		pending:                make(map[soul.Token]*pendingAttempt),
+		tokens:                 newTokenAllocator(),
+		sessions:               newSessionRegistry(nil),
+		searches:               newSearchRegistry(),
+		inboundSlots:           make(chan struct{}, cfg.inboundPeerLimit),
+		handshakeConns:         make(map[net.Conn]struct{}),
+		establishes:            make(map[sessionKey]*sessionEstablishment),
+		downloads:              newDownloadRegistry(),
+		shareWorkers:           make(chan struct{}, maxShareWorkers),
+		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
+		searchDeliveryInFlight: make(map[searchDeliveryKey]struct{}),
 	}
 	c.shares.Store(emptyShareSnapshot())
 	c.uploads = newUploadManager(c, cfg.UploadSlots)

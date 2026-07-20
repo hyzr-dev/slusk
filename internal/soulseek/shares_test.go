@@ -3,10 +3,12 @@ package soulseek
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +174,38 @@ func TestSharingHooksBrowseFolderAndDownloadCoexistence(t *testing.T) {
 	}
 }
 
+func TestRepeatedHugeBrowseResponsesRespectSessionByteBudget(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	largeFrame := make([]byte, int(maxOrdinaryPeerQueuedBytes/2)+1)
+	c.shares.Store(&shareSnapshot{files: map[string]*indexedFile{}, byDirectory: map[string]peer.Directory{}, sharedFrame: largeFrame})
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	session := c.newSession(local, sessionKey{username: "browser", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	defer session.Close(errors.New("test complete"))
+
+	request := &peer.SharedFileListRequest{}
+	wire, err := request.Serialize(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeSharedFileListRequest), wire: wire}
+	for i := 0; i < cap(session.writes); i++ {
+		if err := c.sessionHooks.frame(session, frame); err != nil {
+			t.Fatalf("browse request %d: %v", i, err)
+		}
+	}
+	if got, want := len(session.writes), 1; got != want {
+		t.Fatalf("queued browse responses = %d, want %d", got, want)
+	}
+	if got, want := session.queuedWriteBytes.Load(), int64(len(largeFrame)); got != want {
+		t.Fatalf("queued browse bytes = %d, want %d", got, want)
+	}
+	if got := session.queuedWriteBytes.Load(); got > maxOrdinaryPeerQueuedBytes {
+		t.Fatalf("queued browse bytes = %d, exceeds %d-byte budget", got, maxOrdinaryPeerQueuedBytes)
+	}
+}
+
 func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
@@ -250,6 +284,95 @@ func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 	}
 	for i := 0; i < cap(c.shareWorkers); i++ {
 		<-c.shareWorkers
+	}
+}
+
+func TestShareSearchDeliveryFailureCanRetry(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.shares.Store(&shareSnapshot{
+		files:  map[string]*indexedFile{},
+		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+	})
+	startSessionLifecycle(t, c)
+
+	newSession := func() (*peerSession, net.Conn) {
+		local, remote := net.Pipe()
+		s := c.newSession(local, sessionKey{username: "requester", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+		if _, inserted := c.sessions.Register(s); !inserted {
+			t.Fatal("register requester session")
+		}
+		return s, remote
+	}
+	blocked, blockedRemote := newSession()
+	for i := 0; i < cap(blocked.writes); i++ {
+		if !blocked.TrySend([]byte{1}) {
+			t.Fatal("fill blocked session")
+		}
+	}
+	c.respondToSearch("requester", 77, "track")
+	waitForShareWorkers(t, c)
+	blocked.Close(errors.New("replace blocked session"))
+	_ = blockedRemote.Close()
+
+	retry, retryRemote := newSession()
+	defer retry.Close(errors.New("test complete"))
+	defer retryRemote.Close()
+	c.respondToSearch("requester", 77, "track")
+	select {
+	case wire := <-retry.writes:
+		var response peer.FileSearchResponse
+		if err := response.Deserialize(bytes.NewReader(wire)); err != nil {
+			t.Fatalf("deserialize retry response: %v", err)
+		}
+		if response.Token != 77 || len(response.Results) != 1 {
+			t.Fatalf("retry response token=%d results=%d", response.Token, len(response.Results))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("search response failure was incorrectly marked delivered; retry produced no response")
+	}
+}
+
+func TestShareSearchDeliveryConcurrentDuplicatesQueueOnce(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.shares.Store(&shareSnapshot{
+		files:  map[string]*indexedFile{},
+		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+	})
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	session := c.newSession(local, sessionKey{username: "duplicate", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	defer session.Close(errors.New("test complete"))
+	if _, inserted := c.sessions.Register(session); !inserted {
+		t.Fatal("register duplicate session")
+	}
+
+	start := make(chan struct{})
+	var callers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			c.respondToSearch("duplicate", 88, "track")
+		}()
+	}
+	close(start)
+	callers.Wait()
+	waitForShareWorkers(t, c)
+	if got, want := len(session.writes), 1; got != want {
+		t.Fatalf("concurrent duplicate responses queued = %d, want %d", got, want)
+	}
+}
+
+func waitForShareWorkers(t *testing.T, c *Client) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(c.shareWorkers); got != 0 {
+		t.Fatalf("share workers still active: %d", got)
 	}
 }
 

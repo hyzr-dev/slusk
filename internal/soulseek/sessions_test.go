@@ -175,6 +175,13 @@ func TestSessionSerializesBoundedWrites(t *testing.T) {
 	if conn.concurrent.Load() {
 		t.Fatal("underlying connection observed concurrent writes")
 	}
+	deadline = time.Now().Add(time.Second)
+	for s.queuedWriteBytes.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := s.queuedWriteBytes.Load(); got != 0 {
+		t.Fatalf("queued bytes after successful writes = %d, want 0", got)
+	}
 	s.Close(errors.New("test complete"))
 	if s.TrySend([]byte("late")) {
 		t.Fatal("TrySend accepted a frame after close")
@@ -271,6 +278,42 @@ func TestSessionDeclaredSizeLimitsRejectBeforePayload(t *testing.T) {
 				t.Fatalf("write declaration: %v", err)
 			}
 		})
+	}
+}
+
+func TestOrdinaryWriteQueueReleasesAccountingOnRefusalAndClose(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.sessionWriteQueue = 32
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	s := c.newSession(local, sessionKey{username: "browser", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+
+	large := make([]byte, int(maxOrdinaryPeerQueuedBytes/2)+1)
+	if !s.TrySend(large) {
+		t.Fatal("first legal large P frame was rejected")
+	}
+	for i := 0; i < cap(s.writes); i++ {
+		if s.TrySend(large) {
+			t.Fatalf("repeated large frame %d exceeded the ordinary-session byte budget", i)
+		}
+	}
+	if got, want := len(s.writes), 1; got != want {
+		t.Fatalf("retained frames = %d, want %d", got, want)
+	}
+	if got, want := s.queuedWriteBytes.Load(), int64(len(large)); got != want {
+		t.Fatalf("queued bytes after refusals = %d, want %d", got, want)
+	}
+
+	s.Close(errors.New("test complete"))
+	if got := s.queuedWriteBytes.Load(); got != 0 {
+		t.Fatalf("queued bytes after close = %d, want 0", got)
+	}
+	if s.TrySend([]byte("small download frame")) {
+		t.Fatal("closed session accepted a frame")
+	}
+	if got := s.queuedWriteBytes.Load(); got != 0 {
+		t.Fatalf("refusal after close changed accounting to %d", got)
 	}
 }
 

@@ -13,6 +13,30 @@ import (
 
 const CodeSharedFileListResponse Code = 5
 
+const (
+	maxSharedFileListFrameSize        = 16 << 20 // declared size, excluding its 4-byte prefix
+	maxSharedFileListDecompressedSize = 16 << 20
+	maxSharedFileListDirectories      = 100_000
+	maxSharedFileListFiles            = 1_000_000
+	maxSharedFileListAttributes       = 32
+	maxSharedFileListStringSize       = 1 << 20
+)
+
+type sharedFileListLimitWriter struct {
+	writer    io.Writer
+	remaining int64
+	what      string
+}
+
+func (w *sharedFileListLimitWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.remaining {
+		return 0, fmt.Errorf("%w: shared file list %s exceeds its configured limit", soul.ErrMessageTooLarge, w.what)
+	}
+	n, err := w.writer.Write(p)
+	w.remaining -= int64(n)
+	return n, err
+}
+
 // SharedFileListResponse code 5 peer responds with a list of shared
 // files after we’ve sent a SharedFileListRequest.
 type SharedFileListResponse struct {
@@ -44,35 +68,62 @@ type Attribute struct {
 // directories, zero-byte files, and extensionless files are protocol-valid.
 // Directory and file names themselves must remain nonempty.
 func (s *SharedFileListResponse) Serialize(message *SharedFileListResponse) ([]byte, error) {
+	if err := validateSharedFileList(message); err != nil {
+		return nil, err
+	}
+
 	buf := new(bytes.Buffer)
-	err := internal.WriteUint32(buf, uint32(CodeSharedFileListResponse))
-	if err != nil {
+	frameWriter := &sharedFileListLimitWriter{writer: buf, remaining: maxSharedFileListFrameSize, what: "frame"}
+	if err := internal.WriteUint32(frameWriter, uint32(CodeSharedFileListResponse)); err != nil {
 		return nil, err
 	}
 
-	zw := zlib.NewWriter(buf)
-
-	err = s.walkWrite(message.Directories, zw)
-	if err != nil {
+	zw := zlib.NewWriter(frameWriter)
+	payloadWriter := &sharedFileListLimitWriter{writer: zw, remaining: maxSharedFileListDecompressedSize, what: "decompressed payload"}
+	if err := s.walkWrite(message.Directories, payloadWriter); err != nil {
+		_ = zw.Close()
 		return nil, err
 	}
-
-	err = internal.WriteUint32(zw, 0)
-	if err != nil {
+	if err := internal.WriteUint32(payloadWriter, 0); err != nil {
+		_ = zw.Close()
 		return nil, err
 	}
-
-	err = s.walkWrite(message.PrivateDirectories, zw)
-	if err != nil {
+	if err := s.walkWrite(message.PrivateDirectories, payloadWriter); err != nil {
+		_ = zw.Close()
 		return nil, err
 	}
-
-	err = zw.Close()
-	if err != nil {
+	if err := zw.Close(); err != nil {
 		return nil, err
 	}
 
 	return internal.Pack(buf.Bytes())
+}
+
+func validateSharedFileList(message *SharedFileListResponse) error {
+	if len(message.Directories) > maxSharedFileListDirectories || len(message.PrivateDirectories) > maxSharedFileListDirectories-len(message.Directories) {
+		return fmt.Errorf("%w: shared file list contains more than %d directories", soul.ErrMessageTooLarge, maxSharedFileListDirectories)
+	}
+	fileCount := 0
+	for _, directories := range [][]Directory{message.Directories, message.PrivateDirectories} {
+		for _, directory := range directories {
+			if len(directory.Name) > maxSharedFileListStringSize {
+				return fmt.Errorf("%w: shared file list directory name exceeds %d bytes", soul.ErrMessageTooLarge, maxSharedFileListStringSize)
+			}
+			if len(directory.Files) > maxSharedFileListFiles-fileCount {
+				return fmt.Errorf("%w: shared file list contains more than %d files", soul.ErrMessageTooLarge, maxSharedFileListFiles)
+			}
+			fileCount += len(directory.Files)
+			for _, file := range directory.Files {
+				if len(file.Name) > maxSharedFileListStringSize || len(file.Extension) > maxSharedFileListStringSize {
+					return fmt.Errorf("%w: shared file list file string exceeds %d bytes", soul.ErrMessageTooLarge, maxSharedFileListStringSize)
+				}
+				if len(file.Attributes) > maxSharedFileListAttributes {
+					return fmt.Errorf("%w: shared file list file contains more than %d attributes", soul.ErrMessageTooLarge, maxSharedFileListAttributes)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ErrNoDirectories is returned when there are no directories.
@@ -93,8 +144,8 @@ var ErrSizeZero = errors.New("file size is zero")
 // ErrEmptyFileExtension is returned when the file extension is empty.
 var ErrEmptyFileExtension = errors.New("file extension is empty")
 
-func (SharedFileListResponse) walkWrite(directories []Directory, zw *zlib.Writer) error {
-	err := internal.WriteUint32(zw, uint32(len(directories)))
+func (SharedFileListResponse) walkWrite(directories []Directory, writer io.Writer) error {
+	err := internal.WriteUint32(writer, uint32(len(directories)))
 	if err != nil {
 		return err
 	}
@@ -104,12 +155,12 @@ func (SharedFileListResponse) walkWrite(directories []Directory, zw *zlib.Writer
 			return ErrEmptyDirectoryName
 		}
 
-		err = internal.WriteString(zw, directory.Name)
+		err = internal.WriteString(writer, directory.Name)
 		if err != nil {
 			return err
 		}
 
-		err = internal.WriteUint32(zw, uint32(len(directory.Files)))
+		err = internal.WriteUint32(writer, uint32(len(directory.Files)))
 		if err != nil {
 			return err
 		}
@@ -119,38 +170,38 @@ func (SharedFileListResponse) walkWrite(directories []Directory, zw *zlib.Writer
 				return ErrEmptyFileName
 			}
 
-			err = internal.WriteUint8(zw, 1)
+			err = internal.WriteUint8(writer, 1)
 			if err != nil {
 				return err
 			}
 
-			err = internal.WriteString(zw, file.Name)
+			err = internal.WriteString(writer, file.Name)
 			if err != nil {
 				return err
 			}
 
-			err = internal.WriteUint64(zw, file.Size)
+			err = internal.WriteUint64(writer, file.Size)
 			if err != nil {
 				return err
 			}
 
-			err = internal.WriteString(zw, file.Extension)
+			err = internal.WriteString(writer, file.Extension)
 			if err != nil {
 				return err
 			}
 
-			err = internal.WriteUint32(zw, uint32(len(file.Attributes)))
+			err = internal.WriteUint32(writer, uint32(len(file.Attributes)))
 			if err != nil {
 				return err
 			}
 
 			for _, attribute := range file.Attributes {
-				err = internal.WriteUint32(zw, uint32(attribute.Code))
+				err = internal.WriteUint32(writer, uint32(attribute.Code))
 				if err != nil {
 					return err
 				}
 
-				err = internal.WriteUint32(zw, attribute.Value)
+				err = internal.WriteUint32(writer, attribute.Value)
 				if err != nil {
 					return err
 				}

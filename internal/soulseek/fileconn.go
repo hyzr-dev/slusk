@@ -112,7 +112,7 @@ func (c *Client) handleInboundFileConn(ctx context.Context, conn net.Conn, lease
 func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Duration, progress func(written int64)) (written int64, err error) {
 	partPath := destPath + ".part"
 
-	resumeOffset, err := partialFileSize(partPath)
+	resumeOffset, partExists, err := partialFileSize(partPath)
 	if err != nil {
 		return 0, err
 	}
@@ -125,21 +125,21 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 			return 0, fmt.Errorf("discard oversized partial download %s: %w", partPath, rmErr)
 		}
 		resumeOffset = 0
+		partExists = false
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return 0, fmt.Errorf("create destination directory for %s: %w", destPath, err)
 	}
 
-	if resumeOffset == size {
+	if partExists && resumeOffset == size {
 		// A prior attempt already wrote every byte to the .part file but was
 		// interrupted before the final rename. Finish that rename without
-		// touching conn at all - this call never reads or writes it, and the
-		// peer is never told anything.
-		if _, statErr := os.Stat(partPath); statErr == nil {
-			if renameErr := os.Rename(partPath, destPath); renameErr != nil {
-				return 0, fmt.Errorf("rename completed partial download %s: %w", partPath, renameErr)
-			}
+		// touching conn at all - this remains valid for a completed empty
+		// partial too. A fresh zero-byte download has no partial, so it must
+		// instead perform the Offset(0) handshake below.
+		if renameErr := os.Rename(partPath, destPath); renameErr != nil {
+			return 0, fmt.Errorf("rename completed partial download %s: %w", partPath, renameErr)
 		}
 		return size, nil
 	}
@@ -186,15 +186,16 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 	return written, nil
 }
 
-// partialFileSize returns the size of a ".part" file at path, or 0 if it
-// does not exist yet (a fresh download with nothing to resume).
-func partialFileSize(path string) (int64, error) {
+// partialFileSize returns the size and existence of a ".part" file. The
+// existence bit distinguishes a completed empty partial from a fresh
+// zero-byte download, whose required Offset(0) handshake must not be skipped.
+func partialFileSize(path string) (size int64, exists bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return 0, false, nil
 		}
-		return 0, fmt.Errorf("stat partial download %s: %w", path, err)
+		return 0, false, fmt.Errorf("stat partial download %s: %w", path, err)
 	}
-	return info.Size(), nil
+	return info.Size(), true, nil
 }
