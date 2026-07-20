@@ -414,6 +414,12 @@ func (h *downloadSessionHooks) frame(session *peerSession, frame sessionFrame) e
 		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
 			return fmt.Errorf("deserialize transfer request: %w", err)
 		}
+		if msg.Direction == peer.DownloadFromPeer {
+			// Soulseek.NET/slskd still initiates downloads with the legacy
+			// direction-0 TransferRequest. That is an upload request from our
+			// perspective, so leave it for uploadSessionHooks.
+			return errUnhandledPeerFrame
+		}
 		tr := h.downloads.lookupByKey(session.key.username, msg.Filename)
 		if tr == nil {
 			if h.logger != nil {

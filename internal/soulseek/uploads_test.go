@@ -1,12 +1,15 @@
 package soulseek
 
 import (
+	"bytes"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
@@ -42,6 +45,47 @@ func TestUploadQueueFIFOPositionsDeduplicateAndBounds(t *testing.T) {
 	}
 	if err := m.enqueue("mallory", `Music\..\secret`); err != peer.ErrFileNotShared {
 		t.Fatalf("traversal enqueue error = %v", err)
+	}
+}
+
+func TestLegacyDownloadTransferRequestIsQueuedAndAcknowledged(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.mp3"), []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}, UploadSlots: 1}, testLogger())
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	session := c.newSession(local, sessionKey{username: "slskd", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+
+	request := &peer.TransferRequest{Direction: peer.DownloadFromPeer, Token: soul.Token(42), Filename: `Music\track.mp3`}
+	wire, err := request.Serialize(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sessionHooks.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeTransferRequest), wire: wire}); err != nil {
+		t.Fatalf("legacy transfer request: %v", err)
+	}
+
+	select {
+	case responseWire := <-session.writes:
+		var response peer.TransferResponse
+		if err := response.Deserialize(bytes.NewReader(responseWire)); err != nil {
+			t.Fatalf("deserialize response: %v", err)
+		}
+		if response.Token != 42 || response.Allowed || response.Reason == nil || response.Reason.Error() != peer.ErrQueued.Error() {
+			t.Fatalf("response = %+v, want token 42 and Queued", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy transfer request was not acknowledged")
+	}
+	if place, ok := c.uploads.position(uploadKey{username: "slskd", filename: `Music\track.mp3`}); !ok || place != 1 {
+		t.Fatalf("queued upload position = %d, %v", place, ok)
 	}
 }
 

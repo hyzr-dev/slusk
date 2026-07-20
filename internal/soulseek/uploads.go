@@ -205,6 +205,27 @@ func (h *uploadSessionHooks) frame(session *peerSession, frame sessionFrame) err
 		return errUnhandledPeerFrame
 	}
 	switch peer.Code(frame.code) {
+	case peer.CodeTransferRequest:
+		msg := &peer.TransferRequest{}
+		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
+			return fmt.Errorf("deserialize upload transfer request: %w", err)
+		}
+		if msg.Direction != peer.DownloadFromPeer {
+			return errUnhandledPeerFrame
+		}
+		reason := error(peer.ErrQueued)
+		if err := h.uploads.enqueue(session.key.username, msg.Filename); err != nil {
+			reason = err
+		}
+		// Soulseek.NET/slskd uses the legacy direction-0 request and waits for
+		// this immediate acknowledgement. Queue it even when a slot is free;
+		// the dispatcher then sends the modern direction-1 TransferRequest
+		// when the slot is committed, reusing one queue implementation.
+		if !sendUploadPeerMessage(session, &peer.TransferResponse{Token: msg.Token, Allowed: false, Reason: reason}) {
+			return errors.New("legacy upload request response backpressure")
+		}
+		return nil
+
 	case peer.CodeQueueUpload:
 		msg := &peer.QueueUpload{}
 		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
@@ -249,7 +270,7 @@ func (h *uploadSessionHooks) frame(session *peerSession, frame sessionFrame) err
 }
 
 type uploadPeerMessage[M any] interface {
-	*peer.TransferRequest | *peer.PlaceInQueueResponse | *peer.UploadDenied | *peer.UploadFailed
+	*peer.TransferRequest | *peer.TransferResponse | *peer.PlaceInQueueResponse | *peer.UploadDenied | *peer.UploadFailed
 	Serialize(M) ([]byte, error)
 }
 
