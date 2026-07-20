@@ -122,6 +122,16 @@ type PipelineConfig struct {
 	DownloadingInterval Duration `toml:"downloading_interval"`
 	// ImportingInterval is how often the importing phase runs. Default 30s.
 	ImportingInterval Duration `toml:"importing_interval"`
+	// ManualImportTimeout bounds Lidarr's manualimport folder scan, which
+	// parses audio tags per file and legitimately runs far longer than a
+	// normal API call on large folders (box sets, deluxe editions).
+	// Default 10m.
+	ManualImportTimeout Duration `toml:"manual_import_timeout"`
+	// ImportRetryCooldown is how long the importing phase waits before
+	// re-attempting a failed manualimport folder scan on the same job, so a
+	// slow-scanning folder is not hammered every ImportingInterval until
+	// StuckAfter elapses. Default 5m.
+	ImportRetryCooldown Duration `toml:"import_retry_cooldown"`
 }
 
 // applyDefaults fills any zero-valued field with its documented default.
@@ -170,6 +180,12 @@ func (p *PipelineConfig) applyDefaults() {
 	}
 	if p.ImportingInterval.Duration == 0 {
 		p.ImportingInterval.Duration = 30 * time.Second
+	}
+	if p.ManualImportTimeout.Duration == 0 {
+		p.ManualImportTimeout.Duration = 10 * time.Minute
+	}
+	if p.ImportRetryCooldown.Duration == 0 {
+		p.ImportRetryCooldown.Duration = 5 * time.Minute
 	}
 }
 
@@ -372,6 +388,12 @@ func (c Config) Validate() error {
 	}
 	if c.Pipeline.ImportingInterval.Duration <= 0 {
 		problems = append(problems, "pipeline.importing_interval must be > 0")
+	}
+	if c.Pipeline.ManualImportTimeout.Duration <= 0 {
+		problems = append(problems, "pipeline.manual_import_timeout must be > 0")
+	}
+	if c.Pipeline.ImportRetryCooldown.Duration <= 0 {
+		problems = append(problems, "pipeline.import_retry_cooldown must be > 0")
 	}
 	if c.Paths.SlskdCompleteDir == "" {
 		problems = append(problems, "paths.slskd_complete_dir is required")

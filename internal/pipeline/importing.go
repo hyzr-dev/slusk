@@ -36,6 +36,10 @@ type ImportingStore interface {
 	// past ImportConfirmTimeout) in one tx, so a job is never left in IMPORTING
 	// with no ACTIVE candidate.
 	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// SetJobNotBefore hides the job from RunnableJobsInState until notBefore
+	// without touching retries or updated_at, so a verify-phase retry cooldown
+	// does not reset escalateIfStuck's StuckAfter clock (keyed on updated_at).
+	SetJobNotBefore(ctx context.Context, jobID int64, notBefore time.Time) error
 	// RecordAttemptOutcome writes a candidate's terminal success/fail outcome to
 	// the peer reliability tables (best-effort).
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
@@ -55,6 +59,11 @@ type ImportingParams struct {
 	StuckAfter           time.Duration
 	ImportConfirmTimeout time.Duration
 	Interval             time.Duration
+	// RetryCooldown is how long a job waits before re-attempting a failed
+	// verify-phase Lidarr call (ManualImportCandidates/AlbumStatus) on the
+	// same folder, instead of retrying every Interval until StuckAfter. Zero
+	// disables the cooldown (retry next tick, the pre-cooldown behavior).
+	RetryCooldown time.Duration
 }
 
 // Importing owns every IMPORTING-state job. IMPORTING replaces the legacy
@@ -308,6 +317,16 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 // atomic fail path's error.
 func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand core.Candidate, filenames []string, reason string, now time.Time) error {
 	if now.Sub(job.UpdatedAt) <= m.p.StuckAfter {
+		// Not stuck yet: cool the job down instead of re-firing the same slow
+		// Lidarr call (typically a large-folder scan timing out) on the very
+		// next tick. Best-effort - a failed write just means the old
+		// retry-next-tick behavior for one round. SetJobNotBefore leaves
+		// updated_at alone, so the StuckAfter clock above keeps running.
+		if m.p.RetryCooldown > 0 {
+			if err := m.p.Store.SetJobNotBefore(ctx, job.ID, now.Add(m.p.RetryCooldown)); err != nil {
+				m.log().Warn("set import retry cooldown failed", "album_job", job.ID, "err", err)
+			}
+		}
 		return nil
 	}
 	stuckDetail := fmt.Sprintf("importing stuck past timeout (%s)", reason)

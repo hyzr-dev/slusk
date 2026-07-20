@@ -96,6 +96,21 @@ func (s *Store) SetJobBackoff(ctx context.Context, jobID int64, retries int, not
 	return nil
 }
 
+// SetJobNotBefore hides the job from RunnableJobsInState until notBefore
+// without touching retries or updated_at. Unlike SetJobBackoff this is not a
+// backoff-cycle write: the importing verify phase uses it to cool down retries
+// against a slow-scanning folder, and bumping updated_at here would reset
+// escalateIfStuck's StuckAfter clock so the job never escalates.
+func (s *Store) SetJobNotBefore(ctx context.Context, jobID int64, notBefore time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET not_before = $1 WHERE id = $2`,
+		notBefore, jobID)
+	if err != nil {
+		return fmt.Errorf("set job not_before: %w", err)
+	}
+	return nil
+}
+
 // MarkJobFailed: state→FAILED, failed_at=now, not_before cleared. The UPDATE is
 // guarded (state NOT IN the terminal states) so a job WantedSync cancelled
 // underneath a failing search cycle is never resurrected CANCELLED→FAILED (or a

@@ -612,3 +612,75 @@ func TestImportingConfirmToleratesMissingAlbumFolder(t *testing.T) {
 		t.Errorf("expected no ERROR log line for an already-missing folder, got %q", logBuf.String())
 	}
 }
+
+// TestImportingVerifyErrorCoolsDownRetries reproduces the "spam Lidarr" bug: a
+// ManualImportCandidates call that fails (e.g. Lidarr timing out on a large
+// folder scan) used to be retried on the very next tick (~30s), hammering the
+// same slow folder for up to StuckAfter. With RetryCooldown set, the job must
+// be hidden until the cooldown elapses, then retried.
+func TestImportingVerifyErrorCoolsDownRetries(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportErr: context.DeadlineExceeded}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.RetryCooldown = 5 * time.Minute
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := len(music.manualImportCalls); got != 1 {
+		t.Fatalf("expected 1 scan attempt, got %d", got)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("job should stay IMPORTING within StuckAfter, got %v", got)
+	}
+
+	// Next tick lands within the cooldown: the job must not be scanned again.
+	if err := m.Tick(ctx, now.Add(30*time.Second)); err != nil {
+		t.Fatalf("Tick within cooldown: %v", err)
+	}
+	if got := len(music.manualImportCalls); got != 1 {
+		t.Errorf("scan retried within cooldown: %d attempts", got)
+	}
+
+	// Past the cooldown the job becomes runnable again and retries.
+	if err := m.Tick(ctx, now.Add(5*time.Minute+time.Second)); err != nil {
+		t.Fatalf("Tick past cooldown: %v", err)
+	}
+	if got := len(music.manualImportCalls); got != 2 {
+		t.Errorf("expected retry after cooldown, got %d attempts", got)
+	}
+}
+
+// TestImportingStuckEscalationSurvivesCooldown asserts the cooldown does not
+// defeat the StuckAfter ceiling: the cooldown write must leave the job's
+// updated_at (escalateIfStuck's clock) untouched, so a job whose scans keep
+// failing is still escalated to SELECTING once runnable past StuckAfter.
+func TestImportingStuckEscalationSurvivesCooldown(t *testing.T) {
+	ctx := context.Background()
+	stuckSince := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportErr: context.DeadlineExceeded}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.StuckAfter = time.Hour
+	p.RetryCooldown = 5 * time.Minute
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, stuckSince)
+
+	m := NewImporting(p)
+	// Fail scans every cooldown-interval until past StuckAfter.
+	for tick := time.Duration(0); tick <= p.StuckAfter; tick += p.RetryCooldown + time.Second {
+		if err := m.Tick(ctx, stuckSince.Add(tick)); err != nil {
+			t.Fatalf("Tick at +%v: %v", tick, err)
+		}
+	}
+	if err := m.Tick(ctx, stuckSince.Add(p.StuckAfter+p.RetryCooldown+2*time.Second)); err != nil {
+		t.Fatalf("Tick past StuckAfter: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("stuck job past StuckAfter should fail to SELECTING, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+}

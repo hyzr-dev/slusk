@@ -19,11 +19,38 @@ type Client struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
+	// scanHTTP is used only by ManualImportCandidates: Lidarr parses audio
+	// tags per file during a manualimport folder scan, so large folders (box
+	// sets, deluxe editions) legitimately take far longer than any other API
+	// call and need their own, longer timeout.
+	scanHTTP *http.Client
+}
+
+// Option configures a Client at construction.
+type Option func(*Client)
+
+// WithManualImportTimeout overrides how long a manualimport folder scan may
+// take before the client gives up (default 10m). Values <= 0 are ignored.
+func WithManualImportTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.scanHTTP.Timeout = d
+		}
+	}
 }
 
 // New constructs a Lidarr client.
-func New(baseURL, apiKey string) *Client {
-	return &Client{baseURL: baseURL, apiKey: apiKey, http: &http.Client{Timeout: 30 * time.Second}}
+func New(baseURL, apiKey string, opts ...Option) *Client {
+	c := &Client{
+		baseURL:  baseURL,
+		apiKey:   apiKey,
+		http:     &http.Client{Timeout: 30 * time.Second},
+		scanHTTP: &http.Client{Timeout: 10 * time.Minute},
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // wantedMissingPage is one page of Lidarr's wanted/missing response.
@@ -120,7 +147,7 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]c
 		return nil, err
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
-	resp, err := c.http.Do(req)
+	resp, err := c.scanHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}

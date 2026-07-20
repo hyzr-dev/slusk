@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -257,5 +258,30 @@ func TestExecuteManualImportBuildsCorrectPayload(t *testing.T) {
 	}
 	if _, hasFolderName := f["folderName"]; hasFolderName {
 		t.Errorf("files[0] should not include folderName, got %v", f["folderName"])
+	}
+}
+
+// TestManualImportCandidatesUsesScanTimeout proves the manualimport folder
+// scan runs on its own, longer timeout rather than the shared client timeout:
+// Lidarr parses audio tags per file during the scan, so large folders (box
+// sets over NFS) legitimately exceed a normal API call's deadline.
+func TestManualImportCandidatesUsesScanTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k", WithManualImportTimeout(2*time.Second))
+	// Shrink the general timeout below the server's delay: success proves the
+	// scan is not bound by it.
+	c.http.Timeout = 20 * time.Millisecond
+	if _, err := c.ManualImportCandidates(context.Background(), "/f"); err != nil {
+		t.Fatalf("scan should survive past the general client timeout: %v", err)
+	}
+
+	slow := New(srv.URL, "k", WithManualImportTimeout(20*time.Millisecond))
+	if _, err := slow.ManualImportCandidates(context.Background(), "/f"); err == nil {
+		t.Fatal("scan exceeding its own timeout should fail")
 	}
 }
