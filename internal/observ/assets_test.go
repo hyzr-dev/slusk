@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestAssetHandlerServesIndexAtRoot(t *testing.T) {
@@ -62,5 +63,55 @@ func TestAssetHandlerCachesHashedAssetsImmutably(t *testing.T) {
 	// Missing hashed assets must 404 rather than returning the SPA shell.
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// Unhashed public/ assets (rule 3) must be served as-is but never cached
+// immutably, since their filename can stay the same while their content
+// changes. dist/ is gitignored except for placeholder.html, so this is
+// exercised against an in-memory fs.FS fixture rather than the embedded dist
+// tree — a fresh clone has no favicon to test against.
+func TestAssetHandlerServesRootFilesWithNoCache(t *testing.T) {
+	fixture := fstest.MapFS{
+		"index.html":  {Data: []byte("<html>shell</html>")},
+		"favicon.ico": {Data: []byte("fake-icon-bytes")},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+
+	newAssetHandlerFS(fixture).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", cc)
+	}
+	if body := rec.Body.String(); body != "fake-icon-bytes" {
+		t.Errorf("body = %q, want fake-icon-bytes", body)
+	}
+}
+
+// When the frontend hasn't been built (no index.html), the SPA fallback
+// must serve placeholder.html instead of 500ing.
+func TestAssetHandlerFallsBackToPlaceholder(t *testing.T) {
+	fixture := fstest.MapFS{
+		"placeholder.html": {Data: []byte("<html>frontend not built</html>")},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	newAssetHandlerFS(fixture).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if body := rec.Body.String(); body != "<html>frontend not built</html>" {
+		t.Errorf("body = %q, want placeholder content", body)
 	}
 }
