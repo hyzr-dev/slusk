@@ -40,15 +40,9 @@ type Attribute struct {
 	Value uint32
 }
 
-// Serialize accepts directories and privateDirectories and returns a message packed as a byte slice.
-// It uses custom errors for the following cases:
-// - ErrNoDirectories is returned when there are no directories.
-// - ErrEmptyDirectoryName is returned when the directory name is empty.
-// - ErrEmptyDirectory is returned when the directory is empty.
-// - ErrEmptyFileName is returned when the file name is empty.
-// - ErrSizeZero is returned when the file size is zero.
-// - ErrEmptyFileExtension is returned when the file extension is empty.
-// You can use them in your code to check for specific errors.
+// Serialize accepts public and private directories. Empty share lists,
+// directories, zero-byte files, and extensionless files are protocol-valid.
+// Directory and file names themselves must remain nonempty.
 func (s *SharedFileListResponse) Serialize(message *SharedFileListResponse) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	err := internal.WriteUint32(buf, uint32(CodeSharedFileListResponse))
@@ -115,10 +109,6 @@ func (SharedFileListResponse) walkWrite(directories []Directory, zw *zlib.Writer
 			return err
 		}
 
-		if len(directory.Files) == 0 {
-			return ErrEmptyDirectory
-		}
-
 		err = internal.WriteUint32(zw, uint32(len(directory.Files)))
 		if err != nil {
 			return err
@@ -139,17 +129,9 @@ func (SharedFileListResponse) walkWrite(directories []Directory, zw *zlib.Writer
 				return err
 			}
 
-			if file.Size == 0 {
-				return ErrSizeZero
-			}
-
 			err = internal.WriteUint64(zw, file.Size)
 			if err != nil {
 				return err
-			}
-
-			if file.Extension == "" {
-				return ErrEmptyFileExtension
 			}
 
 			err = internal.WriteString(zw, file.Extension)

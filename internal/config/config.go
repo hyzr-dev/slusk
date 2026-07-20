@@ -4,8 +4,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -200,6 +202,14 @@ const defaultSoulseekListenAddr = "0.0.0.0:2234"
 // server (as opposed to the [slskd] daemon). The whole section is optional:
 // a wholly absent [soulseek] section, or one with every field blank, leaves
 // the direct connection disabled.
+type SharedFolderConfig struct {
+	// Name is the public, virtual root exposed to Soulseek peers. It never
+	// reveals Path.
+	Name string `toml:"name"`
+	// Path is an absolute local directory. Share mounts should be read-only.
+	Path string `toml:"path"`
+}
+
 type SoulseekConfig struct {
 	// ServerAddress is the Soulseek server's host:port. Defaults to
 	// server.slsknet.org:2242 when the section is enabled and this is blank.
@@ -213,12 +223,17 @@ type SoulseekConfig struct {
 	// host port must equal it (there is no separate "advertised port"
 	// concept - the listen port itself is what gets advertised).
 	ListenAddr string `toml:"listen_addr"`
+	// SharedFolders are explicitly named local roots. Absolute local paths are
+	// never sent to peers; only Name and paths below it are public.
+	SharedFolders []SharedFolderConfig `toml:"shared_folders"`
+	// UploadSlots limits concurrent upload negotiation and streaming. Default 2.
+	UploadSlots int `toml:"upload_slots"`
 }
 
 // Enabled reports whether any field of the section was set, meaning the
 // direct Soulseek connection should be started.
 func (s SoulseekConfig) Enabled() bool {
-	return s.ServerAddress != "" || s.Username != "" || s.Password != "" || s.ListenAddr != ""
+	return s.ServerAddress != "" || s.Username != "" || s.Password != "" || s.ListenAddr != "" || len(s.SharedFolders) != 0 || s.UploadSlots != 0
 }
 
 // applyDefaults fills ServerAddress and ListenAddr with their documented
@@ -232,6 +247,9 @@ func (s *SoulseekConfig) applyDefaults() {
 	}
 	if s.ListenAddr == "" {
 		s.ListenAddr = defaultSoulseekListenAddr
+	}
+	if s.UploadSlots == 0 {
+		s.UploadSlots = 2
 	}
 }
 
@@ -258,6 +276,11 @@ func Load(path string) (Config, error) {
 	}
 	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
 		return Config{}, fmt.Errorf("unknown config keys: %v", undecoded)
+	}
+	// Zero means absent for the normal defaulting path, but an explicitly
+	// configured nonpositive slot count is a typo and must fail loudly.
+	if meta.IsDefined("soulseek", "upload_slots") && cfg.Soulseek.UploadSlots <= 0 {
+		return Config{}, errors.New("soulseek.upload_slots must be > 0")
 	}
 	cfg.Pipeline.applyDefaults()
 	cfg.Soulseek.applyDefaults()
@@ -375,6 +398,32 @@ func (c Config) Validate() error {
 			problems = append(problems, "soulseek.listen_addr must have a numeric port")
 		} else if portNum <= 0 || portNum > 65535 {
 			problems = append(problems, "soulseek.listen_addr port must be between 1 and 65535")
+		}
+		if c.Soulseek.UploadSlots <= 0 {
+			problems = append(problems, "soulseek.upload_slots must be > 0")
+		}
+		names := make(map[string]struct{}, len(c.Soulseek.SharedFolders))
+		paths := make(map[string]struct{}, len(c.Soulseek.SharedFolders))
+		for i, share := range c.Soulseek.SharedFolders {
+			name := strings.TrimSpace(share.Name)
+			if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].name must be nonblank and contain no path separators", i))
+			} else if _, exists := names[strings.ToLower(name)]; exists {
+				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].name must be unique", i))
+			} else {
+				names[strings.ToLower(name)] = struct{}{}
+			}
+			path := strings.TrimSpace(share.Path)
+			if path == "" || !filepath.IsAbs(path) {
+				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].path must be an absolute path", i))
+			} else {
+				clean := filepath.Clean(path)
+				if _, exists := paths[clean]; exists {
+					problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].path must be unique", i))
+				} else {
+					paths[clean] = struct{}{}
+				}
+			}
 		}
 	}
 	if c.Observ.ListenAddr == "" {

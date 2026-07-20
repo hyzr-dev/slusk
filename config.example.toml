@@ -120,3 +120,19 @@ slskd_complete_dir = "/music/slskd-downloads"
 # directly. With Docker port mapping, the published host port MUST equal the
 # container port (e.g. "2234:2234"), or use host networking instead.
 # listen_addr = "0.0.0.0:2234"
+#
+# Two upload slots are used by default. Negotiation and streaming both occupy
+# a slot; additional requests wait in a bounded global FIFO queue.
+# upload_slots = 2
+#
+# Shares use explicit public names so local host/container paths never appear
+# in browse/search results. Mount each path read-only. Shares are scanned at
+# startup; send SIGHUP to atomically rescan after adding/removing files (there
+# is deliberately no HTTP rescan endpoint).
+# [[soulseek.shared_folders]]
+# name = "Music"
+# path = "/shares/music"
+#
+# [[soulseek.shared_folders]]
+# name = "Live"
+# path = "/shares/live"

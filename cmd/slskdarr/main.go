@@ -93,12 +93,7 @@ func main() {
 
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
-		soulClient = soulseek.New(soulseek.Config{
-			Address:    cfg.Soulseek.ServerAddress,
-			Username:   cfg.Soulseek.Username,
-			Password:   cfg.Soulseek.Password,
-			ListenAddr: cfg.Soulseek.ListenAddr,
-		}, logger)
+		soulClient = newSoulseekClient(cfg.Soulseek, logger)
 	}
 
 	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{
@@ -249,6 +244,10 @@ func main() {
 	soulCtx, soulCancel := context.WithCancel(ctx)
 	defer soulCancel()
 	if soulClient != nil {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+		go runShareRescanLoop(soulCtx, hup, soulClient, logger)
 		soulDone = make(chan error, 1)
 		go func() {
 			err := soulClient.Run(soulCtx)

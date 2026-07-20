@@ -432,13 +432,9 @@ func (h *downloadSessionHooks) frame(session *peerSession, frame sessionFrame) e
 		return nil
 
 	case peer.CodeTransferResponse:
-		// We send TransferResponse for a download, we do not receive it. An
-		// echo here is unexpected protocol input, not a session-ending
-		// error: log it and move on rather than closing the session.
-		if h.logger != nil {
-			h.logger.Debug("unexpected transfer response on a download session", "username", session.key.username)
-		}
-		return nil
+		// TransferResponse is received by the upload side; yield it to the
+		// upload hook while preserving all download routing for code 40.
+		return errUnhandledPeerFrame
 
 	case peer.CodePlaceInQueueResponse:
 		msg := &peer.PlaceInQueueResponse{}

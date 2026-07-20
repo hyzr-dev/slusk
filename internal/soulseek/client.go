@@ -21,15 +21,16 @@ import (
 )
 
 const (
-	defaultDialTimeout      = 10 * time.Second
-	defaultPingInterval     = 5 * time.Minute
-	defaultBackoffBase      = 5 * time.Second
-	defaultBackoffCap       = 10 * time.Minute
-	tcpKeepAliveInterval    = time.Minute
-	defaultPeerInitTimeout  = 10 * time.Second
-	defaultPeerDialTimeout  = 10 * time.Second
-	defaultEstablishTimeout = 30 * time.Second
-	defaultFileIdleTimeout  = 60 * time.Second
+	defaultDialTimeout              = 10 * time.Second
+	defaultPingInterval             = 5 * time.Minute
+	defaultBackoffBase              = 5 * time.Second
+	defaultBackoffCap               = 10 * time.Minute
+	tcpKeepAliveInterval            = time.Minute
+	defaultPeerInitTimeout          = 10 * time.Second
+	defaultPeerDialTimeout          = 10 * time.Second
+	defaultEstablishTimeout         = 30 * time.Second
+	defaultFileIdleTimeout          = 60 * time.Second
+	defaultUploadNegotiationTimeout = 60 * time.Second
 	// defaultPlaceInQueueInterval is how often runDownload polls a peer for a
 	// queued download's current queue position while waiting for its
 	// TransferRequest.
@@ -85,6 +86,11 @@ type Config struct {
 	// it directly.
 	DownloadDir string
 
+	// SharedFolders are explicitly named public roots backed by private local
+	// directories. UploadSlots defaults to 2.
+	SharedFolders []SharedFolder
+	UploadSlots   int
+
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
 	// pingInterval is how often a keepalive Ping is sent once connected.
@@ -139,6 +145,8 @@ type Config struct {
 	// downloadQueueTimeout bounds how long a queued download waits for the
 	// peer to send its TransferRequest before giving up. Default 10m.
 	downloadQueueTimeout time.Duration
+	// uploadNegotiationTimeout bounds waiting for TransferResponse.
+	uploadNegotiationTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -189,6 +197,13 @@ type Client struct {
 	tree         *distributedTree
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
+
+	shares           atomic.Pointer[shareSnapshot]
+	shareScanMu      sync.Mutex
+	shareWorkers     chan struct{}
+	searchDeliveryMu sync.Mutex
+	searchDeliveries map[searchDeliveryKey]time.Time
+	uploads          *uploadManager
 
 	// downloads is the in-memory registry of in-flight native downloads
 	// (issue #55): this group (D) defines the type and the F-connection
@@ -267,25 +282,38 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.downloadQueueTimeout <= 0 {
 		cfg.downloadQueueTimeout = defaultDownloadQueueTimeout
 	}
+	if cfg.uploadNegotiationTimeout <= 0 {
+		cfg.uploadNegotiationTimeout = defaultUploadNegotiationTimeout
+	}
+	if cfg.UploadSlots <= 0 {
+		cfg.UploadSlots = 2
+	}
 
 	c := &Client{
-		cfg:            cfg,
-		logger:         logger,
-		pendingAddrs:   make(map[string][]chan addrResult),
-		pending:        make(map[soul.Token]*pendingAttempt),
-		tokens:         newTokenAllocator(),
-		sessions:       newSessionRegistry(nil),
-		searches:       newSearchRegistry(),
-		inboundSlots:   make(chan struct{}, cfg.inboundPeerLimit),
-		handshakeConns: make(map[net.Conn]struct{}),
-		establishes:    make(map[sessionKey]*sessionEstablishment),
-		downloads:      newDownloadRegistry(),
+		cfg:              cfg,
+		logger:           logger,
+		pendingAddrs:     make(map[string][]chan addrResult),
+		pending:          make(map[soul.Token]*pendingAttempt),
+		tokens:           newTokenAllocator(),
+		sessions:         newSessionRegistry(nil),
+		searches:         newSearchRegistry(),
+		inboundSlots:     make(chan struct{}, cfg.inboundPeerLimit),
+		handshakeConns:   make(map[net.Conn]struct{}),
+		establishes:      make(map[sessionKey]*sessionEstablishment),
+		downloads:        newDownloadRegistry(),
+		shareWorkers:     make(chan struct{}, maxShareWorkers),
+		searchDeliveries: make(map[searchDeliveryKey]time.Time),
 	}
+	c.shares.Store(emptyShareSnapshot())
+	c.uploads = newUploadManager(c, cfg.UploadSlots)
 	c.tree = newDistributedTree(c)
+	c.tree.onSearch = c.handleDistributedShareSearch
 	c.sessionHooks = composedSessionHooks{
 		c.tree,
 		&searchSessionHooks{searches: c.searches},
 		&downloadSessionHooks{downloads: c.downloads, logger: logger},
+		&sharingSessionHooks{c: c},
+		&uploadSessionHooks{c: c, uploads: c.uploads},
 	}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
@@ -296,7 +324,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
 	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress | *server.GetUserStats |
-		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch
+		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch | *server.SharedFoldersFiles
 	Serialize(M) ([]byte, error)
 }
 
@@ -357,6 +385,9 @@ func (c *Client) Status() Status {
 // invalid credentials, outdated protocol version, or the account logging in
 // elsewhere), and never reconnects afterward.
 func (c *Client) Run(ctx context.Context) error {
+	if _, err := c.RescanShares(ctx); err != nil {
+		return fmt.Errorf("initial share scan: %w", err)
+	}
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
@@ -369,6 +400,10 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		_ = ln.Close()
 		return err
+	}
+	if !c.startTracked(func() { c.uploads.dispatch(runCtx) }) {
+		_ = ln.Close()
+		return errors.New("soulseek: lifecycle stopped before upload dispatcher start")
 	}
 	if !c.startTracked(func() { c.acceptPeers(runCtx, ln) }) {
 		_ = ln.Close()
@@ -540,6 +575,14 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 	if err := sendToServerGeneration(c, generation, &server.GetUserStats{Username: c.cfg.Username}); err != nil {
 		return fmt.Errorf("request own user stats: %w", err)
 	}
+	// Keep download-only clients wire-compatible with the established startup
+	// exchange. Sharing clients additionally advertise their current index.
+	if len(c.cfg.SharedFolders) != 0 {
+		stats := c.shareSnapshot().stats
+		if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{Directories: stats.Directories, Files: stats.Files}); err != nil {
+			return fmt.Errorf("announce shared folders and files: %w", err)
+		}
+	}
 
 	readErrs := make(chan error, 1)
 	if !c.startTracked(func() { readErrs <- c.readLoop(serverCtx, conn) }) {
@@ -621,6 +664,14 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 			return fmt.Errorf("deserialize cant connect to peer: %w", err)
 		}
 		c.handleCantConnectToPeer(*msg)
+		return nil
+
+	case server.CodeFileSearch:
+		msg := &server.FileSearch{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize incoming file search: %w", err)
+		}
+		c.respondToSearch(msg.Username, msg.Token, msg.SearchQuery)
 		return nil
 
 	case server.CodePossibleParents:

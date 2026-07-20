@@ -1,10 +1,83 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadSoulseekSharesAndUploadSlots(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := string(base) + `
+[soulseek]
+username = "me"
+password = "secret"
+upload_slots = 3
+[[soulseek.shared_folders]]
+name = "Music"
+path = "/shares/music"
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Soulseek.UploadSlots != 3 || len(cfg.Soulseek.SharedFolders) != 1 || cfg.Soulseek.SharedFolders[0].Name != "Music" {
+		t.Fatalf("Soulseek config = %+v", cfg.Soulseek)
+	}
+
+	for _, invalid := range []string{
+		"upload_slots = 0\n",
+		"[[soulseek.shared_folders]]\nname = \"../secret\"\npath = \"/shares/music\"\n",
+		"[[soulseek.shared_folders]]\nname = \"Music\"\npath = \"relative\"\n",
+	} {
+		bad := filepath.Join(t.TempDir(), "config.toml")
+		body := string(base) + "\n[soulseek]\nusername = \"me\"\npassword = \"secret\"\n" + invalid
+		if err := os.WriteFile(bad, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(bad); err == nil {
+			t.Fatalf("Load accepted invalid soulseek config: %s", invalid)
+		}
+	}
+}
+
+func TestSoulseekShareValidationRejectsDuplicates(t *testing.T) {
+	cfg := Config{Soulseek: SoulseekConfig{
+		Username: "me", Password: "secret", ServerAddress: defaultSoulseekServerAddress,
+		ListenAddr: defaultSoulseekListenAddr, UploadSlots: 2,
+		SharedFolders: []SharedFolderConfig{{Name: "Music", Path: "/one"}, {Name: "music", Path: "/one"}},
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "shared_folders") {
+		t.Fatalf("Validate duplicate shares = %v", err)
+	}
+}
+
+func TestLoadSoulseekDefaultsTwoUploadSlots(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, append(base, []byte("\n[soulseek]\nusername=\"me\"\npassword=\"secret\"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Soulseek.UploadSlots != 2 {
+		t.Fatalf("UploadSlots = %d", cfg.Soulseek.UploadSlots)
+	}
+}
 
 func TestLoadValid(t *testing.T) {
 	cfg, err := Load("testdata/valid.toml")
@@ -262,6 +335,9 @@ func TestLoadSoulseekValid(t *testing.T) {
 	}
 	if cfg.Soulseek.ListenAddr != "0.0.0.0:2234" {
 		t.Errorf("ListenAddr = %q, want the default", cfg.Soulseek.ListenAddr)
+	}
+	if cfg.Soulseek.UploadSlots != 4 || len(cfg.Soulseek.SharedFolders) != 1 || cfg.Soulseek.SharedFolders[0] != (SharedFolderConfig{Name: "Music", Path: "/shares/music"}) {
+		t.Errorf("sharing config = slots %d, folders %+v", cfg.Soulseek.UploadSlots, cfg.Soulseek.SharedFolders)
 	}
 }
 
