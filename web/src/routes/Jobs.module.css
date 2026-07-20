@@ -3,7 +3,9 @@
 .input, .select {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
-  background: var(--panel-raised);
+  /* --panel, not --panel-raised: the latter marks elevated/active surfaces
+     (see the active nav item) and is visibly lighter than form chrome should be. */
+  background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 12.5px;
