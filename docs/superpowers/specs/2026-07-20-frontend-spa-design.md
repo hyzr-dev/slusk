@@ -47,10 +47,15 @@ Frontend-källkod bor i `web/` i repo-roten. Vite bygger till
 `internal/observ/web/dist/`, som `go:embed` plockar upp — placeringen är ett tvång
 från embed, som inte kan läsa filer utanför paketets katalog.
 
-`dist/` är gitignorerat, med en incheckad placeholder-`index.html` som instruerar
-att köra `make ui`. Det håller git-historiken fri från hashade bundles samtidigt
-som `go build ./...` alltid kompilerar och ger ett begripligt fel om frontend inte
-är byggd.
+`dist/` är gitignorerat, med en incheckad **`placeholder.html`** som instruerar att
+köra `make ui`. `serveIndex` faller tillbaka på den när `index.html` saknas. Det
+håller git-historiken fri från hashade bundles samtidigt som `go build ./...` alltid
+kompilerar och ger ett begripligt fel om frontend inte är byggd.
+
+Placeholdern får **inte** heta `index.html`: Vite skriver den filen vid varje bygge,
+så en spårad `index.html` gör arbetsträdet smutsigt efter varje `make ui` och gör det
+lätt att committa den byggda bundlen av misstag — precis det gitignoreringen skulle
+förhindra.
 
 En `Makefile` binder ihop stegen:
 
@@ -74,8 +79,18 @@ med tre regler, i denna ordning:
    och når den aldrig. En felstavad API-sökväg måste ge 404, inte HTML.
 2. `/assets/*` — Vites hashade filnamn — serveras med
    `Cache-Control: public, max-age=31536000, immutable`.
-3. Allt annat returnerar `index.html` med `Cache-Control: no-cache`, så
+3. Verkliga filer i `dist`-roten (favicon, `robots.txt` och liknande ohashade
+   filer från Vites `public/`) serveras som de är med `Cache-Control: no-cache`.
+   De är inte innehållshashade och kan ändras utan att filnamnet gör det, så de
+   får aldrig cachas oföränderligt. Regeln är död kod tills en `public/`-katalog
+   tillkommer, men utan den skulle ett favicon-anrop falla till SPA-fallbacken
+   och besvaras med HTML — en bugg som bara syns som en trasig flik-ikon.
+4. Allt annat returnerar `index.html` med `Cache-Control: no-cache`, så
    klientroutade sökvägar fungerar på direktlänk och omladdning.
+
+Den fjärde regeln upptäcktes under granskning av implementationen: koden hade
+grenen men specen beskrev bara tre regler. Beslut 2026-07-20: behåll grenen och
+dokumentera den.
 
 `ProtectPrivateEndpoints` i `security.go` lämnas orörd, och kräver ingen ändring för
 SSE. `TokenAuthenticator.Authenticate` provar HTTP Basic före Bearer, så webbläsaren
@@ -122,7 +137,12 @@ designprojektet, som båda är svenska. Strängarna översätts när komponenter
 — kostnaden är låg eftersom varje sträng ändå passerar genom porteringen.
 
 **Alla användarvända strängar samlas i `src/strings.ts`.** Ingen sträng skrivs direkt
-i en komponent. Mönstret finns redan i dagens `dashboard.js` som `STATUS_LABEL` och
+i en komponent. Katalogen exporteras med `as const`, men uppslag av **dynamiska**
+nycklar går genom hjälpfunktioner — `eventLabel(code)`, `stateLabel(state, status)`,
+`candidateStateLabel(state)` — som implementerar mönstret `MAP[key] ?? key`. Utan dem
+blir `t.event[nyckelFrånBackend]` ett `TS7053`-fel under `strict`, och varje vy
+tvingas till en osäker cast. Hjälparna bevarar också beteendet att en okänd
+backend-kod visas rå i stället för att rendera tomt. Mönstret finns redan i dagens `dashboard.js` som `STATUS_LABEL` och
 `EVENT_LABEL`; det formaliseras och utvidgas till att gälla allt.
 
 Detta är i18n-förberedelse, inte i18n. Att dra in `react-i18next` nu vore plumbing,
