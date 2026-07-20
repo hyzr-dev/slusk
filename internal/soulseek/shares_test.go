@@ -3,12 +3,17 @@ package soulseek
 import (
 	"bytes"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
 func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
@@ -66,6 +71,196 @@ func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
 	if c.shareSnapshot() != snapshot {
 		t.Fatal("failed rescan replaced last-known-good snapshot")
 	}
+}
+
+func TestRescanSharesSkipsBackslashComponentsAndUsesLocalBasenameExtension(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("backslash is a path separator on this platform")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, `collision\track.mp3`), []byte("bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "TRACK.FLAC"), []byte("good"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, `hidden\dir`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, `hidden\dir`, "nested.mp3"), []byte("bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	stats, err := c.RescanShares(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Files != 1 {
+		t.Fatalf("files = %d, want only the safe file", stats.Files)
+	}
+	indexed := c.shareSnapshot().files[`Music\TRACK.FLAC`]
+	if indexed == nil || indexed.wire.Extension != "flac" {
+		t.Fatalf("safe indexed file = %#v", indexed)
+	}
+}
+
+func TestSharingHooksBrowseFolderAndDownloadCoexistence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Album", "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	session := c.newSession(local, sessionKey{username: "friend", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	if _, inserted := c.sessions.Register(session); !inserted {
+		t.Fatal("register test session")
+	}
+
+	browse := &peer.SharedFileListRequest{}
+	wire, err := browse.Serialize(browse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sessionHooks.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeSharedFileListRequest), wire: wire}); err != nil {
+		t.Fatalf("browse hook: %v", err)
+	}
+	select {
+	case responseWire := <-session.writes:
+		var response peer.SharedFileListResponse
+		if err := response.Deserialize(bytes.NewReader(responseWire)); err != nil || len(response.Directories) != 2 {
+			t.Fatalf("browse response directories=%d err=%v", len(response.Directories), err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("browse response was not queued")
+	}
+
+	folder := &peer.FolderContentsRequest{Token: soul.Token(7), Folder: `Music\Album`}
+	wire, err = folder.Serialize(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sessionHooks.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeFolderContentsRequest), wire: wire}); err != nil {
+		t.Fatalf("folder hook: %v", err)
+	}
+	select {
+	case responseWire := <-session.writes:
+		var response peer.FolderContentsResponse
+		if err := response.Deserialize(bytes.NewReader(responseWire)); err != nil || response.Token != 7 || len(response.Folders) != 1 {
+			t.Fatalf("folder response=%+v err=%v", response, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("folder response was not queued")
+	}
+
+	// The sharing hooks must leave #55 download frames available to their
+	// existing sibling hook on the same retained P session.
+	request := &peer.TransferRequest{Direction: peer.UploadToPeer, Token: 8, Filename: "unknown.flac", FileSize: 1}
+	wire, err = request.Serialize(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.sessionHooks.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeTransferRequest), wire: wire}); err != nil {
+		t.Fatalf("download hook after sharing hooks: %v", err)
+	}
+}
+
+func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.shares.Store(&shareSnapshot{
+		files:  map[string]*indexedFile{},
+		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+	})
+	startSessionLifecycle(t, c)
+	newQueuedSession := func(username string) *peerSession {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = remote.Close() })
+		s := c.newSession(local, sessionKey{username: username, connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+		if _, inserted := c.sessions.Register(s); !inserted {
+			t.Fatalf("register %s", username)
+		}
+		return s
+	}
+	assertResponse := func(session *peerSession, token soul.Token) {
+		t.Helper()
+		select {
+		case wire := <-session.writes:
+			var response peer.FileSearchResponse
+			if err := response.Deserialize(bytes.NewReader(wire)); err != nil || response.Token != token || len(response.Results) != 1 {
+				t.Fatalf("search response token=%d results=%d err=%v", response.Token, len(response.Results), err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("search response was not scheduled")
+		}
+	}
+
+	central := newQueuedSession("central")
+	payload := new(bytes.Buffer)
+	if err := writeUint32(payload, uint32(server.CodeFileSearch)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeString(payload, "central"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUint32(payload, 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeString(payload, "track"); err != nil {
+		t.Fatal(err)
+	}
+	wire := packFrame(payload.Bytes())
+	if err := c.handleMessage(context.Background(), server.CodeFileSearch, bytes.NewReader(wire)); err != nil {
+		t.Fatal(err)
+	}
+	assertResponse(central, 11)
+
+	dist := newQueuedSession("distributed")
+	c.handleDistributedShareSearch(distributed.Search{Username: "distributed", Token: 12, Query: "track"}, nil)
+	assertResponse(dist, 12)
+
+	backpressured := newQueuedSession("downloader")
+	for i := 0; i < cap(backpressured.writes); i++ {
+		if !backpressured.TrySend([]byte{1}) {
+			t.Fatal("fill session write queue")
+		}
+	}
+	c.respondToSearch("downloader", 13, "track")
+	deadline := time.Now().Add(time.Second)
+	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-backpressured.done:
+		t.Fatal("share response backpressure closed a P session used by downloads")
+	default:
+	}
+
+	for i := 0; i < cap(c.shareWorkers); i++ {
+		c.shareWorkers <- struct{}{}
+	}
+	if err := c.sessionHooks.frame(backpressured, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeFolderContentsRequest), wire: mustFolderRequestWire(t, 14, `Music`)}); err != nil {
+		t.Fatalf("saturated folder request closed shared P session: %v", err)
+	}
+	for i := 0; i < cap(c.shareWorkers); i++ {
+		<-c.shareWorkers
+	}
+}
+
+func mustFolderRequestWire(t *testing.T, token soul.Token, folder string) []byte {
+	t.Helper()
+	msg := &peer.FolderContentsRequest{Token: token, Folder: folder}
+	wire, err := msg.Serialize(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
 }
 
 func TestShareSearchAndFolderLookup(t *testing.T) {

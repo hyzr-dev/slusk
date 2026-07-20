@@ -406,7 +406,9 @@ func (c Config) Validate() error {
 		paths := make(map[string]struct{}, len(c.Soulseek.SharedFolders))
 		for i, share := range c.Soulseek.SharedFolders {
 			name := strings.TrimSpace(share.Name)
-			if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+			if name != share.Name {
+				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].name must not contain surrounding whitespace", i))
+			} else if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
 				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].name must be nonblank and contain no path separators", i))
 			} else if _, exists := names[strings.ToLower(name)]; exists {
 				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].name must be unique", i))
@@ -414,7 +416,9 @@ func (c Config) Validate() error {
 				names[strings.ToLower(name)] = struct{}{}
 			}
 			path := strings.TrimSpace(share.Path)
-			if path == "" || !filepath.IsAbs(path) {
+			if path != share.Path {
+				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].path must not contain surrounding whitespace", i))
+			} else if path == "" || !filepath.IsAbs(path) {
 				problems = append(problems, fmt.Sprintf("soulseek.shared_folders[%d].path must be an absolute path", i))
 			} else {
 				clean := filepath.Clean(path)

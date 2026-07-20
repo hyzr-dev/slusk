@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
@@ -70,7 +71,15 @@ func (c *Client) denyQueuedUpload(ctx context.Context, job *uploadJob, reason er
 }
 
 func openIndexedFile(indexed *indexedFile) (*os.File, error) {
-	before, err := os.Lstat(indexed.local)
+	resolvedBefore, err := filepath.EvalSymlinks(indexed.local)
+	if err != nil {
+		return nil, fmt.Errorf("resolve shared file before opening: %w", err)
+	}
+	resolvedBefore, err = filepath.Abs(resolvedBefore)
+	if err != nil || !pathWithinRoot(indexed.root, resolvedBefore) {
+		return nil, fmt.Errorf("shared file escaped resolved root")
+	}
+	before, err := os.Stat(resolvedBefore)
 	if err != nil || !before.Mode().IsRegular() || !os.SameFile(indexed.info, before) || before.Size() != int64(indexed.wire.Size) || !before.ModTime().Equal(indexed.info.ModTime()) {
 		return nil, fmt.Errorf("shared file changed since scan")
 	}
@@ -83,7 +92,17 @@ func openIndexedFile(indexed *indexedFile) (*os.File, error) {
 		f.Close()
 		return nil, fmt.Errorf("shared file changed while opening")
 	}
-	after, err := os.Lstat(indexed.local)
+	resolvedAfter, err := filepath.EvalSymlinks(indexed.local)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("resolve shared file after opening: %w", err)
+	}
+	resolvedAfter, err = filepath.Abs(resolvedAfter)
+	if err != nil || !pathWithinRoot(indexed.root, resolvedAfter) {
+		f.Close()
+		return nil, fmt.Errorf("shared file escaped resolved root while opening")
+	}
+	after, err := os.Stat(resolvedAfter)
 	if err != nil || !after.Mode().IsRegular() || !os.SameFile(opened, after) {
 		f.Close()
 		return nil, fmt.Errorf("shared file path changed while opening")
@@ -127,18 +146,34 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 	if offset.Offset > size {
 		return fmt.Errorf("invalid upload offset %d greater than size %d", offset.Offset, size)
 	}
-	if offset.Offset == size {
-		return nil
+	if offset.Offset < size {
+		if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
+			return err
+		}
+		writer := &progressWriter{conn: conn, idleTimeout: idleTimeout}
+		written, err := io.CopyN(writer, shared, int64(size-offset.Offset))
+		if err != nil {
+			return fmt.Errorf("stream upload (sent %d of %d): %w", written, size-offset.Offset, err)
+		}
 	}
-	if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
+	// The downloader owns successful F-connection completion. Keep the socket
+	// open after the exact byte count and wait for it to close, bounded by the
+	// same idle timeout used for transfer progress.
+	if err := conn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
+		if err == io.ErrClosedPipe {
+			return nil
+		}
 		return err
 	}
-	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout}
-	written, err := io.CopyN(writer, shared, int64(size-offset.Offset))
-	if err != nil {
-		return fmt.Errorf("stream upload (sent %d of %d): %w", written, size-offset.Offset, err)
+	var unexpected [1]byte
+	n, err := conn.Read(unexpected[:])
+	if (err == io.EOF || err == io.ErrClosedPipe) && n == 0 {
+		return nil
 	}
-	return nil
+	if err != nil {
+		return fmt.Errorf("wait for downloader to close completed upload: %w", err)
+	}
+	return fmt.Errorf("unexpected data after completed upload")
 }
 
 type progressWriter struct {

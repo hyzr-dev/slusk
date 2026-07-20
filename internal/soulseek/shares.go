@@ -40,6 +40,7 @@ type ShareStats struct {
 type indexedFile struct {
 	virtual string
 	local   string
+	root    string
 	wire    peer.File
 	info    os.FileInfo
 }
@@ -99,8 +100,8 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			return nil, fmt.Errorf("duplicate public share name %q", configured.Name)
 		}
 		names[strings.ToLower(name)] = struct{}{}
-		if !filepath.IsAbs(configured.Path) {
-			return nil, fmt.Errorf("share %q path must be absolute", configured.Name)
+		if strings.TrimSpace(configured.Path) != configured.Path || !filepath.IsAbs(configured.Path) {
+			return nil, fmt.Errorf("share %q path must be absolute and contain no surrounding whitespace", configured.Name)
 		}
 		cleanPath := filepath.Clean(configured.Path)
 		if _, exists := paths[cleanPath]; exists {
@@ -118,6 +119,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve absolute share %q: %w", configured.Name, err)
 		}
+		root = filepath.Clean(root)
 		rootInfo, err := os.Stat(root)
 		if err != nil {
 			return nil, fmt.Errorf("stat share %q: %w", configured.Name, err)
@@ -135,6 +137,12 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			}
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if path != root && strings.ContainsRune(entry.Name(), '\\') {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			if path != root && entry.Type()&os.ModeSymlink != 0 {
 				if entry.IsDir() {
@@ -166,10 +174,37 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			if !info.Mode().IsRegular() {
 				return nil
 			}
+			resolvedFile, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			resolvedFile, err = filepath.Abs(resolvedFile)
+			if err != nil || !pathWithinRoot(root, resolvedFile) {
+				return fmt.Errorf("share %q file escaped resolved root: %s", configured.Name, path)
+			}
+			resolvedInfo, err := os.Stat(resolvedFile)
+			if err != nil || !resolvedInfo.Mode().IsRegular() || !os.SameFile(info, resolvedInfo) {
+				return fmt.Errorf("share %q file changed while resolving: %s", configured.Name, path)
+			}
 			dirVirtual := virtualDirectory(virtual)
-			wire := peer.File{Name: virtual, Size: uint64(info.Size()), Extension: extensionOf(virtual)}
+			wire := peer.File{Name: virtual, Size: uint64(info.Size()), Extension: extensionOf(filepath.Base(path))}
 			wire.Attributes = extractTechnicalMetadata(path, info.Size(), c.logger)
-			indexed := &indexedFile{virtual: virtual, local: path, wire: wire, info: info}
+			resolvedAfter, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("re-resolve share %q file: %w", configured.Name, err)
+			}
+			resolvedAfter, err = filepath.Abs(resolvedAfter)
+			if err != nil || !pathWithinRoot(root, resolvedAfter) {
+				return fmt.Errorf("share %q file escaped resolved root during scan: %s", configured.Name, path)
+			}
+			afterInfo, err := os.Stat(resolvedAfter)
+			if err != nil || !afterInfo.Mode().IsRegular() || !os.SameFile(info, afterInfo) {
+				return fmt.Errorf("share %q file changed during scan: %s", configured.Name, path)
+			}
+			indexed := &indexedFile{virtual: virtual, local: path, root: root, wire: wire, info: info}
 			s.files[virtual] = indexed
 			s.search = append(s.search, indexed)
 			directory := s.byDirectory[dirVirtual]
@@ -217,6 +252,11 @@ func virtualDirectory(name string) string {
 func extensionOf(name string) string {
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
 	return ext
+}
+
+func pathWithinRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func normalizeVirtualPath(value string) (string, bool) {
@@ -270,8 +310,8 @@ func (h *sharingSessionHooks) frame(session *peerSession, frame sessionFrame) er
 		if err := request.Deserialize(bytes.NewReader(frame.wire)); err != nil {
 			return fmt.Errorf("deserialize shared file list request: %w", err)
 		}
-		if !session.TrySend(h.c.shareSnapshot().sharedFrame) {
-			return errors.New("share response backpressure")
+		if !session.TrySend(h.c.shareSnapshot().sharedFrame) && h.c.logger != nil {
+			h.c.logger.Debug("dropping shared file list response due to peer backpressure", "username", session.key.username)
 		}
 		return nil
 	case peer.CodeFolderContentsRequest:
@@ -279,21 +319,25 @@ func (h *sharingSessionHooks) frame(session *peerSession, frame sessionFrame) er
 		if err := request.Deserialize(bytes.NewReader(frame.wire)); err != nil {
 			return fmt.Errorf("deserialize folder contents request: %w", err)
 		}
-		msg := h.c.shareSnapshot().folderResponse(request.Token, request.Folder)
 		select {
 		case h.c.shareWorkers <- struct{}{}:
 		default:
-			return errors.New("share response worker capacity exceeded")
+			if h.c.logger != nil {
+				h.c.logger.Debug("dropping folder contents response due to worker saturation", "username", session.key.username)
+			}
+			return nil
 		}
 		if !h.c.startTracked(func() {
 			defer func() { <-h.c.shareWorkers }()
+			msg := h.c.shareSnapshot().folderResponse(request.Token, request.Folder)
 			response, err := msg.Serialize(msg)
 			if err != nil || !session.TrySend(response) {
-				session.Close(errors.New("folder contents response failed"))
+				if h.c.logger != nil {
+					h.c.logger.Debug("dropping folder contents response", "username", session.key.username, "err", err)
+				}
 			}
 		}) {
 			<-h.c.shareWorkers
-			return errors.New("share response lifecycle stopping")
 		}
 		return nil
 	default:
@@ -305,24 +349,22 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 	if username == "" || username == c.cfg.Username {
 		return
 	}
-	snapshot := c.shareSnapshot()
-	results := snapshot.match(query, maxSharedSearchResults)
-	if len(results) == 0 {
-		return
-	}
 	select {
 	case c.shareWorkers <- struct{}{}:
 	case <-c.lifecycleContext().Done():
 		return
 	default:
-		return
-	}
-	if !c.markSearchDelivery(username, token) {
-		<-c.shareWorkers
+		if c.logger != nil {
+			c.logger.Debug("dropping share search due to worker saturation", "username", username)
+		}
 		return
 	}
 	if !c.startTracked(func() {
 		defer func() { <-c.shareWorkers }()
+		results := c.shareSnapshot().match(query, maxSharedSearchResults)
+		if len(results) == 0 || !c.markSearchDelivery(username, token) {
+			return
+		}
 		ctx, cancel := context.WithTimeout(c.lifecycleContext(), c.cfg.establishTimeout)
 		defer cancel()
 		session, err := c.getOrConnectPeerSession(ctx, username)
@@ -333,11 +375,12 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 		msg := &peer.FileSearchResponse{Username: c.cfg.Username, Token: token, Results: results, FreeSlot: free, Queue: queued}
 		wire, err := msg.Serialize(msg)
 		if err != nil || !session.TrySend(wire) {
-			session.Close(errors.New("search response backpressure"))
+			if c.logger != nil {
+				c.logger.Debug("dropping share search response", "username", username, "err", err)
+			}
 		}
 	}) {
 		<-c.shareWorkers
-		return
 	}
 }
 

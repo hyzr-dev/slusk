@@ -401,6 +401,7 @@ func (c *Client) Run(ctx context.Context) error {
 		_ = ln.Close()
 		return err
 	}
+	defer c.stopLifecycle(ln)
 	if !c.startTracked(func() { c.uploads.dispatch(runCtx) }) {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before upload dispatcher start")
@@ -409,7 +410,6 @@ func (c *Client) Run(ctx context.Context) error {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before listener start")
 	}
-	defer c.stopLifecycle(ln)
 
 	for {
 		if runCtx.Err() != nil {
@@ -575,13 +575,11 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 	if err := sendToServerGeneration(c, generation, &server.GetUserStats{Username: c.cfg.Username}); err != nil {
 		return fmt.Errorf("request own user stats: %w", err)
 	}
-	// Keep download-only clients wire-compatible with the established startup
-	// exchange. Sharing clients additionally advertise their current index.
-	if len(c.cfg.SharedFolders) != 0 {
-		stats := c.shareSnapshot().stats
-		if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{Directories: stats.Directories, Files: stats.Files}); err != nil {
-			return fmt.Errorf("announce shared folders and files: %w", err)
-		}
+	// Soulseek expects an explicit index count on every authenticated session,
+	// including download-only clients with an empty index.
+	stats := c.shareSnapshot().stats
+	if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{Directories: stats.Directories, Files: stats.Files}); err != nil {
+		return fmt.Errorf("announce shared folders and files: %w", err)
 	}
 
 	readErrs := make(chan error, 1)
@@ -816,6 +814,9 @@ func (c *Client) beginLifecycle(parent context.Context) (context.Context, error)
 	if c.lifeActive {
 		return nil, errors.New("soulseek: Run already active")
 	}
+	// A new lifecycle never inherits queue or token routing state from a prior
+	// run, including a prior run that stopped during negotiation.
+	c.uploads.reset()
 	c.lifeCtx, c.lifeCancel = context.WithCancel(parent)
 	c.lifeActive = true
 	c.lifeStopping = false
@@ -865,6 +866,9 @@ func (c *Client) stopLifecycle(ln net.Listener) {
 	c.failAllAddrWaiters(context.Canceled)
 	c.failAllPendingAttempts(context.Canceled)
 	c.lifeWG.Wait()
+	// A final reset closes the race where a P-session hook enqueued work after
+	// the dispatcher observed cancellation but before sessions were closed.
+	c.uploads.reset()
 
 	c.lifeMu.Lock()
 	c.lifeActive = false

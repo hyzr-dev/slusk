@@ -38,6 +38,8 @@ path = "/shares/music"
 		"upload_slots = 0\n",
 		"[[soulseek.shared_folders]]\nname = \"../secret\"\npath = \"/shares/music\"\n",
 		"[[soulseek.shared_folders]]\nname = \"Music\"\npath = \"relative\"\n",
+		"[[soulseek.shared_folders]]\nname = \" Music\"\npath = \"/shares/music\"\n",
+		"[[soulseek.shared_folders]]\nname = \"Music\"\npath = \"/shares/music \"\n",
 	} {
 		bad := filepath.Join(t.TempDir(), "config.toml")
 		body := string(base) + "\n[soulseek]\nusername = \"me\"\npassword = \"secret\"\n" + invalid

@@ -29,6 +29,7 @@ type uploadJob struct {
 type uploadManager struct {
 	mu      sync.Mutex
 	c       *Client
+	execute func(context.Context, *uploadJob)
 	slots   int
 	active  int
 	waiting []*uploadJob
@@ -39,7 +40,7 @@ type uploadManager struct {
 }
 
 func newUploadManager(c *Client, slots int) *uploadManager {
-	return &uploadManager{c: c, slots: slots, byKey: make(map[uploadKey]*uploadJob), byToken: make(map[soul.Token]chan peer.TransferResponse), perUser: make(map[string]int), wake: make(chan struct{}, 1)}
+	return &uploadManager{c: c, execute: c.runUpload, slots: slots, byKey: make(map[uploadKey]*uploadJob), byToken: make(map[soul.Token]chan peer.TransferResponse), perUser: make(map[string]int), wake: make(chan struct{}, 1)}
 }
 
 func (m *uploadManager) notify() {
@@ -98,6 +99,7 @@ func (m *uploadManager) position(key uploadKey) (uint32, bool) {
 }
 
 func (m *uploadManager) dispatch(ctx context.Context) {
+	defer m.reset()
 	for {
 		select {
 		case <-ctx.Done():
@@ -105,6 +107,9 @@ func (m *uploadManager) dispatch(ctx context.Context) {
 		case <-m.wake:
 		}
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			m.mu.Lock()
 			if m.active >= m.slots || len(m.waiting) == 0 {
 				m.mu.Unlock()
@@ -117,13 +122,26 @@ func (m *uploadManager) dispatch(ctx context.Context) {
 			m.mu.Unlock()
 			if !m.c.startTracked(func() {
 				defer m.complete(job)
-				m.c.runUpload(ctx, job)
+				m.execute(ctx, job)
 			}) {
 				m.complete(job)
 				return
 			}
 		}
 	}
+}
+
+func (m *uploadManager) reset() {
+	m.mu.Lock()
+	for _, job := range m.byKey {
+		job.active = false
+	}
+	m.active = 0
+	m.waiting = nil
+	m.byKey = make(map[uploadKey]*uploadJob)
+	m.byToken = make(map[soul.Token]chan peer.TransferResponse)
+	m.perUser = make(map[string]int)
+	m.mu.Unlock()
 }
 
 func (m *uploadManager) complete(job *uploadJob) {

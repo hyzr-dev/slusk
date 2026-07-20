@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -183,6 +185,7 @@ func drainInitialTreeAdvertisements(conn net.Conn) error {
 		uint32(server.CodeBranchLevel),
 		uint32(server.CodeAcceptChildren),
 		uint32(server.CodeGetUserStats),
+		uint32(server.CodeSharedFoldersFiles),
 	}
 	for _, wantCode := range want {
 		code, err := readFrameCode(conn)
@@ -282,6 +285,79 @@ func TestClientLoginSuccess(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+func TestClientAlwaysAnnouncesSharedFolderFileCounts(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		folders  []SharedFolder
+		wantDir  uint32
+		wantFile uint32
+	}{
+		{name: "zero"},
+		{name: "nonzero", wantDir: 1, wantFile: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "nonzero" {
+				root := t.TempDir()
+				if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				tt.folders = []SharedFolder{{Name: "Music", Path: root}}
+			}
+			srv := newFakeServer(t)
+			observed := make(chan error, 1)
+			srv.serve(t, func(conn net.Conn) {
+				defer conn.Close()
+				if err := drainLoginRequest(conn); err != nil {
+					observed <- err
+					return
+				}
+				if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+					observed <- err
+					return
+				}
+				for _, want := range []server.Code{server.CodeSetListenPort, server.CodeHaveNoParent, server.CodeBranchRoot, server.CodeBranchLevel, server.CodeAcceptChildren, server.CodeGetUserStats} {
+					if code, err := readFrameCode(conn); err != nil || code != uint32(want) {
+						observed <- fmt.Errorf("startup code=%d want=%d err=%v", code, want, err)
+						return
+					}
+				}
+				payload, err := readFramePayload(conn)
+				if err != nil {
+					observed <- err
+					return
+				}
+				if len(payload) != 12 || binary.LittleEndian.Uint32(payload[:4]) != uint32(server.CodeSharedFoldersFiles) || binary.LittleEndian.Uint32(payload[4:8]) != tt.wantDir || binary.LittleEndian.Uint32(payload[8:12]) != tt.wantFile {
+					observed <- fmt.Errorf("shared counts payload=%x want dirs=%d files=%d", payload, tt.wantDir, tt.wantFile)
+					return
+				}
+				observed <- nil
+				_, _ = io.Copy(io.Discard, conn)
+			})
+			c := New(Config{Address: srv.addr(), Username: "me", Password: "p", SharedFolders: tt.folders}, testLogger())
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- c.Run(ctx) }()
+			select {
+			case err := <-observed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for share count announcement")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not stop")
+			}
+		})
 	}
 }
 
