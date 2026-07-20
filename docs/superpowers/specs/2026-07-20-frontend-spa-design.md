@@ -251,6 +251,12 @@ Dessa rättas vid porteringen i stället för att bevaras:
 | `failed`-statuskortet räknas men ritas aldrig | Kortet visas |
 | `pct()` saknar clamp — baren kan spilla över vid `bytesDone > bytesTotal` | Klampas till 100 % |
 | Cancel/retry kollar aldrig `res.ok` — misslyckat anrop ger ingen återkoppling | Felmeddelande visas |
+| Sökningen matchar mot en sammanslagen sträng, så en term kan träffa tvärs över fältgränsen (`Blue Miles` matchar "Kind of Blue" av "Miles Davis") | Matchning sker per fält: id, titel, artist, peer var för sig |
+
+Den fjärde raden upptäcktes under implementationen: planens kodexempel byggde en
+haystack medan planens test krävde per-fält-semantik. Haystacken är vad `dashboard.js`
+gör, men träffar tvärs över fältgränser är en oavsiktlig konsekvens av
+implementationen snarare än ett designat beteende. Per fält är mer förutsägbart.
 
 Övriga beteenden bevaras exakt, inklusive de subtila: "behåll senast kända data vid
 fel" i samtliga fetch-anrop, race-guarden som hindrar ett långsamt svar för ett
