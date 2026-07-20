@@ -10,3 +10,9 @@ docs/
 *.md
 .git/
 .superpowers/
+
+# Build artifacts — host-specific or regenerated in-image; mirrors .gitignore.
+/slskdarr
+/internal/observ/web/dist/*
+!/internal/observ/web/dist/index.html
+/web/node_modules/
