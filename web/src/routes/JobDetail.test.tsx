@@ -1,0 +1,219 @@
+import { QueryClient, QueryClientProvider, keepPreviousData } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { queryKeys } from '../api/queries';
+import type { Job, JobDetail as JobDetailDTO, JobEvent } from '../api/types';
+import { t } from '../strings';
+import JobDetail from './JobDetail';
+
+afterEach(() => vi.unstubAllGlobals());
+
+function makeJob(overrides: Partial<Job> = {}): Job {
+  return {
+    id: 1,
+    title: 'Kind of Blue',
+    artist: 'Miles Davis',
+    status: 'failed',
+    peer: '',
+    bytesDone: 0,
+    bytesTotal: 0,
+    updatedAt: '',
+    state: 'FAILED',
+    candidatesTried: 1,
+    maxCandidates: 3,
+    failReason: '',
+    nextAttemptAt: '',
+    retries: 0,
+    notBefore: '',
+    ...overrides,
+  };
+}
+
+function makeDetail(overrides: Partial<JobDetailDTO> = {}): JobDetailDTO {
+  return {
+    id: 1,
+    title: 'Kind of Blue',
+    artist: 'Miles Davis',
+    state: 'DOWNLOADING',
+    attempts: [],
+    ...overrides,
+  };
+}
+
+function renderJobDetail(path: string, client: QueryClient) {
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/jobs/:id" element={<JobDetail />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe('retry visibility', () => {
+  // Neither test needs a real network response: the query cache is seeded
+  // directly, and fetch is stubbed to a promise that never settles so the
+  // inevitable background refetch (staleTime defaults to 0) can't disturb it.
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  it('shows Retry when the live job reports FAILED, even if the cached detail does not', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'FAILED' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
+  });
+
+  it('shows Retry when the cached detail reports FAILED, even if the live job does not', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'FAILED' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
+  });
+
+  it('hides Retry when neither source reports FAILED', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByRole('button', { name: t.jobs.retry })).not.toBeInTheDocument();
+  });
+});
+
+describe('meta row: nextAttemptAt and retries', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  it('shows nextAttemptAt and retries when both are present', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(
+      queryKeys.jobs,
+      [makeJob({ nextAttemptAt: '2026-01-01T12:00:00Z', retries: 2 })],
+    );
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(t.jobs.nextAttempt(new Date('2026-01-01T12:00:00Z').toLocaleString('sv-SE')))).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.retries(2))).toBeInTheDocument();
+  });
+
+  it('hides nextAttemptAt and retries when unset', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ nextAttemptAt: '', retries: 0 })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByText(/Next attempt:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/retries/)).not.toBeInTheDocument();
+  });
+});
+
+describe('placeholder-data guard', () => {
+  // Small harness so navigating between job ids re-renders the *same*
+  // JobDetail instance (as App.tsx's route does), which is what allows
+  // TanStack Query's `placeholderData: keepPreviousData` to substitute the
+  // previous job's data in the first place.
+  function Harness() {
+    const navigate = useNavigate();
+    return (
+      <>
+        <button onClick={() => navigate('/jobs/2')}>go-to-2</button>
+        <Routes>
+          <Route path="/jobs/:id" element={<JobDetail />} />
+        </Routes>
+      </>
+    );
+  }
+
+  it("shows loading, not job 1's stale attempts, while job 2's detail is still in flight", async () => {
+    let resolveJob2Detail: (value: JobDetailDTO) => void = () => {};
+    const job2DetailPromise = new Promise<JobDetailDTO>((resolve) => {
+      resolveJob2Detail = resolve;
+    });
+
+    const job1Detail = makeDetail({
+      id: 1,
+      attempts: [
+        {
+          id: 100,
+          username: 'peer-one',
+          fileCount: 1,
+          state: 'SUCCEEDED',
+          failReason: '',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+          transfers: [],
+        },
+      ],
+    });
+
+    const jsonResponse = (body: unknown) =>
+      Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/jobs') return jsonResponse([]);
+        if (url === '/api/jobs/1/detail') return jsonResponse(job1Detail);
+        if (url === '/api/jobs/1/events') return jsonResponse([]);
+        if (url === '/api/jobs/2/detail') {
+          return job2DetailPromise.then((data) => new Response(JSON.stringify(data), { status: 200 }));
+        }
+        if (url === '/api/jobs/2/events') return jsonResponse([]);
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { placeholderData: keepPreviousData, retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/jobs/1']}>
+          <Harness />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await screen.findByText('peer-one');
+
+    fireEvent.click(screen.getByRole('button', { name: 'go-to-2' }));
+
+    // Job 2's detail fetch is still pending. Without the isPlaceholderData
+    // guard, useJobDetail(2) would return job 1's data (isLoading: false,
+    // isPlaceholderData: true) and the page would keep showing job 1's
+    // attempt, silently mislabelled as job 2's.
+    expect(screen.queryByText('peer-one')).not.toBeInTheDocument();
+    expect(screen.getAllByText(t.jobs.loading).length).toBeGreaterThan(0);
+
+    resolveJob2Detail(makeDetail({ id: 2, attempts: [] }));
+
+    await waitFor(() => expect(screen.getByText(t.jobs.noAttempts)).toBeInTheDocument());
+  });
+});

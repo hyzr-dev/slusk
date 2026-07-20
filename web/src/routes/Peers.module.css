@@ -1,0 +1,11 @@
+/* --panel-inset, not --panel: an expanded detail row is nested, recessed
+   content, not an active/elevated surface (that's --panel-raised, e.g. the
+   active nav item in Layout.module.css). */
+.detailRow { background: var(--panel-inset); }
+
+.artist {
+  font-size: 11.5px;
+  color: var(--text-detail);
+  padding: 3px 0 3px 12px;
+  font-family: var(--font-mono);
+}

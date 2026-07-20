@@ -22,13 +22,13 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	if cancel == nil {
 		cancel = func(context.Context, int64) error { return nil }
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig)
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 
 func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	for _, path := range []string{"/", "/dashboard.js", "/status", "/api/jobs", "/metrics"} {
+	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()

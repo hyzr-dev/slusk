@@ -1,0 +1,8 @@
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 15px;
+}
+.label { font-size: 12px; color: var(--text-muted); }
+.value { font-family: var(--font-mono); font-size: 28px; font-weight: 600; margin-top: 6px; }

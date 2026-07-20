@@ -7,3 +7,8 @@ config.toml
 *.db-wal
 *.db-shm
 /slskdarr
+
+# Vite build output; only the checked-in placeholder index.html is tracked.
+/internal/observ/web/dist/*
+!/internal/observ/web/dist/placeholder.html
+/web/node_modules/
