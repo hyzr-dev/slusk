@@ -96,7 +96,7 @@ func TestFailAllAddrWaiters(t *testing.T) {
 // the TOCTOU race fixed by making completePendingDial's map deletion and
 // channel delivery atomic under pendingMu (see its doc comment). It
 // simulates, deterministically, the interleaving that used to leak a
-// connection: ConnectPeer's ctx expires and its deferred
+// connection: a dial attempt's ctx expires and its deferred
 // deregisterPendingAttempt call runs strictly after a completePendingDial
 // call (standing in for a concurrent, real PierceFirewall arrival) has
 // already fully finished - deleted the token from c.pending and delivered
@@ -106,11 +106,16 @@ func TestFailAllAddrWaiters(t *testing.T) {
 // deletion and the send, so deregisterPendingAttempt's non-blocking drain
 // could run in that window, see an empty channel, and give up; the delayed
 // send then landed in a channel nobody would ever read from again, leaking
-// the socket and permanently over-counting Status().PeerConns. Actually
-// exercising that exact timing window is inherently racy, so this test
-// instead directly drives the two calls in the problematic order - which is
-// deterministic and exactly what the atomic delete-then-deliver protocol
-// must make safe regardless of timing.
+// the socket. Actually exercising that exact timing window is inherently
+// racy, so this test instead directly drives the two calls in the
+// problematic order - which is deterministic and exactly what the atomic
+// delete-then-deliver protocol must make safe regardless of timing.
+//
+// completePendingDial delivers the raw socket (plus any inbound lease), not a
+// wrapped, counted PeerConn - the receiver (ConnectPeer / connectPeerSession)
+// wraps and counts it. So PeerConns stays 0 here throughout; what this test
+// guards is that the drain closes the delivered socket rather than stranding
+// it.
 func TestCompletePendingDialThenDeregisterDoesNotLeak(t *testing.T) {
 	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
 
@@ -122,17 +127,14 @@ func TestCompletePendingDialThenDeregisterDoesNotLeak(t *testing.T) {
 	if !c.completePendingDial(token, connA) {
 		t.Fatal("completePendingDial: expected the token to match the pending attempt")
 	}
-	if got := c.Status().PeerConns; got != 1 {
-		t.Fatalf("PeerConns = %d, want 1 right after completePendingDial", got)
-	}
 
-	// Simulates ConnectPeer's ctx already having expired and its deferred
+	// Simulates the dial attempt's ctx already having expired and its deferred
 	// cleanup running after the delivery above; it must drain and close the
 	// connection rather than leave it stranded in attempt.done.
 	c.deregisterPendingAttempt(token, attempt)
 
 	if got := c.Status().PeerConns; got != 0 {
-		t.Fatalf("PeerConns = %d, want 0 after deregisterPendingAttempt drains the delivered connection", got)
+		t.Fatalf("PeerConns = %d, want 0 - the raw delivery is never counted until wrapped", got)
 	}
 
 	// The delivered connection must actually have been closed, not merely

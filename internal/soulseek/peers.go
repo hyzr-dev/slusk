@@ -46,12 +46,6 @@ func (p *PeerConn) Close() error {
 	return p.Conn.Close()
 }
 
-// newPeerConn wraps conn as an established peer connection, counting it in
-// c.peerConns until it is closed.
-func (c *Client) newPeerConn(conn net.Conn, username string, ct soul.ConnectionType) *PeerConn {
-	return c.newPeerConnWithLease(conn, username, ct, nil)
-}
-
 func (c *Client) newPeerConnWithLease(conn net.Conn, username string, ct soul.ConnectionType, lease *inboundLease) *PeerConn {
 	c.peerConns.Add(1)
 	return &PeerConn{
@@ -175,13 +169,18 @@ func (c *Client) resolvePeerAddress(ctx context.Context, username string) (serve
 	}
 }
 
-// pendingResult is delivered to an in-flight indirect ConnectPeer attempt's
-// done channel: either the peer connection completed via a matching
-// PierceFirewall (conn), or a failure (err) - the server reporting
-// CantConnectToPeer, or the server connection being lost entirely.
+// pendingResult is delivered to an in-flight indirect dial attempt's done
+// channel: either the peer connection completed via a matching PierceFirewall
+// (the raw conn plus the inbound lease it holds - the peer dialed us back
+// through our listener), or a failure (err) - the server reporting
+// CantConnectToPeer, or the server connection being lost entirely. The raw
+// socket (rather than a wrapped PeerConn) lets the receiver decide whether to
+// wrap it as a caller-owned PeerConn (ConnectPeer) or a registered peerSession
+// (getOrConnectPeerSession).
 type pendingResult struct {
-	conn *PeerConn
-	err  error
+	conn  net.Conn
+	lease *inboundLease
+	err   error
 }
 
 // pendingAttempt is one in-flight indirect (NAT-traversal) connection
@@ -235,6 +234,7 @@ func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAtte
 	case res := <-attempt.done:
 		if res.conn != nil {
 			_ = res.conn.Close()
+			res.lease.Release()
 		}
 	default:
 	}
@@ -271,29 +271,44 @@ func (c *Client) completePendingDial(token soul.Token, conn net.Conn, leases ...
 	}
 	delete(c.pending, token)
 
-	pc := c.newPeerConnWithLease(conn, attempt.username, attempt.ct, lease)
-	attempt.done <- pendingResult{conn: pc}
+	attempt.done <- pendingResult{conn: conn, lease: lease}
 	return true
 }
 
 // ConnectPeer establishes a connection to username for the given connection
-// type (typically peer.ConnectionType, "P"). It first asks the server for
-// the peer's current address and dials it directly; if that fails (e.g. the
-// peer is behind a NAT/firewall with no port forwarding), it falls back to
-// asking the server to relay a connection request to the peer, who then
-// dials us back and completes the handshake with PierceFirewall. The whole
-// attempt - address resolution, the direct dial, and the indirect fallback
-// - is bounded by Config.establishTimeout.
+// type (typically peer.ConnectionType, "P") and returns it as a caller-owned
+// PeerConn. The connection strategy - direct dial then indirect NAT-traversal
+// fallback, bounded by Config.establishTimeout - lives in dialPeer, shared with
+// getOrConnectPeerSession.
 func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.ConnectionType) (*PeerConn, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.establishTimeout)
 	defer cancel()
 
-	addr, err := c.resolvePeerAddress(ctx, username)
+	conn, lease, err := c.dialPeer(ctx, username, ct)
 	if err != nil {
 		return nil, err
 	}
+	return c.newPeerConnWithLease(conn, username, ct, lease), nil
+}
+
+// dialPeer establishes a raw TCP connection to username for connection type ct.
+// It first asks the server for the peer's current address and dials it
+// directly; if that fails (e.g. the peer is behind a NAT/firewall with no port
+// forwarding), it falls back to asking the server to relay a connection request
+// to the peer, who then dials us back and completes the handshake with
+// PierceFirewall. It returns the connected socket and, for the indirect path
+// where the peer dialed us back through our listener, the inbound lease that
+// socket holds (nil for the direct path); the caller owns both and must wrap
+// them (as a PeerConn or a peerSession) or close and release them. The whole
+// attempt is bounded by the ctx the caller supplies (ConnectPeer and
+// getOrConnectPeerSession each apply establishTimeout).
+func (c *Client) dialPeer(ctx context.Context, username string, ct soul.ConnectionType) (net.Conn, *inboundLease, error) {
+	addr, err := c.resolvePeerAddress(ctx, username)
+	if err != nil {
+		return nil, nil, err
+	}
 	if addr.IP == nil || addr.IP.IsUnspecified() || addr.Port == 0 {
-		return nil, fmt.Errorf("peer %s is offline (server reported no reachable address)", username)
+		return nil, nil, fmt.Errorf("peer %s is offline (server reported no reachable address)", username)
 	}
 
 	directAddr := net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
@@ -302,12 +317,12 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 	if directErr == nil {
 		if _, err := peer.Write(directConn, &peer.PeerInit{Username: c.cfg.Username, ConnectionType: ct}, false); err != nil {
 			_ = directConn.Close()
-			return nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
+			return nil, nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
 		}
 		if c.logger != nil {
 			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "direct")
 		}
-		return c.newPeerConn(directConn, username, ct), nil
+		return directConn, nil, nil
 	}
 
 	// Indirect (NAT-traversal) fallback: ask the server to relay a
@@ -317,25 +332,62 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 	defer c.deregisterPendingAttempt(token, attempt)
 
 	if err := sendToServer(c, &server.ConnectToPeer{Token: token, Username: username, Type: ct}); err != nil {
-		return nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and requesting an indirect connection failed: %w",
+		return nil, nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and requesting an indirect connection failed: %w",
 			username, token, directAddr, directErr, err)
 	}
 
 	select {
 	case res := <-attempt.done:
 		if res.err != nil {
-			return nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and %w",
+			return nil, nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and %w",
 				username, token, directAddr, directErr, res.err)
 		}
 		if c.logger != nil {
 			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "indirect", "direct_dial_err", directErr)
 		}
-		return res.conn, nil
+		return res.conn, res.lease, nil
 
 	case <-ctx.Done():
-		return nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and the indirect connection timed out: %w",
+		return nil, nil, fmt.Errorf("peer %s (token %d): direct dial to %s failed (%v) and the indirect connection timed out: %w",
 			username, token, directAddr, directErr, ctx.Err())
 	}
+}
+
+// getOrConnectPeerSession returns the registered ordinary "P" session for
+// username, establishing one if none exists yet. Unlike getOrEstablishSession
+// (which dials a known address for the distributed tree), it resolves the
+// peer's address via the server and falls back to the indirect NAT-traversal
+// dance, exactly like ConnectPeer - but the result is a shared, registered
+// peerSession rather than a raw PeerConn, so search (#54) and downloads (#55)
+// reuse the single "P" connection the protocol allows per peer. Concurrent
+// callers for the same peer coalesce onto one establishment.
+func (c *Client) getOrConnectPeerSession(ctx context.Context, username string) (*peerSession, error) {
+	key := sessionKey{username: username, connType: peer.ConnectionType}
+	return c.coalesceEstablish(ctx, key, func() (*peerSession, error) {
+		return c.connectPeerSession(ctx, username)
+	})
+}
+
+// connectPeerSession dials username for an ordinary "P" connection (direct or
+// via the indirect fallback) and registers the resulting socket as a peer
+// session. It mirrors establishSession but resolves the address itself; the
+// establishment is bounded by establishTimeout. If a session for the peer was
+// registered concurrently (e.g. an inbound PeerInit raced us), registerSession
+// closes our losing candidate and returns the winner.
+func (c *Client) connectPeerSession(ctx context.Context, username string) (*peerSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.establishTimeout)
+	defer cancel()
+
+	conn, lease, err := c.dialPeer(ctx, username, peer.ConnectionType)
+	if err != nil {
+		return nil, err
+	}
+	key := sessionKey{username: username, connType: peer.ConnectionType}
+	candidate := c.newSession(conn, key, sessionInitiatorLocal, sessionRoleOrdinary, 0, lease)
+	if winner := c.registerSession(candidate); winner != nil {
+		return winner, nil
+	}
+	return nil, errNoServerConnection
 }
 
 // handleConnectToPeer handles an incoming server.ConnectToPeer notification:
