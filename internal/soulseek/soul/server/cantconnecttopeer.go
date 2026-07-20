@@ -58,10 +58,17 @@ func (c *CantConnectToPeer) Deserialize(reader io.Reader) error {
 		return err
 	}
 
-	c.Username, err = internal.ReadString(reader)
+	// This message is asymmetric: clients send token+username, but the server
+	// replies with the token only when a peer could not complete our indirect
+	// connection request. A completely absent trailing username is therefore
+	// valid on receive; a present but truncated field remains malformed.
+	size, err := internal.ReadStringLen(reader)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-
-	return nil
+	c.Username, err = internal.ReadStringBody(reader, size)
+	return err
 }
