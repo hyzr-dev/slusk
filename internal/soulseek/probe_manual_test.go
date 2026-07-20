@@ -31,8 +31,11 @@ import (
 //	SLSK_PEER    username of the peer to download from
 //	SLSK_FILE    the peer's shared filename (Soulseek "\" path syntax), as
 //	             returned by a real search against SLSK_PEER
-//	SLSK_SIZE    that file's size in bytes (decimal), as reported by the
-//	             search result
+//	SLSK_SIZE    a starting estimate of the file's size in bytes; an
+//	             approximate value (e.g. a rounded figure from a search UI) is
+//	             fine, since the download uses the peer's authoritative size
+//	             from its TransferRequest and the completion check verifies
+//	             against that, not against SLSK_SIZE
 //	SLSK_DEST    local directory downloaded files are written under
 //	             (Config.DownloadDir); left in place afterward - the probe
 //	             does not clean it up, so the downloaded file can be
@@ -101,8 +104,16 @@ func TestManualDownloadProbe(t *testing.T) {
 				if statErr != nil {
 					t.Fatalf("stat completed download %s: %v", destPath, statErr)
 				}
-				if info.Size() != size {
-					t.Fatalf("completed download size = %d, want %d", info.Size(), size)
+				// The download streams the peer's authoritative size from its
+				// TransferRequest (reported here as tr.Size), not the SLSK_SIZE
+				// hint enqueued with it, so verify the file against tr.Size. That
+				// makes SLSK_SIZE only a starting estimate: a rounded value from a
+				// search UI is fine. Flag any disagreement for visibility.
+				if size != tr.Size {
+					t.Logf("note: SLSK_SIZE=%d differs from the peer's reported size %d; verifying against the peer's", size, tr.Size)
+				}
+				if info.Size() != tr.Size {
+					t.Fatalf("completed download size = %d, want %d (peer-reported)", info.Size(), tr.Size)
 				}
 				t.Logf("download completed: %s (%d bytes)", destPath, info.Size())
 				return
