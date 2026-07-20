@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -700,5 +701,36 @@ func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 	}
 	if len(got[0].Artists) != 1 || got[0].Artists[0].ArtistID != 1 {
 		t.Errorf("unexpected artist breakdown: %+v", got[0].Artists)
+	}
+}
+
+// TestMuxDoesNotSwallowUnregisteredAPIPaths exercises the real ServeMux built
+// by NewServer, not the asset handler directly. It guards against a
+// regression where a future "/api/" prefix handler swallows unregistered API
+// paths and answers them with the SPA shell instead of 404 — assets_test.go
+// only ever calls newAssetHandler() in isolation, so it can't catch that.
+func TestMuxDoesNotSwallowUnregisteredAPIPaths(t *testing.T) {
+	h := newTestHandler(prometheus.NewRegistry())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/nope", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, must not be HTML for an unregistered API path", ct)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/: status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("/: Content-Type = %q, want text/html", ct)
 	}
 }
