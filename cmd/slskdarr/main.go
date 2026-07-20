@@ -222,9 +222,19 @@ func main() {
 		}
 		return out
 	}
+	// The settings view's display config never changes at runtime (it's read
+	// once at startup, same as the rest of cfg), so the ConfigFunc closes over
+	// a single fixed value instead of re-reading the file. ReconcileInterval and
+	// MaxConcurrentDownloads have no config fields under those exact names: the
+	// closest real values are WantedSyncInterval (how often the wanted list is
+	// refreshed from Lidarr) and MaxActive (jobs simultaneously active across
+	// the pipeline).
+	appConfig := observ.NewAppConfig(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
+		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive)
+	configFn := func() observ.AppConfig { return appConfig }
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)

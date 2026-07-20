@@ -158,9 +158,10 @@ type ModulesFunc func() map[string]ModuleStatus
 // have distinct semantics.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
+	config ConfigFunc) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
@@ -168,7 +169,8 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 // and maxCandidates are engine values surfaced by the existing job API.
 func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int) http.Handler {
+	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
+	config ConfigFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +362,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
+	mux.Handle("/api/config", newConfigHandler(config))
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
