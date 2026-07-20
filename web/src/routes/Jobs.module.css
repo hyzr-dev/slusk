@@ -1,0 +1,14 @@
+.controls { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.input, .select {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.input { width: 260px; }
+.sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.bytes { font-size: 11px; color: #7c828d; margin-bottom: 3px; }
