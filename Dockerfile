@@ -1,9 +1,18 @@
-# Build stage: static, cgo-free binary.
+# Frontend stage: build the SPA before Go embeds it.
+FROM node:22 AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# Build stage: static, cgo-free binary with the SPA embedded.
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=web /internal/observ/web/dist ./internal/observ/web/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/slskdarr ./cmd/slskdarr
 
 # Runtime stage: distroless, non-root, fixed UID.
