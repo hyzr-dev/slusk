@@ -230,9 +230,11 @@ func appendSearchResult(subscription *searchSubscription, results *[]core.Search
 	}
 }
 
-// searchSessionHooks is the sole P-frame consumer. Framing has already been
-// validated by peerSession.readFrame; malformed code-9 payloads, unsupported
-// codes, and claimed-identity mismatches close only the originating P session.
+// searchSessionHooks claims only code-9 (FileSearchResponse) P-frames; any
+// other code is reported unhandled via errUnhandledPeerFrame so a sibling
+// hook in the composed dispatch can claim it. Framing has already been
+// validated by peerSession.readFrame; malformed code-9 payloads and
+// claimed-identity mismatches close only the originating P session.
 type searchSessionHooks struct {
 	searches *searchRegistry
 }
@@ -241,10 +243,12 @@ func (*searchSessionHooks) established(*peerSession) {}
 
 func (h *searchSessionHooks) frame(session *peerSession, frame sessionFrame) error {
 	if frame.connType != peer.ConnectionType {
-		return nil
+		return errUnhandledPeerFrame
 	}
 	if frame.code != int(peer.CodeFileSearchResponse) {
-		return fmt.Errorf("unsupported ordinary peer code %d", frame.code)
+		// Not a search response; this hook doesn't own the code (it may belong
+		// to a sibling hook, e.g. the download hooks in a later group).
+		return errUnhandledPeerFrame
 	}
 
 	response := &peer.FileSearchResponse{}

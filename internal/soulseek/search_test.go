@@ -517,6 +517,35 @@ func TestSearchHookOneLargeResponseNeverBlocksPeerReader(t *testing.T) {
 	}
 }
 
+// TestSearchHookNonResponseCodeIsUnhandled locks in the claim-sentinel
+// contract: searchSessionHooks only owns code 9 (FileSearchResponse). Any
+// other P code — including download codes owned by a future hook — must be
+// reported as unclaimed via errUnhandledPeerFrame rather than a hard error,
+// so a sibling hook in the composed dispatch gets a chance to claim it.
+func TestSearchHookNonResponseCodeIsUnhandled(t *testing.T) {
+	hook := &searchSessionHooks{searches: newSearchRegistry()}
+	session := &peerSession{key: sessionKey{username: "peer", connType: peer.ConnectionType}}
+	err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeTransferRequest)})
+	if !errors.Is(err, errUnhandledPeerFrame) {
+		t.Fatalf("searchSessionHooks.frame(TransferRequest) = %v, want errUnhandledPeerFrame", err)
+	}
+}
+
+// TestComposedSessionHooksUnknownCodeStillClosesSession complements
+// TestSearchPeerHookLargeResponseMappingAndSessionIsolation: even once every
+// registered hook can decline a frame it doesn't own via errUnhandledPeerFrame,
+// a code no hook claims must still fail the frame (and thus close the
+// session) rather than being silently accepted. This is the lease-abuse
+// protection the claim-sentinel refactor must preserve.
+func TestComposedSessionHooksUnknownCodeStillClosesSession(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	session := &peerSession{key: sessionKey{username: "peer", connType: peer.ConnectionType}}
+	err := c.sessionHooks.frame(session, sessionFrame{connType: peer.ConnectionType, code: 0xffff})
+	if err == nil {
+		t.Fatal("composed session hooks did not error on an unclaimed peer code")
+	}
+}
+
 func TestSearchNumericChecksAndShutdownFailure(t *testing.T) {
 	if _, ok := mapSearchResult("u", false, 0, 0, peer.File{Name: "huge", Size: uint64(math.MaxInt64) + 1}); ok {
 		t.Fatal("uint64 size above MaxInt64 was mapped")

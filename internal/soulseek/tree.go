@@ -36,11 +36,25 @@ func (h composedSessionHooks) established(s *peerSession) {
 	}
 }
 
+// frame gives each hook a chance to claim the frame's code. A hook signals
+// "not mine" via errUnhandledPeerFrame so the next hook can try; any other
+// error is fatal and closes the session immediately. If no hook claims the
+// code, the session is still closed — an unclaimed code is unsupported, not
+// silently ignored.
 func (h composedSessionHooks) frame(s *peerSession, frame sessionFrame) error {
+	handled := false
 	for _, hook := range h {
-		if err := hook.frame(s, frame); err != nil {
+		switch err := hook.frame(s, frame); {
+		case err == nil:
+			handled = true
+		case errors.Is(err, errUnhandledPeerFrame):
+			// This hook doesn't own the code; let another hook try.
+		default:
 			return err
 		}
+	}
+	if !handled {
+		return fmt.Errorf("unsupported peer code %d", frame.code)
 	}
 	return nil
 }
@@ -433,7 +447,7 @@ func (t *distributedTree) childByUsernameLocked(username string) (*peerSession, 
 
 func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error {
 	if frame.connType != distributed.ConnectionType {
-		return nil
+		return errUnhandledPeerFrame
 	}
 
 	t.mu.Lock()

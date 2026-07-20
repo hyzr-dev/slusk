@@ -64,14 +64,21 @@ type sessionFrame struct {
 	wire     []byte
 }
 
-// sessionHooks is the narrow integration seam for the tree and search
-// workers. Hooks run without component locks held. Returning an error from
-// frame closes only that peer session.
+// sessionHooks is the narrow integration seam for the tree, search, and
+// (future) download workers. Hooks run without component locks held.
+// Returning an error from frame closes only that peer session.
 type sessionHooks interface {
 	established(*peerSession)
 	frame(*peerSession, sessionFrame) error
 	closed(*peerSession, error)
 }
+
+// errUnhandledPeerFrame is returned by an individual hook's frame method to
+// signal that the frame's code is not owned by that hook, so the composed
+// dispatch should offer it to the next hook instead of closing the session.
+// It must never escape composedSessionHooks.frame: a code no hook claims is
+// itself an error (see composedSessionHooks.frame in tree.go).
+var errUnhandledPeerFrame = errors.New("soulseek: peer frame not handled by this hook")
 
 type discardSessionHooks struct{}
 
