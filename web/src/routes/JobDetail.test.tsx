@@ -98,6 +98,41 @@ describe('retry visibility', () => {
   });
 });
 
+describe('meta row: nextAttemptAt and retries', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  it('shows nextAttemptAt and retries when both are present', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(
+      queryKeys.jobs,
+      [makeJob({ nextAttemptAt: '2026-01-01T12:00:00Z', retries: 2 })],
+    );
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(t.jobs.nextAttempt(new Date('2026-01-01T12:00:00Z').toLocaleString('sv-SE')))).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.retries(2))).toBeInTheDocument();
+  });
+
+  it('hides nextAttemptAt and retries when unset', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ nextAttemptAt: '', retries: 0 })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByText(/Next attempt:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/retries/)).not.toBeInTheDocument();
+  });
+});
+
 describe('placeholder-data guard', () => {
   // Small harness so navigating between job ids re-renders the *same*
   // JobDetail instance (as App.tsx's route does), which is what allows

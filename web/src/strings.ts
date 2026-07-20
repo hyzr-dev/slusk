@@ -81,6 +81,8 @@ export const t = {
     retryFailed: 'Could not retry the job. Only failed jobs can be retried.',
     sleepingUntil: (time: string) => `Sleeping until ${time}`,
     candidates: (tried: number, max: number) => `${tried} of ${max} candidates tried`,
+    nextAttempt: (time: string) => `Next attempt: ${time}`,
+    retries: (n: number) => `${n} retries`,
   },
   events: {
     filterPlaceholder: 'Filter events…',

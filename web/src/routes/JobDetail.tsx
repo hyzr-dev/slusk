@@ -72,11 +72,15 @@ export default function JobDetail() {
                 {t.jobs.sleepingUntil(formatShortTime(sleepingUntil))}
               </span>
             )}
+            {job.nextAttemptAt && <span>{t.jobs.nextAttempt(formatDateTime(job.nextAttemptAt))}</span>}
           </div>
           {(job.status === 'queued' || job.status === 'failed') && job.maxCandidates > 0 && (
             <div className={styles.candidates}>
               {t.jobs.candidates(job.candidatesTried, job.maxCandidates)}
             </div>
+          )}
+          {job.retries > 0 && (
+            <div className={styles.candidates}>{t.jobs.retries(job.retries)}</div>
           )}
           {job.failReason && <div className={styles.failReason}>{job.failReason}</div>}
         </>
