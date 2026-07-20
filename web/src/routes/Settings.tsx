@@ -25,21 +25,37 @@ export default function Settings() {
       </section>
 
       <section className={styles.group}>
-        <h2 className={styles.groupTitle}>{t.settings.reconcile}</h2>
-        <Field label={t.settings.interval} value={config?.reconcileInterval ?? '—'} />
+        <h2 className={styles.groupTitle}>{t.settings.pipeline}</h2>
         <Field
-          label={t.settings.concurrentDownloads}
-          value={String(config?.maxConcurrentDownloads ?? '—')}
+          label={t.settings.wantedSyncInterval}
+          configKey={t.settings.configKeys.wantedSyncInterval}
+          value={config?.wantedSyncInterval ?? '—'}
+        />
+        <Field
+          label={t.settings.maxActive}
+          configKey={t.settings.configKeys.maxActive}
+          value={String(config?.maxActive ?? '—')}
         />
       </section>
     </>
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function Field({
+  label,
+  configKey,
+  value,
+}: {
+  label: string;
+  configKey?: string;
+  value: string;
+}) {
   return (
     <div className={styles.field}>
-      <label className={styles.label}>{label}</label>
+      <label className={styles.label}>
+        {label}
+        {configKey && <span className={styles.key}> ({configKey})</span>}
+      </label>
       <input className={styles.input} value={value} disabled readOnly />
     </div>
   );

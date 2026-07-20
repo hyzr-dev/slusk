@@ -104,9 +104,16 @@ export const t = {
     apiKey: 'API key',
     apiKeyHidden: 'Configured (hidden)',
     apiKeyMissing: 'Not configured',
-    reconcile: 'Reconcile',
-    interval: 'Interval',
-    concurrentDownloads: 'Concurrent downloads',
+    pipeline: 'Pipeline',
+    wantedSyncInterval: 'Wanted sync interval',
+    maxActive: 'Max active jobs',
+    // Real TOML keys (config.example.toml [pipeline]), shown alongside the
+    // human-readable labels above so a user can find the setting they see
+    // here in the file they'd actually edit.
+    configKeys: {
+      wantedSyncInterval: 'wanted_sync_interval',
+      maxActive: 'max_active',
+    },
   },
 } as const;
 

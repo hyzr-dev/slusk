@@ -10,22 +10,27 @@ import (
 
 // AppConfig is the subset of configuration the settings view displays. The
 // Lidarr API key is unexported so it can never be marshalled by accident.
+//
+// Field names mirror the [pipeline] TOML keys they come from
+// (WantedSyncInterval <-> wanted_sync_interval, MaxActive <-> max_active) so
+// the settings view can display something that matches the config file the
+// user actually edits.
 type AppConfig struct {
-	LidarrURL              string `json:"lidarrUrl"`
-	ReconcileInterval      string `json:"reconcileInterval"`
-	MaxConcurrentDownloads int    `json:"maxConcurrentDownloads"`
+	LidarrURL          string `json:"lidarrUrl"`
+	WantedSyncInterval string `json:"wantedSyncInterval"`
+	MaxActive          int    `json:"maxActive"`
 
 	lidarrAPIKey string
 }
 
 // NewAppConfig builds the display config, keeping the API key out of the
 // marshalled surface.
-func NewAppConfig(lidarrURL, lidarrAPIKey, reconcileInterval string, maxConcurrent int) AppConfig {
+func NewAppConfig(lidarrURL, lidarrAPIKey, wantedSyncInterval string, maxActive int) AppConfig {
 	return AppConfig{
-		LidarrURL:              lidarrURL,
-		ReconcileInterval:      reconcileInterval,
-		MaxConcurrentDownloads: maxConcurrent,
-		lidarrAPIKey:           lidarrAPIKey,
+		LidarrURL:          lidarrURL,
+		WantedSyncInterval: wantedSyncInterval,
+		MaxActive:          maxActive,
+		lidarrAPIKey:       lidarrAPIKey,
 	}
 }
 

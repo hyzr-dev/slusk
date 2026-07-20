@@ -10,10 +10,10 @@ import (
 
 func TestConfigHandlerNeverLeaksTheAPIKey(t *testing.T) {
 	cfg := AppConfig{
-		LidarrURL:              "http://lidarr:8686",
-		lidarrAPIKey:           "super-secret-value",
-		ReconcileInterval:      "5m",
-		MaxConcurrentDownloads: 3,
+		LidarrURL:          "http://lidarr:8686",
+		lidarrAPIKey:       "super-secret-value",
+		WantedSyncInterval: "5m",
+		MaxActive:          3,
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
@@ -30,7 +30,7 @@ func TestConfigHandlerNeverLeaksTheAPIKey(t *testing.T) {
 	var got struct {
 		LidarrURL              string `json:"lidarrUrl"`
 		LidarrAPIKeyConfigured bool   `json:"lidarrApiKeyConfigured"`
-		MaxConcurrentDownloads int    `json:"maxConcurrentDownloads"`
+		MaxActive              int    `json:"maxActive"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)

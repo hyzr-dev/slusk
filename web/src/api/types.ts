@@ -113,10 +113,15 @@ export interface StatusReport {
   moduleDetails: Record<string, ModuleStatus>;
 }
 
-/** GET /api/config — see Task 14. Secrets are never sent, only their presence. */
+/**
+ * GET /api/config — see Task 14. Secrets are never sent, only their
+ * presence. Field names mirror the [pipeline] TOML keys (internal/observ/
+ * config.go AppConfig) so the settings view can display something that
+ * matches the config file the user actually edits.
+ */
 export interface AppConfig {
   lidarrUrl: string;
   lidarrApiKeyConfigured: boolean;
-  reconcileInterval: string;
-  maxConcurrentDownloads: number;
+  wantedSyncInterval: string;
+  maxActive: number;
 }
