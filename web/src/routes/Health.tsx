@@ -22,23 +22,27 @@ export default function Health() {
           </tr>
         </thead>
         <tbody>
-          {names.map((name) => {
-            const m = modules[name];
-            const label = m.lastAttempt ? formatTime(m.lastAttempt) : t.health.neverRun;
-            return (
-              <tr key={name}>
-                <td className={table.td}>{name}</td>
-                <td
-                  className={`${table.td} ${m.ready ? '' : styles.unhealthy}`}
-                  title={m.lastError}
-                >
-                  {label}
-                  {m.consecutiveFailures > 0 &&
-                    ` (${t.health.consecutiveFailures(m.consecutiveFailures)})`}
-                </td>
-              </tr>
-            );
-          })}
+          {names.length === 0 ? (
+            <tr><td className={table.empty} colSpan={2}>{t.health.empty}</td></tr>
+          ) : (
+            names.map((name) => {
+              const m = modules[name];
+              const label = m.lastAttempt ? formatTime(m.lastAttempt) : t.health.neverRun;
+              return (
+                <tr key={name}>
+                  <td className={table.td}>{name}</td>
+                  <td
+                    className={`${table.td} ${m.ready ? '' : styles.unhealthy}`}
+                    title={m.lastError}
+                  >
+                    {label}
+                    {m.consecutiveFailures > 0 &&
+                      ` (${t.health.consecutiveFailures(m.consecutiveFailures)})`}
+                  </td>
+                </tr>
+              );
+            })
+          )}
         </tbody>
       </table>
     </>

@@ -100,6 +100,7 @@ export const t = {
   health: {
     neverRun: 'Never run',
     consecutiveFailures: (n: number) => `${n} consecutive failures`,
+    empty: 'No modules reported.',
   },
   settings: {
     readOnlyNotice:
