@@ -155,7 +155,7 @@ type ModulesFunc func() map[string]ModuleStatus
 
 // NewServer returns the observability handler with the same function used for
 // both health checks. Call NewServerWithReadiness when liveness and readiness
-// have distinct semantics.
+// have distinct semantics. See that function for the config parameter.
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
@@ -166,7 +166,9 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
 // /healthz, /readyz, the dashboard APIs, and the dashboard UI. failedRetryAfter
-// and maxCandidates are engine values surfaced by the existing job API.
+// and maxCandidates are engine values surfaced by the existing job API. config
+// supplies the read-only view of the running configuration served at
+// /api/config; it never carries secrets — see AppConfig.
 func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
