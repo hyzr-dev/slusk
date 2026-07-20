@@ -2,6 +2,10 @@
   --bg: #0b0d10;
   --panel: #14171c;
   --panel-raised: #1a1f26;
+  /* Recessed surfaces — nested disclosure content such as expanded detail
+     rows — not elevated ones. Use --panel-raised for elevated/active
+     surfaces instead. */
+  --panel-inset: #0e1115;
   --border: #21252e;
   --border-subtle: #191d24;
   --text: #dfe2e8;

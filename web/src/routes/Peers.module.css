@@ -1,7 +1,7 @@
-/* --panel-raised, not --panel: an expanded detail row is an active surface
-   (same rationale as the active nav item in Layout.module.css), so it should
-   read as raised rather than as ordinary panel chrome. */
-.detailRow { background: var(--panel-raised); }
+/* --panel-inset, not --panel: an expanded detail row is nested, recessed
+   content, not an active/elevated surface (that's --panel-raised, e.g. the
+   active nav item in Layout.module.css). */
+.detailRow { background: var(--panel-inset); }
 
 .artist {
   font-size: 11.5px;
