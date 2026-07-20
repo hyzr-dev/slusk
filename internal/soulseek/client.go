@@ -140,6 +140,7 @@ type Client struct {
 
 	tokens       *tokenAllocator
 	sessions     *sessionRegistry
+	searches     *searchRegistry
 	tree         *distributedTree
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
@@ -205,12 +206,13 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		pending:        make(map[soul.Token]*pendingAttempt),
 		tokens:         newTokenAllocator(),
 		sessions:       newSessionRegistry(nil),
+		searches:       newSearchRegistry(),
 		inboundSlots:   make(chan struct{}, cfg.inboundPeerLimit),
 		handshakeConns: make(map[net.Conn]struct{}),
 		establishes:    make(map[sessionKey]*sessionEstablishment),
 	}
 	c.tree = newDistributedTree(c)
-	c.sessionHooks = composedSessionHooks{c.tree, discardSessionHooks{}}
+	c.sessionHooks = composedSessionHooks{c.tree, &searchSessionHooks{searches: c.searches}}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
@@ -447,6 +449,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		c.serverWriteMu.Unlock()
 		c.tree.deactivate(generation)
 		c.sessions.CloseGeneration("D", generation, errNoServerConnection)
+		c.searches.failGeneration(generation, errNoServerConnection)
 		c.failAllAddrWaiters(errNoServerConnection)
 		c.failAllPendingAttempts(errNoServerConnection)
 	}()
@@ -727,6 +730,7 @@ func (c *Client) stopLifecycle(ln net.Listener) {
 	_ = ln.Close()
 	c.closeHandshakes()
 	c.sessions.CloseAll(context.Canceled)
+	c.searches.failAll(context.Canceled)
 	c.failAllAddrWaiters(context.Canceled)
 	c.failAllPendingAttempts(context.Canceled)
 	c.lifeWG.Wait()
