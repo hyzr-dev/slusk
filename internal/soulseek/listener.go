@@ -6,23 +6,50 @@ import (
 	"net"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
-// acceptPeerErrBackoff is how long acceptPeers pauses after an Accept error
-// other than shutdown before retrying, so a persistent failure (e.g. the
-// process hitting its file descriptor limit) cannot busy-spin the loop.
+// acceptPeerErrBackoff is how long acceptPeers pauses after a transient
+// Accept error so a persistent descriptor failure cannot busy-spin.
 const acceptPeerErrBackoff = 100 * time.Millisecond
 
-// acceptPeers accepts incoming peer connections on ln until it is closed
-// (which Run does when ctx is cancelled or Run itself returns). Each
-// accepted connection is handed to handlePeerConn in its own goroutine so a
-// slow or malicious peer cannot stall other connections; per-connection
-// goroutines (and the mirror dial-back goroutines started from
-// handleConnectToPeer in peers.go) are deliberately not joined on shutdown -
-// they are time-bounded by peerInitTimeout/peerDialTimeout and ctx
-// cancellation respectively, so leaving them to exit on their own is
-// simpler than plumbing a WaitGroup through for no real benefit.
+func (c *Client) acquireInboundLease() *inboundLease {
+	select {
+	case c.inboundSlots <- struct{}{}:
+		return &inboundLease{release: func() { <-c.inboundSlots }}
+	default:
+		return nil
+	}
+}
+
+func (c *Client) trackHandshake(conn net.Conn) {
+	c.handshakeMu.Lock()
+	c.handshakeConns[conn] = struct{}{}
+	c.handshakeMu.Unlock()
+}
+
+func (c *Client) untrackHandshake(conn net.Conn) {
+	c.handshakeMu.Lock()
+	delete(c.handshakeConns, conn)
+	c.handshakeMu.Unlock()
+}
+
+func (c *Client) closeHandshakes() {
+	c.handshakeMu.Lock()
+	conns := make([]net.Conn, 0, len(c.handshakeConns))
+	for conn := range c.handshakeConns {
+		conns = append(conns, conn)
+	}
+	c.handshakeMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// acceptPeers admits at most the client-wide cap. A permit is acquired before
+// a handshake goroutine starts and remains attached to an internally retained
+// inbound session (or caller-owned indirect PeerConn) until that owner closes.
 func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -37,24 +64,29 @@ func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
 			continue
 		}
 
-		go c.handlePeerConn(conn)
+		lease := c.acquireInboundLease()
+		if lease == nil {
+			_ = conn.Close()
+			continue
+		}
+		c.trackHandshake(conn)
+		if !c.startTracked(func() { c.handlePeerConn(ctx, conn, lease) }) {
+			c.untrackHandshake(conn)
+			_ = conn.Close()
+			lease.Release()
+		}
 	}
 }
 
-// handlePeerConn reads the first frame of a freshly accepted peer
-// connection - a PeerInit (a peer connecting to us directly) or a
-// PierceFirewall (a peer completing a connection we asked the server to
-// relay, see peers.go's indirect ConnectPeer path) - bounded by
-// peerInitTimeout so a connection that never sends anything cannot leak.
-//
-// Full handling of an established peer connection (queued transfers,
-// uploads, shared file listings, ...) is not implemented yet; every path
-// below logs and closes the connection. See #54.
-func (c *Client) handlePeerConn(conn net.Conn) {
+// handlePeerConn completes the init handshake before transferring the socket
+// to exactly one owner. Unsupported types and unknown tokens are closed.
+func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inboundLease) {
 	claimed := false
 	defer func() {
+		c.untrackHandshake(conn)
 		if !claimed {
 			_ = conn.Close()
+			lease.Release()
 		}
 	}()
 
@@ -62,7 +94,7 @@ func (c *Client) handlePeerConn(conn net.Conn) {
 		return
 	}
 
-	reader, _, code, err := peer.Read(peer.CodeInit(0), conn, false)
+	reader, _, code, err := peer.ReadLimited(peer.CodeInit(0), conn, false, maxPeerInitFrameSize)
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Debug("read peer init frame", "remote", conn.RemoteAddr(), "err", err)
@@ -74,21 +106,12 @@ func (c *Client) handlePeerConn(conn net.Conn) {
 	case peer.CodePierceFirewall:
 		pf := &peer.PierceFirewall{}
 		if err := pf.Deserialize(reader); err != nil {
-			if c.logger != nil {
-				c.logger.Debug("deserialize pierce firewall", "remote", conn.RemoteAddr(), "err", err)
-			}
 			return
 		}
 		if err := conn.SetReadDeadline(time.Time{}); err != nil {
-			if c.logger != nil {
-				c.logger.Debug("clear read deadline after pierce firewall", "remote", conn.RemoteAddr(), "err", err)
-			}
 			return
 		}
-		if c.completePendingDial(pf.Token, conn) {
-			// Ownership of conn has passed to the matching ConnectPeer call
-			// (delivered via its pendingAttempt.done channel); this
-			// goroutine must not close it.
+		if c.completePendingDial(pf.Token, conn, lease) {
 			claimed = true
 			return
 		}
@@ -99,13 +122,38 @@ func (c *Client) handlePeerConn(conn net.Conn) {
 	case peer.CodePeerInit:
 		pi := &peer.PeerInit{}
 		if err := pi.Deserialize(reader); err != nil {
-			if c.logger != nil {
-				c.logger.Debug("deserialize peer init", "remote", conn.RemoteAddr(), "err", err)
-			}
 			return
 		}
+		if pi.Username == "" || len(pi.Username) > maxPeerUsernameSize {
+			return
+		}
+		if pi.ConnectionType != peer.ConnectionType && pi.ConnectionType != distributed.ConnectionType {
+			return
+		}
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			return
+		}
+		role := sessionRoleOrdinary
+		var generation uint64
+		if pi.ConnectionType == distributed.ConnectionType {
+			role = sessionRoleChild
+			c.mu.Lock()
+			if c.serverConn != nil {
+				generation = c.serverGeneration
+			}
+			c.mu.Unlock()
+			if generation == 0 {
+				return
+			}
+		}
+		candidate := c.newSession(conn, sessionKey{username: pi.Username, connType: pi.ConnectionType}, sessionInitiatorRemote, role, generation, lease)
+		winner := c.registerSession(candidate)
+		claimed = true
+		if winner != nil && pi.ConnectionType == distributed.ConnectionType && winner.generation == generation && !c.isServerGenerationActive(generation) {
+			winner.Close(errNoServerConnection)
+		}
 		if c.logger != nil {
-			c.logger.Info("incoming peer connection", "username", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
+			c.logger.Info("incoming peer session", "username", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
 		}
 
 	default:

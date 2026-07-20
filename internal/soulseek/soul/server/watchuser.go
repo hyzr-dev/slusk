@@ -18,6 +18,7 @@ type WatchUser struct {
 	Status       UserStatus
 	AverageSpeed int
 	UploadNumber int
+	Unknown      uint32
 	Files        int
 	Directories  int
 	CountryCode  string
@@ -76,6 +77,11 @@ func (w *WatchUser) Deserialize(reader io.Reader) error {
 		}
 
 		w.UploadNumber, err = internal.ReadUint32ToInt(reader)
+		if err != nil {
+			return err
+		}
+
+		w.Unknown, err = internal.ReadUint32(reader)
 		if err != nil {
 			return err
 		}

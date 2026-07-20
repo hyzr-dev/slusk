@@ -10,7 +10,12 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
 )
 
-const CodePeerInit CodeInit = 1
+const (
+	CodePeerInit CodeInit = 1
+	// MaxPeerInitUsernameSize bounds the identity retained for a peer session.
+	MaxPeerInitUsernameSize       uint32 = 1024
+	maxPeerInitConnectionTypeSize uint32 = 1
+)
 
 // PeerInit code 1 message is sent to initiate a direct connection to another peer.
 type PeerInit struct {
@@ -21,6 +26,16 @@ type PeerInit struct {
 
 // Serialize accepts a PeerInit and returns a message packed as a byte slice.
 func (p *PeerInit) Serialize(message *PeerInit) ([]byte, error) {
+	if message.Username == "" {
+		return nil, errors.New("peer init username must be nonempty")
+	}
+	if len(message.Username) > int(MaxPeerInitUsernameSize) {
+		return nil, fmt.Errorf("%w: peer init username exceeds %d bytes", soul.ErrMessageTooLarge, MaxPeerInitUsernameSize)
+	}
+	if len(message.ConnectionType) != int(maxPeerInitConnectionTypeSize) {
+		return nil, errors.New("peer init connection type must be one byte")
+	}
+
 	buf := new(bytes.Buffer)
 	err := internal.WriteUint8(buf, uint8(CodePeerInit))
 	if err != nil {
@@ -62,12 +77,29 @@ func (p *PeerInit) Deserialize(reader io.Reader) error {
 			fmt.Errorf("expected code %d, got %d", CodePeerInit, code))
 	}
 
-	p.Username, err = internal.ReadString(reader)
+	usernameSize, err := internal.ReadStringLen(reader)
+	if err != nil {
+		return err
+	}
+	if usernameSize == 0 {
+		return errors.New("peer init username must be nonempty")
+	}
+	if usernameSize > MaxPeerInitUsernameSize {
+		return fmt.Errorf("%w: peer init username exceeds %d bytes", soul.ErrMessageTooLarge, MaxPeerInitUsernameSize)
+	}
+	p.Username, err = internal.ReadStringBody(reader, usernameSize)
 	if err != nil {
 		return err
 	}
 
-	connType, err := internal.ReadString(reader)
+	connectionTypeSize, err := internal.ReadStringLen(reader)
+	if err != nil {
+		return err
+	}
+	if connectionTypeSize != maxPeerInitConnectionTypeSize {
+		return errors.New("peer init connection type must be one byte")
+	}
+	connType, err := internal.ReadStringBody(reader, connectionTypeSize)
 	if err != nil {
 		return err
 	}

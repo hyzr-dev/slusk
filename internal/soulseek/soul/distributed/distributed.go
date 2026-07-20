@@ -23,7 +23,14 @@ type Code int
 // and the code of the message. It then reads the message from the connection and
 // returns the message, the size of the message, the code of the message and an error.
 func Read(connection io.Reader) (io.Reader, int, Code, error) {
-	r, s, c, err := internal.MessageRead(internal.CodeDistributed(0), connection, false)
+	return ReadLimited(connection, internal.MaxMessageSize)
+}
+
+// ReadLimited reads a distributed frame with a caller-selected declared-size
+// limit, allowing session owners to reject oversized declarations before
+// buffering their payloads.
+func ReadLimited(connection io.Reader, maxMessageSize uint32) (io.Reader, int, Code, error) {
+	r, s, c, err := internal.MessageReadLimited(internal.CodeDistributed(0), connection, false, maxMessageSize)
 	return r, int(s), Code(c), err
 }
 

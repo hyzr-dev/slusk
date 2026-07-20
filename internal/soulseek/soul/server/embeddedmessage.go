@@ -13,9 +13,9 @@ import (
 const CodeEmbeddedMessage Code = 93
 
 // EmbeddedMessage code 93, the server sends us an embedded distributed message. The only
-// type of distributed message sent at present is DistribSearch (distributed code 3).
-// If we receive such a message, we are a branch root in the distributed network,
-// and we distribute the embedded message (not the unpacked distributed message) to our child peers.
+// type sent at present is DistribSearch (distributed code 3). Receiving it makes us a
+// branch root. Current Nicotine+ and corrected SoulseekQt behavior unpack the wrapper and
+// forward the raw inner distributed message to child peers.
 type EmbeddedMessage struct {
 	Code    distributed.Code
 	Message []byte
@@ -43,12 +43,7 @@ func (e *EmbeddedMessage) Deserialize(reader io.Reader) error {
 	}
 
 	e.Code = distributed.Code(embeddedCode)
-
-	e.Message, err = internal.ReadBytes(reader)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	e.Message, err = io.ReadAll(reader)
+	return err
 
 }

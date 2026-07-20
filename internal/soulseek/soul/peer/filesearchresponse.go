@@ -13,6 +13,15 @@ import (
 
 const CodeFileSearchResponse Code = 9
 
+const (
+	maxFileSearchResponseDecompressedSize = 16 << 20
+	maxFileSearchResponseFiles            = 4096
+	maxFileSearchResponseAttributes       = 32
+	maxFileSearchResponseStringSize       = 1 << 20
+)
+
+var errUnexpectedFileSearchResponseData = errors.New("unexpected data after file search response")
+
 // FileSearchResponse code 9 peer sends this message when it has a file search match.
 // The token is taken from original FileSearch, UserSearch or RoomSearch server message.
 type FileSearchResponse struct {
@@ -165,116 +174,175 @@ func (f *FileSearchResponse) Deserialize(reader io.Reader) error {
 			fmt.Errorf("expected code %d, got %d", CodeFileSearchResponse, code))
 	}
 
-	zr, err := zlib.NewReader(reader)
+	decompressed, err := readFileSearchResponsePayload(reader)
 	if err != nil {
 		return err
 	}
 
-	defer zr.Close()
+	payload := bytes.NewReader(decompressed)
+	*f = FileSearchResponse{}
 
-	f.Username, err = internal.ReadString(zr)
+	f.Username, err = readFileSearchResponseString(payload)
 	if err != nil {
 		return err
 	}
 
-	f.Token, err = internal.ReadUint32ToToken(zr)
+	f.Token, err = internal.ReadUint32ToToken(payload)
 	if err != nil {
 		return err
 	}
 
-	results, err := internal.ReadUint32(zr)
+	results, err := internal.ReadUint32(payload)
 	if err != nil {
 		return err
 	}
 
-	f.Results, err = f.walkRead(results, zr)
+	f.Results, err = f.walkRead(results, payload)
 	if err != nil {
 		return err
 	}
 
-	f.FreeSlot, err = internal.ReadBool(zr)
+	f.FreeSlot, err = internal.ReadBool(payload)
 	if err != nil {
 		return err
 	}
 
-	f.AverageSpeed, err = internal.ReadUint32ToInt(zr)
+	f.AverageSpeed, err = internal.ReadUint32ToInt(payload)
 	if err != nil {
 		return err
 	}
 
-	f.Queue, err = internal.ReadUint32ToInt(zr)
+	f.Queue, err = internal.ReadUint32ToInt(payload)
 	if err != nil {
 		return err
 	}
 
-	_, err = internal.ReadUint32(zr)
+	// Nicotine+ treats both tail components independently as optional when no
+	// decompressed content remains. Only a clean EOF at a field boundary is
+	// accepted; a partial uint32 or a truncated declared file remains an error.
+	_, err = internal.ReadUint32(payload)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 
-	privateResults, err := internal.ReadUint32(zr)
+	privateResults, err := internal.ReadUint32(payload)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 
-	f.PrivateResults, err = f.walkRead(privateResults, zr)
+	f.PrivateResults, err = f.walkRead(privateResults, payload)
 	if err != nil {
 		return err
 	}
 
-	return err
+	if payload.Len() != 0 {
+		return errUnexpectedFileSearchResponseData
+	}
+
+	return nil
 }
 
-func (f *FileSearchResponse) walkRead(numberOfFiles uint32, zr io.ReadCloser) (files []File, err error) {
+func readFileSearchResponsePayload(reader io.Reader) ([]byte, error) {
+	zr, err := zlib.NewReader(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	decompressed, readErr := io.ReadAll(io.LimitReader(zr, maxFileSearchResponseDecompressedSize+1))
+	closeErr := zr.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(decompressed) > maxFileSearchResponseDecompressedSize {
+		return nil, fmt.Errorf("%w: decompressed file search response exceeds %d bytes", soul.ErrMessageTooLarge, maxFileSearchResponseDecompressedSize)
+	}
+
+	return decompressed, nil
+}
+
+func readFileSearchResponseString(reader io.Reader) (string, error) {
+	size, err := internal.ReadStringLen(reader)
+	if err != nil {
+		return "", err
+	}
+	if size > maxFileSearchResponseStringSize {
+		return "", fmt.Errorf("%w: file search response string exceeds %d bytes", soul.ErrMessageTooLarge, maxFileSearchResponseStringSize)
+	}
+
+	return internal.ReadStringBody(reader, size)
+}
+
+func (f *FileSearchResponse) walkRead(numberOfFiles uint32, reader io.Reader) ([]File, error) {
+	if numberOfFiles > maxFileSearchResponseFiles {
+		return nil, fmt.Errorf("%w: file search response contains more than %d files", soul.ErrMessageTooLarge, maxFileSearchResponseFiles)
+	}
+
+	var files []File
+	if numberOfFiles > 0 {
+		files = make([]File, 0, numberOfFiles)
+	}
 	for i := uint32(0); i < numberOfFiles; i++ {
 		var file File
 
-		_, err = internal.ReadUint8(zr)
-		if err != nil {
-			return
+		if _, err := internal.ReadUint8(reader); err != nil {
+			return nil, err
 		}
 
-		file.Name, err = internal.ReadString(zr)
+		var err error
+		file.Name, err = readFileSearchResponseString(reader)
 		if err != nil {
-			return
+			return nil, err
 		}
 
-		file.Size, err = internal.ReadUint64(zr)
+		file.Size, err = internal.ReadUint64(reader)
 		if err != nil {
-			return
+			return nil, err
 		}
 
-		file.Extension, err = internal.ReadString(zr)
+		file.Extension, err = readFileSearchResponseString(reader)
 		if err != nil {
-			return
+			return nil, err
 		}
 
-		var attributes uint32
-		attributes, err = internal.ReadUint32(zr)
+		attributes, err := internal.ReadUint32(reader)
 		if err != nil {
-			return
+			return nil, err
+		}
+		if attributes > maxFileSearchResponseAttributes {
+			return nil, fmt.Errorf("%w: file search response file contains more than %d attributes", soul.ErrMessageTooLarge, maxFileSearchResponseAttributes)
+		}
+
+		if attributes > 0 {
+			file.Attributes = make([]Attribute, 0, attributes)
 		}
 		for j := uint32(0); j < attributes; j++ {
-			attribute := Attribute{}
-
-			var code uint32
-			code, err = internal.ReadUint32(zr)
+			code, err := internal.ReadUint32(reader)
 			if err != nil {
-				return
+				return nil, err
 			}
 
-			attribute.Code = FileAttributeType(code)
-
-			attribute.Value, err = internal.ReadUint32(zr)
+			value, err := internal.ReadUint32(reader)
 			if err != nil {
-				return
+				return nil, err
 			}
 
-			file.Attributes = append(file.Attributes, attribute)
+			file.Attributes = append(file.Attributes, Attribute{
+				Code:  FileAttributeType(code),
+				Value: value,
+			})
 		}
 
 		files = append(files, file)
 	}
 
-	return
+	return files, nil
 }

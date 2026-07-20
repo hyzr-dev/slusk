@@ -135,9 +135,13 @@ func startConnectedClient(t *testing.T, handle func(conn net.Conn)) (*Client, st
 			t.Logf("write login success: %v", err)
 			return
 		}
-		// The client always sends SetListenPort right after login.
+		// The client sends SetListenPort and its initial tree state after login.
 		if _, _, err := readRawFrame(conn); err != nil {
 			t.Logf("read set listen port: %v", err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			t.Logf("read initial tree advertisements: %v", err)
 			return
 		}
 		handle(conn)
@@ -415,6 +419,9 @@ func TestConnectPeerServerDisconnectFailsPending(t *testing.T) {
 			t.Logf("read set listen port: %v", err)
 			return
 		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
 		serverConn = conn
 		close(connReady)
 		// Read (and drop) the GetPeerAddress request, then go silent and let
@@ -474,6 +481,9 @@ func TestConnectPeerServerDisconnectFailsPendingIndirectDance(t *testing.T) {
 		}
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
 			t.Logf("read set listen port: %v", err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
 			return
 		}
 		serverConn = conn
@@ -552,6 +562,7 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 	peerAddr := peerLn.Addr().(*net.TCPAddr)
 
 	pierceSeen := make(chan soul.Token, 1)
+	releasePeer := make(chan struct{})
 	go func() {
 		conn, err := peerLn.Accept()
 		if err != nil {
@@ -569,6 +580,7 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 			return
 		}
 		pierceSeen <- pf.Token
+		<-releasePeer
 	}()
 
 	srv := newFakeServer(t)
@@ -581,6 +593,9 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 			return
 		}
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
 			return
 		}
 
@@ -614,6 +629,20 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake peer never saw a PierceFirewall frame")
 	}
+
+	key := sessionKey{username: "friend", connType: peer.ConnectionType}
+	deadline := time.Now().Add(2 * time.Second)
+	for c.sessions.Get(key) == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	session := c.sessions.Get(key)
+	if session == nil {
+		t.Fatal("successful mirror connection was not retained in the private registry")
+	}
+	if session.initiator != sessionInitiatorRemote {
+		t.Fatalf("mirror logical initiator = %v, want remote", session.initiator)
+	}
+	close(releasePeer)
 }
 
 func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
@@ -639,6 +668,9 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 			return
 		}
 		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
 			return
 		}
 
@@ -697,11 +729,10 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 	}
 }
 
-func TestHandlePeerConnIncomingPeerInitLoggedAndClosed(t *testing.T) {
+func TestHandlePeerConnIncomingPeerInitRetainedAsSession(t *testing.T) {
 	c, addr := startConnectedClient(t, func(conn net.Conn) {
 		_, _ = io.Copy(io.Discard, conn)
 	})
-	_ = c
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -713,10 +744,27 @@ func TestHandlePeerConnIncomingPeerInitLoggedAndClosed(t *testing.T) {
 		t.Fatalf("write peer init: %v", err)
 	}
 
+	key := sessionKey{username: "friend", connType: peer.ConnectionType}
+	deadline := time.Now().Add(2 * time.Second)
+	var session *peerSession
+	for time.Now().Before(deadline) {
+		session = c.sessions.Get(key)
+		if session != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if session == nil {
+		t.Fatal("incoming PeerInit was not retained in the private registry")
+	}
+	if session.initiator != sessionInitiatorRemote || session.role != sessionRoleOrdinary {
+		t.Fatalf("session metadata = initiator %v role %v, want remote/ordinary", session.initiator, session.role)
+	}
+
+	session.Close(errors.New("test complete"))
 	buf := make([]byte, 1)
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, err = conn.Read(buf)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("read after PeerInit: err = %v, want io.EOF (server closes after logging)", err)
+	if _, err := conn.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("read after session close: err = %v, want io.EOF", err)
 	}
 }

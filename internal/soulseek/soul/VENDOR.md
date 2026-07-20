@@ -127,6 +127,10 @@ some trailing fields.
     itself - meaning zero bytes remained in the frame at all - counts as
     "absent"; any error reading the body, even a clean `io.EOF`, is a hard
     error.
-- `peer/filesearchresponse.go` has trailing fields (behind a zlib-compressed
-  section) that are a known, still-open deviation from this policy — not
-  addressed here; deferred to a follow-up issue (#54).
+- `peer/filesearchresponse.go`: resolved for #54 from Nicotine+ master commit
+  [`6d88c63a`](https://github.com/nicotine-plus/nicotine-plus/blob/6d88c63a1a6ac83ee67539cb4473c97bc9784e5f/pynicotine/slskmessages.py#L3499-L3509),
+  inspected 2026-07-20, and the full-tail layout in vendored `bh90210/soul`
+  [`5890ce2`](https://github.com/bh90210/soul/blob/5890ce2/peer/filesearchresponse.go)
+  (2025-04-20). Clean decompressed EOF is accepted after `Queue` and,
+  independently, after the following unknown uint32; partial fields/files,
+  invalid zlib endings, and extra decompressed data are rejected.

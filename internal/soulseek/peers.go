@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
@@ -30,6 +31,7 @@ type PeerConn struct {
 
 	closeOnce sync.Once
 	onClose   func()
+	lease     *inboundLease
 }
 
 // Close closes the underlying connection. It is safe to call multiple
@@ -39,6 +41,7 @@ func (p *PeerConn) Close() error {
 		if p.onClose != nil {
 			p.onClose()
 		}
+		p.lease.Release()
 	})
 	return p.Conn.Close()
 }
@@ -46,12 +49,14 @@ func (p *PeerConn) Close() error {
 // newPeerConn wraps conn as an established peer connection, counting it in
 // c.peerConns until it is closed.
 func (c *Client) newPeerConn(conn net.Conn, username string, ct soul.ConnectionType) *PeerConn {
+	return c.newPeerConnWithLease(conn, username, ct, nil)
+}
+
+func (c *Client) newPeerConnWithLease(conn net.Conn, username string, ct soul.ConnectionType, lease *inboundLease) *PeerConn {
 	c.peerConns.Add(1)
 	return &PeerConn{
-		Conn:     conn,
-		Username: username,
-		Type:     ct,
-		onClose:  func() { c.peerConns.Add(-1) },
+		Conn: conn, Username: username, Type: ct, lease: lease,
+		onClose: func() { c.peerConns.Add(-1) },
 	}
 }
 
@@ -183,9 +188,10 @@ type pendingResult struct {
 // attempt, registered in Client.pending under the token sent to the server
 // in a ConnectToPeer request.
 type pendingAttempt struct {
-	username string
-	ct       soul.ConnectionType
-	done     chan pendingResult // buffered 1
+	username         string
+	ct               soul.ConnectionType
+	done             chan pendingResult // buffered 1
+	tokenReservation *tokenReservation
 }
 
 // registerPendingAttempt allocates a fresh token (regenerating on the
@@ -193,16 +199,12 @@ type pendingAttempt struct {
 // connection attempt for it.
 func (c *Client) registerPendingAttempt(username string, ct soul.ConnectionType) (soul.Token, *pendingAttempt) {
 	attempt := &pendingAttempt{username: username, ct: ct, done: make(chan pendingResult, 1)}
-
+	reservation := c.tokens.Reserve()
+	attempt.tokenReservation = reservation
 	c.pendingMu.Lock()
-	defer c.pendingMu.Unlock()
-	for {
-		token := soul.NewToken()
-		if _, exists := c.pending[token]; !exists {
-			c.pending[token] = attempt
-			return token, attempt
-		}
-	}
+	c.pending[reservation.token] = attempt
+	c.pendingMu.Unlock()
+	return reservation.token, attempt
 }
 
 // deregisterPendingAttempt removes token's entry (only if it still points at
@@ -222,6 +224,7 @@ func (c *Client) registerPendingAttempt(username string, ct soul.ConnectionType)
 // case) and closes it. Without this drain, the second case would otherwise
 // leak the connection into a channel nobody reads from again.
 func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAttempt) {
+	defer attempt.tokenReservation.Release()
 	c.pendingMu.Lock()
 	if cur, ok := c.pending[token]; ok && cur == attempt {
 		delete(c.pending, token)
@@ -254,7 +257,11 @@ func (c *Client) deregisterPendingAttempt(token soul.Token, attempt *pendingAtte
 // connection forever. This also guarantees the send below never blocks: at
 // most one of completePendingDial / handleCantConnectToPeer ever observes
 // the token present and gets to deliver into the buffered (size 1) channel.
-func (c *Client) completePendingDial(token soul.Token, conn net.Conn) bool {
+func (c *Client) completePendingDial(token soul.Token, conn net.Conn, leases ...*inboundLease) bool {
+	var lease *inboundLease
+	if len(leases) != 0 {
+		lease = leases[0]
+	}
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 
@@ -264,7 +271,7 @@ func (c *Client) completePendingDial(token soul.Token, conn net.Conn) bool {
 	}
 	delete(c.pending, token)
 
-	pc := c.newPeerConn(conn, attempt.username, attempt.ct)
+	pc := c.newPeerConnWithLease(conn, attempt.username, attempt.ct, lease)
 	attempt.done <- pendingResult{conn: pc}
 	return true
 }
@@ -337,12 +344,10 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 // request to us. We dial the peer back - on the plain (non-obfuscated) port
 // only; ObfuscatedPort is deliberately unsupported here - and reply with
 // PierceFirewall carrying the relayed token. Runs in its own goroutine so a
-// slow or unreachable peer cannot stall message handling. ctx is Run's
-// shutdown lifetime (shared across reconnects): tying the dial
-// to it lets shutdown cancel an in-flight dial-back instead of leaving it to
-// run out its own timeout.
-func (c *Client) handleConnectToPeer(ctx context.Context, msg server.ConnectToPeer) {
-	go func() {
+// slow or unreachable peer cannot stall message handling. ctx and generation
+// belong to the exact central-server session that supplied the request.
+func (c *Client) handleConnectToPeer(ctx context.Context, generation uint64, msg server.ConnectToPeer) {
+	c.startTracked(func() {
 		addr := net.JoinHostPort(msg.IP.String(), strconv.Itoa(msg.Port))
 		dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -350,7 +355,7 @@ func (c *Client) handleConnectToPeer(ctx context.Context, msg server.ConnectToPe
 			if c.logger != nil {
 				c.logger.Debug("mirror connect-to-peer dial failed", "username", msg.Username, "token", msg.Token, "addr", addr, "err", err)
 			}
-			if sendErr := sendToServer(c, &server.CantConnectToPeer{Token: msg.Token, Username: msg.Username}); sendErr != nil && c.logger != nil {
+			if sendErr := sendToServerGeneration(c, generation, &server.CantConnectToPeer{Token: msg.Token, Username: msg.Username}); sendErr != nil && c.logger != nil {
 				c.logger.Debug("write cant connect to peer", "username", msg.Username, "token", msg.Token, "err", sendErr)
 			}
 			return
@@ -364,14 +369,26 @@ func (c *Client) handleConnectToPeer(ctx context.Context, msg server.ConnectToPe
 			return
 		}
 
-		if c.logger != nil {
-			c.logger.Debug("mirror dial-back succeeded; closing until #54", "username", msg.Username, "type", msg.Type)
+		if ctx.Err() != nil {
+			_ = conn.Close()
+			return
 		}
-		// Full handling of an established mirror connection (queued
-		// transfers, uploads, ...) is not implemented yet; close it rather
-		// than leak the socket. See #54.
-		_ = conn.Close()
-	}()
+		if msg.Type != peer.ConnectionType && msg.Type != distributed.ConnectionType {
+			_ = conn.Close()
+			return
+		}
+		role := sessionRoleOrdinary
+		if msg.Type == distributed.ConnectionType {
+			role = sessionRoleChild
+		}
+		candidate := c.newSession(conn, sessionKey{username: msg.Username, connType: msg.Type}, sessionInitiatorRemote, role, generation, nil)
+		if c.registerSession(candidate) == nil {
+			return
+		}
+		if c.logger != nil {
+			c.logger.Debug("mirror peer session retained", "username", msg.Username, "type", msg.Type)
+		}
+	})
 }
 
 // handleCantConnectToPeer handles the server telling us a peer we asked it

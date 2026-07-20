@@ -84,6 +84,19 @@ type Config struct {
 	// address, the direct dial attempt, and - if that fails - the indirect
 	// NAT-traversal fallback. Default 30s.
 	establishTimeout time.Duration
+	// inboundPeerLimit caps accepted sockets globally, including handshakes
+	// and retained inbound sessions. Default 128.
+	inboundPeerLimit int
+	// sessionWriteQueue bounds serialized writes per internal session.
+	sessionWriteQueue int
+	// peerIdleTimeout retires ordinary retained P sessions. Default 2m.
+	peerIdleTimeout time.Duration
+	// inboundPeerSessionLifetime is an absolute lifetime for retained inbound
+	// ordinary P sessions, even while they remain active. Default 10m.
+	inboundPeerSessionLifetime time.Duration
+	// parentCandidateTimeout bounds one direct D candidate's opportunity to
+	// provide valid metadata and a search. Default 10s.
+	parentCandidateTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -95,12 +108,13 @@ type Client struct {
 
 	status atomic.Pointer[Status]
 
-	// mu serializes writes to the server connection (the vendored server.Write
-	// takes an io.Writer directly; nothing about it is safe for concurrent
-	// use) and guards serverConn itself. serverConn is non-nil only while
-	// serveConnected is running for the current connection.
-	mu         sync.Mutex
-	serverConn net.Conn
+	// mu guards the current central-server session identity. serverWriteMu
+	// serializes writes separately, so network I/O never occurs under mu.
+	mu               sync.Mutex
+	serverWriteMu    sync.Mutex
+	serverConn       net.Conn
+	serverCancel     context.CancelFunc
+	serverGeneration uint64
 
 	// addrMu guards pendingAddrs, the GetPeerAddress waiters registered by
 	// in-flight ConnectPeer calls (see peers.go), keyed by username.
@@ -123,9 +137,29 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[soul.Token]*pendingAttempt
 
-	// peerConns counts currently-open peer connections established via
-	// ConnectPeer or the mirror (inbound-indirect) path, for Status().
+	// peerConns counts currently-open public peer connections and private
+	// sessions, for Status().
 	peerConns atomic.Int64
+
+	tokens       *tokenAllocator
+	sessions     *sessionRegistry
+	searches     *searchRegistry
+	tree         *distributedTree
+	sessionHooks sessionHooks
+	inboundSlots chan struct{}
+
+	lifeMu       sync.Mutex
+	lifeCtx      context.Context
+	lifeCancel   context.CancelFunc
+	lifeWG       sync.WaitGroup
+	lifeActive   bool
+	lifeStopping bool
+
+	handshakeMu    sync.Mutex
+	handshakeConns map[net.Conn]struct{}
+
+	establishMu sync.Mutex
+	establishes map[sessionKey]*sessionEstablishment
 }
 
 // New constructs a Client. Zero-valued test-seam fields in cfg are filled
@@ -155,13 +189,36 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.establishTimeout <= 0 {
 		cfg.establishTimeout = defaultEstablishTimeout
 	}
+	if cfg.inboundPeerLimit <= 0 {
+		cfg.inboundPeerLimit = defaultInboundPeerLimit
+	}
+	if cfg.sessionWriteQueue <= 0 {
+		cfg.sessionWriteQueue = defaultSessionWriteQueue
+	}
+	if cfg.peerIdleTimeout <= 0 {
+		cfg.peerIdleTimeout = defaultPeerIdleTimeout
+	}
+	if cfg.inboundPeerSessionLifetime <= 0 {
+		cfg.inboundPeerSessionLifetime = defaultInboundPeerSessionLifetime
+	}
+	if cfg.parentCandidateTimeout <= 0 {
+		cfg.parentCandidateTimeout = defaultParentCandidateTimeout
+	}
 
 	c := &Client{
-		cfg:          cfg,
-		logger:       logger,
-		pendingAddrs: make(map[string][]chan addrResult),
-		pending:      make(map[soul.Token]*pendingAttempt),
+		cfg:            cfg,
+		logger:         logger,
+		pendingAddrs:   make(map[string][]chan addrResult),
+		pending:        make(map[soul.Token]*pendingAttempt),
+		tokens:         newTokenAllocator(),
+		sessions:       newSessionRegistry(nil),
+		searches:       newSearchRegistry(),
+		inboundSlots:   make(chan struct{}, cfg.inboundPeerLimit),
+		handshakeConns: make(map[net.Conn]struct{}),
+		establishes:    make(map[sessionKey]*sessionEstablishment),
 	}
+	c.tree = newDistributedTree(c)
+	c.sessionHooks = composedSessionHooks{c.tree, &searchSessionHooks{searches: c.searches}}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
@@ -170,7 +227,8 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // types this package actually sends, rather than reusing server package's
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
-	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress
+	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress | *server.GetUserStats |
+		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch
 	Serialize(M) ([]byte, error)
 }
 
@@ -179,14 +237,32 @@ type serverMessage[M any] interface {
 // write concurrently. It reports an error if no server connection is
 // currently established.
 func sendToServer[M serverMessage[M]](c *Client, msg M) error {
+	return sendToServerGeneration(c, 0, msg)
+}
+
+// sendToServerGeneration additionally rejects a stale server-originated
+// worker when generation is non-zero. A write error cancels and closes that
+// exact server session so its work cannot survive into a replacement.
+func sendToServerGeneration[M serverMessage[M]](c *Client, generation uint64, msg M) error {
+	c.serverWriteMu.Lock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.serverConn == nil {
-		return errors.New("soulseek: not connected to server")
+	if c.serverConn == nil || (generation != 0 && generation != c.serverGeneration) {
+		c.mu.Unlock()
+		c.serverWriteMu.Unlock()
+		return errors.New("soulseek: not connected to requested server generation")
 	}
+	conn := c.serverConn
+	cancel := c.serverCancel
+	c.mu.Unlock()
 
-	_, err := server.Write(c.serverConn, msg)
+	_, err := server.Write(conn, msg)
+	c.serverWriteMu.Unlock()
+	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
+		_ = conn.Close()
+	}
 	return err
 }
 
@@ -221,22 +297,23 @@ func (c *Client) Run(ctx context.Context) error {
 	boundAddr := ln.Addr().String()
 	c.boundListenAddr.Store(&boundAddr)
 
-	acceptDone := make(chan struct{})
-	go func() {
-		defer close(acceptDone)
-		c.acceptPeers(ctx, ln)
-	}()
-	defer func() {
+	runCtx, err := c.beginLifecycle(ctx)
+	if err != nil {
 		_ = ln.Close()
-		<-acceptDone
-	}()
+		return err
+	}
+	if !c.startTracked(func() { c.acceptPeers(runCtx, ln) }) {
+		_ = ln.Close()
+		return errors.New("soulseek: lifecycle stopped before listener start")
+	}
+	defer c.stopLifecycle(ln)
 
 	for {
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			return nil
 		}
 
-		err := c.connectAndServe(ctx)
+		err := c.connectAndServe(runCtx)
 		if err == nil {
 			return nil
 		}
@@ -255,7 +332,7 @@ func (c *Client) Run(ctx context.Context) error {
 		c.logger.Warn("soulseek connection failed; reconnecting",
 			"err", err, "backoff", wait, "consecutive_failures", failures)
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			return nil
 		case <-time.After(wait):
 		}
@@ -354,25 +431,52 @@ func (c *Client) login(ctx context.Context, conn net.Conn) error {
 // the server, and cleared on every exit path, at which point any pending
 // GetPeerAddress waiter is failed rather than left to time out.
 func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	c.serverWriteMu.Lock()
 	c.mu.Lock()
+	c.serverGeneration++
+	generation := c.serverGeneration
 	c.serverConn = conn
+	c.serverCancel = serverCancel
 	c.mu.Unlock()
+	c.serverWriteMu.Unlock()
 	defer func() {
+		// Invalidate generation-owned work before clearing its state. Closing
+		// the socket also unblocks an in-progress serialized write.
+		serverCancel()
+		_ = conn.Close()
+		c.serverWriteMu.Lock()
 		c.mu.Lock()
-		c.serverConn = nil
+		if c.serverConn == conn && c.serverGeneration == generation {
+			c.serverConn = nil
+			c.serverCancel = nil
+		}
 		c.mu.Unlock()
+		c.serverWriteMu.Unlock()
+		c.tree.deactivate(generation)
+		c.sessions.CloseGeneration("D", generation, errNoServerConnection)
+		c.searches.failGeneration(generation, errNoServerConnection)
 		c.failAllAddrWaiters(errNoServerConnection)
 		c.failAllPendingAttempts(errNoServerConnection)
 	}()
 
-	if err := sendToServer(c, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
+	if err := sendToServerGeneration(c, generation, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
 		return fmt.Errorf("write set listen port: %w", err)
+	}
+	if err := c.tree.activate(generation); err != nil {
+		return fmt.Errorf("initialize distributed tree: %w", err)
+	}
+	// Upload capacity is generation-scoped tree state. Request our own current
+	// stats once for every authenticated server connection so AcceptChildren
+	// can be driven by an actual server response rather than unsolicited data.
+	if err := sendToServerGeneration(c, generation, &server.GetUserStats{Username: c.cfg.Username}); err != nil {
+		return fmt.Errorf("request own user stats: %w", err)
 	}
 
 	readErrs := make(chan error, 1)
-	go func() {
-		readErrs <- c.readLoop(ctx, conn)
-	}()
+	if !c.startTracked(func() { readErrs <- c.readLoop(serverCtx, conn) }) {
+		return errors.New("soulseek: lifecycle stopping")
+	}
 
 	ticker := time.NewTicker(c.cfg.pingInterval)
 	defer ticker.Stop()
@@ -437,7 +541,10 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 		if err := msg.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize connect to peer: %w", err)
 		}
-		c.handleConnectToPeer(ctx, *msg)
+		c.mu.Lock()
+		generation := c.serverGeneration
+		c.mu.Unlock()
+		c.handleConnectToPeer(ctx, generation, *msg)
 		return nil
 
 	case server.CodeCantConnectToPeer:
@@ -446,6 +553,74 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 			return fmt.Errorf("deserialize cant connect to peer: %w", err)
 		}
 		c.handleCantConnectToPeer(*msg)
+		return nil
+
+	case server.CodePossibleParents:
+		msg := &server.PossibleParents{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize possible parents: %w", err)
+		}
+		generation := c.currentServerGeneration()
+		c.tree.offerParents(ctx, generation, msg.Parents)
+		return nil
+
+	case server.CodeResetDistributed:
+		msg := &server.ResetDistributed{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize reset distributed: %w", err)
+		}
+		c.tree.reset(c.currentServerGeneration())
+		return nil
+
+	case server.CodeEmbeddedMessage:
+		msg := &server.EmbeddedMessage{}
+		if err := msg.Deserialize(reader); err != nil {
+			// Embedded distributed messages are optional compatibility input.
+			// Ignore malformed wrappers without dropping the server session.
+			if c.logger != nil {
+				c.logger.Debug("ignore malformed embedded distributed message", "err", err)
+			}
+			return nil
+		}
+		if err := c.tree.handleServerEmbedded(c.currentServerGeneration(), *msg); err != nil {
+			return fmt.Errorf("handle embedded distributed message: %w", err)
+		}
+		return nil
+
+	case server.CodeParentMinSpeed:
+		msg := &server.ParentMinSpeed{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize parent minimum speed: %w", err)
+		}
+		c.tree.updateParentMinSpeed(c.currentServerGeneration(), msg.MinSpeed)
+		return nil
+
+	case server.CodeParentSpeedRatio:
+		msg := &server.ParentSpeedRatio{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize parent speed ratio: %w", err)
+		}
+		c.tree.updateParentRatio(c.currentServerGeneration(), msg.SpeedRatio)
+		return nil
+
+	case server.CodeWatchUser:
+		msg := &server.WatchUser{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize watch user: %w", err)
+		}
+		if msg.Username == c.cfg.Username && msg.Exists {
+			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.AverageSpeed)
+		}
+		return nil
+
+	case server.CodeGetUserStats:
+		msg := &server.GetUserStats{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize user stats: %w", err)
+		}
+		if msg.Username == c.cfg.Username {
+			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.Speed)
+		}
 		return nil
 	}
 
@@ -499,6 +674,86 @@ func (c *Client) recordTransientFailure(err error) int {
 // Copied from internal/pipeline/backoff.go rather than exported from there,
 // since pipeline is a separate scheduling concern and this package should
 // not depend on it.
+func (c *Client) currentServerGeneration() uint64 {
+	c.mu.Lock()
+	generation := c.serverGeneration
+	if c.serverConn == nil {
+		generation = 0
+	}
+	c.mu.Unlock()
+	return generation
+}
+
+func (c *Client) isServerGenerationActive(generation uint64) bool {
+	c.mu.Lock()
+	active := c.serverConn != nil && c.serverGeneration == generation
+	c.mu.Unlock()
+	return active
+}
+
+func (c *Client) beginLifecycle(parent context.Context) (context.Context, error) {
+	c.lifeMu.Lock()
+	defer c.lifeMu.Unlock()
+	if c.lifeActive {
+		return nil, errors.New("soulseek: Run already active")
+	}
+	c.lifeCtx, c.lifeCancel = context.WithCancel(parent)
+	c.lifeActive = true
+	c.lifeStopping = false
+	return c.lifeCtx, nil
+}
+
+func (c *Client) lifecycleContext() context.Context {
+	c.lifeMu.Lock()
+	defer c.lifeMu.Unlock()
+	if c.lifeCtx != nil {
+		return c.lifeCtx
+	}
+	return context.Background()
+}
+
+func (c *Client) startTracked(fn func()) bool {
+	c.lifeMu.Lock()
+	if !c.lifeActive || c.lifeStopping {
+		c.lifeMu.Unlock()
+		return false
+	}
+	c.lifeWG.Add(1)
+	c.lifeMu.Unlock()
+	go func() {
+		defer c.lifeWG.Done()
+		fn()
+	}()
+	return true
+}
+
+func (c *Client) stopLifecycle(ln net.Listener) {
+	c.lifeMu.Lock()
+	if !c.lifeActive || c.lifeStopping {
+		c.lifeMu.Unlock()
+		return
+	}
+	c.lifeStopping = true
+	cancel := c.lifeCancel
+	c.lifeMu.Unlock()
+
+	// Cancellation precedes reset/close of generation-owned work.
+	cancel()
+	_ = ln.Close()
+	c.closeHandshakes()
+	c.sessions.CloseAll(context.Canceled)
+	c.searches.failAll(context.Canceled)
+	c.failAllAddrWaiters(context.Canceled)
+	c.failAllPendingAttempts(context.Canceled)
+	c.lifeWG.Wait()
+
+	c.lifeMu.Lock()
+	c.lifeActive = false
+	c.lifeCtx = nil
+	c.lifeCancel = nil
+	c.lifeMu.Unlock()
+}
+
 func nextBackoff(retries int, base, maxBackoff time.Duration) time.Duration {
 	const maxExponent = 32 // 1<<32 * any realistic base already exceeds maxBackoff
 	exp := retries
