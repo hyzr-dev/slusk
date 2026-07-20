@@ -232,6 +232,10 @@ befintliga endpoints, read-only `/api/config`, Vitest-setup, borttagning av
 Översikt byggs **utan charts** — designens två chartytor utgår helt i stället för att
 lämnas tomma, så layouten ser avsiktlig ut. Se #88.
 
+Översikt visar statuskort och aktiva jobb. **Modulhälsan flyttar till Hälsovyn**, som
+designen ger en egen plats i navigationen; dagens dashboard visar den på förstasidan
+enbart för att den inte har någon annan vy att lägga den i.
+
 **Ingår inte:** samtliga fem UI-issues. De kräver både utökad design och backend
 som inte finns. SSE-transport (#60). Charts på Översikt (#88) — designens
 reconcile-historik och 24-timmarskurva kräver tidsseriedata backend saknar.
