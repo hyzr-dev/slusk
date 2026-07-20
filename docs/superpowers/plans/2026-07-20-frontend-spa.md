@@ -107,7 +107,9 @@ read-only config-endpoint.
 `web/vite.config.ts` — bygger till Go-paketets `dist`, proxar API i dev:
 
 ```ts
-import { defineConfig } from 'vite';
+// defineConfig comes from vitest/config, not vite — the plain Vite export does
+// not type the `test` block and tsc will reject it.
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // Build output lands inside internal/observ/web/ because go:embed cannot read
