@@ -167,19 +167,16 @@ func TestAlbumStatus(t *testing.T) {
 
 func TestAlbumReleases(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/albumrelease" {
-			t.Errorf("path = %q, want /api/v1/albumrelease", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("albumId"); got != "42" {
-			t.Errorf("albumId = %q, want 42", got)
+		if r.URL.Path != "/api/v1/album/42" {
+			t.Errorf("path = %q, want /api/v1/album/42", r.URL.Path)
 		}
 		if got := r.Header.Get("X-Api-Key"); got != "key" {
 			t.Errorf("api key = %q, want key", got)
 		}
-		fmt.Fprint(w, `[
+		fmt.Fprint(w, `{"id":42,"title":"X","releases":[
 			{"id":1,"albumId":42,"trackCount":12,"monitored":true},
 			{"id":2,"albumId":42,"trackCount":10,"monitored":false}
-		]`)
+		]}`)
 	}))
 	defer srv.Close()
 
