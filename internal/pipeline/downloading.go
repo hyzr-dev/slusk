@@ -229,12 +229,13 @@ func (d *Downloading) Tick(ctx context.Context, now time.Time) error {
 }
 
 // removeFromSlskd best-effort purges a terminal transfer's leftover record from
-// slskd. Call it ONLY after the store has marked the transfer terminal (so it is
-// no longer in ActiveTransfers): removing it while the store still lists it
-// active would make the next reconcile pass see it gone from slskd's live list
-// and treat it as "lost". A 404 is routine (slskd already forgot it, e.g. after
-// a restart); any other failure is logged and swallowed, with slskd's retention
-// config as the backstop.
+// the peer backend. Call it ONLY after the store has marked the transfer
+// terminal, or retried via RetryTransfer (which resets it to PENDING and
+// detaches its slskd_id) — either way it is no longer in ActiveTransfers.
+// Removing it while the store still lists it active would make the next
+// reconcile pass see it gone from the live list and treat it as "lost". A 404 is routine (the backend
+// already forgot it, e.g. after a slskd restart); any other failure is logged
+// and swallowed, with the backend's own retention/cleanup as the backstop.
 func (d *Downloading) removeFromSlskd(ctx context.Context, username, id string) {
 	if id == "" {
 		return
@@ -391,6 +392,11 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			if err := d.p.Store.RetryTransfer(ctx, tr.ID, now); err != nil {
 				return stats, fmt.Errorf("retry rejected transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
 			}
+			// The native backend's Enqueue is idempotent (it returns the existing
+			// terminal transfer rather than restarting it), so the remote record
+			// must be removed here for the re-enqueue on the next top-up pass to
+			// actually start fresh. Mirrors finishStalled's purge-after-retry above.
+			d.removeFromSlskd(ctx, tr.Username, lt.ID)
 			stats.Retried++
 			continue
 		}

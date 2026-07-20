@@ -63,6 +63,10 @@ volumes:
 # If slskd/lidarr are services in the SAME compose project, put slskdarr on their
 # network and use service-name URLs in config.toml (http://lidarr:8686, etc.):
 #   networks: [arr]
+# The slskd service itself is optional when pipeline.backend = "soulseek" in
+# config.toml: nothing in the pipeline talks to it in that mode, so it can be
+# omitted from this compose project entirely (Lidarr's network access is
+# still required).
 # networks:
 #   arr:
 #     external: true

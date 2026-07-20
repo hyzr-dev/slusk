@@ -80,10 +80,9 @@ type Config struct {
 	// DownloadDir is the local root directory native downloads (issue #55)
 	// are written under, in the same completeDir/<leaf>/<basename> layout
 	// slskd produces (see downloadDestPath) so the Importing module's
-	// AlbumFolder scan finds them in the same place either way. Left blank
-	// here: production wiring lands in #57 (which will set it from
-	// config.PathsConfig.SlskdCompleteDir); tests and the manual probe set
-	// it directly.
+	// AlbumFolder scan finds them in the same place either way. Production
+	// wiring (issue #57) sets it from config.PathsConfig.SlskdCompleteDir;
+	// tests and the manual probe set it directly.
 	DownloadDir string
 
 	// SharedFolders are explicitly named public roots backed by private local

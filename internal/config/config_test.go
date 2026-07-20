@@ -397,3 +397,121 @@ func TestLoadSoulseekNonNumericPortListenAddr(t *testing.T) {
 		t.Errorf("error should name the invalid field: %v", err)
 	}
 }
+
+func TestLoadDefaultBackendIsSlskd(t *testing.T) {
+	cfg, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pipeline.Backend != BackendSlskd {
+		t.Errorf("Backend = %q, want %q", cfg.Pipeline.Backend, BackendSlskd)
+	}
+}
+
+func TestLoadBackendSoulseekWithoutSoulseekSectionFails(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"soulseek\"\n", 1)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for backend = soulseek without a [soulseek] section, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek") {
+		t.Errorf("error should mention the missing soulseek section: %v", err)
+	}
+}
+
+func TestLoadBackendSoulseekWithSlskdSectionValid(t *testing.T) {
+	// An [slskd] section alongside backend = "soulseek" is valid: the slskd
+	// config is simply unused by the pipeline.
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"soulseek\"\n", 1)
+	contents += "\n[soulseek]\nusername = \"souluser\"\npassword = \"soulpass\"\n"
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pipeline.Backend != BackendSoulseek {
+		t.Errorf("Backend = %q, want %q", cfg.Pipeline.Backend, BackendSoulseek)
+	}
+}
+
+func TestLoadBackendSoulseekWithoutSlskdSectionValid(t *testing.T) {
+	const contents = `
+[lidarr]
+url = "http://lidarr:8686"
+api_key = "abc"
+
+[pipeline]
+backend = "soulseek"
+max_candidates_per_album = 5
+transfer_deadline = "30m"
+stall_timeout = "5m"
+search_timeout = "30s"
+min_bitrate = 192
+max_inflight_per_peer = 3
+max_transfer_retries = 3
+
+[pipeline.weights]
+format = 1.0
+bitrate = 0.5
+reliability = 0.8
+file_count = 1.0
+
+[store]
+dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+
+[observ]
+listen_addr = "127.0.0.1:9090"
+
+[paths]
+slskd_complete_dir = "/music/slskd-downloads"
+
+[soulseek]
+username = "souluser"
+password = "soulpass"
+`
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pipeline.Backend != BackendSoulseek {
+		t.Errorf("Backend = %q, want %q", cfg.Pipeline.Backend, BackendSoulseek)
+	}
+}
+
+func TestLoadUnknownBackendValueFails(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"bogus\"\n", 1)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for an unknown pipeline.backend value, got nil")
+	}
+	if !strings.Contains(err.Error(), "pipeline.backend") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}

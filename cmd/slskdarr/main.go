@@ -31,6 +31,17 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
+// peerBackend combines the two port interfaces every peer-facing pipeline
+// module (plus app.Jobs' TransferCanceller) needs, so main can wire
+// a single value regardless of which backend (slskd or native soulseek) is
+// selected. Both embedded interfaces declare Cancel with an identical
+// signature; overlapping methods in embedded interfaces are legal since Go
+// 1.14.
+type peerBackend interface {
+	pipeline.PeerSearcher
+	pipeline.PeerNetwork
+}
+
 const (
 	startupTimeout           = 30 * time.Second
 	lifecycleShutdownTimeout = 10 * time.Second
@@ -81,7 +92,6 @@ func main() {
 		logger.Error("open store", "err", err)
 		os.Exit(1)
 	}
-	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
 		lidarr.WithManualImportTimeout(cfg.Pipeline.ManualImportTimeout.Duration))
 	w := cfg.Pipeline.Weights
@@ -94,7 +104,18 @@ func main() {
 
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
-		soulClient = newSoulseekClient(cfg.Soulseek, logger)
+		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, logger)
+	}
+
+	// Backend selection: config.Validate already guarantees soulClient != nil
+	// when cfg.Pipeline.Backend is BackendSoulseek, so the slskd client is not
+	// even constructed in that case.
+	var peers peerBackend
+	switch cfg.Pipeline.Backend {
+	case config.BackendSlskd:
+		peers = slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
+	case config.BackendSoulseek:
+		peers = soulClient
 	}
 
 	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{

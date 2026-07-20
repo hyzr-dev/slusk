@@ -132,7 +132,20 @@ type PipelineConfig struct {
 	// slow-scanning folder is not hammered every ImportingInterval until
 	// StuckAfter elapses. Default 5m.
 	ImportRetryCooldown Duration `toml:"import_retry_cooldown"`
+	// Backend selects which peer backend drives the pipeline: BackendSlskd
+	// (the slskd daemon, the default) or BackendSoulseek (the native
+	// internal/soulseek client). Default BackendSlskd.
+	Backend string `toml:"backend"`
 }
+
+// Backend selects the peer backend that drives the pipeline.
+const (
+	// BackendSlskd routes peer operations through the slskd daemon.
+	BackendSlskd = "slskd"
+	// BackendSoulseek routes peer operations through the native
+	// internal/soulseek client, connecting directly to the Soulseek server.
+	BackendSoulseek = "soulseek"
+)
 
 // applyDefaults fills any zero-valued field with its documented default.
 // Note: an explicit zero in TOML (e.g. `max_active = 0`) is indistinguishable
@@ -186,6 +199,9 @@ func (p *PipelineConfig) applyDefaults() {
 	}
 	if p.ImportRetryCooldown.Duration == 0 {
 		p.ImportRetryCooldown.Duration = 5 * time.Minute
+	}
+	if p.Backend == "" {
+		p.Backend = BackendSlskd
 	}
 }
 
@@ -317,11 +333,20 @@ func (c Config) Validate() error {
 	if c.Lidarr.APIKey == "" {
 		problems = append(problems, "lidarr.api_key is required")
 	}
-	if c.Slskd.URL == "" {
-		problems = append(problems, "slskd.url is required")
-	}
-	if c.Slskd.APIKey == "" {
-		problems = append(problems, "slskd.api_key is required")
+	switch c.Pipeline.Backend {
+	case BackendSlskd:
+		if c.Slskd.URL == "" {
+			problems = append(problems, "slskd.url is required")
+		}
+		if c.Slskd.APIKey == "" {
+			problems = append(problems, "slskd.api_key is required")
+		}
+	case BackendSoulseek:
+		if !c.Soulseek.Enabled() {
+			problems = append(problems, "pipeline.backend = \"soulseek\" requires a configured [soulseek] section")
+		}
+	default:
+		problems = append(problems, fmt.Sprintf("pipeline.backend must be %q or %q", BackendSlskd, BackendSoulseek))
 	}
 	if c.Pipeline.MaxCandidatesPerAlbum <= 0 {
 		problems = append(problems, "pipeline.max_candidates_per_album must be > 0")
