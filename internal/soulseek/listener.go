@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/file"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
@@ -125,6 +126,23 @@ func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inbou
 			return
 		}
 		if pi.Username == "" || len(pi.Username) > maxPeerUsernameSize {
+			return
+		}
+		if pi.ConnectionType == file.ConnectionType {
+			// An inbound F connection is never a peerSession: hand the raw
+			// socket to handleInboundFileConn, which matches it against a
+			// pending download by its TransferInit token (see fileconn.go).
+			// claimed is set before startTracked so this defer never
+			// double-closes conn/lease once ownership has (successfully or
+			// not) moved past this point.
+			if err := conn.SetReadDeadline(time.Time{}); err != nil {
+				return
+			}
+			claimed = true
+			if !c.startTracked(func() { c.handleInboundFileConn(ctx, conn, lease) }) {
+				_ = conn.Close()
+				lease.Release()
+			}
 			return
 		}
 		if pi.ConnectionType != peer.ConnectionType && pi.ConnectionType != distributed.ConnectionType {

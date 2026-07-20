@@ -10,6 +10,7 @@ import (
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/file"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
@@ -423,6 +424,17 @@ func (c *Client) handleConnectToPeer(ctx context.Context, generation uint64, msg
 
 		if ctx.Err() != nil {
 			_ = conn.Close()
+			return
+		}
+		if msg.Type == file.ConnectionType {
+			// A mirror-dialed F connection is never a peerSession, and the
+			// outbound dial above consumed no inbound lease, so
+			// handleInboundFileConn gets a nil one here (contrast the
+			// accepted-socket path in listener.go, which passes its lease
+			// through).
+			if !c.startTracked(func() { c.handleInboundFileConn(ctx, conn, nil) }) {
+				_ = conn.Close()
+			}
 			return
 		}
 		if msg.Type != peer.ConnectionType && msg.Type != distributed.ConnectionType {

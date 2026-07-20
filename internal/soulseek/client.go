@@ -29,6 +29,7 @@ const (
 	defaultPeerInitTimeout  = 10 * time.Second
 	defaultPeerDialTimeout  = 10 * time.Second
 	defaultEstablishTimeout = 30 * time.Second
+	defaultFileIdleTimeout  = 60 * time.Second
 	// defaultListenAddr is used only when Config.ListenAddr is left blank,
 	// which production configuration never does (see config.SoulseekConfig);
 	// it exists so tests that don't care about the peer listener don't have
@@ -76,6 +77,16 @@ type Config struct {
 	// peerInitTimeout bounds how long an accepted peer connection has to
 	// send its first (PeerInit or PierceFirewall) frame. Default 10s.
 	peerInitTimeout time.Duration
+	// fileIdleTimeout bounds how long an F (file transfer) connection may go
+	// without any data arriving before it is treated as stalled. It resets
+	// on every read (see progressReader in fileconn.go) rather than bounding
+	// the transfer's total duration, so a slow but steady peer sending a
+	// large file is never cut off - only silence trips it. Default 60s.
+	fileIdleTimeout time.Duration
+	// fileInitTimeout bounds how long an accepted or mirror-dialed F
+	// connection has to send its TransferInit frame. Default equals
+	// peerInitTimeout (10s).
+	fileInitTimeout time.Duration
 	// peerDialTimeout bounds a single outbound peer TCP dial attempt (both
 	// the direct path in ConnectPeer and the mirror dial-back in
 	// handleConnectToPeer). Default 10s.
@@ -148,6 +159,12 @@ type Client struct {
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
+	// downloads is the in-memory registry of in-flight native downloads
+	// (issue #55): this group (D) defines the type and the F-connection
+	// handoff it feeds; Group E wires Enqueue/ListDownloads/Cancel/Remove and
+	// the P-session download hooks on top without changing its shape.
+	downloads *downloadRegistry
+
 	lifeMu       sync.Mutex
 	lifeCtx      context.Context
 	lifeCancel   context.CancelFunc
@@ -183,6 +200,12 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.peerInitTimeout <= 0 {
 		cfg.peerInitTimeout = defaultPeerInitTimeout
 	}
+	if cfg.fileIdleTimeout <= 0 {
+		cfg.fileIdleTimeout = defaultFileIdleTimeout
+	}
+	if cfg.fileInitTimeout <= 0 {
+		cfg.fileInitTimeout = cfg.peerInitTimeout
+	}
 	if cfg.peerDialTimeout <= 0 {
 		cfg.peerDialTimeout = defaultPeerDialTimeout
 	}
@@ -216,6 +239,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		inboundSlots:   make(chan struct{}, cfg.inboundPeerLimit),
 		handshakeConns: make(map[net.Conn]struct{}),
 		establishes:    make(map[sessionKey]*sessionEstablishment),
+		downloads:      newDownloadRegistry(),
 	}
 	c.tree = newDistributedTree(c)
 	c.sessionHooks = composedSessionHooks{c.tree, &searchSessionHooks{searches: c.searches}}
