@@ -14,5 +14,5 @@ docs/
 # Build artifacts — host-specific or regenerated in-image; mirrors .gitignore.
 /slskdarr
 /internal/observ/web/dist/*
-!/internal/observ/web/dist/index.html
+!/internal/observ/web/dist/placeholder.html
 /web/node_modules/

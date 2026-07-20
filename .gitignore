@@ -10,5 +10,5 @@ config.toml
 
 # Vite build output; only the checked-in placeholder index.html is tracked.
 /internal/observ/web/dist/*
-!/internal/observ/web/dist/index.html
+!/internal/observ/web/dist/placeholder.html
 /web/node_modules/
