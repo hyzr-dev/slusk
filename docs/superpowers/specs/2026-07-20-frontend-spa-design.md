@@ -103,7 +103,13 @@ web/
 ```
 
 **Routing: React Router med riktiga sökvägar.** `/`, `/jobs`, `/jobs/:id`,
-`/health`, `/settings`. Dagens `#/jobs/:id` slutar fungera; acceptabelt för en
+`/events`, `/peers`, `/health`, `/settings`.
+
+`/events` och `/peers` finns inte i designen, som bara har fyra vyer. Men de finns i
+dagens dashboard, har fungerande endpoints, och peers-vyn bär poängsättning,
+sortering och artist-uppdelning som inte visas någon annanstans. Att portera
+designen bokstavligt vore en funktionsregression, så de behålls och ritas i det nya
+designspråket. Dagens `#/jobs/:id` slutar fungera; acceptabelt för en
 självhostad app.
 
 Sökvägar, komponentnamn och filnamn är på engelska. Fas 2 följer samma regel:
@@ -199,8 +205,12 @@ E2E mot ett UI som fortfarande ritas om cementerar det som är minst färdigt.
 
 **Ingår i fas 1:** Vite-bygget, Makefile, Dockerfile-ändring, asset-handler,
 tokens och komponentbibliotek, de fyra designade vyerna (Översikt, Kö, Hälsa,
-Inställningar), TanStack Query mot befintliga endpoints, SSE-endpoint, Vitest-setup,
-borttagning av `dashboard.html` och `dashboard.js`.
+Inställningar) plus de två bevarade (Händelser, Peers), TanStack Query mot
+befintliga endpoints, read-only `/api/config`, Vitest-setup, borttagning av
+`dashboard.html` och `dashboard.js`.
+
+Översikt byggs **utan charts** — designens två chartytor utgår helt i stället för att
+lämnas tomma, så layouten ser avsiktlig ut. Se #88.
 
 **Ingår inte:** samtliga fem UI-issues. De kräver både utökad design och backend
 som inte finns. SSE-transport (#60). Charts på Översikt (#88) — designens
