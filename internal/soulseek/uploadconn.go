@@ -34,7 +34,7 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 	reservation := c.tokens.Reserve()
 	defer reservation.Release()
 	responses := make(chan peer.TransferResponse, 1)
-	c.uploads.registerToken(reservation.token, responses)
+	c.uploads.registerToken(reservation.token, job.key.username, responses)
 	defer c.uploads.unregisterToken(reservation.token, responses)
 
 	request := &peer.TransferRequest{Direction: peer.UploadToPeer, Token: reservation.token, Filename: job.key.filename, FileSize: indexed.wire.Size}

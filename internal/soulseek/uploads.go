@@ -26,6 +26,11 @@ type uploadJob struct {
 	active bool
 }
 
+type uploadResponseWaiter struct {
+	username  string
+	responses chan peer.TransferResponse
+}
+
 type uploadManager struct {
 	mu      sync.Mutex
 	c       *Client
@@ -34,13 +39,13 @@ type uploadManager struct {
 	active  int
 	waiting []*uploadJob
 	byKey   map[uploadKey]*uploadJob
-	byToken map[soul.Token]chan peer.TransferResponse
+	byToken map[soul.Token]uploadResponseWaiter
 	perUser map[string]int
 	wake    chan struct{}
 }
 
 func newUploadManager(c *Client, slots int) *uploadManager {
-	return &uploadManager{c: c, execute: c.runUpload, slots: slots, byKey: make(map[uploadKey]*uploadJob), byToken: make(map[soul.Token]chan peer.TransferResponse), perUser: make(map[string]int), wake: make(chan struct{}, 1)}
+	return &uploadManager{c: c, execute: c.runUpload, slots: slots, byKey: make(map[uploadKey]*uploadJob), byToken: make(map[soul.Token]uploadResponseWaiter), perUser: make(map[string]int), wake: make(chan struct{}, 1)}
 }
 
 func (m *uploadManager) notify() {
@@ -139,7 +144,7 @@ func (m *uploadManager) reset() {
 	m.active = 0
 	m.waiting = nil
 	m.byKey = make(map[uploadKey]*uploadJob)
-	m.byToken = make(map[soul.Token]chan peer.TransferResponse)
+	m.byToken = make(map[soul.Token]uploadResponseWaiter)
 	m.perUser = make(map[string]int)
 	m.mu.Unlock()
 }
@@ -161,27 +166,27 @@ func (m *uploadManager) complete(job *uploadJob) {
 	m.notify()
 }
 
-func (m *uploadManager) registerToken(token soul.Token, responses chan peer.TransferResponse) {
+func (m *uploadManager) registerToken(token soul.Token, username string, responses chan peer.TransferResponse) {
 	m.mu.Lock()
-	m.byToken[token] = responses
+	m.byToken[token] = uploadResponseWaiter{username: username, responses: responses}
 	m.mu.Unlock()
 }
 
 func (m *uploadManager) unregisterToken(token soul.Token, responses chan peer.TransferResponse) {
 	m.mu.Lock()
-	if m.byToken[token] == responses {
+	if waiter, ok := m.byToken[token]; ok && waiter.responses == responses {
 		delete(m.byToken, token)
 	}
 	m.mu.Unlock()
 }
 
-func (m *uploadManager) deliver(response peer.TransferResponse) {
+func (m *uploadManager) deliver(username string, response peer.TransferResponse) {
 	m.mu.Lock()
-	responses := m.byToken[response.Token]
+	waiter, ok := m.byToken[response.Token]
 	m.mu.Unlock()
-	if responses != nil {
+	if ok && waiter.username == username {
 		select {
-		case responses <- response:
+		case waiter.responses <- response:
 		default:
 		}
 	}
@@ -236,7 +241,7 @@ func (h *uploadSessionHooks) frame(session *peerSession, frame sessionFrame) err
 		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
 			return fmt.Errorf("deserialize upload transfer response: %w", err)
 		}
-		h.uploads.deliver(*msg)
+		h.uploads.deliver(session.key.username, *msg)
 		return nil
 	default:
 		return errUnhandledPeerFrame

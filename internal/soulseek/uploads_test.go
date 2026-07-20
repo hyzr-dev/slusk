@@ -110,7 +110,7 @@ func TestUploadDispatcherHandsOffSlotAndResetsOnShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	responses := make(chan peer.TransferResponse, 1)
-	m.registerToken(99, responses)
+	m.registerToken(99, "carol", responses)
 	cancel()
 	select {
 	case <-dispatchDone:
@@ -148,6 +148,30 @@ func TestUploadDispatcherHandsOffSlotAndResetsOnShutdown(t *testing.T) {
 	case <-restartDone:
 	case <-time.After(time.Second):
 		t.Fatal("restarted dispatcher did not stop")
+	}
+}
+
+func TestUploadTransferResponseIsBoundToPeer(t *testing.T) {
+	m := newUploadManager(nil, 1)
+	responses := make(chan peer.TransferResponse, 1)
+	m.registerToken(99, "alice", responses)
+
+	m.deliver("mallory", peer.TransferResponse{Token: 99, Allowed: true})
+	select {
+	case <-responses:
+		t.Fatal("response from the wrong peer was delivered")
+	default:
+	}
+
+	want := peer.TransferResponse{Token: 99, Allowed: true}
+	m.deliver("alice", want)
+	select {
+	case got := <-responses:
+		if got.Token != want.Token || got.Allowed != want.Allowed {
+			t.Fatalf("response = %+v, want %+v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response from the owning peer was not delivered")
 	}
 }
 
