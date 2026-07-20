@@ -1,7 +1,10 @@
 package soulseek
 
 import (
+	"context"
+	"errors"
 	"net"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,14 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+)
+
+// Compile-time confirmation that Client satisfies the pipeline ports Group E
+// implements Enqueue/ListDownloads/Cancel/Remove/DeleteDownloadFolder for.
+var (
+	_ pipeline.PeerSearcher = (*Client)(nil)
+	_ pipeline.PeerNetwork  = (*Client)(nil)
 )
 
 // TestDownloadDestPathMatchesPipelineAlbumFolder is the drift lock: the native
@@ -196,5 +207,270 @@ func TestTransferAttachFileConnDeliversOnce(t *testing.T) {
 		}
 	default:
 		t.Fatal("fileConnCh empty after a successful attachFileConn")
+	}
+}
+
+// --- downloadSessionHooks ---
+
+// TestDownloadHooksClaimAndDispatch exercises downloadSessionHooks.frame
+// directly against handmade sessionFrames (the same technique
+// TestSearchHookNonResponseCodeIsUnhandled uses), covering every code it
+// owns: TransferRequest claims the token and wakes the orchestration,
+// PlaceInQueueResponse updates queuePosition, and UploadFailed/UploadDenied
+// deliver a correctly categorized failure. None of them may return an error
+// (a claimed code returning non-nil would close the P session).
+func TestDownloadHooksClaimAndDispatch(t *testing.T) {
+	downloads := newDownloadRegistry()
+	hook := &downloadSessionHooks{downloads: downloads, logger: testLogger()}
+	session := &peerSession{key: sessionKey{username: "friend", connType: peer.ConnectionType}}
+
+	tr := newTransfer("id1", "friend", "song.flac", 100)
+	downloads.insert(tr)
+
+	req := &peer.TransferRequest{Direction: peer.UploadToPeer, Token: soul.Token(7), Filename: "song.flac", FileSize: 100}
+	wire, err := req.Serialize(req)
+	if err != nil {
+		t.Fatalf("serialize transfer request: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeTransferRequest), wire: wire}); err != nil {
+		t.Fatalf("frame(TransferRequest) = %v, want nil", err)
+	}
+	select {
+	case got := <-tr.transferRequestCh:
+		if got.Token != soul.Token(7) || got.Filename != "song.flac" {
+			t.Errorf("delivered transfer request = %+v", got)
+		}
+	default:
+		t.Fatal("transferRequestCh empty after a TransferRequest frame")
+	}
+	tr.mu.Lock()
+	gotToken := tr.token
+	tr.mu.Unlock()
+	if gotToken != soul.Token(7) {
+		t.Errorf("tr.token = %v, want 7", gotToken)
+	}
+	if claimed := downloads.claimByToken(soul.Token(7)); claimed != tr {
+		t.Fatal("TransferRequest did not registerToken in the registry")
+	}
+
+	piq := &peer.PlaceInQueueResponse{Filename: "song.flac", Place: 3}
+	wire, err = piq.Serialize(piq)
+	if err != nil {
+		t.Fatalf("serialize place in queue response: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodePlaceInQueueResponse), wire: wire}); err != nil {
+		t.Fatalf("frame(PlaceInQueueResponse) = %v, want nil", err)
+	}
+	tr.mu.Lock()
+	place := tr.queuePosition
+	tr.mu.Unlock()
+	if place != 3 {
+		t.Errorf("queuePosition = %d, want 3", place)
+	}
+
+	failed := &peer.UploadFailed{Filename: "song.flac"}
+	wire, err = failed.Serialize(failed)
+	if err != nil {
+		t.Fatalf("serialize upload failed: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeUploadFailed), wire: wire}); err != nil {
+		t.Fatalf("frame(UploadFailed) = %v, want nil", err)
+	}
+	select {
+	case f := <-tr.failCh:
+		if !f.retryable {
+			t.Error("UploadFailed retryable = false, want true")
+		}
+	default:
+		t.Fatal("failCh empty after an UploadFailed frame")
+	}
+
+	denied := &peer.UploadDenied{Filename: "song.flac", Reason: peer.ErrFileNotShared}
+	wire, err = denied.Serialize(denied)
+	if err != nil {
+		t.Fatalf("serialize upload denied: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeUploadDenied), wire: wire}); err != nil {
+		t.Fatalf("frame(UploadDenied) = %v, want nil", err)
+	}
+	select {
+	case f := <-tr.failCh:
+		if f.retryable {
+			t.Errorf("UploadDenied(ErrFileNotShared) retryable = true, want false")
+		}
+		if f.reason != peer.ErrFileNotShared.Error() {
+			t.Errorf("UploadDenied failure reason = %q, want %q", f.reason, peer.ErrFileNotShared.Error())
+		}
+	default:
+		t.Fatal("failCh empty after an UploadDenied frame")
+	}
+}
+
+// TestDownloadHooksTransferRequestForUnknownDownloadIsHandled covers a
+// TransferRequest that arrives for a (username, filename) pair with no
+// registered transfer - e.g. a stale/duplicate relay: it must still be
+// treated as handled (nil), not close the P session.
+func TestDownloadHooksTransferRequestForUnknownDownloadIsHandled(t *testing.T) {
+	hook := &downloadSessionHooks{downloads: newDownloadRegistry()}
+	session := &peerSession{key: sessionKey{username: "friend", connType: peer.ConnectionType}}
+	req := &peer.TransferRequest{Direction: peer.UploadToPeer, Token: soul.Token(1), Filename: "unknown.flac", FileSize: 1}
+	wire, err := req.Serialize(req)
+	if err != nil {
+		t.Fatalf("serialize transfer request: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeTransferRequest), wire: wire}); err != nil {
+		t.Fatalf("frame(TransferRequest for unknown download) = %v, want nil", err)
+	}
+}
+
+// TestDownloadHooksUnknownCodeUnhandled locks in the claim-sentinel contract
+// downloadSessionHooks must follow: it owns exactly
+// {40,41,44,46,50}/TransferRequest,TransferResponse,PlaceInQueueResponse,
+// UploadFailed,UploadDenied on a P connection. Any other code, or a non-P
+// frame, must come back as errUnhandledPeerFrame so a sibling hook (or,
+// ultimately, composedSessionHooks's own unclaimed-code rejection - see
+// TestComposedSessionHooksUnknownCodeStillClosesSession in search_test.go)
+// gets to decide, rather than downloadSessionHooks silently swallowing it.
+func TestDownloadHooksUnknownCodeUnhandled(t *testing.T) {
+	hook := &downloadSessionHooks{downloads: newDownloadRegistry()}
+	session := &peerSession{key: sessionKey{username: "friend", connType: peer.ConnectionType}}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: 0xffff}); !errors.Is(err, errUnhandledPeerFrame) {
+		t.Errorf("frame(unknown P code) = %v, want errUnhandledPeerFrame", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: "D", code: int(peer.CodeTransferRequest)}); !errors.Is(err, errUnhandledPeerFrame) {
+		t.Errorf("frame(non-P connType) = %v, want errUnhandledPeerFrame", err)
+	}
+}
+
+// --- Enqueue / ListDownloads / Cancel / Remove / DeleteDownloadFolder ---
+
+func TestEnqueueDeduplicatesByKey(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+
+	id1, err := c.Enqueue(context.Background(), "alice", "song.flac", 100)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	id2, err := c.Enqueue(context.Background(), "alice", "song.flac", 100)
+	if err != nil {
+		t.Fatalf("Enqueue (duplicate): %v", err)
+	}
+	if id1 != id2 {
+		t.Errorf("Enqueue ids = %q, %q, want identical (byKey dedupe, no second goroutine)", id1, id2)
+	}
+	if got := len(c.downloads.snapshot()); got != 1 {
+		t.Errorf("registry size after duplicate Enqueue = %d, want 1", got)
+	}
+}
+
+func TestListDownloadsMapsFields(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+
+	tr := newTransfer("id1", "alice", "song.flac", 1000)
+	tr.state = core.TransferInProgress
+	tr.failure = "stalled"
+	tr.retryable = true
+	tr.queuePosition = 5
+	tr.speed = 4096
+	tr.bytesDone.Store(500)
+	c.downloads.insert(tr)
+
+	list, err := c.ListDownloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListDownloads: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("ListDownloads length = %d, want 1", len(list))
+	}
+	want := core.RemoteTransfer{
+		ID: "id1", Username: "alice", Filename: "song.flac",
+		State: core.TransferInProgress, Size: 1000, BytesDone: 500,
+		Failure: "stalled", Retryable: true, QueuePosition: 5, Speed: 4096,
+	}
+	if got := list[0]; got != want {
+		t.Errorf("ListDownloads mapping = %+v, want %+v", got, want)
+	}
+}
+
+func TestCancelAndRemoveNotFound(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	if err := c.Cancel(context.Background(), "alice", "missing"); !errors.Is(err, core.ErrRemoteNotFound) {
+		t.Errorf("Cancel(missing) = %v, want wrapping core.ErrRemoteNotFound", err)
+	}
+	if err := c.Remove(context.Background(), "alice", "missing"); !errors.Is(err, core.ErrRemoteNotFound) {
+		t.Errorf("Remove(missing) = %v, want wrapping core.ErrRemoteNotFound", err)
+	}
+}
+
+func TestCancelMarksTransferCancelled(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	tr := newTransfer("id1", "alice", "song.flac", 100)
+	_, cancel := context.WithCancel(context.Background())
+	tr.cancel = cancel
+	c.downloads.insert(tr)
+
+	if err := c.Cancel(context.Background(), "alice", "id1"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	tr.mu.Lock()
+	state := tr.state
+	tr.mu.Unlock()
+	if state != core.TransferCancelled {
+		t.Errorf("state after Cancel = %q, want %q", state, core.TransferCancelled)
+	}
+}
+
+func TestRemoveDeletesPartialDownloadAndRegistryEntry(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.DownloadDir = t.TempDir()
+
+	const filename = `Music\Artist - Album\01 track.flac`
+	tr := newTransfer("id1", "alice", filename, 100)
+	_, cancel := context.WithCancel(context.Background())
+	tr.cancel = cancel
+	c.downloads.insert(tr)
+
+	partPath := downloadDestPath(c.cfg.DownloadDir, filename) + ".part"
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(partPath, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("seed .part: %v", err)
+	}
+
+	if err := c.Remove(context.Background(), "alice", "id1"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(partPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat .part after Remove: err = %v, want os.ErrNotExist", err)
+	}
+	if got := c.downloads.lookupByID("id1"); got != nil {
+		t.Error("transfer still present in the registry after Remove")
+	}
+}
+
+func TestDeleteDownloadFolder(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.DownloadDir = t.TempDir()
+
+	const leaf = "Artist - Album"
+	dir := filepath.Join(c.cfg.DownloadDir, leaf)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "01.flac"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	if err := c.DeleteDownloadFolder(context.Background(), leaf); err != nil {
+		t.Fatalf("DeleteDownloadFolder: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat folder after delete: err = %v, want os.ErrNotExist", err)
+	}
+
+	if err := c.DeleteDownloadFolder(context.Background(), "missing"); !errors.Is(err, core.ErrRemoteNotFound) {
+		t.Errorf("DeleteDownloadFolder(missing) = %v, want wrapping core.ErrRemoteNotFound", err)
 	}
 }

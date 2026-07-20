@@ -1,13 +1,21 @@
 package soulseek
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
@@ -282,4 +290,409 @@ func (r *downloadRegistry) snapshot() []*transfer {
 		out = append(out, tr)
 	}
 	return out
+}
+
+// downloadID deterministically derives a transfer's registry id from its
+// (username, filename) key: hex(sha1(username\x00filename))[:16]. Being
+// deterministic rather than random makes Enqueue idempotent - a second
+// Enqueue call for the same pair returns the same id a caller (e.g. the
+// pipeline reconciler, after a restart or a retried request) may already be
+// tracking, without either side needing to remember which call was first.
+func downloadID(username, filename string) string {
+	sum := sha1.Sum([]byte(downloadKey(username, filename)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// downloadSessionHooks is the P-session hook (issue #55) that claims the
+// download side of the protocol: TransferRequest, PlaceInQueueResponse,
+// UploadFailed and UploadDenied - the codes a peer sends us while we are
+// downloading from them. Every other P code (including TransferResponse,
+// which we send rather than receive for a download) is reported unhandled
+// via errUnhandledPeerFrame so a sibling hook, or composedSessionHooks
+// itself for a genuinely unclaimed code, can decide what to do with it (see
+// composedSessionHooks.frame in tree.go).
+//
+// Dispatch is keyed by (session.key.username, message.Filename) via
+// downloadRegistry.lookupByKey rather than by which P session the frame
+// arrived on, since the shared P session backing a download can be torn down
+// and re-established at any point while the download is queued (see
+// getOrConnectPeerSession): an inbound TransferRequest or
+// PlaceInQueueResponse carries no memory of which session originated the
+// QueueUpload it answers.
+type downloadSessionHooks struct {
+	downloads *downloadRegistry
+	logger    *slog.Logger
+}
+
+func (*downloadSessionHooks) established(*peerSession) {}
+
+func (h *downloadSessionHooks) frame(session *peerSession, frame sessionFrame) error {
+	if frame.connType != peer.ConnectionType {
+		return errUnhandledPeerFrame
+	}
+
+	switch peer.Code(frame.code) {
+	case peer.CodeTransferRequest:
+		msg := &peer.TransferRequest{}
+		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
+			return fmt.Errorf("deserialize transfer request: %w", err)
+		}
+		tr := h.downloads.lookupByKey(session.key.username, msg.Filename)
+		if tr == nil {
+			if h.logger != nil {
+				h.logger.Debug("transfer request for unknown or already-finished download", "username", session.key.username, "filename", msg.Filename)
+			}
+			return nil
+		}
+		h.downloads.registerToken(tr, msg.Token)
+		select {
+		case tr.transferRequestCh <- *msg:
+		default:
+			if h.logger != nil {
+				h.logger.Debug("transfer request channel already full; orchestration not ready for it", "username", session.key.username, "filename", msg.Filename)
+			}
+		}
+		return nil
+
+	case peer.CodeTransferResponse:
+		// We send TransferResponse for a download, we do not receive it. An
+		// echo here is unexpected protocol input, not a session-ending
+		// error: log it and move on rather than closing the session.
+		if h.logger != nil {
+			h.logger.Debug("unexpected transfer response on a download session", "username", session.key.username)
+		}
+		return nil
+
+	case peer.CodePlaceInQueueResponse:
+		msg := &peer.PlaceInQueueResponse{}
+		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
+			return fmt.Errorf("deserialize place in queue response: %w", err)
+		}
+		if tr := h.downloads.lookupByKey(session.key.username, msg.Filename); tr != nil {
+			tr.mu.Lock()
+			tr.queuePosition = msg.Place
+			tr.mu.Unlock()
+		}
+		return nil
+
+	case peer.CodeUploadFailed:
+		msg := &peer.UploadFailed{}
+		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
+			return fmt.Errorf("deserialize upload failed: %w", err)
+		}
+		if tr := h.downloads.lookupByKey(session.key.username, msg.Filename); tr != nil {
+			deliverTransferFailure(tr, transferFailure{reason: "upload failed", retryable: true})
+		}
+		return nil
+
+	case peer.CodeUploadDenied:
+		msg := &peer.UploadDenied{}
+		if err := msg.Deserialize(bytes.NewReader(frame.wire)); err != nil {
+			return fmt.Errorf("deserialize upload denied: %w", err)
+		}
+		if tr := h.downloads.lookupByKey(session.key.username, msg.Filename); tr != nil {
+			reason := ""
+			if msg.Reason != nil {
+				reason = msg.Reason.Error()
+			}
+			failure, retryable := categorizeUploadFailure(reason)
+			deliverTransferFailure(tr, transferFailure{reason: failure, retryable: retryable})
+		}
+		return nil
+
+	default:
+		return errUnhandledPeerFrame
+	}
+}
+
+func (*downloadSessionHooks) closed(*peerSession, error) {}
+
+// deliverTransferFailure delivers f on tr.failCh without blocking: the
+// channel is buffered 1, so a second failure arriving before runDownload
+// reads the first - or after runDownload has already stopped reading it, e.g.
+// following a Cancel - is dropped rather than stalling the P session's sole
+// reader.
+func deliverTransferFailure(tr *transfer, f transferFailure) {
+	select {
+	case tr.failCh <- f:
+	default:
+	}
+}
+
+// Enqueue starts a native download of (username, filename), fire-and-forget:
+// it registers the transfer in the client-wide registry and starts its
+// orchestration goroutine (runDownload), then returns the transfer's
+// deterministic id immediately without waiting for any protocol exchange.
+// ctx does not bound the transfer's lifetime - runDownload runs for as long
+// as the client's own lifecycle does, or until Cancel/Remove is called - it
+// is accepted only to satisfy pipeline.PeerSearcher's signature.
+//
+// A second Enqueue for a (username, filename) pair that already has an
+// active transfer is idempotent: it returns the existing transfer's id and
+// starts no second goroutine, so a caller (e.g. the pipeline reconciler)
+// that calls Enqueue more than once for the same file - after a restart, or
+// a retried request - never races two orchestrations over the same
+// destination file.
+func (c *Client) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
+	if existing := c.downloads.lookupByKey(username, filename); existing != nil {
+		return existing.id, nil
+	}
+
+	id := downloadID(username, filename)
+	tr := newTransfer(id, username, filename, size)
+	trCtx, cancel := context.WithCancel(c.lifecycleContext())
+	tr.cancel = cancel
+	c.downloads.insert(tr)
+
+	if !c.startTracked(func() { c.runDownload(trCtx, tr) }) {
+		cancel()
+		setTransferErrored(tr, "soulseek: client lifecycle is stopping", true)
+		c.downloads.remove(tr)
+	}
+	return id, nil
+}
+
+// ListDownloads returns a point-in-time snapshot of every native download
+// this client currently knows about (queued, in progress, or terminal but
+// not yet Remove()d), mapped to core.RemoteTransfer. Implements
+// pipeline.PeerNetwork.
+func (c *Client) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error) {
+	snapshot := c.downloads.snapshot()
+	out := make([]core.RemoteTransfer, 0, len(snapshot))
+	for _, tr := range snapshot {
+		tr.mu.Lock()
+		state, failure, retryable, queuePosition, speed := tr.state, tr.failure, tr.retryable, tr.queuePosition, tr.speed
+		tr.mu.Unlock()
+		out = append(out, core.RemoteTransfer{
+			ID:            tr.id,
+			Username:      tr.username,
+			Filename:      tr.filename,
+			State:         state,
+			Size:          tr.size,
+			BytesDone:     tr.bytesDone.Load(),
+			Failure:       failure,
+			Retryable:     retryable,
+			QueuePosition: queuePosition,
+			Speed:         speed,
+		})
+	}
+	return out, nil
+}
+
+// Cancel stops a still-active native download's orchestration goroutine and
+// marks it TransferCancelled, leaving its registry entry (and any partial
+// ".part" file already on disk) in place for a subsequent Remove. Implements
+// both pipeline.PeerSearcher and pipeline.PeerNetwork - their Cancel
+// signatures are identical, so one method satisfies both.
+func (c *Client) Cancel(ctx context.Context, username, id string) error {
+	tr := c.downloads.lookupByID(id)
+	if tr == nil {
+		return fmt.Errorf("cancel download %s: %w", id, core.ErrRemoteNotFound)
+	}
+	// The terminal state is set before tr.cancel is invoked, not after:
+	// closing a context's Done channel happens-after every write the
+	// cancelling goroutine made beforehand (Go's channel-close memory
+	// model), so runDownload's own ctx.Done() branch - which checks whether
+	// the state is already TransferCancelled before deciding whether to mark
+	// the download errored instead, see finishInterrupted - is guaranteed to
+	// observe this write rather than racing it.
+	tr.mu.Lock()
+	tr.state = core.TransferCancelled
+	tr.mu.Unlock()
+	if tr.cancel != nil {
+		tr.cancel()
+	}
+	return nil
+}
+
+// Remove purges id's registry entry and deletes any partial (".part") file
+// left on disk for it, cancelling its orchestration first if still active.
+// Implements pipeline.PeerNetwork.
+func (c *Client) Remove(ctx context.Context, username, id string) error {
+	tr := c.downloads.lookupByID(id)
+	if tr == nil {
+		return fmt.Errorf("remove download %s: %w", id, core.ErrRemoteNotFound)
+	}
+	if tr.cancel != nil {
+		tr.cancel()
+	}
+	c.downloads.remove(tr)
+
+	partPath := downloadDestPath(c.cfg.DownloadDir, tr.filename) + ".part"
+	if err := os.Remove(partPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove partial download %s: %w", partPath, err)
+	}
+	return nil
+}
+
+// DeleteDownloadFolder deletes name's directory under Config.DownloadDir -
+// the per-release leaf directory downloaded files land in (see
+// downloadDestPath) - and everything in it. Implements
+// pipeline.PeerSearcher.
+func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
+	dir := filepath.Join(c.cfg.DownloadDir, name)
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("delete download folder %s: %w", name, core.ErrRemoteNotFound)
+		}
+		return fmt.Errorf("stat download folder %s: %w", dir, err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("delete download folder %s: %w", dir, err)
+	}
+	return nil
+}
+
+// setTransferErrored marks tr TransferErrored under its lock, for the
+// several runDownload exit paths (and Enqueue's own lifecycle-stopping
+// fallback) that fail before ever reaching a file transfer.
+func setTransferErrored(tr *transfer, failure string, retryable bool) {
+	tr.mu.Lock()
+	tr.state = core.TransferErrored
+	tr.failure = failure
+	tr.retryable = retryable
+	tr.mu.Unlock()
+}
+
+// finishInterrupted handles runDownload waking up on ctx.Done(): if Cancel
+// already marked tr TransferCancelled (see Client.Cancel's comment on why
+// that write is guaranteed visible here), leave it alone; otherwise
+// ctx.Done() fired because the client's own lifecycle is shutting down,
+// which is reported as an errored, retryable transfer rather than silently
+// abandoned, so a caller polling ListDownloads still sees a deliberate
+// outcome instead of a transfer stuck QUEUED/IN_PROGRESS forever.
+func finishInterrupted(tr *transfer, err error) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.state == core.TransferCancelled {
+		return
+	}
+	tr.state = core.TransferErrored
+	tr.failure = "download interrupted: " + err.Error()
+	tr.retryable = true
+}
+
+// downloadPeerMessage constrains trySendPeerMessage to the P messages the
+// download orchestration sends to a peer, mirroring the serverMessage[M]
+// pattern in client.go.
+type downloadPeerMessage[M any] interface {
+	*peer.QueueUpload | *peer.TransferResponse | *peer.PlaceInQueueRequest
+	Serialize(M) ([]byte, error)
+}
+
+// trySendPeerMessage serializes msg and enqueues it on session's write queue
+// without blocking - Serialize packs the size+code+body itself, the same
+// pattern tree.go's sendChildMetadata uses for outbound P/D frames. It
+// reports false on either a serialization error or TrySend's own
+// backpressure/closed-session refusal; the caller decides whether that is
+// worth retrying.
+func trySendPeerMessage[M downloadPeerMessage[M]](session *peerSession, msg M) bool {
+	frame, err := msg.Serialize(msg)
+	if err != nil {
+		return false
+	}
+	return session.TrySend(frame)
+}
+
+// runDownload drives one transfer through the Soulseek download protocol
+// dance from QUEUED to a terminal state: it asks the peer to queue our
+// download (QueueUpload), waits for their TransferRequest - polling
+// PlaceInQueueRequest for a queue-position update in the meantime, and
+// re-establishing the shared P session if it drops while queued, since a
+// peer holding us queued does not keep any particular session alive on our
+// behalf, see getOrConnectPeerSession - accepts the request
+// (TransferResponse), waits for the resulting F connection (delivered by
+// handleInboundFileConn via tr.fileConnCh), and finally streams the file to
+// disk with streamFile. It is started exactly once per transfer, by Enqueue,
+// and owns every write to tr's state from that point until it returns.
+func (c *Client) runDownload(ctx context.Context, tr *transfer) {
+	session, err := c.getOrConnectPeerSession(ctx, tr.username)
+	if err != nil {
+		setTransferErrored(tr, "peer offline: "+err.Error(), true)
+		return
+	}
+	if !trySendPeerMessage(session, &peer.QueueUpload{Filename: tr.filename}) {
+		session, err = c.getOrConnectPeerSession(ctx, tr.username)
+		if err != nil || !trySendPeerMessage(session, &peer.QueueUpload{Filename: tr.filename}) {
+			setTransferErrored(tr, "queue upload request could not be delivered to the peer", true)
+			return
+		}
+	}
+
+	poll := time.NewTicker(c.cfg.placeInQueueInterval)
+	defer poll.Stop()
+	queueDeadline := time.NewTimer(c.cfg.downloadQueueTimeout)
+	defer queueDeadline.Stop()
+
+	var req peer.TransferRequest
+queueWait:
+	for {
+		select {
+		case req = <-tr.transferRequestCh:
+			break queueWait
+		case f := <-tr.failCh:
+			setTransferErrored(tr, f.reason, f.retryable)
+			return
+		case <-poll.C:
+			if s, err := c.getOrConnectPeerSession(ctx, tr.username); err == nil {
+				trySendPeerMessage(s, &peer.PlaceInQueueRequest{Filename: tr.filename})
+			}
+		case <-ctx.Done():
+			finishInterrupted(tr, ctx.Err())
+			return
+		case <-queueDeadline.C:
+			setTransferErrored(tr, "timed out waiting for the peer to start the transfer", true)
+			return
+		}
+	}
+
+	session, err = c.getOrConnectPeerSession(ctx, tr.username)
+	if err != nil {
+		setTransferErrored(tr, "peer offline: "+err.Error(), true)
+		return
+	}
+	trySendPeerMessage(session, &peer.TransferResponse{Token: req.Token, Allowed: true})
+
+	var handoff fileConnHandoff
+	select {
+	case handoff = <-tr.fileConnCh:
+	case f := <-tr.failCh:
+		setTransferErrored(tr, f.reason, f.retryable)
+		return
+	case <-ctx.Done():
+		finishInterrupted(tr, ctx.Err())
+		return
+	case <-time.After(c.cfg.downloadNegotiationTimeout):
+		setTransferErrored(tr, "timed out waiting for the peer's file connection", true)
+		return
+	}
+	defer handoff.lease.Release()
+	defer handoff.conn.Close()
+
+	tr.mu.Lock()
+	tr.state = core.TransferInProgress
+	tr.mu.Unlock()
+
+	destPath := downloadDestPath(c.cfg.DownloadDir, tr.filename)
+	lastBytes, lastTime := int64(0), time.Now()
+	written, err := streamFile(handoff.conn, destPath, tr.size, c.cfg.fileIdleTimeout, func(n int64) {
+		tr.bytesDone.Store(n)
+		now := time.Now()
+		if d := now.Sub(lastTime); d >= time.Second {
+			speed := int64(float64(n-lastBytes) / d.Seconds())
+			tr.mu.Lock()
+			tr.speed = speed
+			tr.mu.Unlock()
+			lastBytes, lastTime = n, now
+		}
+	})
+	if err != nil {
+		setTransferErrored(tr, err.Error(), true)
+		return
+	}
+
+	tr.bytesDone.Store(written)
+	tr.mu.Lock()
+	tr.state = core.TransferCompleted
+	tr.mu.Unlock()
 }

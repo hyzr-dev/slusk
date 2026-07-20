@@ -30,6 +30,17 @@ const (
 	defaultPeerDialTimeout  = 10 * time.Second
 	defaultEstablishTimeout = 30 * time.Second
 	defaultFileIdleTimeout  = 60 * time.Second
+	// defaultPlaceInQueueInterval is how often runDownload polls a peer for a
+	// queued download's current queue position while waiting for its
+	// TransferRequest.
+	defaultPlaceInQueueInterval = 60 * time.Second
+	// defaultDownloadNegotiationTimeout bounds how long runDownload waits for
+	// a TransferRequest's matching F connection to arrive once
+	// TransferResponse has been sent.
+	defaultDownloadNegotiationTimeout = 60 * time.Second
+	// defaultDownloadQueueTimeout bounds how long a queued download waits for
+	// the peer to send its TransferRequest before giving up.
+	defaultDownloadQueueTimeout = 10 * time.Minute
 	// defaultListenAddr is used only when Config.ListenAddr is left blank,
 	// which production configuration never does (see config.SoulseekConfig);
 	// it exists so tests that don't care about the peer listener don't have
@@ -64,6 +75,15 @@ type Config struct {
 	// is only appropriate for tests: production configuration always
 	// supplies a real, routable ListenAddr (see config.SoulseekConfig).
 	ListenAddr string
+
+	// DownloadDir is the local root directory native downloads (issue #55)
+	// are written under, in the same completeDir/<leaf>/<basename> layout
+	// slskd produces (see downloadDestPath) so the Importing module's
+	// AlbumFolder scan finds them in the same place either way. Left blank
+	// here: production wiring lands in #57 (which will set it from
+	// config.PathsConfig.SlskdCompleteDir); tests and the manual probe set
+	// it directly.
+	DownloadDir string
 
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
@@ -108,6 +128,17 @@ type Config struct {
 	// parentCandidateTimeout bounds one direct D candidate's opportunity to
 	// provide valid metadata and a search. Default 10s.
 	parentCandidateTimeout time.Duration
+	// placeInQueueInterval is how often runDownload polls a peer for a
+	// queued download's current queue position while waiting for its
+	// TransferRequest. Default 60s.
+	placeInQueueInterval time.Duration
+	// downloadNegotiationTimeout bounds how long runDownload waits for a
+	// TransferRequest's matching F connection to arrive once
+	// TransferResponse has been sent. Default 60s.
+	downloadNegotiationTimeout time.Duration
+	// downloadQueueTimeout bounds how long a queued download waits for the
+	// peer to send its TransferRequest before giving up. Default 10m.
+	downloadQueueTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -227,6 +258,15 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.parentCandidateTimeout <= 0 {
 		cfg.parentCandidateTimeout = defaultParentCandidateTimeout
 	}
+	if cfg.placeInQueueInterval <= 0 {
+		cfg.placeInQueueInterval = defaultPlaceInQueueInterval
+	}
+	if cfg.downloadNegotiationTimeout <= 0 {
+		cfg.downloadNegotiationTimeout = defaultDownloadNegotiationTimeout
+	}
+	if cfg.downloadQueueTimeout <= 0 {
+		cfg.downloadQueueTimeout = defaultDownloadQueueTimeout
+	}
 
 	c := &Client{
 		cfg:            cfg,
@@ -242,7 +282,11 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		downloads:      newDownloadRegistry(),
 	}
 	c.tree = newDistributedTree(c)
-	c.sessionHooks = composedSessionHooks{c.tree, &searchSessionHooks{searches: c.searches}}
+	c.sessionHooks = composedSessionHooks{
+		c.tree,
+		&searchSessionHooks{searches: c.searches},
+		&downloadSessionHooks{downloads: c.downloads, logger: logger},
+	}
 	c.status.Store(&Status{State: StateDisconnected})
 	return c
 }
