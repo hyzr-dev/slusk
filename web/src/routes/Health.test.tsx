@@ -67,4 +67,31 @@ describe('Health module states', () => {
     expect(cell.className).toMatch(/unhealthy/);
     expect(cell.textContent).toContain(t.health.consecutiveFailures(3));
   });
+
+  it('renders a ready module with a nonzero failure count without the unhealthy style', () => {
+    renderHealth({
+      importer: makeModule({
+        lastAttempt: '2026-07-20T10:00:00Z',
+        ready: true,
+        consecutiveFailures: 2,
+      }),
+    });
+    const cell = screen.getByTitle('');
+    expect(cell.className).not.toMatch(/unhealthy/);
+    expect(cell.textContent).toContain(t.health.consecutiveFailures(2));
+  });
+
+  it('marks a not-ready module unhealthy even with zero consecutive failures, and omits the count', () => {
+    renderHealth({
+      importer: makeModule({
+        lastAttempt: '2026-07-20T10:00:00Z',
+        ready: false,
+        consecutiveFailures: 0,
+        lastError: 'boom',
+      }),
+    });
+    const cell = screen.getByTitle('boom');
+    expect(cell.className).toMatch(/unhealthy/);
+    expect(cell.textContent).not.toContain('consecutive');
+  });
 });
