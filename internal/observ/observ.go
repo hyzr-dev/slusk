@@ -360,7 +360,6 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
-	mux.HandleFunc("/", dashboardHandler)
-	mux.HandleFunc("/dashboard.js", dashboardJSHandler)
+	mux.Handle("/", newAssetHandler())
 	return mux
 }
