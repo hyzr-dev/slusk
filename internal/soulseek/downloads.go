@@ -89,7 +89,11 @@ type transfer struct {
 	id       string
 	username string
 	filename string
-	size     int64
+	// size is the enqueued file size, updated once (under mu) to the peer's
+	// authoritative TransferRequest.FileSize when the transfer is negotiated,
+	// so it is read under mu by a concurrent ListDownloads snapshot even though
+	// it is declared above mu here to keep it beside the other identity fields.
+	size int64
 	// token is the token from the peer's TransferRequest, echoed back to us
 	// unchanged in the F connection's TransferInit. It is the zero value
 	// until the download hook (Group E) observes a TransferRequest and calls
@@ -98,12 +102,19 @@ type transfer struct {
 	// above mu here to keep the wire-correlation fields grouped together.
 	token soul.Token
 
-	mu            sync.Mutex // guards state, failure, retryable, queuePosition, speed, token
+	mu            sync.Mutex // guards state, failure, retryable, queuePosition, speed, size, token, awaitingFileConn
 	state         core.TransferState
 	failure       string
 	retryable     bool
 	queuePosition uint32
 	speed         int64
+	// awaitingFileConn is true only while runDownload is parked in the
+	// negotiation select waiting for the peer's F connection on fileConnCh.
+	// attachFileConn checks it under mu so an F connection that arrives after
+	// runDownload has moved on (cancelled, failed, or timed out) is refused and
+	// closed by its caller rather than delivered into a buffered channel nobody
+	// will ever read - which would leak the socket and its inbound lease.
+	awaitingFileConn bool
 
 	// bytesDone is written by streamFile's progress callback as bytes land on
 	// disk and read concurrently by ListDownloads (Group E); kept outside mu
@@ -161,20 +172,60 @@ func newTransfer(id, username, filename string, size int64) *transfer {
 	}
 }
 
-// attachFileConn delivers an established F connection to whichever
-// orchestration goroutine is waiting on tr.fileConnCh, without blocking. It
-// reports whether the delivery landed: false means nothing was waiting -
-// fileConnCh's single buffer slot was already full, or nobody has read from
-// it since a prior delivery - in which case the caller (handleInboundFileConn)
-// must close conn and release lease itself, since ownership was never handed
-// off.
+// attachFileConn hands an established F connection to the orchestration
+// goroutine parked in runDownload's negotiation select, reporting whether the
+// handoff landed. It only delivers while tr.awaitingFileConn is set - the
+// window in which runDownload is actually reading fileConnCh - checked under
+// tr.mu so the decision is atomic with runDownload's own give-up
+// (stopAwaitingFileConn also runs under tr.mu). A false return means runDownload
+// is not, or is no longer, waiting: the caller (handleInboundFileConn) then
+// closes conn and releases lease itself, since ownership was never transferred.
+// This must not treat the buffered channel merely having a free slot as a
+// waiting receiver, or an F connection arriving after runDownload gave up would
+// sit unread and leak the socket and its inbound lease.
 func (tr *transfer) attachFileConn(conn net.Conn, lease *inboundLease) bool {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if !tr.awaitingFileConn {
+		return false
+	}
 	select {
 	case tr.fileConnCh <- fileConnHandoff{conn: conn, lease: lease}:
 		return true
 	default:
+		// awaitingFileConn implies fileConnCh is empty (claimByToken admits at
+		// most one F connection per transfer), so this is unreachable; refuse
+		// rather than block under mu if it ever is reached.
 		return false
 	}
+}
+
+// stopAwaitingFileConn clears the awaiting flag and returns any F connection
+// attachFileConn delivered just before it was cleared, for runDownload to close
+// on a give-up path. Clearing the flag under tr.mu serialises against
+// attachFileConn: after this returns, attachFileConn refuses (returns false)
+// any not-yet-delivered F connection, so its caller closes that one instead.
+func (tr *transfer) stopAwaitingFileConn() (fileConnHandoff, bool) {
+	tr.mu.Lock()
+	tr.awaitingFileConn = false
+	tr.mu.Unlock()
+	select {
+	case handoff := <-tr.fileConnCh:
+		return handoff, true
+	default:
+		return fileConnHandoff{}, false
+	}
+}
+
+// closeLeftoverFileConn closes an F connection returned by stopAwaitingFileConn
+// (if any), releasing its inbound lease - the give-up counterpart of
+// runDownload's normal defer conn.Close()/lease.Release().
+func closeLeftoverFileConn(handoff fileConnHandoff, ok bool) {
+	if !ok {
+		return
+	}
+	_ = handoff.conn.Close()
+	handoff.lease.Release()
 }
 
 // downloadKey returns the byKey registry key for a (username, filename)
@@ -217,6 +268,23 @@ func (r *downloadRegistry) insert(tr *transfer) {
 	r.byKey[downloadKey(tr.username, tr.filename)] = tr
 }
 
+// insertIfAbsent registers tr unless a transfer for its (username, filename)
+// key already exists, in which case it registers nothing and returns that
+// existing transfer. The check and insert are one atomic step under the
+// registry lock, so two concurrent Enqueue calls for the same file never both
+// create an orchestration goroutine over the same destination.
+func (r *downloadRegistry) insertIfAbsent(tr *transfer) (existing *transfer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := downloadKey(tr.username, tr.filename)
+	if cur, ok := r.byKey[key]; ok {
+		return cur
+	}
+	r.byID[tr.id] = tr
+	r.byKey[key] = tr
+	return nil
+}
+
 // lookupByKey returns the transfer registered for (username, filename), or
 // nil if none is.
 func (r *downloadRegistry) lookupByKey(username, filename string) *transfer {
@@ -237,10 +305,19 @@ func (r *downloadRegistry) lookupByID(id string) *transfer {
 // connection's TransferInit can be matched back to tr via claimByToken.
 func (r *downloadRegistry) registerToken(tr *transfer, token soul.Token) {
 	tr.mu.Lock()
+	old := tr.token
 	tr.token = token
 	tr.mu.Unlock()
 
 	r.mu.Lock()
+	// A peer re-sending TransferRequest with a fresh token (e.g. after its own
+	// retry) must not leave the previous token stranded in byToken - a stale
+	// entry both leaks map memory and could misroute a late F connection.
+	if old != token {
+		if cur, ok := r.byToken[old]; ok && cur == tr {
+			delete(r.byToken, old)
+		}
+	}
 	r.byToken[token] = tr
 	r.mu.Unlock()
 }
@@ -434,15 +511,18 @@ func deliverTransferFailure(tr *transfer, f transferFailure) {
 // a retried request - never races two orchestrations over the same
 // destination file.
 func (c *Client) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
-	if existing := c.downloads.lookupByKey(username, filename); existing != nil {
-		return existing.id, nil
-	}
-
 	id := downloadID(username, filename)
 	tr := newTransfer(id, username, filename, size)
+	// tr.cancel is set before insertIfAbsent makes tr reachable via the
+	// registry, so a Cancel racing right after registration always finds a
+	// usable cancel func rather than a nil one.
 	trCtx, cancel := context.WithCancel(c.lifecycleContext())
 	tr.cancel = cancel
-	c.downloads.insert(tr)
+
+	if existing := c.downloads.insertIfAbsent(tr); existing != nil {
+		cancel() // discard the unused context for the deduplicated transfer
+		return existing.id, nil
+	}
 
 	if !c.startTracked(func() { c.runDownload(trCtx, tr) }) {
 		cancel()
@@ -461,14 +541,14 @@ func (c *Client) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, erro
 	out := make([]core.RemoteTransfer, 0, len(snapshot))
 	for _, tr := range snapshot {
 		tr.mu.Lock()
-		state, failure, retryable, queuePosition, speed := tr.state, tr.failure, tr.retryable, tr.queuePosition, tr.speed
+		state, failure, retryable, queuePosition, speed, size := tr.state, tr.failure, tr.retryable, tr.queuePosition, tr.speed, tr.size
 		tr.mu.Unlock()
 		out = append(out, core.RemoteTransfer{
 			ID:            tr.id,
 			Username:      tr.username,
 			Filename:      tr.filename,
 			State:         state,
-			Size:          tr.size,
+			Size:          size,
 			BytesDone:     tr.bytesDone.Load(),
 			Failure:       failure,
 			Retryable:     retryable,
@@ -497,6 +577,12 @@ func (c *Client) Cancel(ctx context.Context, username, id string) error {
 	// the download errored instead, see finishInterrupted - is guaranteed to
 	// observe this write rather than racing it.
 	tr.mu.Lock()
+	if tr.state == core.TransferCompleted {
+		// A download that already finished is not cancellable: leave the
+		// successful terminal state (and the file on disk) intact.
+		tr.mu.Unlock()
+		return nil
+	}
 	tr.state = core.TransferCancelled
 	tr.mu.Unlock()
 	if tr.cancel != nil {
@@ -594,6 +680,24 @@ func trySendPeerMessage[M downloadPeerMessage[M]](session *peerSession, msg M) b
 	return session.TrySend(frame)
 }
 
+// sendTransferAccept tells the peer we accept its upload (a TransferResponse
+// with Allowed set) so it opens the file connection back to us. Like the
+// QueueUpload send, it re-establishes the shared P session and retries once if
+// the first attempt is refused by backpressure or a just-closed session, and
+// reports whether the accept ultimately reached a session's write queue -
+// runDownload treats a failure as a retryable error rather than silently
+// waiting for a file connection the peer was never asked to open.
+func (c *Client) sendTransferAccept(ctx context.Context, tr *transfer, token soul.Token, session *peerSession) bool {
+	if trySendPeerMessage(session, &peer.TransferResponse{Token: token, Allowed: true}) {
+		return true
+	}
+	session, err := c.getOrConnectPeerSession(ctx, tr.username)
+	if err != nil {
+		return false
+	}
+	return trySendPeerMessage(session, &peer.TransferResponse{Token: token, Allowed: true})
+}
+
 // runDownload drives one transfer through the Soulseek download protocol
 // dance from QUEUED to a terminal state: it asks the peer to queue our
 // download (QueueUpload), waits for their TransferRequest - polling
@@ -646,23 +750,57 @@ queueWait:
 		}
 	}
 
+	// NEGOTIATE: the peer is ready to upload. Accept the transfer and wait for
+	// the F connection it opens back to us.
 	session, err = c.getOrConnectPeerSession(ctx, tr.username)
 	if err != nil {
 		setTransferErrored(tr, "peer offline: "+err.Error(), true)
 		return
 	}
-	trySendPeerMessage(session, &peer.TransferResponse{Token: req.Token, Allowed: true})
+
+	// Announce we are ready to receive the F connection before sending the
+	// accept, so a peer that opens it immediately is delivered to us rather
+	// than refused (and closed) as unowned by attachFileConn.
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+
+	if !c.sendTransferAccept(ctx, tr, req.Token, session) {
+		closeLeftoverFileConn(tr.stopAwaitingFileConn())
+		setTransferErrored(tr, "transfer acceptance could not be delivered to the peer", true)
+		return
+	}
+
+	// The peer's TransferRequest is authoritative about how many bytes it will
+	// send; trust it over the size the caller enqueued (normally identical) so
+	// a mismatch cannot truncate the file (io.CopyN stopping early, then
+	// renaming a short .part to Completed) or hang it until the idle timeout.
+	streamSize := tr.size
+	if req.FileSize > 0 {
+		streamSize = int64(req.FileSize)
+		tr.mu.Lock()
+		tr.size = streamSize
+		tr.mu.Unlock()
+	}
 
 	var handoff fileConnHandoff
 	select {
 	case handoff = <-tr.fileConnCh:
+		// Clear the awaiting flag through the same serialised-under-mu path the
+		// give-up branches use, closing any second (protocol-violating) F
+		// connection a misbehaving peer raced in, so no late delivery can slip
+		// into a channel this goroutine has stopped reading.
+		closeLeftoverFileConn(tr.stopAwaitingFileConn())
 	case f := <-tr.failCh:
+		closeLeftoverFileConn(tr.stopAwaitingFileConn())
 		setTransferErrored(tr, f.reason, f.retryable)
 		return
 	case <-ctx.Done():
+		closeLeftoverFileConn(tr.stopAwaitingFileConn())
 		finishInterrupted(tr, ctx.Err())
 		return
 	case <-time.After(c.cfg.downloadNegotiationTimeout):
+		closeLeftoverFileConn(tr.stopAwaitingFileConn())
 		setTransferErrored(tr, "timed out waiting for the peer's file connection", true)
 		return
 	}
@@ -675,7 +813,7 @@ queueWait:
 
 	destPath := downloadDestPath(c.cfg.DownloadDir, tr.filename)
 	lastBytes, lastTime := int64(0), time.Now()
-	written, err := streamFile(handoff.conn, destPath, tr.size, c.cfg.fileIdleTimeout, func(n int64) {
+	written, err := streamFile(handoff.conn, destPath, streamSize, c.cfg.fileIdleTimeout, func(n int64) {
 		tr.bytesDone.Store(n)
 		now := time.Now()
 		if d := now.Sub(lastTime); d >= time.Second {

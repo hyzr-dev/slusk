@@ -180,24 +180,34 @@ func TestDownloadRegistrySnapshot(t *testing.T) {
 	}
 }
 
-func TestTransferAttachFileConnDeliversOnce(t *testing.T) {
+func TestTransferAttachFileConnRequiresAwaitingReceiver(t *testing.T) {
 	tr := newTransfer("id1", "alice", "song.flac", 100)
 
 	first, firstPeer := net.Pipe()
 	defer first.Close()
 	defer firstPeer.Close()
+
+	// With no orchestration goroutine awaiting the F connection, attach must be
+	// refused so its caller (handleInboundFileConn) closes the socket instead
+	// of leaking it into a buffered channel nobody reads.
+	if tr.attachFileConn(first, nil) {
+		t.Fatal("attachFileConn with no awaiting receiver = true, want false")
+	}
+
+	// Once runDownload is awaiting, the first attach lands...
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+	if !tr.attachFileConn(first, nil) {
+		t.Fatal("attachFileConn while awaiting = false, want true")
+	}
+
+	// ...and a second is refused: the single buffer slot is already used.
 	second, secondPeer := net.Pipe()
 	defer second.Close()
 	defer secondPeer.Close()
-
-	// Two deliveries back-to-back, with nobody reading fileConnCh in between:
-	// the first fills its single buffer slot, so the second must be refused
-	// rather than overwrite or block.
-	if !tr.attachFileConn(first, nil) {
-		t.Fatal("attachFileConn (first) = false, want true")
-	}
 	if tr.attachFileConn(second, nil) {
-		t.Error("attachFileConn (second, buffer already full) = true, want false")
+		t.Error("second attachFileConn (buffer already full) = true, want false")
 	}
 
 	select {
@@ -207,6 +217,52 @@ func TestTransferAttachFileConnDeliversOnce(t *testing.T) {
 		}
 	default:
 		t.Fatal("fileConnCh empty after a successful attachFileConn")
+	}
+}
+
+// TestStopAwaitingFileConnRefusesLateAttach is the regression guard for the F
+// socket + inbound-lease leak: once runDownload has stopped awaiting an F
+// connection (cancelled, failed, or timed out), a late-arriving F connection
+// must be refused by attachFileConn so handleInboundFileConn closes it, rather
+// than delivered into a channel with no reader.
+func TestStopAwaitingFileConnRefusesLateAttach(t *testing.T) {
+	tr := newTransfer("id1", "alice", "song.flac", 100)
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+
+	// runDownload gives up before any F connection arrived: nothing to drain.
+	if handoff, ok := tr.stopAwaitingFileConn(); ok {
+		t.Errorf("stopAwaitingFileConn returned a handoff %v, want none", handoff.conn)
+	}
+
+	late, latePeer := net.Pipe()
+	defer late.Close()
+	defer latePeer.Close()
+	if tr.attachFileConn(late, nil) {
+		t.Error("attachFileConn after stopAwaitingFileConn = true, want false (would leak the socket)")
+	}
+}
+
+// TestStopAwaitingFileConnDrainsRacedDelivery covers the narrow race where an F
+// connection is delivered a moment before runDownload gives up:
+// stopAwaitingFileConn must hand that raced connection back so runDownload can
+// close it, since nothing else will read it off the channel.
+func TestStopAwaitingFileConnDrainsRacedDelivery(t *testing.T) {
+	tr := newTransfer("id1", "alice", "song.flac", 100)
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
+
+	raced, racedPeer := net.Pipe()
+	defer racedPeer.Close()
+	if !tr.attachFileConn(raced, nil) {
+		t.Fatal("attachFileConn while awaiting = false, want true")
+	}
+
+	handoff, ok := tr.stopAwaitingFileConn()
+	if !ok || handoff.conn != raced {
+		t.Fatalf("stopAwaitingFileConn = (conn %v, ok %v), want the raced connection", handoff.conn, ok)
 	}
 }
 

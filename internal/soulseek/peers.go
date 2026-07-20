@@ -388,6 +388,10 @@ func (c *Client) connectPeerSession(ctx context.Context, username string) (*peer
 	if winner := c.registerSession(candidate); winner != nil {
 		return winner, nil
 	}
+	// registerSession only returns nil for a closed generation, which a
+	// generation-0 ordinary "P" candidate can never hit; the guard mirrors
+	// establishSession (where non-zero generations make it reachable) and is
+	// kept defensively.
 	return nil, errNoServerConnection
 }
 

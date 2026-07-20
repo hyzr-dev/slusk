@@ -130,19 +130,33 @@ func TestDownloadEndToEndQueuePositionAndCompletion(t *testing.T) {
 			return
 		}
 
-		reader, _, code, err = peer.Read(peer.Code(0), conn, false)
-		if err != nil {
-			t.Logf("fake peer: read transfer response: %v", err)
-			return
-		}
-		if peer.Code(code) != peer.CodeTransferResponse {
-			t.Errorf("fake peer: code = %d, want CodeTransferResponse", code)
-			return
-		}
-		tresp := &peer.TransferResponse{}
-		if err := tresp.Deserialize(reader); err != nil {
-			t.Errorf("fake peer: deserialize transfer response: %v", err)
-			return
+		// runDownload keeps polling PlaceInQueueRequest on its ticker until it
+		// observes our TransferRequest, so one or more extra polls can arrive
+		// on this connection before the TransferResponse does. Drain and ignore
+		// any of them rather than depend on exact scheduler timing.
+		var tresp *peer.TransferResponse
+		for tresp == nil {
+			reader, _, code, err = peer.Read(peer.Code(0), conn, false)
+			if err != nil {
+				t.Logf("fake peer: read transfer response: %v", err)
+				return
+			}
+			switch peer.Code(code) {
+			case peer.CodePlaceInQueueRequest:
+				if err := (&peer.PlaceInQueueRequest{}).Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize extra place in queue request: %v", err)
+					return
+				}
+			case peer.CodeTransferResponse:
+				tresp = &peer.TransferResponse{}
+				if err := tresp.Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize transfer response: %v", err)
+					return
+				}
+			default:
+				t.Errorf("fake peer: code = %d, want CodeTransferResponse or CodePlaceInQueueRequest", code)
+				return
+			}
 		}
 		if !tresp.Allowed {
 			t.Errorf("fake peer: TransferResponse.Allowed = false, want true")

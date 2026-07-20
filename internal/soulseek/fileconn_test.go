@@ -225,6 +225,11 @@ func TestHandleInboundFileConnDirect(t *testing.T) {
 	c.downloads.insert(tr)
 	const token = soul.Token(555)
 	c.downloads.registerToken(tr, token)
+	// Model runDownload parked in its negotiation select: attachFileConn only
+	// hands the F connection off to a transfer that is awaiting it.
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -368,6 +373,11 @@ func TestHandleInboundFileConnIndirectMirrorDial(t *testing.T) {
 	tr := newTransfer("id1", "friend", "song.flac", 100)
 	c.downloads.insert(tr)
 	c.downloads.registerToken(tr, transferToken)
+	// Model runDownload parked in its negotiation select: attachFileConn only
+	// hands the F connection off to a transfer that is awaiting it.
+	tr.mu.Lock()
+	tr.awaitingFileConn = true
+	tr.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
