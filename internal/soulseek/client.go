@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	defaultDialTimeout              = 10 * time.Second
-	defaultPingInterval             = 5 * time.Minute
+	defaultDialTimeout  = 10 * time.Second
+	defaultPingInterval = 5 * time.Minute
 	// defaultServerWriteTimeout bounds a single write to the central server so a
 	// stalled (e.g. zero-window) server cannot pin serverWriteMu, and the ping
 	// ticker's own write cannot wedge the serveConnected select that must reach
