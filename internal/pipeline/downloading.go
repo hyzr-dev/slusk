@@ -154,7 +154,12 @@ type Downloading struct {
 }
 
 // NewDownloading constructs a Downloading.
-func NewDownloading(p DownloadingParams) *Downloading { return &Downloading{p: p} }
+func NewDownloading(p DownloadingParams) *Downloading {
+	if p.Logger != nil {
+		p.Logger = p.Logger.With("module", "downloading")
+	}
+	return &Downloading{p: p}
+}
 
 // Name identifies this module in logs and Health().
 func (d *Downloading) Name() string { return "downloading" }

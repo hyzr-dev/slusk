@@ -49,7 +49,12 @@ type WantedSync struct {
 }
 
 // NewWantedSync constructs a WantedSync.
-func NewWantedSync(p WantedSyncParams) *WantedSync { return &WantedSync{p: p} }
+func NewWantedSync(p WantedSyncParams) *WantedSync {
+	if p.Logger != nil {
+		p.Logger = p.Logger.With("module", "wanted_sync")
+	}
+	return &WantedSync{p: p}
+}
 
 // Name identifies this module in logs and Health().
 func (w *WantedSync) Name() string { return "wanted_sync" }
