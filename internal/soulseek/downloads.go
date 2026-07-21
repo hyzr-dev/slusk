@@ -834,6 +834,12 @@ queueWait:
 			// .part to the destination and report the download Completed, while
 			// also discarding any resumable partial. Reject it as a protocol
 			// violation (non-retryable) rather than trust the declared size.
+			//
+			// This return is past sendTransferAccept, so the peer has been told
+			// to open the F connection: run the same handoff teardown every other
+			// give-up path below uses, or a leftover F connection would sit unread
+			// in fileConnCh and leak its socket and inbound lease.
+			closeLeftoverFileConn(tr.stopAwaitingFileConn())
 			setTransferErrored(tr, "peer declared an out-of-range file size", false)
 			return
 		}
