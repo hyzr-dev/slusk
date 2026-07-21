@@ -242,3 +242,24 @@ func TestRunHealthcheckProbesConfiguredSpecificListener(t *testing.T) {
 		t.Fatalf("runHealthcheck: %v", err)
 	}
 }
+
+func TestEnsureWritableDir(t *testing.T) {
+	// A writable dir succeeds and leaves no probe file behind.
+	dir := t.TempDir()
+	if err := ensureWritableDir(dir); err != nil {
+		t.Fatalf("ensureWritableDir(%q) = %v, want nil", dir, err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("probe file left behind: %v", entries)
+	}
+
+	// A path whose parent is a regular file cannot be created — a
+	// user-independent failure (unlike a read-only dir, which root bypasses).
+	file := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWritableDir(filepath.Join(file, "sub")); err == nil {
+		t.Error("ensureWritableDir under a regular file = nil, want an error")
+	}
+}

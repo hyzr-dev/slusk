@@ -1,7 +1,10 @@
 # docker-compose for slskdarr.
-# slskdarr needs no media mount unless native Soulseek sharing is configured.
-# Named shares are scanned and served read-only; mount only those roots and use
-# their in-container paths in [[soulseek.shared_folders]].
+# With the default slskd backend, slskdarr needs no media mount. But with
+# pipeline.backend = "soulseek" (the native backend) it downloads files itself
+# and needs a WRITABLE volume at paths.slskd_complete_dir (see the mount below);
+# the slskd backend only ever read that path.
+# Named Soulseek shares are scanned and served read-only; mount only those roots
+# and use their in-container paths in [[soulseek.shared_folders]].
 #
 # State lives in PostgreSQL (store.dsn in config.toml), so slskdarr itself needs
 # no data volume. This example bundles a local Postgres for development; in
@@ -34,6 +37,12 @@ services:
 
     volumes:
       - ./config.toml:/config/config.toml:ro
+      # Required with pipeline.backend = "soulseek": the native backend writes
+      # completed downloads here itself, so this must be WRITABLE by the
+      # PUID:PGID above and match paths.slskd_complete_dir in config.toml. Share
+      # it with Lidarr at the path Lidarr expects so import works end to end.
+      # Not needed with the default slskd backend (which only reads that path).
+      # - /host/downloads:/music/slskd-downloads
       # Optional named Soulseek share; keep it read-only and ensure the
       # configured non-root PUID:PGID can read every shared file.
       # - /host/music:/shares/music:ro

@@ -41,6 +41,13 @@ eller `docker exec` in i Postgres-containern.)
       bekräfta att `[soulseek]`-sektionen är ifylld (annars vägrar containern starta),
       att `$STATUS/status` visar `soulseek`-modulen i `moduleDetails` med `ready=true`
       efter inloggning, och att `[slskd]`-sektionen kan lämnas helt bort ur config.toml.
+- [ ] **Native backend — skrivbar nedladdningskatalog:** till skillnad från
+      slskd-backend (som bara *läser* `paths.slskd_complete_dir`) skriver
+      native-backend nedladdningar dit själv, så den katalogen MÅSTE vara en
+      skrivbar volym för containerns PUID:PGID. Saknas den failar varje
+      nedladdning tyst med `mkdir ...: permission denied` (syns bara i
+      `download errored`-loggen). Montera en skrivbar volym på
+      `paths.slskd_complete_dir` och dela den med Lidarr för att import ska funka.
 
 ## Fas 2 — Anslutning + observability
 

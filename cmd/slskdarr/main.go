@@ -52,6 +52,24 @@ const (
 	healthcheckTimeout       = 5 * time.Second
 )
 
+// ensureWritableDir verifies dir exists (creating it if needed) and is actually
+// writable by creating and removing a probe file — MkdirAll alone returns nil
+// for an existing but unwritable dir. It gives the native soulseek backend a
+// loud startup failure instead of a silent per-download "mkdir: permission
+// denied" when paths.slskd_complete_dir is unmounted or owned by another user.
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe, err := os.CreateTemp(dir, ".slskdarr-write-probe-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	return os.Remove(name)
+}
+
 func main() {
 	configPath := flag.String("config", "/config/config.toml", "path to config file")
 	healthcheck := flag.Bool("healthcheck", false, "check the running instance's /healthz and exit 0 (healthy) or 1 (unhealthy); used by Docker HEALTHCHECK since the distroless image has no shell/curl")
@@ -124,6 +142,15 @@ func main() {
 		peers = slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	case config.BackendSoulseek:
 		peers = soulClient
+		// The native backend writes completed downloads to this dir itself (the
+		// slskd backend only read it), so fail fast with a clear message if it is
+		// missing or not writable — otherwise every download dies with an opaque
+		// per-transfer "mkdir ...: permission denied" and nothing ever completes.
+		if err := ensureWritableDir(cfg.Paths.SlskdCompleteDir); err != nil {
+			logger.Error("paths.slskd_complete_dir is not writable; the native soulseek backend downloads into it and needs it mounted writable by this user",
+				"dir", cfg.Paths.SlskdCompleteDir, "err", err)
+			os.Exit(1)
+		}
 	}
 
 	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{
