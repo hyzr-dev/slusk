@@ -106,7 +106,12 @@ type Selecting struct {
 }
 
 // NewSelecting constructs a Selecting.
-func NewSelecting(p SelectingParams) *Selecting { return &Selecting{p: p} }
+func NewSelecting(p SelectingParams) *Selecting {
+	if p.Logger != nil {
+		p.Logger = p.Logger.With("module", "selecting")
+	}
+	return &Selecting{p: p}
+}
 
 // Name identifies this module in logs and Health().
 func (s *Selecting) Name() string { return "selecting" }

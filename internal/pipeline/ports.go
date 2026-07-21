@@ -20,29 +20,38 @@ type MusicSource interface {
 	AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error)
 }
 
-// PeerSearcher is the slice of the slskd client the discoverer needs for search+enqueue.
+// PeerSearcher is the slice of the peer backend (slskd daemon or native
+// soulseek client) the discoverer needs for search+enqueue.
 type PeerSearcher interface {
 	Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
-	// Cancel stops a still-active slskd download, so a failed attempt's live
+	// Cancel stops a still-active download, so a failed attempt's live
 	// sibling transfers stop writing into a folder that is about to be cleaned
 	// up. It cancels the in-flight transfer but leaves the terminal record in
-	// slskd (use Remove to purge that). Same call the reconciler uses for
-	// deadline-overdue transfers.
+	// the backend (use Remove to purge that). Same call the reconciler uses
+	// for deadline-overdue transfers.
 	Cancel(ctx context.Context, username, id string) error
 	DeleteDownloadFolder(ctx context.Context, name string) error
 }
 
-// PeerNetwork is the slice of the slskd client the engine needs.
+// PeerNetwork is the slice of the peer backend (slskd daemon or native
+// soulseek client) the engine needs.
 type PeerNetwork interface {
 	ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error)
 	Cancel(ctx context.Context, username, id string) error
-	// Remove purges a terminal transfer's leftover record from slskd (DELETE
-	// ?remove=true). reconcile calls it immediately after the store marks a
-	// transfer terminal, so slskd's transfer list does not accumulate every
-	// finished download. It MUST run only after that store write — otherwise the
-	// next reconcile pass would see the transfer gone from slskd's live list and
-	// mis-handle it as "lost".
+	// Remove purges a terminal transfer's leftover record from the backend
+	// (slskd's DELETE ?remove=true, or the native client's registry+.part-file
+	// cleanup). reconcile calls it immediately after the store marks a
+	// transfer terminal, so the backend's transfer list does not accumulate
+	// every finished download. It MUST run only after that store write —
+	// otherwise the next reconcile pass would see the transfer gone from the
+	// live list and mis-handle it as "lost".
+	//
+	// The Remove semantics differ by backend but converge on the same
+	// observable property: slskd purges the daemon-side record, while the
+	// native backend drops the transfer's registry entry and deletes its
+	// .part file. Either way the transfer disappears from ListDownloads,
+	// which is the only property the reconciler relies on.
 	Remove(ctx context.Context, username, id string) error
 }
 

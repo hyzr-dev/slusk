@@ -60,6 +60,20 @@ func TestCommonLeaf(t *testing.T) {
 	}
 }
 
+// TestCommonLeafRejectsTraversal locks the upstream half of the path-traversal
+// fix: a common remote directory that resolves to ".." must yield "" so it can
+// never reach AlbumFolder (scan) or DeleteDownloadFolder (os.RemoveAll).
+func TestCommonLeafRejectsTraversal(t *testing.T) {
+	for _, files := range [][]string{
+		{`..\track1.flac`, `..\track2.flac`},
+		{`a\..\..\x.flac`, `a\..\..\y.flac`},
+	} {
+		if got := commonLeaf(files); got != "" {
+			t.Errorf("commonLeaf(%v) = %q, want \"\" (traversal must be rejected)", files, got)
+		}
+	}
+}
+
 func TestCommonLeafEmptyWhenAmbiguous(t *testing.T) {
 	if got := commonLeaf(nil); got != "" {
 		t.Errorf("empty filenames should yield \"\", got %q", got)

@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,5 +269,192 @@ pollLoop:
 	}
 	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat .part after a completed download: err = %v, want os.ErrNotExist", err)
+	}
+}
+
+// TestDownloadRejectsOutOfRangeFileSizeWithoutLeakingFileConn is the regression
+// guard for a leak the FileSize > MaxInt64 guard introduced: that give-up path
+// returned without the fileConnCh teardown every sibling give-up path runs, so a
+// peer that declared an out-of-range size and then opened the promised F
+// connection left its socket and inbound lease stranded in the buffered channel
+// forever. Here the fake peer declares FileSize = math.MaxUint64 yet still dials
+// the F connection back like a real uploader. The transfer must ERROR, and the
+// client must actively close that F connection and release its inbound lease -
+// which, with the bug, it never does (the socket sits unread in fileConnCh).
+func TestDownloadRejectsOutOfRangeFileSizeWithoutLeakingFileConn(t *testing.T) {
+	const filename = `Artist - Album\01 Track.flac`
+	const transferToken = soul.Token(9002)
+	const size = int64(4096)
+
+	peerLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake peer: %v", err)
+	}
+	defer peerLn.Close()
+	peerAddr := peerLn.Addr().(*net.TCPAddr)
+
+	var listenAddr string
+	// Closed by the fake peer once the client closes the rejected F connection
+	// from its side (io.Copy returns EOF). With the leak the client never closes
+	// it, so this never fires and the test fails deterministically.
+	fconnClosedByClient := make(chan struct{})
+
+	go func() {
+		conn, err := peerLn.Accept()
+		if err != nil {
+			t.Logf("fake peer: accept: %v", err)
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		reader, _, _, err := peer.Read(peer.CodeInit(0), conn, false)
+		if err != nil {
+			t.Logf("fake peer: read peer init: %v", err)
+			return
+		}
+		if err := (&peer.PeerInit{}).Deserialize(reader); err != nil {
+			t.Logf("fake peer: deserialize peer init: %v", err)
+			return
+		}
+
+		reader, _, code, err := peer.Read(peer.Code(0), conn, false)
+		if err != nil {
+			t.Logf("fake peer: read queue upload: %v", err)
+			return
+		}
+		if peer.Code(code) != peer.CodeQueueUpload {
+			t.Errorf("fake peer: code = %d, want CodeQueueUpload", code)
+			return
+		}
+		qu := &peer.QueueUpload{}
+		if err := qu.Deserialize(reader); err != nil {
+			t.Errorf("fake peer: deserialize queue upload: %v", err)
+			return
+		}
+
+		// Declare an out-of-range size: >= 2^63 overflows int64, which the client
+		// must reject. It still sends the accept before hitting that guard, so we
+		// proceed to open the F connection exactly like a real upload.
+		transferRequest := &peer.TransferRequest{
+			Direction: peer.UploadToPeer, Token: transferToken,
+			Filename: qu.Filename, FileSize: math.MaxUint64,
+		}
+		if _, err := peer.Write(conn, transferRequest, false); err != nil {
+			t.Errorf("fake peer: write transfer request: %v", err)
+			return
+		}
+
+		var tresp *peer.TransferResponse
+		for tresp == nil {
+			reader, _, code, err = peer.Read(peer.Code(0), conn, false)
+			if err != nil {
+				t.Logf("fake peer: read transfer response: %v", err)
+				return
+			}
+			switch peer.Code(code) {
+			case peer.CodePlaceInQueueRequest:
+				if err := (&peer.PlaceInQueueRequest{}).Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize place in queue request: %v", err)
+					return
+				}
+			case peer.CodeTransferResponse:
+				tresp = &peer.TransferResponse{}
+				if err := tresp.Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize transfer response: %v", err)
+					return
+				}
+			default:
+				t.Errorf("fake peer: code = %d, want CodeTransferResponse or CodePlaceInQueueRequest", code)
+				return
+			}
+		}
+
+		fconn, err := net.Dial("tcp", listenAddr)
+		if err != nil {
+			t.Errorf("fake peer: dial client listener for F connection: %v", err)
+			return
+		}
+		defer fconn.Close()
+		_ = fconn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := peer.Write(fconn, &peer.PeerInit{Username: "friend", ConnectionType: file.ConnectionType}, false); err != nil {
+			t.Errorf("fake peer: write F peer init: %v", err)
+			return
+		}
+		if _, err := file.Write(fconn, &file.TransferInit{Token: transferToken}); err != nil {
+			t.Errorf("fake peer: write transfer init: %v", err)
+			return
+		}
+		// Block until the client closes the F connection from its side. The fix
+		// (refuse the handoff, close the socket, release the lease) makes this
+		// return EOF; the leak leaves the socket stranded and this blocks until
+		// the 5s deadline above.
+		_, _ = io.Copy(io.Discard, fconn)
+		close(fconnClosedByClient)
+	}()
+
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
+		code, body, err := readRawFrame(conn)
+		if err != nil || code != uint32(server.CodeGetPeerAddress) {
+			t.Logf("read get peer address request: code=%d err=%v", code, err)
+			return
+		}
+		username, err := parseGetPeerAddressRequest(body)
+		if err != nil {
+			t.Errorf("parse get peer address request: %v", err)
+			return
+		}
+		writeGetPeerAddressResponse(t, conn, username, peerAddr.IP, peerAddr.Port, 0)
+		_, _ = io.Copy(io.Discard, conn)
+	})
+	listenAddr = addr
+	c.cfg.DownloadDir = t.TempDir()
+	c.cfg.placeInQueueInterval = 30 * time.Millisecond
+
+	id, err := c.Enqueue(context.Background(), "friend", filename, size)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var final core.RemoteTransfer
+	for time.Now().Before(deadline) {
+		list, err := c.ListDownloads(context.Background())
+		if err != nil {
+			t.Fatalf("ListDownloads: %v", err)
+		}
+		found := false
+		for _, tr := range list {
+			if tr.ID == id {
+				final = tr
+				found = true
+			}
+		}
+		if found && final.State == core.TransferErrored {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if final.State != core.TransferErrored {
+		t.Fatalf("final transfer state = %q (failure=%q), want %q", final.State, final.Failure, core.TransferErrored)
+	}
+	if !strings.Contains(final.Failure, "out-of-range file size") {
+		t.Errorf("failure = %q, want it to name the out-of-range file size", final.Failure)
+	}
+
+	select {
+	case <-fconnClosedByClient:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never closed the rejected F connection — socket and inbound lease leaked")
+	}
+
+	// The inbound lease behind that F connection must be released; inboundSlots
+	// holds one token per live lease, so it must drain back to empty.
+	leaseDeadline := time.Now().Add(time.Second)
+	for len(c.inboundSlots) != 0 && time.Now().Before(leaseDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(c.inboundSlots); got != 0 {
+		t.Errorf("inboundSlots still holds %d lease(s) after the errored transfer — F connection leaked", got)
 	}
 }

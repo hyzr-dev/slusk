@@ -12,6 +12,13 @@ import (
 
 const CodePossibleParents Code = 102
 
+// maxPossibleParents bounds the parent list a (possibly compromised) central
+// server can make us allocate. The protocol documents a max of 10; 64 is a
+// safe ceiling well above that. Without it the wire-supplied count drives an
+// unbounded append loop, letting a dense 64MB frame force a few hundred MB of
+// Parent structs.
+const maxPossibleParents = 64
+
 // PossibleParents code 102, the server send us a list of max 10 possible distributed
 // parents to connect to. Messages of this type are sent to us at regular intervals,
 // until we tell the server we don’t need more possible parents with a HaveNoParent message.
@@ -47,6 +54,9 @@ func (p *PossibleParents) Deserialize(reader io.Reader) error {
 	parents, err := internal.ReadUint32(reader)
 	if err != nil {
 		return err
+	}
+	if parents > maxPossibleParents {
+		return fmt.Errorf("possible parents count %d exceeds max %d", parents, maxPossibleParents)
 	}
 
 	for range int(parents) {

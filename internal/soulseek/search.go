@@ -182,7 +182,11 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	registered = true
 	c.mu.Unlock()
 
-	_, writeErr := server.Write(conn, &server.FileSearch{Token: reservation.token, SearchQuery: query})
+	// writeServerLocked (not a bare server.Write) so this shares the standard
+	// write deadline: the absolute deadline a prior sendToServerGeneration write
+	// left on this shared conn would otherwise already be expired here and fail
+	// the write immediately with i/o timeout.
+	writeErr := writeServerLocked(c, conn, &server.FileSearch{Token: reservation.token, SearchQuery: query})
 	c.serverWriteMu.Unlock()
 	finish := func(err error) ([]core.SearchResult, error) {
 		c.searches.removeIfSame(reservation.token, subscription)

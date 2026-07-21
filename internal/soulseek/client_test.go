@@ -891,3 +891,62 @@ func TestClientSendsPing(t *testing.T) {
 		t.Fatal("timed out waiting for a ping")
 	}
 }
+
+// TestRunRetriesTransientStartupFailure locks the startup-resilience fix: a
+// failing peer-listener bind must be retried with backoff, not returned out of
+// Run (which permanently killed soulseek). Cancelling ctx during the retry loop
+// must return nil (clean shutdown), not an error.
+func TestRunRetriesTransientStartupFailure(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = "127.0.0.1:99999" // invalid port: bind always fails
+	c.cfg.backoffBase = 10 * time.Millisecond
+	c.cfg.backoffCap = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	// Still retrying (not returned) after several backoff cycles.
+	select {
+	case err := <-runDone:
+		t.Fatalf("Run returned %v during startup retry, want it to keep retrying", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() after ctx cancel = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestServerWriteDeadlineUnblocksStalledServer locks the write-deadline bound on
+// the central server connection: a server that stops draining must not pin
+// serverWriteMu — and, when the stalled write is the ping ticker's own, the
+// serveConnected select that must reach ctx.Done() — forever. net.Pipe is
+// synchronous, so the Write blocks until the other end reads (it never does),
+// leaving only serverWriteTimeout to unblock it.
+func TestServerWriteDeadlineUnblocksStalledServer(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.serverWriteTimeout = 50 * time.Millisecond
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close() // deliberately never read from b
+	c.serverConn = a
+
+	done := make(chan error, 1)
+	go func() { done <- sendToServer(c, &server.Ping{}) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("sendToServer to a non-draining server returned nil, want a timeout error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendToServer blocked well past serverWriteTimeout — serverWriteMu pinned")
+	}
+}

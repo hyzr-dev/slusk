@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"testing"
 	"time"
 
@@ -131,6 +132,61 @@ func TestReadBytesSizeCap(t *testing.T) {
 	_, err := ReadBytes(buf)
 	if !errors.Is(err, soul.ErrMessageTooLarge) {
 		t.Fatalf("err = %v, want ErrMessageTooLarge", err)
+	}
+}
+
+// allocDelta reports the bytes allocated by fn, so the reject-before-allocate
+// guard can be asserted (old code allocated make([]byte, size) up front).
+func allocDelta(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestReadStringRejectsLengthBeyondBufferWithoutAllocating locks the fix for a
+// length prefix that is within the 64MB ceiling but far larger than the bytes
+// actually present: it must be rejected before allocating the promised buffer.
+// A ~20-byte hostile distributed frame previously forced a ~64MB allocation.
+func TestReadStringRejectsLengthBeyondBufferWithoutAllocating(t *testing.T) {
+	buf := new(bytes.Buffer)
+	// Claim the maximum allowed size (within MaxMessageSize) but supply almost
+	// no body — a buffered reader knows only a handful of bytes remain.
+	if err := binary.Write(buf, binary.LittleEndian, uint32(MaxMessageSize)); err != nil {
+		t.Fatal(err)
+	}
+	buf.WriteString("xyz")
+	r := bytes.NewReader(buf.Bytes())
+
+	var err error
+	got := allocDelta(func() { _, err = ReadString(r) })
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if got > 8<<20 {
+		t.Errorf("allocated %d bytes rejecting an oversized length prefix, want the promised ~64MB buffer to never be allocated", got)
+	}
+}
+
+// TestReadBytesRejectsLengthBeyondBufferWithoutAllocating is the ReadBytes
+// counterpart to the above.
+func TestReadBytesRejectsLengthBeyondBufferWithoutAllocating(t *testing.T) {
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, uint32(MaxMessageSize)); err != nil {
+		t.Fatal(err)
+	}
+	buf.WriteString("xyz")
+	r := bytes.NewReader(buf.Bytes())
+
+	var err error
+	got := allocDelta(func() { _, err = ReadBytes(r) })
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if got > 8<<20 {
+		t.Errorf("allocated %d bytes rejecting an oversized length prefix, want the promised buffer to never be allocated", got)
 	}
 }
 

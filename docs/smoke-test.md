@@ -4,6 +4,12 @@ Kör igenom denna första gången du släpper slskdarr mot din riktiga Lidarr + 
 Syftet är att verifiera hela flödet **innan** du litar på auto-import. Ta det uppifrån
 och ner — varje fas bygger på den föregående.
 
+Checklistan nedan antar `pipeline.backend = "slskd"` (default) genomgående. Kör du
+i stället med `pipeline.backend = "soulseek"` (den native backend:en, fortfarande
+under intrimning) — se anmärkningen i Fas 1 och byt ut "i slskd:s eget UI"-stegen
+mot motsvarande kontroll i `$STATUS/status`/loggen, eftersom det då inte finns
+något slskd-UI att titta i.
+
 Nyttiga kommandon (byt ut värden mot dina):
 ```bash
 STATUS=http://192.168.86.33:9090        # observ.listen_addr
@@ -31,6 +37,17 @@ eller `docker exec` in i Postgres-containern.)
 - [ ] Schemat skapas i Postgres-databasen vid start (`psql "$PGDSN" -c '\dt'` visar
       `album_jobs`, `candidates`, `transfers`, `job_events` m.fl.).
 - [ ] Loggen visar `slskdarr started` med rätt `status_addr`.
+- [ ] **Native backend (valfritt):** om du testar `pipeline.backend = "soulseek"` —
+      bekräfta att `[soulseek]`-sektionen är ifylld (annars vägrar containern starta),
+      att `$STATUS/status` visar `soulseek`-modulen i `moduleDetails` med `ready=true`
+      efter inloggning, och att `[slskd]`-sektionen kan lämnas helt bort ur config.toml.
+- [ ] **Native backend — skrivbar nedladdningskatalog:** till skillnad från
+      slskd-backend (som bara *läser* `paths.slskd_complete_dir`) skriver
+      native-backend nedladdningar dit själv, så den katalogen MÅSTE vara en
+      skrivbar volym för containerns PUID:PGID. Saknas den failar varje
+      nedladdning tyst med `mkdir ...: permission denied` (syns bara i
+      `download errored`-loggen). Montera en skrivbar volym på
+      `paths.slskd_complete_dir` och dela den med Lidarr för att import ska funka.
 
 ## Fas 2 — Anslutning + observability
 

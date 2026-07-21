@@ -31,6 +31,17 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
+// peerBackend combines the two port interfaces every peer-facing pipeline
+// module (plus app.Jobs' TransferCanceller) needs, so main can wire
+// a single value regardless of which backend (slskd or native soulseek) is
+// selected. Both embedded interfaces declare Cancel with an identical
+// signature; overlapping methods in embedded interfaces are legal since Go
+// 1.14.
+type peerBackend interface {
+	pipeline.PeerSearcher
+	pipeline.PeerNetwork
+}
+
 const (
 	startupTimeout           = 30 * time.Second
 	lifecycleShutdownTimeout = 10 * time.Second
@@ -40,6 +51,24 @@ const (
 	httpIdleTimeout          = 60 * time.Second
 	healthcheckTimeout       = 5 * time.Second
 )
+
+// ensureWritableDir verifies dir exists (creating it if needed) and is actually
+// writable by creating and removing a probe file — MkdirAll alone returns nil
+// for an existing but unwritable dir. It gives the native soulseek backend a
+// loud startup failure instead of a silent per-download "mkdir: permission
+// denied" when paths.slskd_complete_dir is unmounted or owned by another user.
+func ensureWritableDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe, err := os.CreateTemp(dir, ".slskdarr-write-probe-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	return os.Remove(name)
+}
 
 func main() {
 	configPath := flag.String("config", "/config/config.toml", "path to config file")
@@ -55,13 +84,21 @@ func main() {
 		os.Exit(0)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// A LevelVar lets config raise the level after load: the logger must exist
+	// before config is read (to report a load failure), yet its verbosity is
+	// config-driven. Zero value is LevelInfo, so pre-config logs use info.
+	var logLevel slog.LevelVar
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &logLevel}))
+	// Make slog.Default() fallbacks (store migrations, module log() helpers)
+	// emit JSON too, instead of Go's plain-text default handler.
+	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		logger.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	logLevel.Set(cfg.Observ.SlogLevel())
 
 	if *migrateDestructive {
 		if err := runMigrateDestructive(cfg, logger); err != nil {
@@ -81,7 +118,6 @@ func main() {
 		logger.Error("open store", "err", err)
 		os.Exit(1)
 	}
-	peers := slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
 		lidarr.WithManualImportTimeout(cfg.Pipeline.ManualImportTimeout.Duration))
 	w := cfg.Pipeline.Weights
@@ -94,7 +130,27 @@ func main() {
 
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
-		soulClient = newSoulseekClient(cfg.Soulseek, logger)
+		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, logger)
+	}
+
+	// Backend selection: config.Validate already guarantees soulClient != nil
+	// when cfg.Pipeline.Backend is BackendSoulseek, so the slskd client is not
+	// even constructed in that case.
+	var peers peerBackend
+	switch cfg.Pipeline.Backend {
+	case config.BackendSlskd:
+		peers = slskd.New(cfg.Slskd.URL, cfg.Slskd.APIKey)
+	case config.BackendSoulseek:
+		peers = soulClient
+		// The native backend writes completed downloads to this dir itself (the
+		// slskd backend only read it), so fail fast with a clear message if it is
+		// missing or not writable — otherwise every download dies with an opaque
+		// per-transfer "mkdir ...: permission denied" and nothing ever completes.
+		if err := ensureWritableDir(cfg.Paths.SlskdCompleteDir); err != nil {
+			logger.Error("paths.slskd_complete_dir is not writable; the native soulseek backend downloads into it and needs it mounted writable by this user",
+				"dir", cfg.Paths.SlskdCompleteDir, "err", err)
+			os.Exit(1)
+		}
 	}
 
 	wantedSync := pipeline.NewWantedSync(pipeline.WantedSyncParams{
@@ -186,7 +242,7 @@ func main() {
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
-	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger}
+	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
 	// Liveness only requires modules to keep attempting work. Readiness also
 	// requires successful work and fails after sustained errors.
 	liveFn := func() bool { return runner.Live() }

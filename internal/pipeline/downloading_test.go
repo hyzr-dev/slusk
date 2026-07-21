@@ -433,6 +433,11 @@ func TestDownloadingReconcileRetriesRejectedWhenRetryable(t *testing.T) {
 	if stats.Retried != 1 {
 		t.Errorf("Retried = %d, want 1", stats.Retried)
 	}
+	// The native backend's Enqueue is idempotent, so the stale remote record
+	// must be purged for the re-enqueue to actually start fresh.
+	if len(net.removed) != 1 || net.removed[0] != "g1" {
+		t.Errorf("expected g1 removed from the peer backend, got %v", net.removed)
+	}
 }
 
 // A rejection whose retry budget is spent must go terminal (ERRORED).
@@ -452,6 +457,11 @@ func TestDownloadingReconcileRejectedErrorsWhenExhausted(t *testing.T) {
 	}
 	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferErrored {
 		t.Errorf("exhausted rejection should ERROR, got %v", states["a.flac"].State)
+	}
+	// The terminal-state path removes the remote record exactly once; it must
+	// not also be removed by the retryable-errored path above.
+	if len(net.removed) != 1 || net.removed[0] != "g1" {
+		t.Errorf("expected g1 removed exactly once via the terminal path, got %v", net.removed)
 	}
 }
 

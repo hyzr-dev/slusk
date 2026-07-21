@@ -16,6 +16,15 @@ api_key = "CHANGEME"
 # [pipeline.weights]) are mandatory, same as they were under the old [engine]
 # section. Everything else in [pipeline] is optional; an absent key uses the
 # default shown.
+#
+# Which peer backend drives the pipeline: "slskd" (the slskd daemon, default)
+# or "soulseek" (the native internal/soulseek client, connecting directly to
+# the Soulseek server). Setting this to "soulseek" makes the whole [slskd]
+# section above optional, since nothing in the pipeline talks to it anymore -
+# but a configured [soulseek] section below becomes required instead. The
+# native backend is experimental while it's being tuned against production
+# traffic; slskd remains the default and the safe fallback.
+# backend = "slskd"
 max_candidates_per_album = 5
 transfer_deadline = "30m"
 stall_timeout = "5m"
@@ -109,6 +118,9 @@ dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 # Set this to a generated token before using the non-loopback listener below.
 auth_token = ""
 listen_addr = "0.0.0.0:9090"
+# Minimum log level: "debug", "info" (default), "warn", or "error". Use "debug"
+# to trace the native soulseek client's peer/transfer negotiation. Verbose.
+# log_level = "info"
 
 [paths]
 slskd_complete_dir = "/music/slskd-downloads"
@@ -116,7 +128,8 @@ slskd_complete_dir = "/music/slskd-downloads"
 # Optional: enable a direct connection to the central Soulseek server,
 # separate from the [slskd] daemon. Uncomment and fill in credentials to
 # enable it; leaving the whole section absent (or every field blank) keeps
-# it disabled.
+# it disabled. Once enabled, it can also drive pipeline downloads directly
+# instead of slskd - see pipeline.backend above.
 # [soulseek]
 # server_address = "server.slsknet.org:2242"
 # username = "CHANGEME"

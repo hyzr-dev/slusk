@@ -123,5 +123,14 @@ func commonLeaf(filenames []string) string {
 	if common == "." || common == "/" || common == "" {
 		return ""
 	}
-	return path.Base(common)
+	// A remote share path whose common directory is (or ends in) ".." — e.g. a
+	// hostile peer naming every file `..\track.flac` — yields a ".." leaf. That
+	// is never a real album folder, and it feeds both AlbumFolder (the local
+	// scan path) and the native backend's DeleteDownloadFolder (os.RemoveAll),
+	// where a ".." would escape the download root. Reject it as ambiguous.
+	leaf := path.Base(common)
+	if leaf == ".." || leaf == "." {
+		return ""
+	}
+	return leaf
 }

@@ -572,3 +572,130 @@ func TestMirrorDAttachmentRejectedAfterGenerationTeardown(t *testing.T) {
 		t.Fatal("late mirror D attachment survived in registry")
 	}
 }
+
+// TestWriteFullWriteDeadlineUnblocksStalledPeer locks the rolling write
+// deadline: a peer that never drains its receive buffer must not pin the writer
+// goroutine forever. net.Pipe is synchronous/unbuffered, so a Write blocks until
+// the other end reads — which it never does here — so only the deadline can
+// unblock it.
+func TestWriteFullWriteDeadlineUnblocksStalledPeer(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close() // deliberately never read from c2
+
+	done := make(chan error, 1)
+	go func() { done <- writeFull(c1, make([]byte, 1<<16), 50*time.Millisecond) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("writeFull to a non-draining peer returned nil, want a timeout error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writeFull blocked well past its write deadline — writer goroutine pinned")
+	}
+}
+
+// TestRegisterSessionPanicInEstablishedTearsDown guards the leak where a
+// panicking established hook unwinds past candidate.Close: the session is
+// already registered with peerConns incremented, so without panic-safe teardown
+// it would stay in the registry (poisoning duplicate arbitration for the peer)
+// with a leaked socket and peerConns count, the panic merely swallowed far up
+// the stack by startTracked's recover.
+func TestRegisterSessionPanicInEstablishedTearsDown(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	c.sessionHooks = testSessionHooks{establishedFn: func(*peerSession) {
+		panic("established hook boom")
+	}}
+	a, b := net.Pipe()
+	defer b.Close()
+	key := sessionKey{username: "friend", connType: peer.ConnectionType}
+	s := c.newSession(a, key, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("registerSession swallowed the established-hook panic; want it re-raised")
+			}
+		}()
+		c.registerSession(s)
+	}()
+
+	if got := c.sessions.Get(key); got != nil {
+		t.Error("session left registered after the established hook panicked")
+	}
+	if got := c.peerConns.Load(); got != 0 {
+		t.Errorf("peerConns = %d after panic, want 0 (session not torn down)", got)
+	}
+	if _, err := a.Read(make([]byte, 1)); err == nil {
+		t.Error("session socket left open after the established hook panicked")
+	}
+}
+
+// TestReadLoopPanicInFrameHookClosesSession guards the immortal-writeLoop leak:
+// a panicking frame hook must still close the session (cancelling s.ctx) so the
+// sibling writeLoop goroutine — whose only exit is s.ctx.Done() — terminates,
+// rather than parking forever while the socket and registry entry leak.
+func TestReadLoopPanicInFrameHookClosesSession(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	c.sessionHooks = testSessionHooks{frameFn: func(*peerSession, sessionFrame) error {
+		panic("frame hook boom")
+	}}
+	a, b := net.Pipe()
+	defer b.Close()
+	key := sessionKey{username: "friend", connType: distributed.ConnectionType}
+	s := c.newSession(a, key, sessionInitiatorRemote, sessionRoleChild, 0, nil)
+	c.registerSession(s)
+
+	// Deliver a frame so readLoop invokes the panicking frame hook.
+	if _, err := distributed.Write(b, &distributed.BranchLevel{Level: 3}); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	// Close closes s.done; had the panic unwound past s.Close, done would never
+	// close and writeLoop would stay parked on s.ctx.Done() forever.
+	select {
+	case <-s.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("frame-hook panic did not close the session; writeLoop leaked")
+	}
+	if got := c.sessions.Get(key); got != nil {
+		t.Error("session left registered after the frame hook panicked")
+	}
+}
+
+// TestCoalesceEstablishPanicClearsInFlight guards the poisoned-reconnect leak:
+// if establish() panics, the in-flight entry must be cleared and its done
+// channel closed, so a later attempt for the same peer runs its own establish
+// rather than blocking forever on a done that never fires.
+func TestCoalesceEstablishPanicClearsInFlight(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+	key := sessionKey{username: "peer", connType: peer.ConnectionType}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("coalesceEstablish swallowed the establish panic; want it re-raised")
+			}
+		}()
+		_, _ = c.coalesceEstablish(context.Background(), key, func() (*peerSession, error) {
+			panic("establish boom")
+		})
+	}()
+
+	ran := make(chan struct{})
+	go func() {
+		_, _ = c.coalesceEstablish(context.Background(), key, func() (*peerSession, error) {
+			close(ran)
+			return nil, errors.New("second attempt establish error")
+		})
+	}()
+	select {
+	case <-ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second coalesceEstablish blocked on a stale in-flight entry after the first panicked")
+	}
+}

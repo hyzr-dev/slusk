@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path"
@@ -45,13 +46,37 @@ func destLeaf(filename string) string {
 
 // downloadDestPath returns the absolute local path a downloaded file is written
 // to under completeDir, matching the completeDir/<leaf>/<base> layout slskd
-// produces and pipeline.AlbumFolder expects.
+// produces and pipeline.AlbumFolder expects. It is a pure path-layout function
+// and performs no safety checks — callers that touch disk MUST route through
+// safeDownloadDest, which enforces containment.
 func downloadDestPath(completeDir, filename string) string {
 	base := path.Base(strings.ReplaceAll(filename, `\`, "/"))
 	if leaf := destLeaf(filename); leaf != "" {
 		return filepath.Join(completeDir, leaf, base)
 	}
 	return filepath.Join(completeDir, base)
+}
+
+// errUnsafeDownloadPath marks a peer-supplied filename that resolves outside the
+// configured download directory (a ".." path-traversal attempt). It is a
+// security boundary, not a convenience check: filename comes verbatim from the
+// remote peer's share path, so a hostile peer can name a file `..\evil` to try
+// to write, delete, or overwrite files outside the download root.
+var errUnsafeDownloadPath = errors.New("soulseek: download path escapes the download directory")
+
+// safeDownloadDest returns the local path filename is written to under
+// downloadDir, or errUnsafeDownloadPath if the peer-controlled filename would
+// escape downloadDir. Every disk-touching path (write, .part removal) resolves
+// its destination through here so a crafted `..`-laden filename can never land
+// bytes — or aim a delete — outside the download root. filepath.Join cleans
+// `..` but does not contain it (Join(root, "..", "x") == parent/x), so the
+// pathWithinRoot check after joining is what actually enforces the boundary.
+func safeDownloadDest(downloadDir, filename string) (string, error) {
+	dest := downloadDestPath(downloadDir, filename)
+	if !pathWithinRoot(downloadDir, dest) {
+		return "", fmt.Errorf("%w: %q", errUnsafeDownloadPath, filename)
+	}
+	return dest, nil
 }
 
 // permanentUploadFailureReasons are the substrings that mark a peer's upload
@@ -89,6 +114,10 @@ type transfer struct {
 	id       string
 	username string
 	filename string
+	// logger, set by Enqueue after construction, records the reason a download
+	// errors so it is observable in the log instead of only via a ListDownloads
+	// field the caller discards. nil (e.g. in tests) disables that logging.
+	logger *slog.Logger
 	// size is the enqueued file size, updated once (under mu) to the peer's
 	// authoritative TransferRequest.FileSize when the transfer is negotiated,
 	// so it is read under mu by a concurrent ListDownloads snapshot even though
@@ -513,8 +542,15 @@ func deliverTransferFailure(tr *transfer, f transferFailure) {
 // a retried request - never races two orchestrations over the same
 // destination file.
 func (c *Client) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
+	// filename is the peer's own share path, fully attacker-controlled. Reject
+	// any name that would escape the download directory before it can create a
+	// transfer, write a file, or leave a ".part" behind for Remove to chase.
+	if _, err := safeDownloadDest(c.cfg.DownloadDir, filename); err != nil {
+		return "", err
+	}
 	id := downloadID(username, filename)
 	tr := newTransfer(id, username, filename, size)
+	tr.logger = c.logger
 	// tr.cancel is set before insertIfAbsent makes tr reachable via the
 	// registry, so a Cancel racing right after registration always finds a
 	// usable cancel func rather than a nil one.
@@ -606,7 +642,15 @@ func (c *Client) Remove(ctx context.Context, username, id string) error {
 	}
 	c.downloads.remove(tr)
 
-	partPath := downloadDestPath(c.cfg.DownloadDir, tr.filename) + ".part"
+	dest, err := safeDownloadDest(c.cfg.DownloadDir, tr.filename)
+	if err != nil {
+		// Enqueue rejects escaping filenames, so a registered transfer should
+		// never have one; if it somehow does, there is no safe ".part" path to
+		// delete. The registry entry is already gone, so report clean rather
+		// than aim os.Remove outside the download root.
+		return nil
+	}
+	partPath := dest + ".part"
 	if err := os.Remove(partPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove partial download %s: %w", partPath, err)
 	}
@@ -619,6 +663,15 @@ func (c *Client) Remove(ctx context.Context, username, id string) error {
 // pipeline.PeerSearcher.
 func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
 	dir := filepath.Join(c.cfg.DownloadDir, name)
+	// name originates from the peer's share paths (via pipeline.commonLeaf), so
+	// it is untrusted: a crafted candidate whose files all sit in a `..\` remote
+	// folder yields name == "..", and os.RemoveAll(filepath.Join(root, "..")))
+	// would recursively delete the parent of the download dir. Refuse anything
+	// that resolves outside the download dir, or to the download dir itself
+	// (name ".", "" — never nuke the whole root).
+	if dir == c.cfg.DownloadDir || !pathWithinRoot(c.cfg.DownloadDir, dir) {
+		return fmt.Errorf("delete download folder %q: %w", name, errUnsafeDownloadPath)
+	}
 	if _, err := os.Stat(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("delete download folder %s: %w", name, core.ErrRemoteNotFound)
@@ -635,6 +688,13 @@ func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
 // several runDownload exit paths (and Enqueue's own lifecycle-stopping
 // fallback) that fail before ever reaching a file transfer.
 func setTransferErrored(tr *transfer, failure string, retryable bool) {
+	// Log before locking: username/filename are immutable and failure is the
+	// argument, so no lock is needed, and the reason is otherwise only reachable
+	// via a ListDownloads field the caller discards - invisible when a download
+	// dies before ever streaming a byte.
+	if tr.logger != nil {
+		tr.logger.Info("download errored", "username", tr.username, "filename", tr.filename, "reason", failure, "retryable", retryable)
+	}
 	tr.mu.Lock()
 	tr.state = core.TransferErrored
 	tr.failure = failure
@@ -651,13 +711,18 @@ func setTransferErrored(tr *transfer, failure string, retryable bool) {
 // outcome instead of a transfer stuck QUEUED/IN_PROGRESS forever.
 func finishInterrupted(tr *transfer, err error) {
 	tr.mu.Lock()
-	defer tr.mu.Unlock()
 	if tr.state == core.TransferCancelled {
+		tr.mu.Unlock()
 		return
 	}
 	tr.state = core.TransferErrored
 	tr.failure = "download interrupted: " + err.Error()
 	tr.retryable = true
+	failure := tr.failure
+	tr.mu.Unlock()
+	if tr.logger != nil {
+		tr.logger.Info("download errored", "username", tr.username, "filename", tr.filename, "reason", failure, "retryable", true)
+	}
 }
 
 // downloadPeerMessage constrains trySendPeerMessage to the P messages the
@@ -779,6 +844,22 @@ queueWait:
 	// renaming a short .part to Completed) or hang it until the idle timeout.
 	streamSize := tr.size
 	if req.FileSize > 0 {
+		if req.FileSize > math.MaxInt64 {
+			// req.FileSize is a peer-controlled uint64. A value ≥ 2^63 wraps
+			// negative when cast to int64, and io.CopyN(dst, src, negative) is a
+			// no-op returning (0, nil) — streamFile would then rename an empty
+			// .part to the destination and report the download Completed, while
+			// also discarding any resumable partial. Reject it as a protocol
+			// violation (non-retryable) rather than trust the declared size.
+			//
+			// This return is past sendTransferAccept, so the peer has been told
+			// to open the F connection: run the same handoff teardown every other
+			// give-up path below uses, or a leftover F connection would sit unread
+			// in fileConnCh and leak its socket and inbound lease.
+			closeLeftoverFileConn(tr.stopAwaitingFileConn())
+			setTransferErrored(tr, "peer declared an out-of-range file size", false)
+			return
+		}
 		streamSize = int64(req.FileSize)
 		tr.mu.Lock()
 		tr.size = streamSize
@@ -813,7 +894,14 @@ queueWait:
 	tr.state = core.TransferInProgress
 	tr.mu.Unlock()
 
-	destPath := downloadDestPath(c.cfg.DownloadDir, tr.filename)
+	destPath, err := safeDownloadDest(c.cfg.DownloadDir, tr.filename)
+	if err != nil {
+		// Defense in depth: Enqueue already rejects escaping filenames, so a
+		// registered transfer should never reach here with one. Fail closed
+		// (non-retryable) rather than write outside the download root.
+		setTransferErrored(tr, err.Error(), false)
+		return
+	}
 	lastBytes, lastTime := int64(0), time.Now()
 	written, err := streamFile(handoff.conn, destPath, streamSize, c.cfg.fileIdleTimeout, func(n int64) {
 		tr.bytesDone.Store(n)

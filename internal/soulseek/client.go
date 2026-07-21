@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +22,14 @@ import (
 )
 
 const (
-	defaultDialTimeout              = 10 * time.Second
-	defaultPingInterval             = 5 * time.Minute
+	defaultDialTimeout  = 10 * time.Second
+	defaultPingInterval = 5 * time.Minute
+	// defaultServerWriteTimeout bounds a single write to the central server so a
+	// stalled (e.g. zero-window) server cannot pin serverWriteMu, and the ping
+	// ticker's own write cannot wedge the serveConnected select that must reach
+	// ctx.Done(). Server control messages are tiny, so a healthy link never
+	// approaches this; it only trips on a genuinely wedged connection.
+	defaultServerWriteTimeout       = 30 * time.Second
 	defaultBackoffBase              = 5 * time.Second
 	defaultBackoffCap               = 10 * time.Minute
 	tcpKeepAliveInterval            = time.Minute
@@ -80,10 +87,9 @@ type Config struct {
 	// DownloadDir is the local root directory native downloads (issue #55)
 	// are written under, in the same completeDir/<leaf>/<basename> layout
 	// slskd produces (see downloadDestPath) so the Importing module's
-	// AlbumFolder scan finds them in the same place either way. Left blank
-	// here: production wiring lands in #57 (which will set it from
-	// config.PathsConfig.SlskdCompleteDir); tests and the manual probe set
-	// it directly.
+	// AlbumFolder scan finds them in the same place either way. Production
+	// wiring (issue #57) sets it from config.PathsConfig.SlskdCompleteDir;
+	// tests and the manual probe set it directly.
 	DownloadDir string
 
 	// SharedFolders are explicitly named public roots backed by private local
@@ -147,6 +153,10 @@ type Config struct {
 	downloadQueueTimeout time.Duration
 	// uploadNegotiationTimeout bounds waiting for TransferResponse.
 	uploadNegotiationTimeout time.Duration
+	// serverWriteTimeout bounds a single write to the central server connection
+	// so a stalled server cannot pin serverWriteMu (and the ping ticker's write
+	// cannot wedge shutdown) forever. Default 30s.
+	serverWriteTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -200,7 +210,12 @@ type Client struct {
 
 	shares                 atomic.Pointer[shareSnapshot]
 	shareScanMu            sync.Mutex
+	// shareWorkers bounds CPU-bound share work (search match, folder-contents
+	// build); deliverWorkers bounds the network-bound search-response delivery
+	// that opens a session to the searcher. Separate pools so a slow delivery
+	// never holds a match slot. See maxShareWorkers / maxDeliverWorkers.
 	shareWorkers           chan struct{}
+	deliverWorkers         chan struct{}
 	searchDeliveryMu       sync.Mutex
 	searchDeliveries       map[searchDeliveryKey]time.Time
 	searchDeliveryInFlight map[searchDeliveryKey]struct{}
@@ -286,8 +301,15 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.uploadNegotiationTimeout <= 0 {
 		cfg.uploadNegotiationTimeout = defaultUploadNegotiationTimeout
 	}
+	if cfg.serverWriteTimeout <= 0 {
+		cfg.serverWriteTimeout = defaultServerWriteTimeout
+	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2
+	}
+
+	if logger != nil {
+		logger = logger.With("component", "soulseek")
 	}
 
 	c := &Client{
@@ -303,6 +325,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		establishes:            make(map[sessionKey]*sessionEstablishment),
 		downloads:              newDownloadRegistry(),
 		shareWorkers:           make(chan struct{}, maxShareWorkers),
+		deliverWorkers:         make(chan struct{}, maxDeliverWorkers),
 		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
 		searchDeliveryInFlight: make(map[searchDeliveryKey]struct{}),
 	}
@@ -330,6 +353,26 @@ type serverMessage[M any] interface {
 	Serialize(M) ([]byte, error)
 }
 
+// writeServerLocked writes msg to the server connection, bounding it with the
+// standard write deadline. The caller MUST hold serverWriteMu. Every server
+// writer goes through here so the deadline is applied consistently: net.Conn
+// write deadlines are absolute and outlive the write, so a writer that skipped
+// setting one would inherit a prior writer's now-expired deadline and fail its
+// own write immediately with i/o timeout (Search is the other direct writer).
+// serverWriteTimeout bounds a stalled (e.g. zero-window) server so it cannot pin
+// serverWriteMu - and, for the ping ticker's write, wedge shutdown - forever.
+// Server messages are tiny, so a healthy link never approaches the deadline; a
+// timeout surfaces as a write error the caller tears the connection down on.
+func writeServerLocked[M serverMessage[M]](c *Client, conn net.Conn, msg M) error {
+	if c.cfg.serverWriteTimeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(c.cfg.serverWriteTimeout)); err != nil {
+			return err
+		}
+	}
+	_, err := server.Write(conn, msg)
+	return err
+}
+
 // sendToServer serializes writes to the server connection behind c.mu, since
 // multiple goroutines (the ping ticker, peer-connection establishment) may
 // write concurrently. It reports an error if no server connection is
@@ -353,7 +396,7 @@ func sendToServerGeneration[M serverMessage[M]](c *Client, generation uint64, ms
 	cancel := c.serverCancel
 	c.mu.Unlock()
 
-	_, err := server.Write(conn, msg)
+	err := writeServerLocked(c, conn, msg)
 	c.serverWriteMu.Unlock()
 	if err != nil {
 		if cancel != nil {
@@ -378,21 +421,21 @@ func (c *Client) Status() Status {
 	return s
 }
 
-// Run starts the peer listener, then dials the server, logs in, and serves
-// the connection until ctx is cancelled or a terminal error occurs. On a
-// transient server-connection failure it reconnects after an exponential
-// backoff; the peer listener itself is started exactly once and lives across
-// every reconnect. Run returns nil only when ctx is cancelled; it returns a
-// non-nil error for a terminal failure (the peer listener failing to start,
-// invalid credentials, outdated protocol version, or the account logging in
-// elsewhere), and never reconnects afterward.
+// Run performs one-time startup (the initial share scan and the peer-listener
+// bind), then dials the server, logs in, and serves the connection until ctx
+// is cancelled or a terminal error occurs. Both startup and the server
+// connection are resilient to transient failures: a boot-time disk blip or
+// not-yet-ready mount (share scan), a transiently-held listen port (bind), or
+// a dropped server connection are all retried with exponential backoff rather
+// than stopping soulseek for the life of the process. The peer listener, once
+// bound, lives across every server reconnect. Run returns nil when ctx is
+// cancelled; it returns a non-nil error only for a terminal server failure
+// (invalid credentials, outdated protocol version, or the account logging in
+// elsewhere), after which it never reconnects.
 func (c *Client) Run(ctx context.Context) error {
-	if _, err := c.RescanShares(ctx); err != nil {
-		return fmt.Errorf("initial share scan: %w", err)
-	}
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	ln := c.retryStartup(ctx)
+	if ln == nil {
+		return nil // ctx cancelled during startup — a clean shutdown, not a failure
 	}
 	c.listenPort = ln.Addr().(*net.TCPAddr).Port
 	boundAddr := ln.Addr().String()
@@ -442,6 +485,50 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// retryStartup performs the one-time pre-connect setup — the initial share
+// scan and the peer-listener bind — retrying transient failures with the same
+// exponential backoff the server reconnect loop uses. Previously either step
+// failing returned straight out of Run, and the single caller (cmd) never
+// retried, so one boot-time hiccup (a not-yet-ready mount for the scan, a
+// briefly-held port for the bind) killed soulseek for the whole process life.
+// There is no clean terminal classification for these — a genuinely bad config
+// is caught by config.Validate first — so, like the reconnect loop, they are
+// treated as transient and retried until they succeed or ctx is cancelled.
+// Returns nil only when ctx is cancelled during startup.
+func (c *Client) retryStartup(ctx context.Context) net.Listener {
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		ln, err := c.trySetup(ctx)
+		if err == nil {
+			return ln
+		}
+		wait := nextBackoff(attempt, c.cfg.backoffBase, c.cfg.backoffCap)
+		c.logger.Warn("soulseek startup failed; retrying",
+			"err", err, "backoff", wait, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+	}
+}
+
+// trySetup runs the initial share scan then binds the peer listener, returning
+// the bound listener or the first error. On a scan failure no listener is
+// opened; the scan is idempotent, so retryStartup safely re-runs it.
+func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
+	if _, err := c.RescanShares(ctx); err != nil {
+		return nil, fmt.Errorf("initial share scan: %w", err)
+	}
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	}
+	return ln, nil
 }
 
 // isTerminalErr reports whether err should stop Run from reconnecting.
@@ -844,6 +931,18 @@ func (c *Client) startTracked(fn func()) bool {
 	c.lifeMu.Unlock()
 	go func() {
 		defer c.lifeWG.Done()
+		// Every tracked goroutine processes untrusted peer/server input. A
+		// panic in any of them (a decode bug, a nil deref) would otherwise
+		// unwind past the goroutine and crash the whole daemon, killing every
+		// other connection and in-flight transfer. Contain it here so one
+		// hostile or buggy peer only loses its own session; fn's own deferred
+		// cleanup (session Close, lease release) still runs during unwinding.
+		defer func() {
+			if r := recover(); r != nil && c.logger != nil {
+				c.logger.Error("soulseek: recovered from panic in tracked goroutine",
+					"panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		fn()
 	}()
 	return true

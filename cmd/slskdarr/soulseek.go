@@ -9,7 +9,7 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek"
 )
 
-func newSoulseekClient(cfg config.SoulseekConfig, logger *slog.Logger) *soulseek.Client {
+func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, logger *slog.Logger) *soulseek.Client {
 	folders := make([]soulseek.SharedFolder, 0, len(cfg.SharedFolders))
 	for _, folder := range cfg.SharedFolders {
 		folders = append(folders, soulseek.SharedFolder{Name: folder.Name, Path: folder.Path})
@@ -17,6 +17,7 @@ func newSoulseekClient(cfg config.SoulseekConfig, logger *slog.Logger) *soulseek
 	return soulseek.New(soulseek.Config{
 		Address: cfg.ServerAddress, Username: cfg.Username, Password: cfg.Password,
 		ListenAddr: cfg.ListenAddr, SharedFolders: folders, UploadSlots: cfg.UploadSlots,
+		DownloadDir: downloadDir,
 	}, logger)
 }
 
