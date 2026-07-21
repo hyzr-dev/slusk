@@ -114,6 +114,10 @@ type transfer struct {
 	id       string
 	username string
 	filename string
+	// logger, set by Enqueue after construction, records the reason a download
+	// errors so it is observable in the log instead of only via a ListDownloads
+	// field the caller discards. nil (e.g. in tests) disables that logging.
+	logger *slog.Logger
 	// size is the enqueued file size, updated once (under mu) to the peer's
 	// authoritative TransferRequest.FileSize when the transfer is negotiated,
 	// so it is read under mu by a concurrent ListDownloads snapshot even though
@@ -546,6 +550,7 @@ func (c *Client) Enqueue(ctx context.Context, username, filename string, size in
 	}
 	id := downloadID(username, filename)
 	tr := newTransfer(id, username, filename, size)
+	tr.logger = c.logger
 	// tr.cancel is set before insertIfAbsent makes tr reachable via the
 	// registry, so a Cancel racing right after registration always finds a
 	// usable cancel func rather than a nil one.
@@ -683,6 +688,13 @@ func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
 // several runDownload exit paths (and Enqueue's own lifecycle-stopping
 // fallback) that fail before ever reaching a file transfer.
 func setTransferErrored(tr *transfer, failure string, retryable bool) {
+	// Log before locking: username/filename are immutable and failure is the
+	// argument, so no lock is needed, and the reason is otherwise only reachable
+	// via a ListDownloads field the caller discards - invisible when a download
+	// dies before ever streaming a byte.
+	if tr.logger != nil {
+		tr.logger.Info("download errored", "username", tr.username, "filename", tr.filename, "reason", failure, "retryable", retryable)
+	}
 	tr.mu.Lock()
 	tr.state = core.TransferErrored
 	tr.failure = failure
@@ -699,13 +711,18 @@ func setTransferErrored(tr *transfer, failure string, retryable bool) {
 // outcome instead of a transfer stuck QUEUED/IN_PROGRESS forever.
 func finishInterrupted(tr *transfer, err error) {
 	tr.mu.Lock()
-	defer tr.mu.Unlock()
 	if tr.state == core.TransferCancelled {
+		tr.mu.Unlock()
 		return
 	}
 	tr.state = core.TransferErrored
 	tr.failure = "download interrupted: " + err.Error()
 	tr.retryable = true
+	failure := tr.failure
+	tr.mu.Unlock()
+	if tr.logger != nil {
+		tr.logger.Info("download errored", "username", tr.username, "filename", tr.filename, "reason", failure, "retryable", true)
+	}
 }
 
 // downloadPeerMessage constrains trySendPeerMessage to the P messages the
