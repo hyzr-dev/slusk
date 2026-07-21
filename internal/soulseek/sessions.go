@@ -392,7 +392,7 @@ func (s *peerSession) writeLoop() {
 		case <-s.ctx.Done():
 			return
 		case frame := <-s.writes:
-			err := writeFull(s.conn, frame)
+			err := writeFull(s.conn, frame, s.client.cfg.peerIdleTimeout)
 			s.queuedWriteBytes.Add(-int64(len(frame)))
 			if err != nil {
 				s.Close(fmt.Errorf("write peer session: %w", err))
@@ -402,8 +402,18 @@ func (s *peerSession) writeLoop() {
 	}
 }
 
-func writeFull(conn net.Conn, frame []byte) error {
+// writeFull writes frame to conn, resetting a rolling write deadline before
+// each Write so a peer that stops draining its receive buffer can pin this
+// writer goroutine for at most idleTimeout rather than forever. A large frame
+// to a slow-but-live peer is unaffected: every Write that makes progress resets
+// the deadline. idleTimeout <= 0 disables the deadline.
+func writeFull(conn net.Conn, frame []byte, idleTimeout time.Duration) error {
 	for len(frame) > 0 {
+		if idleTimeout > 0 {
+			if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
+				return err
+			}
+		}
 		n, err := conn.Write(frame)
 		if err != nil {
 			return err
@@ -461,7 +471,16 @@ func (s *peerSession) readFrame() (sessionFrame, error) {
 		wire, err := readBufferedFrame(reader)
 		return sessionFrame{connType: s.key.connType, code: int(code), wire: wire}, err
 	case distributed.ConnectionType:
-		reader, _, code, err := distributed.ReadLimited(s.conn, maxDistributedFrameSize)
+		// Distributed parent/child sessions get the same rolling idle read
+		// deadline ordinary P sessions do. Without it, a parent or child that
+		// completes the handshake then goes silent (dead NAT, blackhole,
+		// malicious stall) pins this readLoop goroutine and its socket — and,
+		// for a child, one of the bounded inbound/child slots — for the whole
+		// life of the server generation, silently degrading distributed search.
+		// The real distributed network streams searches continuously, so a
+		// healthy peer never idles anywhere near this long.
+		readerConn := sessionDeadlineReader{conn: s.conn, idleTimeout: s.client.cfg.peerIdleTimeout, absoluteDeadline: s.absoluteDeadline}
+		reader, _, code, err := distributed.ReadLimited(readerConn, maxDistributedFrameSize)
 		if err != nil {
 			return sessionFrame{}, err
 		}

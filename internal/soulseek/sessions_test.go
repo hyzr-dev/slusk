@@ -572,3 +572,26 @@ func TestMirrorDAttachmentRejectedAfterGenerationTeardown(t *testing.T) {
 		t.Fatal("late mirror D attachment survived in registry")
 	}
 }
+
+// TestWriteFullWriteDeadlineUnblocksStalledPeer locks the rolling write
+// deadline: a peer that never drains its receive buffer must not pin the writer
+// goroutine forever. net.Pipe is synchronous/unbuffered, so a Write blocks until
+// the other end reads — which it never does here — so only the deadline can
+// unblock it.
+func TestWriteFullWriteDeadlineUnblocksStalledPeer(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close() // deliberately never read from c2
+
+	done := make(chan error, 1)
+	go func() { done <- writeFull(c1, make([]byte, 1<<16), 50*time.Millisecond) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("writeFull to a non-draining peer returned nil, want a timeout error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writeFull blocked well past its write deadline — writer goroutine pinned")
+	}
+}
