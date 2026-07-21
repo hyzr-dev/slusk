@@ -492,3 +492,22 @@ func TestHandleInboundFileConnIndirectMirrorDial(t *testing.T) {
 		t.Fatal("transfer never received its file connection over the indirect path")
 	}
 }
+
+// TestStreamFileRejectsNegativeSize locks the defense-in-depth guard against a
+// negative (overflowed) transfer size: streamFile must error immediately and
+// never create a "completed" destination file. Passing a nil conn also proves
+// the guard runs before any socket use.
+func TestStreamFileRejectsNegativeSize(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.flac")
+	written, err := streamFile(nil, dest, -1, time.Second, nil)
+	if err == nil {
+		t.Fatal("streamFile(size=-1) = nil error, want rejection")
+	}
+	if written != 0 {
+		t.Errorf("written = %d, want 0", written)
+	}
+	if _, statErr := os.Stat(dest); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a destination file was created for a negative size: %v", statErr)
+	}
+}

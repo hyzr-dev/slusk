@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path"
@@ -826,6 +827,16 @@ queueWait:
 	// renaming a short .part to Completed) or hang it until the idle timeout.
 	streamSize := tr.size
 	if req.FileSize > 0 {
+		if req.FileSize > math.MaxInt64 {
+			// req.FileSize is a peer-controlled uint64. A value ≥ 2^63 wraps
+			// negative when cast to int64, and io.CopyN(dst, src, negative) is a
+			// no-op returning (0, nil) — streamFile would then rename an empty
+			// .part to the destination and report the download Completed, while
+			// also discarding any resumable partial. Reject it as a protocol
+			// violation (non-retryable) rather than trust the declared size.
+			setTransferErrored(tr, "peer declared an out-of-range file size", false)
+			return
+		}
 		streamSize = int64(req.FileSize)
 		tr.mu.Lock()
 		tr.size = streamSize

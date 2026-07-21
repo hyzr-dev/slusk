@@ -110,6 +110,13 @@ func (c *Client) handleInboundFileConn(ctx context.Context, conn net.Conn, lease
 // already landed, so a retried streamFile call resumes from where this one
 // left off; only a fully successful transfer is renamed to destPath.
 func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Duration, progress func(written int64)) (written int64, err error) {
+	// Defense in depth: a negative size (e.g. a peer FileSize that overflowed
+	// int64) must never reach io.CopyN, where a negative count is a silent
+	// no-op that would "complete" a 0-byte file. runDownload rejects this
+	// upstream; guard the primitive too so it can never happen through any path.
+	if size < 0 {
+		return 0, fmt.Errorf("refusing to stream a negative transfer size %d", size)
+	}
 	partPath := destPath + ".part"
 
 	resumeOffset, partExists, err := partialFileSize(partPath)
