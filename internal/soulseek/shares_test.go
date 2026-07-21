@@ -287,6 +287,55 @@ func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 	}
 }
 
+// TestShareSearchDeliverPoolSaturationDoesNotBlockMatch locks the match/deliver
+// split: with the network-bound deliver pool fully saturated, a matching search
+// must still run its match and release the match slot (the two are separate
+// pools), dropping only the delivery — never blocking or dropping at the match
+// stage the way the old single shared pool did.
+func TestShareSearchDeliverPoolSaturationDoesNotBlockMatch(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.shares.Store(&shareSnapshot{
+		files:  map[string]*indexedFile{},
+		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+	})
+	startSessionLifecycle(t, c)
+
+	// A registered session the delivery would use if it were not dropped.
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = remote.Close() })
+	s := c.newSession(local, sessionKey{username: "downloader", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	if _, inserted := c.sessions.Register(s); !inserted {
+		t.Fatal("register downloader")
+	}
+
+	// Saturate the delivery pool so no match can be delivered.
+	for i := 0; i < cap(c.deliverWorkers); i++ {
+		c.deliverWorkers <- struct{}{}
+	}
+
+	c.respondToSearch("downloader", 42, "track")
+
+	// The match slot must drain back to empty despite the saturated deliver pool.
+	deadline := time.Now().Add(time.Second)
+	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(c.shareWorkers); got != 0 {
+		t.Fatalf("match slot still held (%d) while the deliver pool is saturated — pools not decoupled", got)
+	}
+
+	// The response was dropped, not delivered, because the deliver pool was full.
+	select {
+	case <-s.writes:
+		t.Fatal("delivered a search response despite a saturated deliver pool")
+	default:
+	}
+
+	for i := 0; i < cap(c.deliverWorkers); i++ {
+		<-c.deliverWorkers
+	}
+}
+
 func TestShareSearchDeliveryFailureCanRetry(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
@@ -365,14 +414,21 @@ func TestShareSearchDeliveryConcurrentDuplicatesQueueOnce(t *testing.T) {
 	}
 }
 
+// waitForShareWorkers waits until all in-flight share-search work has finished.
+// Since the match/deliver split, that means both pools must drain: the match
+// slot is released before delivery, so a drained match pool alone no longer
+// implies the response has been queued.
 func waitForShareWorkers(t *testing.T, c *Client) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
-	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
+	for (len(c.shareWorkers) != 0 || len(c.deliverWorkers) != 0) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if got := len(c.shareWorkers); got != 0 {
-		t.Fatalf("share workers still active: %d", got)
+		t.Fatalf("share (match) workers still active: %d", got)
+	}
+	if got := len(c.deliverWorkers); got != 0 {
+		t.Fatalf("deliver workers still active: %d", got)
 	}
 }
 

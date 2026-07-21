@@ -20,8 +20,19 @@ import (
 
 const (
 	maxSharedSearchResults = 500
-	maxShareWorkers        = 4
-	searchResponseTTL      = 2 * time.Minute
+	// maxShareWorkers bounds the CPU-bound, no-new-connection share work: the
+	// in-memory search match and folder-contents build (both send on an existing
+	// session, if at all). It is generous because that work is microseconds and
+	// opens no sockets, so nearly every inbound distributed search can be
+	// evaluated instead of dropped before we even know whether we match.
+	maxShareWorkers = 32
+	// maxDeliverWorkers bounds the network-bound part: delivering a matched
+	// search response, which opens (or reuses) a session to the searcher - for a
+	// firewalled searcher an indirect connection consuming one of the shared
+	// inbound leases. It is kept small so it leaves lease headroom for downloads;
+	// dropping when full is acceptable backpressure.
+	maxDeliverWorkers = 16
+	searchResponseTTL = 2 * time.Minute
 )
 
 // SharedFolder maps a private local directory to one explicitly named public
@@ -349,24 +360,43 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 	if username == "" || username == c.cfg.Username {
 		return
 	}
+	// Match slot: cheap, connectionless work, freed the instant the match is done
+	// so a slow delivery below can never pin it (that is a separate pool).
 	select {
 	case c.shareWorkers <- struct{}{}:
 	case <-c.lifecycleContext().Done():
 		return
 	default:
 		if c.logger != nil {
-			c.logger.Debug("dropping share search due to worker saturation", "username", username)
+			c.logger.Debug("dropping share search due to match worker saturation", "username", username)
 		}
 		return
 	}
 	if !c.startTracked(func() {
-		defer func() { <-c.shareWorkers }()
-		results := c.shareSnapshot().match(query, maxSharedSearchResults)
+		// Release the match slot as soon as the match returns (deferred so a
+		// panic in match cannot leak the slot), before any network I/O.
+		results := func() []peer.File {
+			defer func() { <-c.shareWorkers }()
+			return c.shareSnapshot().match(query, maxSharedSearchResults)
+		}()
 		if len(results) == 0 || !c.reserveSearchDelivery(username, token) {
 			return
 		}
 		delivered := false
 		defer func() { c.finishSearchDelivery(username, token, delivered) }()
+
+		// Delivery slot: separate, smaller pool. Opening a session to the searcher
+		// (indirect for a firewalled one) consumes a shared inbound lease, so drop
+		// rather than queue when this network-bound pool is full.
+		select {
+		case c.deliverWorkers <- struct{}{}:
+		default:
+			if c.logger != nil {
+				c.logger.Debug("dropping share search response due to deliver worker saturation", "username", username)
+			}
+			return
+		}
+		defer func() { <-c.deliverWorkers }()
 
 		ctx, cancel := context.WithTimeout(c.lifecycleContext(), c.cfg.establishTimeout)
 		defer cancel()

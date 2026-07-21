@@ -210,7 +210,12 @@ type Client struct {
 
 	shares                 atomic.Pointer[shareSnapshot]
 	shareScanMu            sync.Mutex
+	// shareWorkers bounds CPU-bound share work (search match, folder-contents
+	// build); deliverWorkers bounds the network-bound search-response delivery
+	// that opens a session to the searcher. Separate pools so a slow delivery
+	// never holds a match slot. See maxShareWorkers / maxDeliverWorkers.
 	shareWorkers           chan struct{}
+	deliverWorkers         chan struct{}
 	searchDeliveryMu       sync.Mutex
 	searchDeliveries       map[searchDeliveryKey]time.Time
 	searchDeliveryInFlight map[searchDeliveryKey]struct{}
@@ -320,6 +325,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		establishes:            make(map[sessionKey]*sessionEstablishment),
 		downloads:              newDownloadRegistry(),
 		shareWorkers:           make(chan struct{}, maxShareWorkers),
+		deliverWorkers:         make(chan struct{}, maxDeliverWorkers),
 		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
 		searchDeliveryInFlight: make(map[searchDeliveryKey]struct{}),
 	}
