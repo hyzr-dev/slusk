@@ -67,6 +67,9 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Make slog.Default() fallbacks (store migrations, module log() helpers)
+	// emit JSON too, instead of Go's plain-text default handler.
+	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
