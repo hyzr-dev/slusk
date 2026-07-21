@@ -506,6 +506,54 @@ func TestRemoveDeletesPartialDownloadAndRegistryEntry(t *testing.T) {
 	}
 }
 
+// TestEnqueueRejectsTraversalFilename locks the download-write path-traversal
+// fix (T4): a peer-controlled filename containing ".." must be refused before a
+// transfer is ever registered, so nothing can write outside the download root.
+func TestEnqueueRejectsTraversalFilename(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.DownloadDir = t.TempDir()
+	for _, fn := range []string{`..\evil.sh`, `..\..\..\evil.conf`, `..\..`, `sub\..\..\escape`} {
+		if _, err := c.Enqueue(context.Background(), "alice", fn, 10); err == nil {
+			t.Errorf("Enqueue(%q) = nil error, want rejection", fn)
+		}
+		if got := c.downloads.lookupByID(downloadID("alice", fn)); got != nil {
+			t.Errorf("Enqueue(%q) registered a transfer despite rejection", fn)
+		}
+	}
+	// A normal remote share path must still be accepted.
+	if _, err := c.Enqueue(context.Background(), "alice", `Music\Artist - Album\01 track.flac`, 10); err != nil {
+		t.Errorf("Enqueue(benign) = %v, want nil", err)
+	}
+}
+
+// TestDeleteDownloadFolderRejectsTraversal locks the recursive-delete fix: a
+// name resolving outside (or to) the download dir — e.g. "..", produced when a
+// hostile candidate's files all sit in a `..\` remote folder — must not
+// os.RemoveAll anything above the download root.
+func TestDeleteDownloadFolderRejectsTraversal(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	root := t.TempDir()
+	c.cfg.DownloadDir = filepath.Join(root, "downloads")
+	if err := os.MkdirAll(c.cfg.DownloadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(root, "victim.txt") // a sibling above the download dir
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"..", ".", "", "../..", "../victim.txt"} {
+		if err := c.DeleteDownloadFolder(context.Background(), name); err == nil {
+			t.Errorf("DeleteDownloadFolder(%q) = nil, want rejection", name)
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("a file above the download dir was deleted via traversal: %v", err)
+	}
+	if _, err := os.Stat(c.cfg.DownloadDir); err != nil {
+		t.Errorf("the download dir itself was deleted: %v", err)
+	}
+}
+
 func TestDeleteDownloadFolder(t *testing.T) {
 	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
 	c.cfg.DownloadDir = t.TempDir()
