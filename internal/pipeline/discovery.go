@@ -65,7 +65,12 @@ type Discovery struct {
 }
 
 // NewDiscovery constructs a Discovery.
-func NewDiscovery(p DiscoveryParams) *Discovery { return &Discovery{p: p} }
+func NewDiscovery(p DiscoveryParams) *Discovery {
+	if p.Logger != nil {
+		p.Logger = p.Logger.With("module", "discovery")
+	}
+	return &Discovery{p: p}
+}
 
 // Name identifies this module in logs and Health().
 func (d *Discovery) Name() string { return "discovery" }

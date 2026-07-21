@@ -207,7 +207,7 @@ func main() {
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
-	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger}
+	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
 	// Liveness only requires modules to keep attempting work. Readiness also
 	// requires successful work and fails after sustained errors.
 	liveFn := func() bool { return runner.Live() }

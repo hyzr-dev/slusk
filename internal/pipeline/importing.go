@@ -88,7 +88,12 @@ type Importing struct {
 }
 
 // NewImporting constructs an Importing.
-func NewImporting(p ImportingParams) *Importing { return &Importing{p: p} }
+func NewImporting(p ImportingParams) *Importing {
+	if p.Logger != nil {
+		p.Logger = p.Logger.With("module", "importing")
+	}
+	return &Importing{p: p}
+}
 
 // Name identifies this module in logs and Health().
 func (m *Importing) Name() string { return "importing" }

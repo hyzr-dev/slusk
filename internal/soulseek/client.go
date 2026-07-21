@@ -303,6 +303,10 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		cfg.UploadSlots = 2
 	}
 
+	if logger != nil {
+		logger = logger.With("component", "soulseek")
+	}
+
 	c := &Client{
 		cfg:                    cfg,
 		logger:                 logger,
