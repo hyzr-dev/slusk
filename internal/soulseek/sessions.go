@@ -314,7 +314,21 @@ func (c *Client) registerSession(candidate *peerSession) *peerSession {
 	if !inserted {
 		return winner
 	}
+	// candidate is now in the registry with peerConns already incremented, but
+	// its reader/writer are not yet running. If established() panics (a logic bug
+	// reachable via peer state), tear it down before the panic unwinds to
+	// startTracked's recover - which would otherwise leave a dead entry stuck in
+	// the registry, poisoning duplicate arbitration for this peer key, with a
+	// leaked socket and peerConns count. A non-recovering defer runs the cleanup
+	// during unwinding and lets the panic continue to be logged centrally.
+	established := false
+	defer func() {
+		if !established {
+			candidate.Close(errors.New("soulseek: panic while establishing session"))
+		}
+	}()
 	candidate.hooks.established(candidate)
+	established = true
 	if !c.startTracked(candidate.writeLoop) || !c.startTracked(candidate.readLoop) {
 		candidate.Close(errors.New("client lifecycle is stopping"))
 	}
@@ -427,6 +441,18 @@ func writeFull(conn net.Conn, frame []byte, idleTimeout time.Duration) error {
 }
 
 func (s *peerSession) readLoop() {
+	// A panicking frame hook (a logic bug reached via crafted peer data) must
+	// still tear the session down. Without this, the panic unwinds past s.Close
+	// straight to startTracked's recover: s.cancel is never called, so the
+	// sibling writeLoop stays parked on s.ctx.Done() forever - an immortal
+	// goroutine plus a leaked socket, registry entry, and peerConns count. Close
+	// is idempotent; re-panic so startTracked still logs the stack centrally.
+	defer func() {
+		if r := recover(); r != nil {
+			s.Close(fmt.Errorf("panic in peer session frame handler: %v", r))
+			panic(r)
+		}
+	}()
 	for {
 		frame, err := s.readFrame()
 		if err != nil {
@@ -545,13 +571,25 @@ func (c *Client) coalesceEstablish(ctx context.Context, key sessionKey, establis
 	c.establishes[key] = flight
 	c.establishMu.Unlock()
 
+	// Clear the in-flight entry and wake waiters from a defer so a panic in
+	// establish() (e.g. a panicking established hook) cannot leave a stale flight
+	// whose done never closes - which would strand every future attempt for this
+	// key on that dead channel until each caller's own ctx expires, disabling
+	// reconnection to the peer for the process's lifetime.
+	defer func() {
+		c.establishMu.Lock()
+		if c.establishes[key] == flight {
+			delete(c.establishes, key)
+		}
+		if flight.session == nil && flight.err == nil {
+			// establish() panicked before assigning a result; hand waiters a real
+			// error rather than a (nil, nil) a caller might dereference.
+			flight.err = errors.New("soulseek: session establishment aborted")
+		}
+		close(flight.done)
+		c.establishMu.Unlock()
+	}()
 	flight.session, flight.err = establish()
-	c.establishMu.Lock()
-	if c.establishes[key] == flight {
-		delete(c.establishes, key)
-	}
-	close(flight.done)
-	c.establishMu.Unlock()
 	return flight.session, flight.err
 }
 
