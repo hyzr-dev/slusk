@@ -923,3 +923,30 @@ func TestRunRetriesTransientStartupFailure(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 }
+
+// TestServerWriteDeadlineUnblocksStalledServer locks the write-deadline bound on
+// the central server connection: a server that stops draining must not pin
+// serverWriteMu — and, when the stalled write is the ping ticker's own, the
+// serveConnected select that must reach ctx.Done() — forever. net.Pipe is
+// synchronous, so the Write blocks until the other end reads (it never does),
+// leaving only serverWriteTimeout to unblock it.
+func TestServerWriteDeadlineUnblocksStalledServer(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.serverWriteTimeout = 50 * time.Millisecond
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close() // deliberately never read from b
+	c.serverConn = a
+
+	done := make(chan error, 1)
+	go func() { done <- sendToServer(c, &server.Ping{}) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("sendToServer to a non-draining server returned nil, want a timeout error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendToServer blocked well past serverWriteTimeout — serverWriteMu pinned")
+	}
+}

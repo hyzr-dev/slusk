@@ -24,6 +24,12 @@ import (
 const (
 	defaultDialTimeout              = 10 * time.Second
 	defaultPingInterval             = 5 * time.Minute
+	// defaultServerWriteTimeout bounds a single write to the central server so a
+	// stalled (e.g. zero-window) server cannot pin serverWriteMu, and the ping
+	// ticker's own write cannot wedge the serveConnected select that must reach
+	// ctx.Done(). Server control messages are tiny, so a healthy link never
+	// approaches this; it only trips on a genuinely wedged connection.
+	defaultServerWriteTimeout       = 30 * time.Second
 	defaultBackoffBase              = 5 * time.Second
 	defaultBackoffCap               = 10 * time.Minute
 	tcpKeepAliveInterval            = time.Minute
@@ -147,6 +153,10 @@ type Config struct {
 	downloadQueueTimeout time.Duration
 	// uploadNegotiationTimeout bounds waiting for TransferResponse.
 	uploadNegotiationTimeout time.Duration
+	// serverWriteTimeout bounds a single write to the central server connection
+	// so a stalled server cannot pin serverWriteMu (and the ping ticker's write
+	// cannot wedge shutdown) forever. Default 30s.
+	serverWriteTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -286,6 +296,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.uploadNegotiationTimeout <= 0 {
 		cfg.uploadNegotiationTimeout = defaultUploadNegotiationTimeout
 	}
+	if cfg.serverWriteTimeout <= 0 {
+		cfg.serverWriteTimeout = defaultServerWriteTimeout
+	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2
 	}
@@ -353,6 +366,16 @@ func sendToServerGeneration[M serverMessage[M]](c *Client, generation uint64, ms
 	cancel := c.serverCancel
 	c.mu.Unlock()
 
+	// Bound the write so a stalled (e.g. zero-window) server cannot pin
+	// serverWriteMu forever. Critically, when this is the ping ticker's own
+	// write, an unbounded stall would trap the serveConnected select inside its
+	// ticker arm and it could never reach the ctx.Done() arm that closes the
+	// socket to unblock the write - so shutdown would hang. Server messages are
+	// tiny; a healthy link never approaches this deadline. A timeout surfaces as
+	// a write error, which cancels and closes this generation like any other.
+	if c.cfg.serverWriteTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(c.cfg.serverWriteTimeout))
+	}
 	_, err := server.Write(conn, msg)
 	c.serverWriteMu.Unlock()
 	if err != nil {
