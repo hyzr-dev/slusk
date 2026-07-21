@@ -591,3 +591,40 @@ func assertNoActiveSearches(t *testing.T, c *Client) {
 		t.Fatalf("active searches/tokens after return = %d/%d", active, reserved)
 	}
 }
+
+// TestSearchResetsStaleServerWriteDeadline is the regression guard for a bug the
+// serverWriteTimeout write deadline introduced: net.Conn write deadlines are
+// absolute and outlive the write, and Search writes FileSearch directly to the
+// shared server conn (not via sendToServerGeneration), so an expired deadline
+// left by an earlier server write made every later Search fail its write with
+// i/o timeout and force a reconnect. Search must set a fresh write deadline
+// before writing, exactly like every other server write does.
+func TestSearchResetsStaleServerWriteDeadline(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	startSessionLifecycle(t, c)
+
+	local, remote := net.Pipe()
+	// Drain the far side so a deadline-bounded FileSearch write completes.
+	go func() { _, _ = io.Copy(io.Discard, remote) }()
+	defer local.Close()
+	defer remote.Close()
+
+	c.mu.Lock()
+	c.serverConn = local
+	c.serverGeneration = 1
+	c.serverCancel = func() {}
+	c.mu.Unlock()
+
+	// Simulate a prior sendToServerGeneration write having left an absolute write
+	// deadline that has since expired.
+	if err := local.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("prime stale deadline: %v", err)
+	}
+
+	// With the stale deadline unaddressed the FileSearch write fails immediately
+	// with i/o timeout; the fix resets it so the write succeeds and the search
+	// runs to its (empty) timeout.
+	if _, err := c.Search(context.Background(), "immolation", 100*time.Millisecond); err != nil {
+		t.Fatalf("Search returned %v; want nil (a stale server write deadline must be reset before writing)", err)
+	}
+}

@@ -347,6 +347,26 @@ type serverMessage[M any] interface {
 	Serialize(M) ([]byte, error)
 }
 
+// writeServerLocked writes msg to the server connection, bounding it with the
+// standard write deadline. The caller MUST hold serverWriteMu. Every server
+// writer goes through here so the deadline is applied consistently: net.Conn
+// write deadlines are absolute and outlive the write, so a writer that skipped
+// setting one would inherit a prior writer's now-expired deadline and fail its
+// own write immediately with i/o timeout (Search is the other direct writer).
+// serverWriteTimeout bounds a stalled (e.g. zero-window) server so it cannot pin
+// serverWriteMu - and, for the ping ticker's write, wedge shutdown - forever.
+// Server messages are tiny, so a healthy link never approaches the deadline; a
+// timeout surfaces as a write error the caller tears the connection down on.
+func writeServerLocked[M serverMessage[M]](c *Client, conn net.Conn, msg M) error {
+	if c.cfg.serverWriteTimeout > 0 {
+		if err := conn.SetWriteDeadline(time.Now().Add(c.cfg.serverWriteTimeout)); err != nil {
+			return err
+		}
+	}
+	_, err := server.Write(conn, msg)
+	return err
+}
+
 // sendToServer serializes writes to the server connection behind c.mu, since
 // multiple goroutines (the ping ticker, peer-connection establishment) may
 // write concurrently. It reports an error if no server connection is
@@ -370,17 +390,7 @@ func sendToServerGeneration[M serverMessage[M]](c *Client, generation uint64, ms
 	cancel := c.serverCancel
 	c.mu.Unlock()
 
-	// Bound the write so a stalled (e.g. zero-window) server cannot pin
-	// serverWriteMu forever. Critically, when this is the ping ticker's own
-	// write, an unbounded stall would trap the serveConnected select inside its
-	// ticker arm and it could never reach the ctx.Done() arm that closes the
-	// socket to unblock the write - so shutdown would hang. Server messages are
-	// tiny; a healthy link never approaches this deadline. A timeout surfaces as
-	// a write error, which cancels and closes this generation like any other.
-	if c.cfg.serverWriteTimeout > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(c.cfg.serverWriteTimeout))
-	}
-	_, err := server.Write(conn, msg)
+	err := writeServerLocked(c, conn, msg)
 	c.serverWriteMu.Unlock()
 	if err != nil {
 		if cancel != nil {
