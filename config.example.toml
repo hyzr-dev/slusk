@@ -118,6 +118,9 @@ dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 # Set this to a generated token before using the non-loopback listener below.
 auth_token = ""
 listen_addr = "0.0.0.0:9090"
+# Minimum log level: "debug", "info" (default), "warn", or "error". Use "debug"
+# to trace the native soulseek client's peer/transfer negotiation. Verbose.
+# log_level = "info"
 
 [paths]
 slskd_complete_dir = "/music/slskd-downloads"

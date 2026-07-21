@@ -66,7 +66,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// A LevelVar lets config raise the level after load: the logger must exist
+	// before config is read (to report a load failure), yet its verbosity is
+	// config-driven. Zero value is LevelInfo, so pre-config logs use info.
+	var logLevel slog.LevelVar
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &logLevel}))
 	// Make slog.Default() fallbacks (store migrations, module log() helpers)
 	// emit JSON too, instead of Go's plain-text default handler.
 	slog.SetDefault(logger)
@@ -76,6 +80,7 @@ func main() {
 		logger.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	logLevel.Set(cfg.Observ.SlogLevel())
 
 	if *migrateDestructive {
 		if err := runMigrateDestructive(cfg, logger); err != nil {

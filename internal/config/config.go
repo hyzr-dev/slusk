@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -220,6 +221,28 @@ type ObservConfig struct {
 	// AuthToken protects every UI, API, and metrics endpoint except /healthz.
 	// It may be omitted only when ListenAddr is strictly loopback-only.
 	AuthToken string `toml:"auth_token"`
+	// LogLevel is the minimum slog level emitted: "debug", "info" (default),
+	// "warn", or "error". Validate rejects any other non-empty value.
+	LogLevel string `toml:"log_level"`
+}
+
+// logLevels maps accepted observ.log_level values (case-insensitive) to slog
+// levels; an empty value defaults to info.
+var logLevels = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// SlogLevel returns the slog.Level selected by LogLevel, defaulting to
+// slog.LevelInfo when unset. Validate rejects any other value, so a typo is
+// caught at startup rather than silently swallowed here.
+func (o ObservConfig) SlogLevel() slog.Level {
+	if o.LogLevel == "" {
+		return slog.LevelInfo
+	}
+	return logLevels[strings.ToLower(o.LogLevel)]
 }
 
 // PathsConfig holds filesystem paths shared with the arr-stack.
@@ -491,6 +514,11 @@ func (c Config) Validate() error {
 		}
 		if strings.ContainsAny(c.Observ.AuthToken, " \t\r\n") {
 			problems = append(problems, "observ.auth_token must not contain whitespace")
+		}
+	}
+	if c.Observ.LogLevel != "" {
+		if _, ok := logLevels[strings.ToLower(c.Observ.LogLevel)]; !ok {
+			problems = append(problems, fmt.Sprintf("observ.log_level must be one of debug, info, warn, error (got %q)", c.Observ.LogLevel))
 		}
 	}
 	if len(problems) > 0 {

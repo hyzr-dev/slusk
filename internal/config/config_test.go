@@ -1,12 +1,47 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestObservSlogLevel(t *testing.T) {
+	cases := map[string]slog.Level{
+		"":      slog.LevelInfo,
+		"info":  slog.LevelInfo,
+		"DEBUG": slog.LevelDebug,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
+	}
+	for value, want := range cases {
+		if got := (ObservConfig{LogLevel: value}).SlogLevel(); got != want {
+			t.Errorf("SlogLevel(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
+
+func TestLoadInvalidLogLevelFails(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(base), "[observ]\n", "[observ]\nlog_level = \"bogus\"\n", 1)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for an invalid observ.log_level, got nil")
+	}
+	if !strings.Contains(err.Error(), "log_level") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
 
 func TestLoadSoulseekSharesAndUploadSlots(t *testing.T) {
 	base, err := os.ReadFile("testdata/valid.toml")
