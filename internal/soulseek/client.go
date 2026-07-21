@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -843,6 +844,18 @@ func (c *Client) startTracked(fn func()) bool {
 	c.lifeMu.Unlock()
 	go func() {
 		defer c.lifeWG.Done()
+		// Every tracked goroutine processes untrusted peer/server input. A
+		// panic in any of them (a decode bug, a nil deref) would otherwise
+		// unwind past the goroutine and crash the whole daemon, killing every
+		// other connection and in-flight transfer. Contain it here so one
+		// hostile or buggy peer only loses its own session; fn's own deferred
+		// cleanup (session Close, lease release) still runs during unwinding.
+		defer func() {
+			if r := recover(); r != nil && c.logger != nil {
+				c.logger.Error("soulseek: recovered from panic in tracked goroutine",
+					"panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		fn()
 	}()
 	return true

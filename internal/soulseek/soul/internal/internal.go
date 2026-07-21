@@ -605,6 +605,9 @@ func ReadStringBody(reader io.Reader, size uint32) (string, error) {
 	if size > MaxMessageSize {
 		return "", soul.ErrMessageTooLarge
 	}
+	if err := checkAvailable(reader, size); err != nil {
+		return "", err
+	}
 
 	buf := make([]byte, size)
 	_, err := io.ReadFull(reader, buf)
@@ -613,6 +616,26 @@ func ReadStringBody(reader io.Reader, size uint32) (string, error) {
 	}
 
 	return string(buf), nil
+}
+
+// remainingLener is implemented by the buffered readers every wire decoder in
+// this package feeds into a Deserialize call (*bytes.Reader, *bytes.Buffer,
+// *strings.Reader): Len reports the unread bytes still available.
+type remainingLener interface{ Len() int }
+
+// checkAvailable rejects a length prefix larger than the bytes actually left in
+// reader, when reader reports its remaining length. Each frame is fully
+// buffered before per-field decode, so a field can never legitimately claim
+// more bytes than the frame still holds. Without this guard, a length prefix
+// within the 64MB ceiling but far beyond the real (e.g. ≤16KB distributed)
+// frame still forces make([]byte, size) up front — letting a ~20-byte hostile
+// frame trigger a ~64MB allocation. Readers that don't report a length fall
+// through unchanged, so streaming callers keep their existing behaviour.
+func checkAvailable(reader io.Reader, size uint32) error {
+	if r, ok := reader.(remainingLener); ok && int64(size) > int64(r.Len()) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // WriteString writes a string to the buffer.
@@ -661,6 +684,9 @@ func ReadBytes(reader io.Reader) (buf []byte, err error) {
 
 	if size > MaxMessageSize {
 		return nil, soul.ErrMessageTooLarge
+	}
+	if err = checkAvailable(reader, size); err != nil {
+		return nil, err
 	}
 
 	buf = make([]byte, size)
