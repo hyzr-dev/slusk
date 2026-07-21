@@ -278,6 +278,12 @@ type peerSession struct {
 	writeMu          sync.Mutex
 	writeClosed      bool
 	queuedWriteBytes atomic.Int64
+	// wrote records whether we have ever queued a frame to this peer. It lets the
+	// search hook tell a one-way responder (delivered a FileSearchResponse, we
+	// never wrote back) from a session we are actually using (download, upload,
+	// browse-serve → we write back), so only the former is dropped after delivery
+	// to free its inbound lease. Set-once, never reset.
+	wrote            atomic.Bool
 	maxWriteFrame    int64
 	maxQueuedBytes   int64
 	absoluteDeadline time.Time
@@ -356,6 +362,9 @@ func (s *peerSession) TrySend(frame []byte) bool {
 	s.queuedWriteBytes.Add(frameSize)
 	select {
 	case s.writes <- copyOfFrame:
+		// Engaging with the peer: this session is now worth the full idle
+		// retention (a download/upload/browse exchange), not a one-way responder.
+		s.wrote.Store(true)
 		return true
 	default:
 		s.queuedWriteBytes.Add(-frameSize)

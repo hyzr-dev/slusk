@@ -266,29 +266,40 @@ func (h *searchSessionHooks) frame(session *peerSession, frame sessionFrame) err
 		return fmt.Errorf("file search response username %q does not match peer init username %q", response.Username, session.key.username)
 	}
 
-	subscription := h.searches.subscription(response.Token)
-	if subscription == nil {
-		return nil
-	}
-	uploadSpeed, ok := checkedNonnegativeInt(response.AverageSpeed)
-	if !ok {
-		return nil
-	}
-	queueLength, ok := checkedNonnegativeInt(response.Queue)
-	if !ok {
-		return nil
-	}
-	for i, file := range response.Results {
-		result, ok := mapSearchResult(session.key.username, response.FreeSlot, uploadSpeed, queueLength, file)
-		if !ok {
-			continue
-		}
-		subscription.offer(result)
-		if (i+1)%searchResultBuffer == 0 {
-			runtime.Gosched()
+	if subscription := h.searches.subscription(response.Token); subscription != nil {
+		if uploadSpeed, ok := checkedNonnegativeInt(response.AverageSpeed); ok {
+			if queueLength, ok := checkedNonnegativeInt(response.Queue); ok {
+				for i, file := range response.Results {
+					result, ok := mapSearchResult(session.key.username, response.FreeSlot, uploadSpeed, queueLength, file)
+					if !ok {
+						continue
+					}
+					subscription.offer(result)
+					if (i+1)%searchResultBuffer == 0 {
+						runtime.Gosched()
+					}
+				}
+			}
 		}
 	}
-	return nil
+	return releaseResponderSession(session)
+}
+
+// errResponderDelivered closes a P session that only ever delivered search
+// responses to us. Returned as a frame result so readLoop performs the close;
+// it is a routine lifecycle event, not a failure.
+var errResponderDelivered = errors.New("soulseek: releasing responder connection after search response")
+
+// releaseResponderSession drops a one-way responder session - one that pushed a
+// FileSearchResponse to us and that we never wrote to - so its inbound lease
+// frees promptly instead of lingering peerIdleTimeout while thousands more
+// responses arrive; we re-establish on demand if we later download from this
+// peer. A session we are using (wrote is set: download/upload/browse) is kept.
+func releaseResponderSession(session *peerSession) error {
+	if session.wrote.Load() {
+		return nil
+	}
+	return errResponderDelivered
 }
 
 func (*searchSessionHooks) closed(*peerSession, error) {}

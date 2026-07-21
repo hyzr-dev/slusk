@@ -161,7 +161,11 @@ func TestSearchRegistersBeforeWireAndStreamsPeerResponses(t *testing.T) {
 		return len(frame), nil
 	}
 
-	_, remote := registerTestPSession(t, c, "claimed-peer")
+	s, remote := registerTestPSession(t, c, "claimed-peer")
+	// Mark the session engaged so it is not released after the first response;
+	// this test streams several responses to verify mapping. Responder release
+	// after delivery is covered by TestSearchResponderSessionReleasedAfterDelivery.
+	s.wrote.Store(true)
 	resultCh := make(chan []core.SearchResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -502,6 +506,7 @@ func TestSearchHookOneLargeResponseNeverBlocksPeerReader(t *testing.T) {
 	}
 	hook := &searchSessionHooks{searches: registry}
 	session := &peerSession{key: sessionKey{username: "wire-name", connType: peer.ConnectionType}}
+	session.wrote.Store(true) // engaged: keep it, so frame returns nil (release covered separately)
 	started := time.Now()
 	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeFileSearchResponse), wire: wire}); err != nil {
 		t.Fatal(err)
@@ -514,6 +519,42 @@ func TestSearchHookOneLargeResponseNeverBlocksPeerReader(t *testing.T) {
 	}
 	if got := subscription.dropped.Load(); got != 44 {
 		t.Fatalf("large response drops = %d, want 44", got)
+	}
+}
+
+// TestSearchResponderSessionReleasedAfterDelivery locks the search-responder
+// lease fix: a session that only pushed a FileSearchResponse (we never wrote to
+// it) is released after delivery so its inbound lease frees for downloads,
+// while a session we are using (wrote set) is kept.
+func TestSearchResponderSessionReleasedAfterDelivery(t *testing.T) {
+	registry := newSearchRegistry()
+	subscription := newSearchSubscription()
+	const token soul.Token = 7
+	if !registry.add(token, 1, subscription) {
+		t.Fatal("add subscription")
+	}
+	wire, err := (&peer.FileSearchResponse{}).Serialize(makeSearchResponse(token, "responder", []peer.File{{Name: "a.flac", Size: 1, Extension: "flac"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := &searchSessionHooks{searches: registry}
+	frame := sessionFrame{connType: peer.ConnectionType, code: int(peer.CodeFileSearchResponse), wire: wire}
+
+	// One-way responder we never wrote to: frame returns the release sentinel so
+	// readLoop closes the session and frees its inbound lease.
+	responder := &peerSession{key: sessionKey{username: "responder", connType: peer.ConnectionType}}
+	if err := hook.frame(responder, frame); !errors.Is(err, errResponderDelivered) {
+		t.Fatalf("responder frame result = %v, want errResponderDelivered", err)
+	}
+	if got := len(subscription.results); got != 1 {
+		t.Fatalf("responder results delivered = %d, want 1 (results kept, only the socket released)", got)
+	}
+
+	// A session we are using (wrote) is kept: frame returns nil.
+	engaged := &peerSession{key: sessionKey{username: "responder", connType: peer.ConnectionType}}
+	engaged.wrote.Store(true)
+	if err := hook.frame(engaged, frame); err != nil {
+		t.Fatalf("engaged frame result = %v, want nil (session kept)", err)
 	}
 }
 
