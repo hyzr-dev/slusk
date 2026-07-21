@@ -378,21 +378,21 @@ func (c *Client) Status() Status {
 	return s
 }
 
-// Run starts the peer listener, then dials the server, logs in, and serves
-// the connection until ctx is cancelled or a terminal error occurs. On a
-// transient server-connection failure it reconnects after an exponential
-// backoff; the peer listener itself is started exactly once and lives across
-// every reconnect. Run returns nil only when ctx is cancelled; it returns a
-// non-nil error for a terminal failure (the peer listener failing to start,
-// invalid credentials, outdated protocol version, or the account logging in
-// elsewhere), and never reconnects afterward.
+// Run performs one-time startup (the initial share scan and the peer-listener
+// bind), then dials the server, logs in, and serves the connection until ctx
+// is cancelled or a terminal error occurs. Both startup and the server
+// connection are resilient to transient failures: a boot-time disk blip or
+// not-yet-ready mount (share scan), a transiently-held listen port (bind), or
+// a dropped server connection are all retried with exponential backoff rather
+// than stopping soulseek for the life of the process. The peer listener, once
+// bound, lives across every server reconnect. Run returns nil when ctx is
+// cancelled; it returns a non-nil error only for a terminal server failure
+// (invalid credentials, outdated protocol version, or the account logging in
+// elsewhere), after which it never reconnects.
 func (c *Client) Run(ctx context.Context) error {
-	if _, err := c.RescanShares(ctx); err != nil {
-		return fmt.Errorf("initial share scan: %w", err)
-	}
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	ln := c.retryStartup(ctx)
+	if ln == nil {
+		return nil // ctx cancelled during startup — a clean shutdown, not a failure
 	}
 	c.listenPort = ln.Addr().(*net.TCPAddr).Port
 	boundAddr := ln.Addr().String()
@@ -442,6 +442,50 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// retryStartup performs the one-time pre-connect setup — the initial share
+// scan and the peer-listener bind — retrying transient failures with the same
+// exponential backoff the server reconnect loop uses. Previously either step
+// failing returned straight out of Run, and the single caller (cmd) never
+// retried, so one boot-time hiccup (a not-yet-ready mount for the scan, a
+// briefly-held port for the bind) killed soulseek for the whole process life.
+// There is no clean terminal classification for these — a genuinely bad config
+// is caught by config.Validate first — so, like the reconnect loop, they are
+// treated as transient and retried until they succeed or ctx is cancelled.
+// Returns nil only when ctx is cancelled during startup.
+func (c *Client) retryStartup(ctx context.Context) net.Listener {
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		ln, err := c.trySetup(ctx)
+		if err == nil {
+			return ln
+		}
+		wait := nextBackoff(attempt, c.cfg.backoffBase, c.cfg.backoffCap)
+		c.logger.Warn("soulseek startup failed; retrying",
+			"err", err, "backoff", wait, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+	}
+}
+
+// trySetup runs the initial share scan then binds the peer listener, returning
+// the bound listener or the first error. On a scan failure no listener is
+// opened; the scan is idempotent, so retryStartup safely re-runs it.
+func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
+	if _, err := c.RescanShares(ctx); err != nil {
+		return nil, fmt.Errorf("initial share scan: %w", err)
+	}
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+	}
+	return ln, nil
 }
 
 // isTerminalErr reports whether err should stop Run from reconnecting.

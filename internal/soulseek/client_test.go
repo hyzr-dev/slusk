@@ -891,3 +891,35 @@ func TestClientSendsPing(t *testing.T) {
 		t.Fatal("timed out waiting for a ping")
 	}
 }
+
+// TestRunRetriesTransientStartupFailure locks the startup-resilience fix: a
+// failing peer-listener bind must be retried with backoff, not returned out of
+// Run (which permanently killed soulseek). Cancelling ctx during the retry loop
+// must return nil (clean shutdown), not an error.
+func TestRunRetriesTransientStartupFailure(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = "127.0.0.1:99999" // invalid port: bind always fails
+	c.cfg.backoffBase = 10 * time.Millisecond
+	c.cfg.backoffCap = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	// Still retrying (not returned) after several backoff cycles.
+	select {
+	case err := <-runDone:
+		t.Fatalf("Run returned %v during startup retry, want it to keep retrying", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() after ctx cancel = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
