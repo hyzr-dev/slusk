@@ -177,6 +177,11 @@ type Config struct {
 	// shareScanLogInterval is how often scan progress is logged during a
 	// share rescan. Default 30s; test seam.
 	shareScanLogInterval time.Duration
+	// shareScanHook, when non-nil, is invoked at the start of every share
+	// scan (see scanShares) instead of nothing, letting tests block or fail
+	// the scan deterministically without touching the filesystem. Always nil
+	// in production.
+	shareScanHook func(context.Context) error
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -230,6 +235,21 @@ type Client struct {
 
 	shares      atomic.Pointer[shareSnapshot]
 	shareScanMu sync.Mutex
+	// announceMu serializes every SharedFoldersFiles announcement to the
+	// server (login-time in serveConnected, the initial background scan,
+	// SIGHUP rescans): announceShares reads the currently published snapshot
+	// stats and sends them as one critical section under it, so the wire
+	// order of announcements always matches publish order. It also guards
+	// announcedGeneration/announcedStats, which double as the dedup state
+	// (skip re-announcing stats the current server generation has already
+	// been told) and the login gate (hold scan/rescan announcements back
+	// until the generation's mandatory login-time announcement has gone
+	// out; see announceCurrentShares). Lock ordering: announceMu ->
+	// serverWriteMu -> mu; nothing acquires announceMu while holding either
+	// of those.
+	announceMu          sync.Mutex
+	announcedGeneration uint64
+	announcedStats      ShareStats
 	// shareWorkers bounds CPU-bound share work (search match, folder-contents
 	// build); deliverWorkers bounds the network-bound search-response delivery
 	// that opens a session to the searcher. Separate pools so a slow delivery
@@ -447,13 +467,16 @@ func (c *Client) Status() Status {
 	return s
 }
 
-// Run performs one-time startup (the initial share scan and the peer-listener
-// bind), then dials the server, logs in, and serves the connection until ctx
-// is cancelled or a terminal error occurs. Both startup and the server
-// connection are resilient to transient failures: a boot-time disk blip or
-// not-yet-ready mount (share scan), a transiently-held listen port (bind), or
-// a dropped server connection are all retried with exponential backoff rather
-// than stopping soulseek for the life of the process. The peer listener, once
+// Run performs one-time startup (the peer-listener bind, after resolving the
+// gluetun forwarded port when configured), then dials the server, logs in,
+// and serves the connection until ctx is cancelled or a terminal error
+// occurs. Startup no longer includes the initial share scan: it now runs
+// concurrently in the background (see runInitialShareScan), and the client
+// answers browse/search requests with an empty share list until it
+// completes. Both startup and the server connection are resilient to
+// transient failures: a transiently-held listen port (bind) or a dropped
+// server connection are retried with exponential backoff rather than
+// stopping soulseek for the life of the process. The peer listener, once
 // bound, lives across every server reconnect. Run returns nil when ctx is
 // cancelled; it returns a non-nil error only for a terminal server failure
 // (invalid credentials, outdated protocol version, or the account logging in
@@ -480,6 +503,10 @@ func (c *Client) Run(ctx context.Context) error {
 	if !c.startTracked(func() { c.acceptPeers(runCtx, ln) }) {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before listener start")
+	}
+	if !c.startTracked(func() { c.runInitialShareScan(runCtx) }) {
+		_ = ln.Close()
+		return errors.New("soulseek: lifecycle stopped before initial share scan start")
 	}
 
 	for {
@@ -513,15 +540,14 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-// retryStartup performs the one-time pre-connect setup — the initial share
-// scan and the peer-listener bind — retrying transient failures with the same
-// exponential backoff the server reconnect loop uses. Previously either step
-// failing returned straight out of Run, and the single caller (cmd) never
-// retried, so one boot-time hiccup (a not-yet-ready mount for the scan, a
-// briefly-held port for the bind) killed soulseek for the whole process life.
-// There is no clean terminal classification for these — a genuinely bad config
-// is caught by config.Validate first — so, like the reconnect loop, they are
-// treated as transient and retried until they succeed or ctx is cancelled.
+// retryStartup performs the one-time pre-connect setup — the peer-listener
+// bind — retrying transient failures with the same exponential backoff the
+// server reconnect loop uses. Previously a failing bind returned straight out
+// of Run, and the single caller (cmd) never retried, so one boot-time hiccup
+// (a briefly-held port) killed soulseek for the whole process life. There is
+// no clean terminal classification for this — a genuinely bad config is
+// caught by config.Validate first — so, like the reconnect loop, it is
+// treated as transient and retried until it succeeds or ctx is cancelled.
 // Returns nil only when ctx is cancelled during startup.
 func (c *Client) retryStartup(ctx context.Context) net.Listener {
 	for attempt := 0; ; attempt++ {
@@ -544,12 +570,12 @@ func (c *Client) retryStartup(ctx context.Context) net.Listener {
 }
 
 // trySetup resolves the peer listener address (fetching the forwarded port
-// from gluetun first, when configured), runs the initial share scan, then
-// binds the peer listener, returning the bound listener or the first error.
-// The gluetun fetch runs before the share scan since it is cheap and, when
-// the VPN has not yet established port forwarding, should not force an
-// expensive rescan every backoff cycle. On a scan failure no listener is
-// opened; the scan is idempotent, so retryStartup safely re-runs it.
+// from gluetun first, when configured) and binds the peer listener,
+// returning the bound listener or the first error. Both steps are still
+// retried by retryStartup with its existing backoff. The initial share scan
+// no longer gates this: it runs concurrently once Run starts serving the
+// connection (see runInitialShareScan), so a slow or stalled scan can never
+// delay connecting to the server.
 func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
 	addr := c.cfg.ListenAddr
 	if c.cfg.GluetunControlURL != "" {
@@ -565,9 +591,6 @@ func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
 		c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
 	}
 
-	if _, err := c.RescanShares(ctx); err != nil {
-		return nil, fmt.Errorf("initial share scan: %w", err)
-	}
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen for peer connections on %s: %w", addr, err)
@@ -709,9 +732,12 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("request own user stats: %w", err)
 	}
 	// Soulseek expects an explicit index count on every authenticated session,
-	// including download-only clients with an empty index.
-	stats := c.shareSnapshot().stats
-	if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{Directories: stats.Directories, Files: stats.Files}); err != nil {
+	// including download-only clients with an empty index. The helper reads
+	// the currently published stats at send time under announceMu, so this
+	// announcement and a concurrent background-scan or SIGHUP-rescan
+	// announcement can interleave in any order without the server ending up
+	// on stale counts.
+	if err := c.announceSharesOnLogin(); err != nil {
 		return fmt.Errorf("announce shared folders and files: %w", err)
 	}
 

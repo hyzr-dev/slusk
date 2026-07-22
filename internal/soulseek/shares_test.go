@@ -542,3 +542,59 @@ func TestShareSearchAndFolderLookup(t *testing.T) {
 		}
 	}
 }
+
+// TestRunInitialShareScanRetriesThenPublishes locks issue #112's background
+// scan helper directly, with no server connection involved: a failing hook
+// must be retried with backoff (bounded here, not open-ended) before the
+// scan succeeds and publishes the snapshot, and the skipped announce (no
+// server connection, generation 0) must not itself cause an error loop.
+func TestRunInitialShareScanRetriesThenPublishes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	c.cfg.backoffBase = 2 * time.Millisecond
+	c.cfg.backoffCap = 5 * time.Millisecond
+
+	const failuresWanted = 2
+	var attempts int
+	c.cfg.shareScanHook = func(context.Context) error {
+		attempts++
+		if attempts <= failuresWanted {
+			return errors.New("simulated scan failure")
+		}
+		return nil
+	}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		c.runInitialShareScan(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runInitialShareScan did not return after the scan succeeded")
+	}
+
+	if attempts != failuresWanted+1 {
+		t.Fatalf("attempts = %d, want %d (failures then one success)", attempts, failuresWanted+1)
+	}
+	// Backoff must actually have been applied: failuresWanted waits of at
+	// least backoffBase each.
+	if elapsed := time.Since(start); elapsed < time.Duration(failuresWanted)*c.cfg.backoffBase {
+		t.Fatalf("elapsed = %v, want at least %v (backoff applied between retries)", elapsed, time.Duration(failuresWanted)*c.cfg.backoffBase)
+	}
+
+	snapshot := c.shareSnapshot()
+	if snapshot.stats.Files != 1 || snapshot.stats.Directories != 1 {
+		t.Fatalf("published stats = %+v, want 1 file/1 directory", snapshot.stats)
+	}
+	if snapshot.files[`Music\track.flac`] == nil {
+		t.Fatalf("virtual file missing after scan: %#v", snapshot.files)
+	}
+}

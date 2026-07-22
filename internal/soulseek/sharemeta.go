@@ -1,7 +1,6 @@
 package soulseek
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -84,57 +83,124 @@ func flacDuration(path string) (float64, error) {
 	}
 }
 
+// mp3Duration estimates the playback duration of an MP3 file without
+// decoding it fully. It reads at most the first 64 KB of audio data: if
+// that data carries a Xing/Info VBR header, the exact frame count gives an
+// exact duration; otherwise the first frame's bitrate is used to estimate
+// duration from the audio data size (accurate for CBR files).
 func mp3Duration(path string) (float64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 32*1024)
-	if head, _ := r.Peek(10); len(head) == 10 && string(head[:3]) == "ID3" {
-		size := int64(head[6]&0x7f)<<21 | int64(head[7]&0x7f)<<14 | int64(head[8]&0x7f)<<7 | int64(head[9]&0x7f)
-		if _, err := f.Seek(10+size, io.SeekStart); err != nil {
-			return 0, err
-		}
-		r.Reset(f)
-	}
-	var total float64
-	frames := 0
-	var header [4]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
+
+	info, err := f.Stat()
+	if err != nil {
 		return 0, err
 	}
-	for {
-		frameLen, samples, sampleRate, ok := parseMP3Header(binary.BigEndian.Uint32(header[:]))
-		if !ok {
-			if frames != 0 {
-				break
-			}
-			next, err := r.ReadByte()
-			if err != nil {
-				break
-			}
-			header[0], header[1], header[2], header[3] = header[1], header[2], header[3], next
-			continue
+	fileSize := info.Size()
+
+	var id3Header [10]byte
+	n, readErr := io.ReadFull(f, id3Header[:])
+	var audioSize int64
+	if readErr == nil && n == 10 && string(id3Header[:3]) == "ID3" {
+		tagSize := int64(id3Header[6]&0x7f)<<21 | int64(id3Header[7]&0x7f)<<14 | int64(id3Header[8]&0x7f)<<7 | int64(id3Header[9]&0x7f)
+		if _, err := f.Seek(10+tagSize, io.SeekStart); err != nil {
+			return 0, err
 		}
-		if _, err := io.CopyN(io.Discard, r, int64(frameLen-4)); err != nil {
-			break
+		audioSize = fileSize - (10 + tagSize)
+	} else {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return 0, err
 		}
-		total += float64(samples) / float64(sampleRate)
-		frames++
-		if _, err := io.ReadFull(r, header[:]); err != nil {
-			break
-		}
+		audioSize = fileSize
 	}
-	if frames == 0 || total <= 0 {
-		return 0, errors.New("no valid MPEG audio frames")
+
+	head := make([]byte, 64*1024)
+	n, err = io.ReadFull(f, head)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return 0, err
 	}
-	return total, nil
+	head = head[:n]
+
+	return estimateMP3Duration(head, audioSize)
 }
 
-func parseMP3Header(h uint32) (frameLen, samples, sampleRate int, ok bool) {
+// estimateMP3Duration derives a duration estimate from the first chunk of
+// MPEG audio data (head) and the total size of the audio data (audioSize,
+// which may exceed len(head)). It prefers the exact frame count from a
+// Xing/Info VBR header when present, falling back to a CBR estimate based
+// on the first frame's bitrate.
+func estimateMP3Duration(head []byte, audioSize int64) (float64, error) {
+	syncOff := -1
+	var h uint32
+	var samples, sampleRate, kbps int
+	for i := 0; i+4 <= len(head); i++ {
+		candidate := binary.BigEndian.Uint32(head[i : i+4])
+		_, s, sr, kb, ok := parseMP3Header(candidate)
+		if ok {
+			syncOff = i
+			h = candidate
+			samples, sampleRate, kbps = s, sr, kb
+			break
+		}
+	}
+	if syncOff < 0 {
+		return 0, errors.New("no valid MPEG audio frames")
+	}
+
+	// Xing/Info VBR header check. The tag sits right after the side info
+	// that follows the 4-byte frame header; the CRC bit is ignored for
+	// this placement, matching LAME/common encoder practice.
+	versionBits := (h >> 19) & 3
+	mpeg1 := versionBits == 3
+	mono := (h>>6)&3 == 3
+	var sideInfoSize int
+	switch {
+	case mpeg1 && mono:
+		sideInfoSize = 17
+	case mpeg1 && !mono:
+		sideInfoSize = 32
+	case !mpeg1 && mono:
+		sideInfoSize = 9
+	default: // MPEG-2/2.5, stereo
+		sideInfoSize = 17
+	}
+	tagOffset := syncOff + 4 + sideInfoSize
+	if tagOffset+4 <= len(head) {
+		tag := string(head[tagOffset : tagOffset+4])
+		if tag == "Xing" || tag == "Info" {
+			flagsOffset := tagOffset + 4
+			if flagsOffset+4 <= len(head) {
+				flags := binary.BigEndian.Uint32(head[flagsOffset : flagsOffset+4])
+				if flags&0x0001 != 0 { // FRAMES flag
+					frameCountOffset := flagsOffset + 4
+					if frameCountOffset+4 <= len(head) {
+						frameCount := binary.BigEndian.Uint32(head[frameCountOffset : frameCountOffset+4])
+						if frameCount > 0 && sampleRate > 0 {
+							return float64(frameCount) * float64(samples) / float64(sampleRate), nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// CBR fallback: estimate from audio data size and the first frame's bitrate.
+	if kbps <= 0 {
+		return 0, errors.New("no valid MPEG audio frames")
+	}
+	duration := float64(audioSize-int64(syncOff)) * 8 / float64(kbps*1000)
+	if duration <= 0 {
+		return 0, errors.New("no valid MPEG audio frames")
+	}
+	return duration, nil
+}
+
+func parseMP3Header(h uint32) (frameLen, samples, sampleRate, kbps int, ok bool) {
 	if h&0xffe00000 != 0xffe00000 {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	versionBits := (h >> 19) & 3
 	layerBits := (h >> 17) & 3
@@ -142,7 +208,7 @@ func parseMP3Header(h uint32) (frameLen, samples, sampleRate int, ok bool) {
 	rateIndex := (h >> 10) & 3
 	padding := int((h >> 9) & 1)
 	if versionBits == 1 || layerBits != 1 || bitrateIndex == 0 || bitrateIndex == 15 || rateIndex == 3 {
-		return 0, 0, 0, false // only Layer III, all MPEG versions
+		return 0, 0, 0, 0, false // only Layer III, all MPEG versions
 	}
 	rates := [...]int{44100, 48000, 32000}
 	sampleRate = rates[rateIndex]
@@ -152,7 +218,6 @@ func parseMP3Header(h uint32) (frameLen, samples, sampleRate int, ok bool) {
 	} else if versionBits == 0 {
 		sampleRate /= 4
 	}
-	var kbps int
 	if mpeg1 {
 		kbps = [...]int{0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}[bitrateIndex]
 		samples = 1152
@@ -162,5 +227,5 @@ func parseMP3Header(h uint32) (frameLen, samples, sampleRate int, ok bool) {
 		samples = 576
 		frameLen = 72000*kbps/sampleRate + padding
 	}
-	return frameLen, samples, sampleRate, frameLen >= 4
+	return frameLen, samples, sampleRate, kbps, frameLen >= 4
 }

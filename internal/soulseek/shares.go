@@ -79,6 +79,20 @@ type searchDeliveryKey struct {
 // RescanShares builds a complete immutable index and publishes it atomically.
 // If any configured root cannot be scanned, the prior snapshot remains live.
 func (c *Client) RescanShares(ctx context.Context) (ShareStats, error) {
+	stats, err := c.scanAndPublish(ctx)
+	if err != nil {
+		return ShareStats{}, err
+	}
+	if err := c.announceShares(); err != nil {
+		return stats, fmt.Errorf("announce rescanned shares: %w", err)
+	}
+	return stats, nil
+}
+
+// scanAndPublish builds a complete immutable index and publishes it
+// atomically to c.shares, without announcing it to the server. If any
+// configured root cannot be scanned, the prior snapshot remains live.
+func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
 	c.shareScanMu.Lock()
 	defer c.shareScanMu.Unlock()
 
@@ -96,17 +110,117 @@ func (c *Client) RescanShares(ctx context.Context) (ShareStats, error) {
 			"duration", time.Since(start))
 	}
 
-	if generation := c.currentServerGeneration(); generation != 0 {
-		if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{
-			Directories: snapshot.stats.Directories, Files: snapshot.stats.Files,
-		}); err != nil {
-			return snapshot.stats, fmt.Errorf("announce rescanned shares: %w", err)
-		}
-	}
 	return snapshot.stats, nil
 }
 
+// announceShares sends the currently published index size to the server, if
+// a server connection is currently established. The snapshot-stats read and
+// the send form one critical section under announceMu, shared by every
+// announcer (serveConnected's login-time announcement, the initial background
+// scan, SIGHUP rescans): whichever announcer sends later reads the later
+// snapshot, so the wire order of announcements always matches publish order
+// and the server always ends up on the latest published stats under any
+// interleaving. announceMu also carries the dedup state: when the current
+// server generation has already been told identical stats, the send is
+// skipped (returns nil), so e.g. an initial scan that found no shares does
+// not repeat the login-time 0/0 frame.
+//
+// Until the generation's login-time announcement has happened
+// (announceSharesOnLogin), the send is also skipped: serveConnected's fixed
+// post-login frame sequence must not be raced by a background scan that
+// finishes first, and the pending login-time announcement is guaranteed to
+// follow and reads the then-current stats at send time, so nothing published
+// before it is ever lost. It is generation-guarded via
+// sendToServerGeneration and a no-op (returns nil) when there is no active
+// connection.
+func (c *Client) announceShares() error {
+	return c.announceCurrentShares(false)
+}
+
+// announceSharesOnLogin is serveConnected's variant of announceShares: it
+// performs the mandatory first announcement of a server generation (Soulseek
+// expects an explicit index count on every authenticated session), which also
+// unlocks announceShares sends for that generation.
+func (c *Client) announceSharesOnLogin() error {
+	return c.announceCurrentShares(true)
+}
+
+func (c *Client) announceCurrentShares(loginTime bool) error {
+	c.announceMu.Lock()
+	defer c.announceMu.Unlock()
+	generation := c.currentServerGeneration()
+	if generation == 0 {
+		return nil
+	}
+	if !loginTime && c.announcedGeneration != generation {
+		// The login-time announcement for this generation is still pending; it
+		// will read the currently published stats when it sends.
+		return nil
+	}
+	stats := c.shareSnapshot().stats
+	if c.announcedGeneration == generation && c.announcedStats == stats {
+		return nil
+	}
+	if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{
+		Directories: stats.Directories, Files: stats.Files,
+	}); err != nil {
+		return err
+	}
+	c.announcedGeneration = generation
+	c.announcedStats = stats
+	return nil
+}
+
+// runInitialShareScan builds and publishes the initial share index in the
+// background, so Run can connect to and log in with the server without
+// waiting on a scan of the local filesystem (a boot-time disk blip or
+// not-yet-ready mount can otherwise take arbitrarily long). Until this
+// completes, the client answers browse/search requests with the empty
+// snapshot New installs. Retries forever with the same exponential backoff
+// retryStartup uses, since there is no clean terminal classification for a
+// scan failure and a genuinely bad config is caught by config.Validate first.
+// It never returns early on ctx cancellation mid-attempt beyond the standard
+// per-attempt check, since scanAndPublish/scanShares already thread ctx
+// through the filesystem walk.
+func (c *Client) runInitialShareScan(ctx context.Context) {
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		stats, err := c.scanAndPublish(ctx)
+		if err == nil {
+			c.logger.Info("initial share scan complete",
+				"directories", stats.Directories, "files", stats.Files)
+			// announceShares reads the currently published stats at send time
+			// and skips the send when this server generation was already told
+			// identical stats (most commonly: no shares configured, so the
+			// login-time announcement already carried the empty 0/0 counts).
+			// serveConnected re-announces current share stats on every server
+			// login (generation-guarded), so a failed announce here is not
+			// fatal: it will simply be picked up on the next login instead of
+			// forcing a rescan.
+			if announceErr := c.announceShares(); announceErr != nil {
+				c.logger.Debug("share stats will be announced on next server login", "err", announceErr)
+			}
+			return
+		}
+		wait := nextBackoff(attempt, c.cfg.backoffBase, c.cfg.backoffCap)
+		c.logger.Warn("initial share scan failed; retrying in background",
+			"err", err, "backoff", wait, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
+}
+
 func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
+	if c.cfg.shareScanHook != nil {
+		if err := c.cfg.shareScanHook(ctx); err != nil {
+			return nil, err
+		}
+	}
 	s := &shareSnapshot{files: make(map[string]*indexedFile), byDirectory: make(map[string]peer.Directory)}
 	names := make(map[string]struct{}, len(c.cfg.SharedFolders))
 	paths := make(map[string]struct{}, len(c.cfg.SharedFolders))
