@@ -144,15 +144,68 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JobEvents: %v", err)
 	}
-	rejected := false
+	var rejectionDetail string
 	for _, e := range events {
 		if e.Event == core.EventCandidateRejected {
-			rejected = true
+			rejectionDetail = e.Detail
 			break
 		}
 	}
-	if !rejected {
-		t.Errorf("expected an EventCandidateRejected event for the oversized candidate, got events %+v", events)
+	wantRejectionDetail := "rejected 1 candidates: 1 above maximum track count, 0 below minimum track count"
+	if rejectionDetail != wantRejectionDetail {
+		t.Errorf("candidate rejection detail = %q, want %q; events %+v", rejectionDetail, wantRejectionDetail, events)
+	}
+}
+
+func TestDiscoverySummarizesThousandsOfRejectedCandidates(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{
+		wanted:        []core.WantedRelease{wanted[1]},
+		albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}},
+	}
+	const rejectedCandidates = 2000
+	results := make([]core.SearchResult, 0, rejectedCandidates*3)
+	for i := 0; i < rejectedCandidates; i++ {
+		username := fmt.Sprintf("oversized-%04d", i)
+		for track := 1; track <= 3; track++ {
+			results = append(results, core.SearchResult{
+				Username: username,
+				Filename: fmt.Sprintf("%s/%02d.flac", username, track),
+				Size:     10,
+				BitRate:  900,
+			})
+		}
+	}
+	searcher := &fakeSearcher{results: results}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := NewDiscovery(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var rejectionEvents []core.JobEvent
+	for _, event := range events {
+		if event.Event == core.EventCandidateRejected {
+			rejectionEvents = append(rejectionEvents, event)
+		}
+	}
+	if len(rejectionEvents) != 1 {
+		t.Fatalf("candidate rejection events = %d, want 1; all events %+v", len(rejectionEvents), events)
+	}
+	wantDetail := "rejected 2000 candidates: 2000 above maximum track count, 0 below minimum track count"
+	if rejectionEvents[0].Detail != wantDetail {
+		t.Errorf("rejection detail = %q, want %q", rejectionEvents[0].Detail, wantDetail)
 	}
 }
 
