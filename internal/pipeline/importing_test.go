@@ -425,11 +425,11 @@ func TestImportingConfirmTimeoutFailsCandidate(t *testing.T) {
 	}
 }
 
-// TestImportingEmptyFolderIdempotentDone reproduces a crash between a prior
+// TestImportingMissingFolderIdempotentDone reproduces a crash between a prior
 // successful ExecuteManualImport and MarkImportSubmitted: verify re-runs,
-// finds Lidarr's manual import preview empty (the files are already gone from
-// the folder, imported), and must treat this as done rather than erroring.
-func TestImportingEmptyFolderIdempotentDone(t *testing.T) {
+// finds Lidarr's manual import preview empty and the local folder already gone,
+// and must treat this as done rather than erroring.
+func TestImportingMissingFolderIdempotentDone(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{manualImportItems: nil} // empty folder
@@ -450,6 +450,115 @@ func TestImportingEmptyFolderIdempotentDone(t *testing.T) {
 	}
 	if len(peers.deletedFolders) != 0 {
 		t.Errorf("the idempotent already-imported path must not clean up anything, got %+v", peers.deletedFolders)
+	}
+}
+
+func TestImportingEmptyFolderIdempotentDone(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportItems: nil}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = t.TempDir()
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := os.Mkdir(filepath.Join(p.CompleteDir, "A"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateDone {
+		t.Errorf("existing empty folder should be treated as already imported -> DONE, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventAttemptSucceeded {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventAttemptSucceeded)
+	}
+}
+
+func TestImportingEmptyCandidatesWithFilesRetriesThenEscalates(t *testing.T) {
+	ctx := context.Background()
+	stuckSince := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportItems: nil}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = t.TempDir()
+	p.StuckAfter = time.Minute
+	p.RetryCooldown = 30 * time.Second
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, stuckSince)
+	albumFolder := filepath.Join(p.CompleteDir, "A")
+	if err := os.Mkdir(albumFolder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(albumFolder, "01.mp3"), []byte("downloaded"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, stuckSince.Add(time.Second)); err != nil {
+		t.Fatalf("Tick within StuckAfter: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("job with local files should remain IMPORTING within StuckAfter, got %v", got)
+	}
+	if _, found, err := st.ActiveCandidate(ctx, jobID); err != nil || !found {
+		t.Errorf("candidate should remain ACTIVE within StuckAfter, found=%v (%v)", found, err)
+	}
+	if len(music.executedItems) != 0 {
+		t.Errorf("ExecuteManualImport must not run for an empty preview, got %+v", music.executedItems)
+	}
+
+	if err := m.Tick(ctx, stuckSince.Add(2*time.Second)); err != nil {
+		t.Fatalf("Tick within retry cooldown: %v", err)
+	}
+	if got := len(music.manualImportCalls); got != 1 {
+		t.Errorf("empty preview anomaly retried within cooldown: %d attempts", got)
+	}
+
+	if err := m.Tick(ctx, stuckSince.Add(p.StuckAfter+time.Second)); err != nil {
+		t.Fatalf("Tick past StuckAfter: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("anomalous candidate past StuckAfter should return job to SELECTING, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+	ev := lastJobEvent(t, st, jobID)
+	if ev.Event != core.EventAttemptFailed {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventAttemptFailed)
+	}
+	if !strings.Contains(ev.Detail, "empty import candidates for non-empty folder") {
+		t.Errorf("event detail = %q, want anomaly reason", ev.Detail)
+	}
+}
+
+func TestImportingEmptyCandidatesFolderReadErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportItems: nil}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = t.TempDir()
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	// AlbumFolder resolves to CompleteDir/A. Making that path a regular file
+	// produces a stable ReadDir error on every platform without permissions.
+	if err := os.WriteFile(filepath.Join(p.CompleteDir, "A"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("folder read error must not mark job DONE, got %v", got)
+	}
+	if _, found, err := st.ActiveCandidate(ctx, jobID); err != nil || !found {
+		t.Errorf("candidate should remain ACTIVE for retry, found=%v (%v)", found, err)
+	}
+	if len(music.executedItems) != 0 {
+		t.Errorf("ExecuteManualImport must not run for an empty preview, got %+v", music.executedItems)
 	}
 }
 
