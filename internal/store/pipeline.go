@@ -262,6 +262,153 @@ func (s *Store) ReviveFailedJobs(ctx context.Context, wantedIDs []int64, cutoff 
 	return int(n), nil
 }
 
+// SyncWantedJobs atomically reconciles one complete, successfully fetched
+// wanted snapshot. Duplicate Lidarr album IDs are collapsed before any SQL is
+// run, with the last occurrence providing the metadata. Every database
+// operation is set-based and receives fixed-count PostgreSQL arrays, so the
+// number of statements does not grow with the snapshot.
+//
+// An empty snapshot is deliberately non-authoritative: it inserts, cancels,
+// and revives nothing. This protects in-flight work from a transient empty
+// Lidarr response.
+func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedRelease, failedCutoff, now time.Time) (cancelled, revived int, err error) {
+	unique := make(map[int64]core.WantedRelease, len(releases))
+	order := make([]int64, 0, len(releases))
+	for _, release := range releases {
+		if _, exists := unique[release.ID]; !exists {
+			order = append(order, release.ID)
+		}
+		unique[release.ID] = release
+	}
+	if len(unique) == 0 {
+		return 0, 0, nil
+	}
+
+	ids := make([]int64, 0, len(unique))
+	titles := make([]string, 0, len(unique))
+	artists := make([]string, 0, len(unique))
+	releaseDates := make([]string, 0, len(unique))
+	artistIDs := make([]int64, 0, len(unique))
+	for _, id := range order {
+		release := unique[id]
+		ids = append(ids, release.ID)
+		titles = append(titles, release.Title)
+		artists = append(artists, release.ArtistName)
+		releaseDates = append(releaseDates, release.ReleaseDate)
+		artistIDs = append(artistIDs, release.ArtistID)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	const wantedInput = `SELECT * FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::bigint[])
+		AS wanted(lidarr_album_id, title, artist_name, release_date, artist_id)`
+	inputArgs := []any{ids, titles, artists, releaseDates, artistIDs}
+
+	if _, err := tx.ExecContext(ctx, `WITH wanted AS (`+wantedInput+`)
+		INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at, title, artist_name, release_date, artist_id)
+		SELECT lidarr_album_id, $6, $7, $7, title, artist_name, release_date, artist_id FROM wanted
+		ON CONFLICT (lidarr_album_id) DO NOTHING`, append(inputArgs, string(core.StateWanted), now)...); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: insert: %w", err)
+	}
+
+	// The transition is state-gated, and only IDs returned by that transition
+	// have their stale children removed. The dependency on deleted_transfers
+	// makes transfer deletion precede candidate deletion for FK integrity.
+	var reentered, deletedTransfers, deletedCandidates int
+	if err := tx.QueryRowContext(ctx, `WITH wanted AS (`+wantedInput+`),
+		reentered AS (
+			UPDATE album_jobs AS jobs
+			SET state = $6, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $7
+			FROM wanted
+			WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $8
+			RETURNING jobs.id
+		), deleted_transfers AS (
+			DELETE FROM transfers AS transfers USING candidates, reentered
+			WHERE transfers.candidate_id = candidates.id AND candidates.album_job_id = reentered.id
+			RETURNING transfers.id
+		), deleted_candidates AS (
+			DELETE FROM candidates AS candidates USING reentered
+			WHERE candidates.album_job_id = reentered.id
+			  AND (SELECT count(*) FROM deleted_transfers) >= 0
+			RETURNING candidates.id
+		)
+		SELECT (SELECT count(*) FROM reentered), (SELECT count(*) FROM deleted_transfers), (SELECT count(*) FROM deleted_candidates)`,
+		append(inputArgs, string(core.StateWanted), now, string(core.StateCancelled))...).Scan(&reentered, &deletedTransfers, &deletedCandidates); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: re-enter cancelled: %w", err)
+	}
+
+	// WANTED jobs receive a full refresh and a new updated_at. The state
+	// predicate is part of the UPDATE so a concurrent transition cannot be
+	// overwritten based on a stale read.
+	if _, err := tx.ExecContext(ctx, `WITH wanted AS (`+wantedInput+`)
+		UPDATE album_jobs AS jobs
+		SET title = wanted.title, artist_name = wanted.artist_name,
+			release_date = wanted.release_date, artist_id = wanted.artist_id, updated_at = $6
+		FROM wanted
+		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $7`,
+		append(inputArgs, now, string(core.StateWanted))...); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: refresh metadata: %w", err)
+	}
+
+	// Jobs already past WANTED only self-heal missing metadata. As with the old
+	// single-job API, a partially empty record is replaced from one consistent
+	// snapshot, while updated_at remains untouched.
+	if _, err := tx.ExecContext(ctx, `WITH wanted AS (`+wantedInput+`)
+		UPDATE album_jobs AS jobs
+		SET title = wanted.title, artist_name = wanted.artist_name,
+			release_date = wanted.release_date, artist_id = wanted.artist_id
+		FROM wanted
+		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state <> $6
+		  AND (jobs.title = '' OR jobs.artist_name = '' OR jobs.release_date = '' OR jobs.artist_id = 0)`,
+		append(inputArgs, string(core.StateWanted))...); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: backfill metadata: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `UPDATE album_jobs
+		SET state = $1, updated_at = $2
+		WHERE state NOT IN ($3, $4, $5) AND lidarr_album_id <> ALL($6::bigint[])`,
+		string(core.StateCancelled), now, string(core.StateDone), string(core.StateCancelled), string(core.StateFailed), ids)
+	if err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: cancel: %w", err)
+	}
+	cancelledRows, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: cancel rows affected: %w", err)
+	}
+
+	// Failed revival also starts a clean cycle. The strict failed_at < cutoff
+	// predicate intentionally does not revive a job exactly on the boundary.
+	var revivedRows int
+	if err := tx.QueryRowContext(ctx, `WITH revived AS (
+			UPDATE album_jobs
+			SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+			WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5::bigint[])
+			RETURNING id
+		), deleted_transfers AS (
+			DELETE FROM transfers AS transfers USING candidates, revived
+			WHERE transfers.candidate_id = candidates.id AND candidates.album_job_id = revived.id
+			RETURNING transfers.id
+		), deleted_candidates AS (
+			DELETE FROM candidates AS candidates USING revived
+			WHERE candidates.album_job_id = revived.id
+			  AND (SELECT count(*) FROM deleted_transfers) >= 0
+			RETURNING candidates.id
+		)
+		SELECT (SELECT count(*) FROM revived), (SELECT count(*) FROM deleted_transfers), (SELECT count(*) FROM deleted_candidates)`,
+		string(core.StateWanted), now, string(core.StateFailed), failedCutoff, ids).Scan(&revivedRows, &deletedTransfers, &deletedCandidates); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: revive failed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("sync wanted jobs: commit: %w", err)
+	}
+	return int(cancelledRows), revivedRows, nil
+}
+
 // UpsertWantedJob inserts a WANTED job for the album (no-op if one already
 // exists) and, in the same transaction, re-enters a previously-CANCELLED job
 // whose album is wanted again: it is reset to WANTED with a clean slate
