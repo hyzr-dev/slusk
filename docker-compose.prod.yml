@@ -15,11 +15,11 @@
 #
 # --- Prerequisites ---
 #   1. docker login gitea.shcizo.se        (registry auth; the package is private)
-#   2. A config.toml next to this file      (copy config.example.toml, fill in
+#   2. A config/config.toml next to this file (copy config.example.toml, fill in
 #      your Lidarr/slskd URLs + API keys, Postgres store.dsn, and a long random
 #      observ.auth_token — all upstream services must be reachable from the
 #      container, e.g. LAN IPs like http://192.168.86.33:5030 or arr-network
-#      service names). Keep config.toml out of source control and logs.
+#      service names). Keep config/config.toml out of source control and logs.
 #
 # --- Deploy / update ---
 #   docker compose -f docker-compose.prod.yml pull
@@ -69,7 +69,14 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
 
     volumes:
-      - ./config.toml:/config/config.toml:ro
+      # A writable directory mount is required for editing settings from the
+      # UI (issue #89): slskdarr writes the updated config.toml back into
+      # this directory, which needs an atomic rename to land safely, so a
+      # single bind-mounted file cannot be modified this way. A read-only
+      # single-file mount (./config.toml:/config/config.toml:ro) is still
+      # supported and works exactly as before, but makes settings read-only
+      # in the UI.
+      - ./config:/config
       # Optional; the non-root PUID:PGID must have read permission.
       # - /host/music:/shares/music:ro
 

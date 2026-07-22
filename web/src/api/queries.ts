@@ -7,6 +7,8 @@ import { apiGet, apiPost, apiPostJson } from './client';
 import type {
   AppConfig,
   ChartsReport,
+  ConfigUpdateRequest,
+  ConfigUpdateResult,
   ConnectionTestResult,
   Job,
   JobDetail,
@@ -108,6 +110,17 @@ export function useTestConnection(dependency: 'lidarr' | 'soulseek') {
   return useMutation({
     mutationFn: () =>
       apiPostJson<ConnectionTestResult>(`/api/config/test/${dependency}`),
+  });
+}
+
+// A successful update restarts the process to apply it, so the cached config
+// is stale until that restart completes — the settings view invalidates
+// queryKeys.config itself once its post-save poll of GET /api/config
+// succeeds, rather than here.
+export function useUpdateConfig() {
+  return useMutation({
+    mutationFn: (body: ConfigUpdateRequest) =>
+      apiPostJson<ConfigUpdateResult>('/api/config', body),
   });
 }
 

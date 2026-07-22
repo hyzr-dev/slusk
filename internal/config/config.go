@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -337,8 +338,20 @@ func (d *Duration) UnmarshalText(text []byte) error {
 // Load reads and strictly decodes the config at path. Any key present in the
 // file but absent from Config is reported as an error.
 func Load(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	return LoadBytes(data)
+}
+
+// LoadBytes strictly decodes TOML data already in memory, performing the
+// identical unknown-key check, defaulting, and validation as Load. It exists
+// so internal/config/write.go can verify a rendered document is safe to write
+// to disk before it ever touches disk (see ApplySettings).
+func LoadBytes(data []byte) (Config, error) {
 	var cfg Config
-	meta, err := toml.DecodeFile(path, &cfg)
+	meta, err := toml.Decode(string(data), &cfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
