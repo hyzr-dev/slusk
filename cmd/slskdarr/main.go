@@ -281,9 +281,19 @@ func main() {
 	appConfig := observ.NewAppConfig(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
 		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive)
 	configFn := func() observ.AppConfig { return appConfig }
+	// Live queue-position/speed on the job detail page comes from the native
+	// backend's in-memory ListDownloads snapshot. The slskd backend leaves those
+	// two fields zero, so there we skip the call entirely rather than pay a slskd
+	// round-trip per detail poll for data that would only be zeros.
+	liveTransfersFn := func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
+	if cfg.Pipeline.Backend == config.BackendSoulseek {
+		liveTransfersFn = func(ctx context.Context) ([]core.RemoteTransfer, error) {
+			return peers.ListDownloads(ctx)
+		}
+	}
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
