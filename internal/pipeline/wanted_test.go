@@ -1,9 +1,11 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +177,99 @@ func TestWantedSyncReentersCancelledAlbum(t *testing.T) {
 
 	if got := jobStateFor(t, st, job.ID); got != core.StateWanted {
 		t.Errorf("re-wanted CANCELLED album must re-enter WANTED, got %v", got)
+	}
+}
+
+type recordingWantedSyncStore struct {
+	syncCalls  int
+	pruneCalls int
+	releases   []core.WantedRelease
+	cutoff     time.Time
+	now        time.Time
+	cancelled  int
+	revived    int
+	syncErr    error
+	pruneErr   error
+}
+
+func (s *recordingWantedSyncStore) SyncWantedJobs(_ context.Context, releases []core.WantedRelease, cutoff, now time.Time) (int, int, error) {
+	s.syncCalls++
+	s.releases = append([]core.WantedRelease(nil), releases...)
+	s.cutoff = cutoff
+	s.now = now
+	return s.cancelled, s.revived, s.syncErr
+}
+
+func (s *recordingWantedSyncStore) PruneJobEvents(context.Context, time.Time) error {
+	s.pruneCalls++
+	return s.pruneErr
+}
+
+func TestWantedSyncUsesOneBulkCallPublishesLastDuplicateAndLogs(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{wanted: []core.WantedRelease{
+		{ID: 1, Title: "first"},
+		{ID: 2, Title: "other"},
+		{ID: 1, Title: "last"},
+	}}
+	store := &recordingWantedSyncStore{cancelled: 2, revived: 3}
+	var logs bytes.Buffer
+	w := NewWantedSync(WantedSyncParams{
+		Music: music, Store: store, FailedReviveAfter: 30 * 24 * time.Hour,
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+	})
+
+	if err := w.Tick(context.Background(), now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if store.syncCalls != 1 || store.pruneCalls != 1 {
+		t.Fatalf("calls = sync %d, prune %d; want 1, 1", store.syncCalls, store.pruneCalls)
+	}
+	if len(store.releases) != 3 {
+		t.Fatalf("bulk call received %d releases, want original 3-entry snapshot", len(store.releases))
+	}
+	if want := now.Add(-30 * 24 * time.Hour); !store.cutoff.Equal(want) {
+		t.Errorf("failed cutoff = %v, want %v", store.cutoff, want)
+	}
+	if got := w.Wanted(); len(got) != 2 || got[1].Title != "last" {
+		t.Errorf("published snapshot = %+v, want 2 unique albums and duplicate last-wins", got)
+	}
+	logged := logs.String()
+	for _, fragment := range []string{"wanted sync complete", "albums=2", "duration="} {
+		if !strings.Contains(logged, fragment) {
+			t.Errorf("success log %q missing %q", logged, fragment)
+		}
+	}
+}
+
+func TestWantedSyncDoesNotPublishAfterPersistenceOrPruneError(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "initial"}}}
+	store := &recordingWantedSyncStore{}
+	w := NewWantedSync(WantedSyncParams{Music: music, Store: store, FailedReviveAfter: time.Hour})
+	if err := w.Tick(context.Background(), now); err != nil {
+		t.Fatalf("initial Tick: %v", err)
+	}
+
+	music.wanted = []core.WantedRelease{{ID: 2, Title: "replacement"}}
+	store.syncErr = errors.New("bulk failed")
+	if err := w.Tick(context.Background(), now.Add(time.Minute)); err == nil {
+		t.Fatal("Tick succeeded after bulk reconciliation error")
+	}
+	if got := w.Wanted(); len(got) != 1 || got[1].Title != "initial" {
+		t.Errorf("snapshot changed after bulk error: %+v", got)
+	}
+	if store.pruneCalls != 1 {
+		t.Errorf("prune called after bulk error; calls = %d, want initial call only", store.pruneCalls)
+	}
+
+	store.syncErr = nil
+	store.pruneErr = errors.New("prune failed")
+	if err := w.Tick(context.Background(), now.Add(2*time.Minute)); err == nil {
+		t.Fatal("Tick succeeded after prune error")
+	}
+	if got := w.Wanted(); len(got) != 1 || got[1].Title != "initial" {
+		t.Errorf("snapshot changed after prune error: %+v", got)
 	}
 }
 
