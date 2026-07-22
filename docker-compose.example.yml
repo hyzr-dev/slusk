@@ -36,7 +36,14 @@ services:
       - postgres
 
     volumes:
-      - ./config.toml:/config/config.toml:ro
+      # A writable directory mount is required for editing settings from the
+      # UI (issue #89): slskdarr writes the updated config.toml back into
+      # this directory, which needs an atomic rename to land safely, so a
+      # single bind-mounted file cannot be modified this way. A read-only
+      # single-file mount (./config.toml:/config/config.toml:ro) is still
+      # supported and works exactly as before, but makes settings read-only
+      # in the UI.
+      - ./config:/config
       # Required with pipeline.backend = "soulseek": the native backend writes
       # completed downloads here itself, so this must be WRITABLE by the
       # PUID:PGID above and match paths.slskd_complete_dir in config.toml. Share

@@ -110,7 +110,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
+	// restartCtx is a child of the signal context, so requesting a restart
+	// (after a settings-view config update) cancels it exactly like a signal
+	// would, driving the same graceful shutdown path (see runRuntime below).
+	// Every derived context below uses restartCtx rather than ctx directly.
+	restartCtx, requestRestart := context.WithCancel(ctx)
+	defer requestRestart()
+	startupCtx, cancelStartup := context.WithTimeout(restartCtx, startupTimeout)
 	defer cancelStartup()
 
 	st, err := store.OpenContext(startupCtx, cfg.Store.DSN)
@@ -292,10 +298,37 @@ func main() {
 	}
 	// The settings view's display config never changes at runtime (it's read
 	// once at startup, same as the rest of cfg), so the ConfigFunc closes over
-	// a single fixed value instead of re-reading the file.
+	// a single fixed value instead of re-reading the file. Writable is probed
+	// once here too: a settings update always restarts the process (see
+	// configWriter/restartFn below), so this can never go stale mid-process.
+	writable := config.ProbeWritable(*configPath)
 	appConfig := observ.NewAppConfig(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
-		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive, cfg.Soulseek.Enabled())
+		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive, cfg.Pipeline.MinBitrate,
+		cfg.Pipeline.StallTimeout.Duration.String(), cfg.Soulseek.Enabled(), writable)
 	configFn := func() observ.AppConfig { return appConfig }
+	// configWriter converts a validated settings-view update into config.Settings
+	// and applies it to the on-disk file; ErrNotWritable is remapped to observ's
+	// own sentinel so observ can report a 409 without importing internal/config.
+	// restartFn schedules a graceful shutdown (see restartCtx above) so the
+	// container's restart policy brings the process back up with the new config.
+	configWriter := func(u observ.ConfigUpdate) error {
+		err := config.ApplySettings(*configPath, config.Settings{
+			LidarrURL:          u.LidarrURL,
+			LidarrAPIKey:       u.LidarrAPIKey,
+			WantedSyncInterval: u.WantedSyncInterval,
+			StallTimeout:       u.StallTimeout,
+			MaxActive:          u.MaxActive,
+			MinBitrate:         u.MinBitrate,
+		})
+		if errors.Is(err, config.ErrNotWritable) {
+			return observ.ErrConfigNotWritable
+		}
+		return err
+	}
+	restartFn := func() {
+		logger.Info("restarting to apply configuration change")
+		requestRestart()
+	}
 	// Live queue-position/speed on the job detail page comes from the native
 	// backend's in-memory ListDownloads snapshot. The slskd backend leaves those
 	// two fields zero, so there we skip the call entirely rather than pay a slskd
@@ -335,7 +368,8 @@ func main() {
 	}
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn,
+		configWriter, restartFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
@@ -357,7 +391,7 @@ func main() {
 	cancelStartup()
 
 	var soulDone chan error
-	soulCtx, soulCancel := context.WithCancel(ctx)
+	soulCtx, soulCancel := context.WithCancel(restartCtx)
 	defer soulCancel()
 	if soulClient != nil {
 		hup := make(chan os.Signal, 1)
@@ -375,9 +409,9 @@ func main() {
 	}
 
 	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
-	outcome := runRuntime(ctx, srv, listener, runner, lifecycleShutdownTimeout)
+	outcome := runRuntime(restartCtx, srv, listener, runner, lifecycleShutdownTimeout)
 	// runRuntime may return on an abnormal exit (runner or HTTP server
-	// stopping without a signal) while ctx is still live, which would
+	// stopping without a signal) while restartCtx is still live, which would
 	// otherwise leave the soulseek client reconnecting indefinitely and
 	// force this join to burn the full shutdown timeout. Cancel its
 	// context explicitly so the join below is prompt in that case too.

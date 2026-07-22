@@ -114,22 +114,28 @@ export const t = {
     empty: 'No modules reported.',
   },
   settings: {
-    readOnlyNotice:
-      'Settings are read from the configuration file. Editing them here is planned — see issue #89.',
+    notWritableNotice:
+      'The configuration file is mounted read-only, so settings cannot be edited here. Mount its directory writable (e.g. ./config:/config) instead of a single-file or read-only mount to enable editing.',
     lidarr: 'Lidarr',
     url: 'URL',
     apiKey: 'API key',
     apiKeyHidden: 'Configured (hidden)',
     apiKeyMissing: 'Not configured',
+    apiKeyPlaceholderConfigured: 'Configured — leave blank to keep',
+    apiKeyPlaceholderMissing: 'Enter API key',
     pipeline: 'Pipeline',
     wantedSyncInterval: 'Wanted sync interval',
     maxActive: 'Max active jobs',
+    minBitrate: 'Minimum bitrate (kbps)',
+    stallTimeout: 'Stall timeout',
     // Real TOML keys (config.example.toml [pipeline]), shown alongside the
     // human-readable labels above so a user can find the setting they see
     // here in the file they'd actually edit.
     configKeys: {
       wantedSyncInterval: 'wanted_sync_interval',
       maxActive: 'max_active',
+      minBitrate: 'min_bitrate',
+      stallTimeout: 'stall_timeout',
     },
     connections: 'Connections',
     soulseek: 'Soulseek',
@@ -142,6 +148,10 @@ export const t = {
     },
     testUnreachable: 'The test endpoint could not be reached.',
     testFailed: 'Connection test failed.',
+    save: 'Save',
+    saving: 'Saving…',
+    savedRestarting: 'Saved — restarting…',
+    saveFailed: 'Could not save the configuration. Please try again.',
   },
 } as const;
 
