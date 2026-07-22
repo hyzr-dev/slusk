@@ -120,17 +120,53 @@ export interface StatusReport {
 }
 
 /**
- * GET /api/config — see Task 14. Secrets are never sent, only their
- * presence. Field names mirror the [pipeline] TOML keys (internal/observ/
- * config.go AppConfig) so the settings view can display something that
- * matches the config file the user actually edits.
+ * GET /api/config — internal/observ/config.go AppConfig. Secrets are never
+ * sent, only their presence. Field names mirror the [pipeline] TOML keys so
+ * the settings view can display something that matches the config file the
+ * user actually edits. writable reports whether the config file's directory
+ * currently accepts writes (see config.ProbeWritable) — false renders a
+ * read-only view instead of the editable form.
  */
 export interface AppConfig {
   lidarrUrl: string;
   lidarrApiKeyConfigured: boolean;
   wantedSyncInterval: string;
   maxActive: number;
+  minBitrate: number;
+  stallTimeout: string;
   soulseekEnabled: boolean;
+  writable: boolean;
+}
+
+/**
+ * POST /api/config request body — internal/observ/config.go
+ * configUpdateRequest. lidarrApiKey omitted or blank means "keep the
+ * currently configured value"; the settings view never receives the secret
+ * back, so it has no way to resend it unchanged.
+ */
+export interface ConfigUpdateRequest {
+  lidarrUrl: string;
+  lidarrApiKey?: string;
+  wantedSyncInterval: string;
+  stallTimeout: string;
+  maxActive: number;
+  minBitrate: number;
+}
+
+/** POST /api/config 200 response body. */
+export interface ConfigUpdateResult {
+  ok: boolean;
+  restarting: boolean;
+}
+
+/**
+ * Error body shared by POST /api/config's 400/409/422/500 responses.
+ * fieldErrors is present only for a 422 validation failure, keyed by the
+ * request field name it applies to.
+ */
+export interface ApiErrorBody {
+  error: string;
+  fieldErrors?: Record<string, string>;
 }
 
 /**

@@ -32,6 +32,49 @@
   font-size: 12.5px;
 }
 
+.input:not(:disabled) {
+  color: var(--text);
+  cursor: text;
+}
+.input:not(:disabled):focus {
+  outline: none;
+  border-color: var(--active);
+}
+
+.fieldError {
+  flex: 1;
+  font-size: 12px;
+  color: var(--failed);
+}
+
+.saveRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* Sits between two .group cards: inset horizontally to line up with their
+     inner padding, and keep clear air before the Connections card below. */
+  margin: 4px 16px 20px;
+}
+
+.saveButton {
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.saveButton:disabled { opacity: 0.5; cursor: default; }
+
+.saveError { font-size: 12px; color: var(--failed); }
+
+.restartingBanner {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--active);
+}
+
 .testButton {
   padding: 6px 14px;
   border-radius: var(--radius-sm);
