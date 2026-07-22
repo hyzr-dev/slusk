@@ -6,6 +6,7 @@ import {
 import { apiGet, apiPost, apiPostJson } from './client';
 import type {
   AppConfig,
+  ChartsReport,
   ConnectionTestResult,
   Job,
   JobDetail,
@@ -20,6 +21,7 @@ const JOBS_INTERVAL = 3000;
 const EVENTS_INTERVAL = 3000;
 const STATUS_INTERVAL = 5000;
 const PEERS_INTERVAL = 5000;
+const CHARTS_INTERVAL = 15000; // passes change at most every discovery tick (~30s)
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -27,6 +29,7 @@ export const queryKeys = {
   events: ['events'] as const,
   peers: ['peers'] as const,
   config: ['config'] as const,
+  charts: ['charts'] as const,
   jobDetail: (id: number) => ['jobs', id, 'detail'] as const,
   jobEvents: (id: number) => ['jobs', id, 'events'] as const,
 };
@@ -79,6 +82,14 @@ export function useJobEvents(id: number) {
     queryKey: queryKeys.jobEvents(id),
     queryFn: () => apiGet<JobEvent[]>(`/api/jobs/${id}/events`),
     refetchInterval: JOBS_INTERVAL,
+  });
+}
+
+export function useCharts() {
+  return useQuery({
+    queryKey: queryKeys.charts,
+    queryFn: () => apiGet<ChartsReport>('/api/charts'),
+    refetchInterval: CHARTS_INTERVAL,
   });
 }
 

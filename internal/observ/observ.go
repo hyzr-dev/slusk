@@ -159,20 +159,21 @@ type ModulesFunc func() map[string]ModuleStatus
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester) http.Handler {
+	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
 // /healthz, /readyz, the dashboard APIs, and the dashboard UI. failedRetryAfter
 // and maxCandidates are engine values surfaced by the existing job API. config
 // supplies the read-only view of the running configuration served at
-// /api/config; it never carries secrets — see AppConfig.
+// /api/config; it never carries secrets — see AppConfig. charts supplies the
+// Overview view's chart data served at /api/charts (see ChartsData).
 func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester) http.Handler {
+	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +374,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
 	registerConfig(mux, config, tester)
+	registerCharts(mux, charts)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }

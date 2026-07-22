@@ -225,6 +225,43 @@ type testDiscard struct{}
 
 func (testDiscard) Write(p []byte) (int, error) { return len(p), nil }
 
+// TestWantedSyncPrunesExpiredSearchPasses asserts Tick calls
+// PruneSearchPasses alongside PruneJobEvents (issue #88): a search pass older
+// than the retention window must be gone after a sync, while a recent one
+// survives.
+func TestWantedSyncPrunesExpiredSearchPasses(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "A", ArtistName: "X"}}}
+	p, st := newWantedSyncParams(t, music)
+
+	old := now.Add(-31 * 24 * time.Hour)
+	recent := now.Add(-1 * time.Hour)
+	if err := st.RecordSearchPass(ctx, core.SearchPass{StartedAt: old, FinishedAt: old, Searched: 1}); err != nil {
+		t.Fatalf("RecordSearchPass old: %v", err)
+	}
+	if err := st.RecordSearchPass(ctx, core.SearchPass{StartedAt: recent, FinishedAt: recent, Searched: 1}); err != nil {
+		t.Fatalf("RecordSearchPass recent: %v", err)
+	}
+
+	w := NewWantedSync(p)
+	if err := w.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 1 {
+		t.Fatalf("expected 1 surviving search pass, got %d: %+v", len(passes), passes)
+	}
+	if !passes[0].StartedAt.Equal(recent) {
+		t.Errorf("surviving pass StartedAt = %v, want %v", passes[0].StartedAt, recent)
+	}
+}
+
 // jobStateFor scans every pipeline state to find jobID's current state, since
 // the store has no direct get-by-ID lookup exposed here. It uses
 // RunnableJobsInState with a far-future "now" so a job hidden behind a

@@ -142,3 +142,27 @@ export interface ConnectionTestResult {
   ok: boolean;
   error?: string;
 }
+
+/** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
+export interface SearchPass {
+  startedAt: string;
+  finishedAt: string;
+  searched: number;
+  matched: number;
+}
+
+/** internal/observ/charts.go hourCountDTO — one hour bucket of a count series. */
+export interface HourCount {
+  hour: string;
+  count: number;
+}
+
+/**
+ * GET /api/charts — chartsDTO. passes is oldest-first, capped at 20;
+ * completedByHour is always exactly 24 zero-filled hourly buckets, oldest
+ * first, ending at the current hour.
+ */
+export interface ChartsReport {
+  passes: SearchPass[];
+  completedByHour: HourCount[];
+}

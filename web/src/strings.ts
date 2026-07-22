@@ -91,6 +91,16 @@ export const t = {
   },
   overview: {
     empty: 'No active downloads.',
+    chartPasses: 'Matched albums per pass · last 20',
+    chartCompleted: 'Completed downloads · last 24 h',
+    noChartData: 'No pass history yet',
+    chartRangeStart: '−24 h',
+    chartRangeEnd: 'now',
+    passesAriaLabel: (matched: number, total: number) =>
+      `${matched} of ${total} recent search passes matched`,
+    completedAriaLabel: (total: number) =>
+      `${total} completed downloads over the last 24 hours`,
+    passTooltip: (time: string, matched: number) => `${time} — ${matched} matched`,
   },
   peers: {
     empty: 'No peers recorded yet.',

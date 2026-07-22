@@ -36,6 +36,9 @@ type DiscoveryStore interface {
 	// SetJobTrackBand caches the album's valid track-count band on the job,
 	// read later by Importing's coverage gate.
 	SetJobTrackBand(ctx context.Context, jobID int64, minTracks, maxTracks int) error
+	// RecordSearchPass appends one row recording a completed Discovery search
+	// cycle, for the Overview charts (see Tick's best-effort recording).
+	RecordSearchPass(ctx context.Context, p core.SearchPass) error
 }
 
 // DiscoveryParams configures a Discovery.
@@ -109,13 +112,39 @@ func (d *Discovery) Tick(ctx context.Context, now time.Time) error {
 	if len(jobs) == 0 {
 		return nil
 	}
-	return d.searchJob(ctx, jobs[0], now)
+	completed, matched, err := d.searchJob(ctx, jobs[0], now)
+	if err != nil {
+		return err
+	}
+	if completed {
+		d.recordSearchPass(ctx, matched, now)
+	}
+	return nil
+}
+
+// recordSearchPass best-effort appends one row recording a completed
+// Discovery search cycle, for the Overview charts (issue #88). A write
+// failure must never block the pipeline, so it is logged at warn level and
+// swallowed rather than propagated (same pattern as recordEvent).
+func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time.Time) {
+	pass := core.SearchPass{StartedAt: now, FinishedAt: time.Now(), Searched: 1}
+	if matched {
+		pass.Matched = 1
+	}
+	if err := d.p.Store.RecordSearchPass(ctx, pass); err != nil {
+		d.log().Warn("record search pass failed", "err", err)
+	}
 }
 
 // searchJob searches for one album, ranks and filters the results, and
 // either caches the survivors and advances the job to SELECTING, or backs it
-// off (still WANTED) when nothing survives.
-func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.Time) error {
+// off (still WANTED) when nothing survives. completed reports whether the
+// search cycle ran to one of its two normal conclusions (backed off or
+// matched) rather than aborting early (album missing from the wanted
+// snapshot, a search error, or an AlbumReleases error) - Tick only records a
+// search pass when completed is true. matched is true only once
+// InsertCandidates has cached surviving candidates.
+func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.Time) (completed, matched bool, err error) {
 	album, ok := d.p.WantedSource.Wanted()[job.LidarrAlbumID]
 	if !ok {
 		// The album is missing from the most recent wanted snapshot. Unlike the
@@ -125,13 +154,13 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// cancelled).
 		d.log().Info("album missing from wanted snapshot, skipping",
 			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID)
-		return nil
+		return false, false, nil
 	}
 
 	query := album.ArtistName + " " + album.Title
 	results, err := d.p.Peers.Search(ctx, query, d.p.SearchTimeout)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	if len(results) == 0 {
 		// The primary query returned no raw results at all (not just no
@@ -148,7 +177,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			d.recordEvent(ctx, job.ID, core.EventSearchFallback, fallbackDetail, now)
 			results, err = d.p.Peers.Search(ctx, fallback, d.p.SearchTimeout)
 			if err != nil {
-				return err
+				return false, false, err
 			}
 			query = fallback
 		}
@@ -156,7 +185,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 
 	rel, err := d.p.Store.ReliabilityFor(ctx, job.ArtistID, uniqueUsernames(results))
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	ranked := d.p.Ranker.Rank(results, rel, now)
 	searchDetail := fmt.Sprintf("searched album, query=%q results=%d candidates=%d", query, len(results), len(ranked))
@@ -176,14 +205,14 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	releases, err := d.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
 	if err != nil {
 		d.log().Error("album releases failed", "album_job", job.ID, "err", err)
-		return nil
+		return false, false, nil
 	}
 	minTracks, maxTracks := trackBand(releases)
 	// Persisted (not just used inline) because Importing's coverage gate needs
 	// MinTrackCount long after this search: a candidate covering the smallest
 	// valid edition must not be rejected against the canonical (larger) count.
 	if err := d.p.Store.SetJobTrackBand(ctx, job.ID, minTracks, maxTracks); err != nil {
-		return err
+		return false, false, err
 	}
 
 	// Candidates are cached per search cycle - the previously-tried-username
@@ -227,15 +256,15 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// The EventSearch event recorded above already carries this cycle's
 		// empty outcome (results/candidates counts); nothing further to record.
 		d.log().Info("no viable candidates, backing off", "album_job", job.ID)
-		return failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, now)
+		return true, false, failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, now)
 	}
 
 	if err := d.p.Store.InsertCandidates(ctx, job.ID, survivors, now); err != nil {
-		return err
+		return false, false, err
 	}
 	advanced, err := d.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateWanted, core.StateSelecting, now)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	if !advanced {
 		// The job left WANTED underneath us (e.g. WantedSync cancelled it
@@ -246,7 +275,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		d.log().Info("job left WANTED before candidates could be applied, leaving candidates in place",
 			"album_job", job.ID)
 	}
-	return nil
+	return true, true, nil
 }
 
 // newCandidateFrom converts a ranked core.RankedCandidate into the store's

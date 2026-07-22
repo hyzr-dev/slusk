@@ -239,6 +239,17 @@ func main() {
 	recentEventsFn := func(ctx context.Context, limit int) ([]core.JobEvent, error) {
 		return st.RecentEvents(ctx, limit)
 	}
+	chartsFn := func(ctx context.Context) (observ.ChartsData, error) {
+		passes, err := st.RecentSearchPasses(ctx, 20)
+		if err != nil {
+			return observ.ChartsData{}, err
+		}
+		counts, err := st.CompletedByHour(ctx, time.Now().Add(-24*time.Hour))
+		if err != nil {
+			return observ.ChartsData{}, err
+		}
+		return observ.ChartsData{Passes: passes, CompletedByHour: counts}, nil
+	}
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
@@ -320,7 +331,7 @@ func main() {
 	}
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)

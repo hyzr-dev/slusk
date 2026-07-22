@@ -141,6 +141,25 @@ type JobEvent struct {
 	CreatedAt  time.Time
 }
 
+// SearchPass records one completed Discovery search cycle (a "pass"):
+// Searched counts wanted albums examined, Matched counts albums that found
+// viable candidates and advanced to SELECTING. Backs the Overview charts
+// (GET /api/charts, issue #88).
+type SearchPass struct {
+	ID         int64
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Searched   int
+	Matched    int
+}
+
+// HourCount is one hour bucket of an event-count aggregation, e.g. completed
+// downloads per hour for the Overview charts (GET /api/charts).
+type HourCount struct {
+	Hour  time.Time
+	Count int
+}
+
 // PeerRow is one Soulseek peer's global reliability plus every artist-specific
 // row recorded for them, read by the dashboard's Peers view (GET /api/peers).
 // Score computation is left to the caller (see matcher.ReliabilityHistoryScore)
