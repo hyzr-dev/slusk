@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -265,6 +266,14 @@ type SharedFolderConfig struct {
 	Path string `toml:"path"`
 }
 
+// GluetunConfig lets the native Soulseek client fetch its listen port from a
+// gluetun VPN container's control server at startup instead of using the
+// static port in ListenAddr. Absent (blank ControlURL) means disabled.
+type GluetunConfig struct {
+	ControlURL string `toml:"control_url"`
+	APIKey     string `toml:"api_key"`
+}
+
 type SoulseekConfig struct {
 	// ServerAddress is the Soulseek server's host:port. Defaults to
 	// server.slsknet.org:2242 when the section is enabled and this is blank.
@@ -278,6 +287,10 @@ type SoulseekConfig struct {
 	// host port must equal it (there is no separate "advertised port"
 	// concept - the listen port itself is what gets advertised).
 	ListenAddr string `toml:"listen_addr"`
+	// Gluetun, when set, makes the native client fetch its forwarded port
+	// from a gluetun VPN container's control server at startup and use it in
+	// place of ListenAddr's port; ListenAddr's host is still used.
+	Gluetun GluetunConfig `toml:"gluetun"`
 	// SharedFolders are explicitly named local roots. Absolute local paths are
 	// never sent to peers; only Name and paths below it are public.
 	SharedFolders []SharedFolderConfig `toml:"shared_folders"`
@@ -288,7 +301,7 @@ type SoulseekConfig struct {
 // Enabled reports whether any field of the section was set, meaning the
 // direct Soulseek connection should be started.
 func (s SoulseekConfig) Enabled() bool {
-	return s.ServerAddress != "" || s.Username != "" || s.Password != "" || s.ListenAddr != "" || len(s.SharedFolders) != 0 || s.UploadSlots != 0
+	return s.ServerAddress != "" || s.Username != "" || s.Password != "" || s.ListenAddr != "" || len(s.SharedFolders) != 0 || s.UploadSlots != 0 || s.Gluetun.ControlURL != "" || s.Gluetun.APIKey != ""
 }
 
 // applyDefaults fills ServerAddress and ListenAddr with their documented
@@ -468,6 +481,14 @@ func (c Config) Validate() error {
 			problems = append(problems, "soulseek.listen_addr must have a numeric port")
 		} else if portNum <= 0 || portNum > 65535 {
 			problems = append(problems, "soulseek.listen_addr port must be between 1 and 65535")
+		}
+		if g := c.Soulseek.Gluetun; g.ControlURL != "" {
+			u, err := url.Parse(g.ControlURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				problems = append(problems, "soulseek.gluetun.control_url must be an http(s) URL")
+			}
+		} else if g.APIKey != "" {
+			problems = append(problems, "soulseek.gluetun.api_key requires soulseek.gluetun.control_url")
 		}
 		if c.Soulseek.UploadSlots <= 0 {
 			problems = append(problems, "soulseek.upload_slots must be > 0")

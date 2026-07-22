@@ -388,6 +388,52 @@ func TestLoadSoulseekValid(t *testing.T) {
 	if cfg.Soulseek.UploadSlots != 4 || len(cfg.Soulseek.SharedFolders) != 1 || cfg.Soulseek.SharedFolders[0] != (SharedFolderConfig{Name: "Music", Path: "/shares/music"}) {
 		t.Errorf("sharing config = slots %d, folders %+v", cfg.Soulseek.UploadSlots, cfg.Soulseek.SharedFolders)
 	}
+	if cfg.Soulseek.Gluetun != (GluetunConfig{}) {
+		t.Errorf("Gluetun = %+v, want the zero value when [soulseek.gluetun] is absent", cfg.Soulseek.Gluetun)
+	}
+}
+
+func TestLoadSoulseekGluetunValid(t *testing.T) {
+	cfg, err := Load("testdata/soulseek_gluetun_valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Soulseek.Gluetun.ControlURL != "http://127.0.0.1:8000" {
+		t.Errorf("Gluetun.ControlURL = %q", cfg.Soulseek.Gluetun.ControlURL)
+	}
+	if cfg.Soulseek.Gluetun.APIKey != "gluetun-key" {
+		t.Errorf("Gluetun.APIKey = %q", cfg.Soulseek.Gluetun.APIKey)
+	}
+}
+
+func TestLoadSoulseekGluetunInvalidURL(t *testing.T) {
+	_, err := Load("testdata/soulseek_gluetun_invalid_url.toml")
+	if err == nil {
+		t.Fatal("expected error for an invalid soulseek.gluetun.control_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.gluetun.control_url") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+func TestLoadSoulseekGluetunAPIKeyWithoutURL(t *testing.T) {
+	_, err := Load("testdata/soulseek_gluetun_api_key_without_url.toml")
+	if err == nil {
+		t.Fatal("expected error for soulseek.gluetun.api_key without control_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.gluetun.api_key") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+func TestLoadSoulseekGluetunUnknownKeyFails(t *testing.T) {
+	_, err := Load("testdata/soulseek_gluetun_unknown_key.toml")
+	if err == nil {
+		t.Fatal("expected error for an unknown key in [soulseek.gluetun], got nil")
+	}
+	if !strings.Contains(err.Error(), "controll_url") {
+		t.Errorf("error = %q, want it to name the unknown key controll_url", err.Error())
+	}
 }
 
 func TestLoadSoulseekMissingPassword(t *testing.T) {

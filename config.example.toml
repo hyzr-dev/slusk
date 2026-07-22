@@ -146,6 +146,18 @@ slskd_complete_dir = "/music/slskd-downloads"
 # a slot; additional requests wait in a bounded global FIFO queue.
 # upload_slots = 2
 #
+# Optional: run behind gluetun with VPN port forwarding. At startup slskdarr
+# asks gluetun's control server for the currently forwarded port and listens
+# on it instead - the port part of listen_addr above is ignored (its host is
+# still used); startup waits and retries with backoff until gluetun reports a
+# nonzero port. The Docker port-mapping caveat on listen_addr above does not
+# apply here, since with gluetun you run slskdarr with
+# network_mode: service:gluetun (see docker-compose.example.yml) rather than
+# publishing a port of its own.
+# [soulseek.gluetun]
+# control_url = "http://127.0.0.1:8000"
+# api_key = "CHANGEME"
+#
 # Shares use explicit public names so local host/container paths never appear
 # in browse/search results. Mount each path read-only. Shares are scanned at
 # startup; send SIGHUP to atomically rescan after adding/removing files (there
