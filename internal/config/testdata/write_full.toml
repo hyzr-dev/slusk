@@ -1,0 +1,70 @@
+[lidarr]
+url = "http://lidarr:8686"
+api_key = "abc"
+
+[slskd]
+url = "http://slskd:5030"
+api_key = "def"
+
+[pipeline]
+backend = "slskd"
+max_candidates_per_album = 5
+transfer_deadline = "30m"
+stall_timeout = "5m"
+search_timeout = "30s"
+min_bitrate = 192
+max_inflight_per_peer = 3
+max_transfer_retries = 3
+max_active = 30
+max_retries = 10
+backoff_base = "15m"
+backoff_cap = "24h"
+candidate_ttl = "24h"
+failed_revive_after = "720h"
+stuck_after = "1h"
+tick_timeout = "5m"
+import_confirm_timeout = "3m"
+wanted_sync_interval = "15m"
+discovery_interval = "30s"
+selecting_interval = "10s"
+downloading_interval = "15s"
+importing_interval = "30s"
+manual_import_timeout = "10m"
+import_retry_cooldown = "5m"
+
+[pipeline.weights]
+format = 1.0
+bitrate = 0.5
+reliability = 0.8
+file_count = 1.0
+known_user = 0.6
+
+[store]
+dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+
+[observ]
+listen_addr = "127.0.0.1:9090"
+auth_token = "op-token"
+log_level = "warn"
+
+[paths]
+slskd_complete_dir = "/music/slskd-downloads"
+
+[soulseek]
+server_address = "server.slsknet.org:2242"
+username = "souluser"
+password = "soulpass"
+listen_addr = "0.0.0.0:2234"
+upload_slots = 2
+
+[soulseek.gluetun]
+control_url = "http://127.0.0.1:8000"
+api_key = "gluetun-key"
+
+[[soulseek.shared_folders]]
+name = "Music"
+path = "/shares/music"
+
+[[soulseek.shared_folders]]
+name = "Live"
+path = "/shares/live"

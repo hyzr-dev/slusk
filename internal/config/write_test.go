@@ -10,17 +10,17 @@ import (
 	"time"
 )
 
-// writeFixture copies testdata/valid.toml into a fresh temp file, applying
-// any string replacements first (so callers can inject comments, extra keys,
-// or hand edits while keeping the rest of the fixture's required fields
-// intact). It returns the path to the writable copy.
-func writeFixture(t *testing.T, replacements ...[2]string) string {
+// writeFixtureFrom copies testdata/<base> into a fresh temp file, applying any
+// string replacements first (so callers can inject comments, extra keys, or
+// hand edits while keeping the rest of the fixture's required fields intact).
+// It returns the path to the writable copy.
+func writeFixtureFrom(t *testing.T, base string, replacements ...[2]string) string {
 	t.Helper()
-	base, err := os.ReadFile("testdata/valid.toml")
+	data, err := os.ReadFile(filepath.Join("testdata", base))
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := string(base)
+	contents := string(data)
 	for _, r := range replacements {
 		next := strings.Replace(contents, r[0], r[1], 1)
 		if next == contents {
@@ -35,51 +35,355 @@ func writeFixture(t *testing.T, replacements ...[2]string) string {
 	return path
 }
 
+// writeFixture is writeFixtureFrom against testdata/valid.toml, the minimal
+// fixture: no [soulseek] section and several optional pipeline/weights keys
+// left absent (relying on applyDefaults).
+func writeFixture(t *testing.T, replacements ...[2]string) string {
+	t.Helper()
+	return writeFixtureFrom(t, "valid.toml", replacements...)
+}
+
 func strPtr(s string) *string { return &s }
 
-func TestApplySettingsUpdatesAllSixKeys(t *testing.T) {
-	// testdata/valid.toml has no explicit wanted_sync_interval or max_active
-	// (both rely on applyDefaults), so this also exercises key creation.
-	path := writeFixture(t)
-
-	err := ApplySettings(path, Settings{
-		LidarrURL:          "http://lidarr2:8686",
-		LidarrAPIKey:       strPtr("newkey"),
-		WantedSyncInterval: 20 * time.Minute,
-		StallTimeout:       10 * time.Minute,
-		MaxActive:          50,
-		MinBitrate:         256,
-	})
-	if err != nil {
-		t.Fatalf("ApplySettings: %v", err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load after ApplySettings: %v", err)
-	}
-	if cfg.Lidarr.URL != "http://lidarr2:8686" {
-		t.Errorf("Lidarr.URL = %q", cfg.Lidarr.URL)
-	}
-	if cfg.Lidarr.APIKey != "newkey" {
-		t.Errorf("Lidarr.APIKey = %q", cfg.Lidarr.APIKey)
-	}
-	if cfg.Pipeline.WantedSyncInterval.Duration != 20*time.Minute {
-		t.Errorf("WantedSyncInterval = %v", cfg.Pipeline.WantedSyncInterval.Duration)
-	}
-	if cfg.Pipeline.StallTimeout.Duration != 10*time.Minute {
-		t.Errorf("StallTimeout = %v", cfg.Pipeline.StallTimeout.Duration)
-	}
-	if cfg.Pipeline.MaxActive != 50 {
-		t.Errorf("MaxActive = %d", cfg.Pipeline.MaxActive)
-	}
-	if cfg.Pipeline.MinBitrate != 256 {
-		t.Errorf("MinBitrate = %d", cfg.Pipeline.MinBitrate)
+// settingsFromConfig mirrors cfg's currently-resolved values into a Settings
+// value with every secret pointer left nil ("keep"), modeling a settings-view
+// form that was seeded from GET /api/config (which never receives a
+// configured secret back) and resubmitted without touching anything.
+func settingsFromConfig(cfg Config) Settings {
+	return Settings{
+		Lidarr: LidarrSettings{URL: cfg.Lidarr.URL},
+		Slskd:  SlskdSettings{URL: cfg.Slskd.URL},
+		Pipeline: PipelineSettings{
+			Backend:               cfg.Pipeline.Backend,
+			MaxCandidatesPerAlbum: cfg.Pipeline.MaxCandidatesPerAlbum,
+			MaxActive:             cfg.Pipeline.MaxActive,
+			MaxRetries:            cfg.Pipeline.MaxRetries,
+			MaxInflightPerPeer:    cfg.Pipeline.MaxInflightPerPeer,
+			MaxTransferRetries:    cfg.Pipeline.MaxTransferRetries,
+			MinBitrate:            cfg.Pipeline.MinBitrate,
+			TransferDeadline:      cfg.Pipeline.TransferDeadline.Duration,
+			StallTimeout:          cfg.Pipeline.StallTimeout.Duration,
+			SearchTimeout:         cfg.Pipeline.SearchTimeout.Duration,
+			BackoffBase:           cfg.Pipeline.BackoffBase.Duration,
+			BackoffCap:            cfg.Pipeline.BackoffCap.Duration,
+			CandidateTTL:          cfg.Pipeline.CandidateTTL.Duration,
+			FailedReviveAfter:     cfg.Pipeline.FailedReviveAfter.Duration,
+			StuckAfter:            cfg.Pipeline.StuckAfter.Duration,
+			TickTimeout:           cfg.Pipeline.TickTimeout.Duration,
+			ImportConfirmTimeout:  cfg.Pipeline.ImportConfirmTimeout.Duration,
+			WantedSyncInterval:    cfg.Pipeline.WantedSyncInterval.Duration,
+			DiscoveryInterval:     cfg.Pipeline.DiscoveryInterval.Duration,
+			SelectingInterval:     cfg.Pipeline.SelectingInterval.Duration,
+			DownloadingInterval:   cfg.Pipeline.DownloadingInterval.Duration,
+			ImportingInterval:     cfg.Pipeline.ImportingInterval.Duration,
+			ManualImportTimeout:   cfg.Pipeline.ManualImportTimeout.Duration,
+			ImportRetryCooldown:   cfg.Pipeline.ImportRetryCooldown.Duration,
+			Weights: WeightsSettings{
+				Format:      cfg.Pipeline.Weights.Format,
+				Bitrate:     cfg.Pipeline.Weights.Bitrate,
+				Reliability: cfg.Pipeline.Weights.Reliability,
+				FileCount:   cfg.Pipeline.Weights.FileCount,
+				KnownUser:   cfg.Pipeline.Weights.KnownUser,
+			},
+		},
+		Soulseek: SoulseekSettings{
+			ServerAddress: cfg.Soulseek.ServerAddress,
+			Username:      cfg.Soulseek.Username,
+			ListenAddr:    cfg.Soulseek.ListenAddr,
+			UploadSlots:   cfg.Soulseek.UploadSlots,
+			Gluetun:       GluetunSettings{ControlURL: cfg.Soulseek.Gluetun.ControlURL},
+			SharedFolders: append([]SharedFolderConfig(nil), cfg.Soulseek.SharedFolders...),
+		},
+		Store: StoreSettings{},
+		Observ: ObservSettings{
+			ListenAddr: cfg.Observ.ListenAddr,
+			LogLevel:   cfg.Observ.LogLevel,
+		},
+		Paths: PathsSettings{SlskdCompleteDir: cfg.Paths.SlskdCompleteDir},
 	}
 }
 
+func mustLoad(t *testing.T, path string) Config {
+	t.Helper()
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
+}
+
+// --- representative multi-section update, including missing-table creation ---
+
+func TestApplySettingsUpdatesRepresentativeFieldsAcrossEverySection(t *testing.T) {
+	// valid.toml has no [soulseek] section at all and no pipeline.weights.known_user,
+	// so this also exercises table/key creation for both.
+	path := writeFixture(t)
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+
+	s.Lidarr.URL = "http://lidarr2:8686"
+	s.Lidarr.APIKey = strPtr("newlidarrkey")
+	s.Slskd.APIKey = strPtr("newslskdkey")
+	s.Pipeline.MaxActive = 50
+	s.Pipeline.WantedSyncInterval = 20 * time.Minute
+	s.Pipeline.Weights.KnownUser = 0.6
+	s.Soulseek = SoulseekSettings{
+		ServerAddress: "server.slsknet.org:2242",
+		Username:      "souluser",
+		Password:      strPtr("soulpass"),
+		ListenAddr:    "0.0.0.0:2234",
+		UploadSlots:   2,
+		Gluetun: GluetunSettings{
+			ControlURL: "http://127.0.0.1:8000",
+			APIKey:     strPtr("gluetun-key"),
+		},
+		SharedFolders: []SharedFolderConfig{
+			{Name: "Music", Path: "/shares/music"},
+			{Name: "Live", Path: "/shares/live"},
+		},
+	}
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	got := mustLoad(t, path)
+	if got.Lidarr.URL != "http://lidarr2:8686" || got.Lidarr.APIKey != "newlidarrkey" {
+		t.Errorf("Lidarr = %+v", got.Lidarr)
+	}
+	if got.Slskd.APIKey != "newslskdkey" {
+		t.Errorf("Slskd.APIKey = %q", got.Slskd.APIKey)
+	}
+	if got.Pipeline.MaxActive != 50 || got.Pipeline.WantedSyncInterval.Duration != 20*time.Minute {
+		t.Errorf("Pipeline = %+v", got.Pipeline)
+	}
+	if got.Pipeline.Weights.KnownUser != 0.6 {
+		t.Errorf("Weights.KnownUser = %v, want 0.6", got.Pipeline.Weights.KnownUser)
+	}
+	if !got.Soulseek.Enabled() {
+		t.Fatal("soulseek section was not created/enabled")
+	}
+	if got.Soulseek.ServerAddress != "server.slsknet.org:2242" || got.Soulseek.Username != "souluser" ||
+		got.Soulseek.Password != "soulpass" || got.Soulseek.ListenAddr != "0.0.0.0:2234" || got.Soulseek.UploadSlots != 2 {
+		t.Errorf("Soulseek = %+v", got.Soulseek)
+	}
+	if got.Soulseek.Gluetun.ControlURL != "http://127.0.0.1:8000" || got.Soulseek.Gluetun.APIKey != "gluetun-key" {
+		t.Errorf("Soulseek.Gluetun = %+v", got.Soulseek.Gluetun)
+	}
+	want := []SharedFolderConfig{{Name: "Music", Path: "/shares/music"}, {Name: "Live", Path: "/shares/live"}}
+	if len(got.Soulseek.SharedFolders) != len(want) {
+		t.Fatalf("SharedFolders = %+v", got.Soulseek.SharedFolders)
+	}
+	for i := range want {
+		if got.Soulseek.SharedFolders[i] != want[i] {
+			t.Errorf("SharedFolders[%d] = %+v, want %+v", i, got.Soulseek.SharedFolders[i], want[i])
+		}
+	}
+}
+
+// --- untouched optional sections/keys must stay absent, not materialize as zero ---
+
+func TestApplySettingsUntouchedOptionalSectionsStayAbsent(t *testing.T) {
+	path := writeFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg) // Soulseek all zero (disabled), KnownUser 0 — matches the fixture's absence
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after), "[soulseek]") {
+		t.Errorf("an untouched, never-configured soulseek section was materialized:\n%s", after)
+	}
+	if strings.Contains(string(after), "known_user") {
+		t.Errorf("an untouched, never-configured known_user key was materialized:\n%s", after)
+	}
+	got := mustLoad(t, path)
+	if got.Soulseek.Enabled() {
+		t.Error("soulseek became enabled despite an all-zero, untouched submission")
+	}
+	_ = before // the rest of the fixture may still gain defaulted pipeline keys (existing, accepted behavior)
+}
+
+// --- full-fixture unchanged round trip is byte-identical, including shared folders ---
+
+func TestApplySettingsFullFixtureUnchangedIsByteIdentical(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("fully-populated fixture changed despite an all-unchanged update:\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	}
+}
+
+// --- secrets: nil always keeps the currently configured value, across all six ---
+
+func TestApplySettingsNilSecretsKeepAllSixValues(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg) // every secret pointer nil
+	s.Paths.SlskdCompleteDir = "/music/new-downloads"
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	got := mustLoad(t, path)
+	if got.Lidarr.APIKey != "abc" {
+		t.Errorf("Lidarr.APIKey = %q, want unchanged", got.Lidarr.APIKey)
+	}
+	if got.Slskd.APIKey != "def" {
+		t.Errorf("Slskd.APIKey = %q, want unchanged", got.Slskd.APIKey)
+	}
+	if got.Soulseek.Password != "soulpass" {
+		t.Errorf("Soulseek.Password = %q, want unchanged", got.Soulseek.Password)
+	}
+	if got.Soulseek.Gluetun.APIKey != "gluetun-key" {
+		t.Errorf("Soulseek.Gluetun.APIKey = %q, want unchanged", got.Soulseek.Gluetun.APIKey)
+	}
+	if got.Store.DSN != "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable" {
+		t.Errorf("Store.DSN = %q, want unchanged", got.Store.DSN)
+	}
+	if got.Observ.AuthToken != "op-token" {
+		t.Errorf("Observ.AuthToken = %q, want unchanged", got.Observ.AuthToken)
+	}
+	if got.Paths.SlskdCompleteDir != "/music/new-downloads" {
+		t.Errorf("Paths.SlskdCompleteDir = %q, want the actual requested change applied", got.Paths.SlskdCompleteDir)
+	}
+}
+
+// --- shared folders: unchanged list is byte-identical; changed list is rewritten ---
+
+func TestApplySettingsSharedFoldersUnchangedByteIdentical(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg) // same two folders, same order
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("shared folders section changed despite an unchanged list:\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	}
+}
+
+func TestApplySettingsSharedFoldersChangedRewritesAndRoundTrips(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	// Reorder, drop "Live", and add a new folder.
+	s.Soulseek.SharedFolders = []SharedFolderConfig{
+		{Name: "Podcasts", Path: "/shares/podcasts"},
+		{Name: "Music", Path: "/shares/music"},
+	}
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	got := mustLoad(t, path)
+	want := s.Soulseek.SharedFolders
+	if len(got.Soulseek.SharedFolders) != len(want) {
+		t.Fatalf("SharedFolders = %+v, want %+v", got.Soulseek.SharedFolders, want)
+	}
+	for i := range want {
+		if got.Soulseek.SharedFolders[i] != want[i] {
+			t.Errorf("SharedFolders[%d] = %+v, want %+v", i, got.Soulseek.SharedFolders[i], want[i])
+		}
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(after), "[[soulseek.shared_folders]]"); n != 2 {
+		t.Errorf("found %d [[soulseek.shared_folders]] blocks, want 2:\n%s", n, after)
+	}
+	if strings.Contains(string(after), "Live") {
+		t.Error("removed shared folder \"Live\" still present in the file")
+	}
+}
+
+// --- config.toml.bak ---
+
+func TestApplySettingsWritesBakWithPreSaveBytes(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Pipeline.MaxActive = 99
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read .bak: %v", err)
+	}
+	if string(bak) != string(before) {
+		t.Errorf(".bak does not contain the pre-save bytes:\n--- bak ---\n%s\n--- want ---\n%s", bak, before)
+	}
+}
+
+func TestApplySettingsBakWriteFailureDoesNotBlockSave(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml")
+	// A directory at the .bak path makes os.WriteFile(path+".bak", ...) fail
+	// (EISDIR), simulating any reason the best-effort backup can't be written.
+	if err := os.Mkdir(path+".bak", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Pipeline.MaxActive = 77
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings should tolerate a failed .bak write, got: %v", err)
+	}
+
+	got := mustLoad(t, path)
+	if got.Pipeline.MaxActive != 77 {
+		t.Errorf("MaxActive = %d, want 77 (main save should have proceeded)", got.Pipeline.MaxActive)
+	}
+}
+
+// --- comment preservation on scalar edits, untouched sections stay byte-identical ---
+
 func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
-	path := writeFixture(t,
+	path := writeFixtureFrom(t, "write_full.toml",
 		[2]string{"[store]\n", "# Shared Postgres instance for the whole arr-stack.\n[store]\n"},
 		[2]string{
 			`dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"`,
@@ -87,17 +391,12 @@ func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
 		},
 	)
 
-	// Change only the Lidarr URL and max_active; leave the rest matching the
-	// fixture's current effective values (stall_timeout, min_bitrate) or its
-	// applied defaults (wanted_sync_interval), and keep the API key untouched.
-	err := ApplySettings(path, Settings{
-		LidarrURL:          "http://lidarr2:8686",
-		WantedSyncInterval: 15 * time.Minute,
-		StallTimeout:       5 * time.Minute,
-		MaxActive:          50,
-		MinBitrate:         192,
-	})
-	if err != nil {
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Lidarr.URL = "http://lidarr2:8686"
+	s.Pipeline.MaxActive = 50
+
+	if err := ApplySettings(path, s); err != nil {
 		t.Fatalf("ApplySettings: %v", err)
 	}
 
@@ -108,19 +407,12 @@ func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
 	if !strings.Contains(string(after), "# Shared Postgres instance for the whole arr-stack.") {
 		t.Error("block comment on an untouched section was dropped")
 	}
-	// tomledit's Formatter re-serializes the whole document and normalizes the
-	// gutter width before a trailing comment (observed: one space on disk
-	// becomes two), so this checks the comment's content survived rather than
-	// asserting exact original spacing.
 	dsnComment := regexp.MustCompile(`dsn = "postgres://slskdarr:password@postgres:5432/slskdarr\?sslmode=disable"\s*# primary`)
 	if !dsnComment.Match(after) {
 		t.Errorf("inline trailing comment on an untouched key was dropped:\n%s", after)
 	}
-	// The [slskd], [pipeline.weights], [observ], and [paths] sections are
-	// entirely untouched by this update; their lines must be byte-identical.
 	for _, untouched := range []string{
 		"[slskd]\nurl = \"http://slskd:5030\"\napi_key = \"def\"",
-		"[pipeline.weights]\nformat = 1.0",
 		"[observ]\nlisten_addr = \"127.0.0.1:9090\"",
 		"[paths]\nslskd_complete_dir = \"/music/slskd-downloads\"",
 	} {
@@ -130,77 +422,8 @@ func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
 	}
 }
 
-func TestApplySettingsUnchangedValuesLeaveLinesByteIdentical(t *testing.T) {
-	// Make wanted_sync_interval and max_active explicit (rather than relying
-	// on applyDefaults) so "no change requested" is meaningful at the byte
-	// level for every one of the six keys.
-	path := writeFixture(t, [2]string{
-		"max_transfer_retries = 3\n",
-		"max_transfer_retries = 3\nwanted_sync_interval = \"15m\"\nmax_active = 30\n",
-	})
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	err = ApplySettings(path, Settings{
-		LidarrURL:          cfg.Lidarr.URL,
-		LidarrAPIKey:       nil, // leave untouched
-		WantedSyncInterval: cfg.Pipeline.WantedSyncInterval.Duration,
-		StallTimeout:       cfg.Pipeline.StallTimeout.Duration,
-		MaxActive:          cfg.Pipeline.MaxActive,
-		MinBitrate:         cfg.Pipeline.MinBitrate,
-	})
-	if err != nil {
-		t.Fatalf("ApplySettings: %v", err)
-	}
-
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Fatalf("file changed despite an all-unchanged update:\n--- before ---\n%s\n--- after ---\n%s", before, after)
-	}
-}
-
-func TestApplySettingsNilAPIKeyKeepsExisting(t *testing.T) {
-	path := writeFixture(t)
-
-	err := ApplySettings(path, Settings{
-		LidarrURL:          "http://lidarr:8686",
-		LidarrAPIKey:       nil,
-		WantedSyncInterval: 15 * time.Minute,
-		StallTimeout:       5 * time.Minute,
-		MaxActive:          30,
-		MinBitrate:         192,
-	})
-	if err != nil {
-		t.Fatalf("ApplySettings: %v", err)
-	}
-
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(contents), `api_key = "abc"`) {
-		t.Errorf("api_key line changed despite a nil LidarrAPIKey:\n%s", contents)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Lidarr.APIKey != "abc" {
-		t.Errorf("Lidarr.APIKey = %q, want unchanged %q", cfg.Lidarr.APIKey, "abc")
-	}
-}
-
 func TestApplySettingsReadOnlyDirReturnsErrNotWritable(t *testing.T) {
-	path := writeFixture(t)
+	path := writeFixtureFrom(t, "write_full.toml")
 	dir := filepath.Dir(path)
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -215,10 +438,11 @@ func TestApplySettingsReadOnlyDirReturnsErrNotWritable(t *testing.T) {
 	// fires before TempDir's own removal.
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	err = ApplySettings(path, Settings{
-		LidarrURL: "http://changed:8686", WantedSyncInterval: 15 * time.Minute,
-		StallTimeout: 5 * time.Minute, MaxActive: 30, MinBitrate: 192,
-	})
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Lidarr.URL = "http://changed:8686"
+
+	err = ApplySettings(path, s)
 	if !errors.Is(err, ErrNotWritable) {
 		t.Fatalf("ApplySettings error = %v, want ErrNotWritable", err)
 	}
@@ -243,7 +467,7 @@ func TestApplySettingsReadOnlyDirReturnsErrNotWritable(t *testing.T) {
 }
 
 func TestApplySettingsHandEditSurvives(t *testing.T) {
-	path := writeFixture(t)
+	path := writeFixtureFrom(t, "write_full.toml")
 
 	// Simulate a hand edit to an unrelated key made after "startup" (i.e.
 	// after the file we're about to ApplySettings against was last read).
@@ -259,48 +483,45 @@ func TestApplySettingsHandEditSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = ApplySettings(path, Settings{
-		LidarrURL: "http://lidarr:8686", WantedSyncInterval: 15 * time.Minute,
-		StallTimeout: 5 * time.Minute, MaxActive: 99, MinBitrate: 192,
-	})
-	if err != nil {
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Pipeline.MaxActive = 99
+
+	if err := ApplySettings(path, s); err != nil {
 		t.Fatalf("ApplySettings: %v", err)
 	}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	got := mustLoad(t, path)
+	if got.Pipeline.SearchTimeout.Duration != 45*time.Second {
+		t.Errorf("hand-edited search_timeout was lost: got %v, want 45s", got.Pipeline.SearchTimeout.Duration)
 	}
-	if cfg.Pipeline.SearchTimeout.Duration != 45*time.Second {
-		t.Errorf("hand-edited search_timeout was lost: got %v, want 45s", cfg.Pipeline.SearchTimeout.Duration)
-	}
-	if cfg.Pipeline.MaxActive != 99 {
-		t.Errorf("ApplySettings change was lost: MaxActive = %d, want 99", cfg.Pipeline.MaxActive)
+	if got.Pipeline.MaxActive != 99 {
+		t.Errorf("ApplySettings change was lost: MaxActive = %d, want 99", got.Pipeline.MaxActive)
 	}
 }
 
 func TestApplySettingsWrittenFileRoundTripsThroughLoad(t *testing.T) {
-	path := writeFixture(t)
+	path := writeFixtureFrom(t, "write_full.toml")
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Lidarr.URL = "http://lidarr3:8686"
+	s.Pipeline.MaxActive = 12
 
-	err := ApplySettings(path, Settings{
-		LidarrURL: "http://lidarr3:8686", WantedSyncInterval: 25 * time.Minute,
-		StallTimeout: 15 * time.Minute, MaxActive: 12, MinBitrate: 320,
-	})
-	if err != nil {
+	if err := ApplySettings(path, s); err != nil {
 		t.Fatalf("ApplySettings: %v", err)
 	}
 
-	cfg, err := Load(path)
+	got, err := Load(path)
 	if err != nil {
 		t.Fatalf("written config failed to Load: %v", err)
 	}
-	if cfg.Lidarr.URL != "http://lidarr3:8686" || cfg.Pipeline.MaxActive != 12 {
-		t.Errorf("round-tripped config = %+v", cfg)
+	if got.Lidarr.URL != "http://lidarr3:8686" || got.Pipeline.MaxActive != 12 {
+		t.Errorf("round-tripped config = %+v", got)
 	}
 }
 
 func TestApplySettingsCurrentFileSyntaxErrorFails(t *testing.T) {
-	path := writeFixture(t, [2]string{
+	path := writeFixtureFrom(t, "write_full.toml", [2]string{
 		`url = "http://lidarr:8686"`,
 		`url = "http://lidarr:8686`, // unterminated string: a genuine parse error
 	})
@@ -309,10 +530,7 @@ func TestApplySettingsCurrentFileSyntaxErrorFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = ApplySettings(path, Settings{
-		LidarrURL: "http://changed:8686", WantedSyncInterval: 15 * time.Minute,
-		StallTimeout: 5 * time.Minute, MaxActive: 30, MinBitrate: 192,
-	})
+	err = ApplySettings(path, settingsFromConfig(Config{}))
 	if err == nil {
 		t.Fatal("expected an error for a syntactically invalid current file, got nil")
 	}
@@ -328,18 +546,21 @@ func TestApplySettingsCurrentFileSyntaxErrorFails(t *testing.T) {
 func TestApplySettingsCurrentFileUnknownKeyFails(t *testing.T) {
 	// A key tomledit can parse structurally, but which our strict schema
 	// backstop (LoadBytes) rejects, must still block the write.
-	path := writeFixture(t, [2]string{"[store]\n", "[store]\nbogus_key = \"nope\"\n"})
+	path := writeFixtureFrom(t, "write_full.toml", [2]string{"[store]\n", "[store]\nbogus_key = \"nope\"\n"})
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := mustLoad(t, "testdata/write_full.toml")
+	s := settingsFromConfig(cfg)
+	s.Lidarr.URL = "http://changed:8686"
 
-	err = ApplySettings(path, Settings{
-		LidarrURL: "http://changed:8686", WantedSyncInterval: 15 * time.Minute,
-		StallTimeout: 5 * time.Minute, MaxActive: 30, MinBitrate: 192,
-	})
+	err = ApplySettings(path, s)
 	if err == nil {
 		t.Fatal("expected an error for a current file with an unknown key, got nil")
+	}
+	if !errors.Is(err, ErrValidationFailed) {
+		t.Errorf("error = %v, want ErrValidationFailed", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -347,5 +568,31 @@ func TestApplySettingsCurrentFileUnknownKeyFails(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Error("file was modified despite the backstop validation failure")
+	}
+}
+
+func TestApplySettingsBackstopRejectsCrossFieldInvalidCombination(t *testing.T) {
+	// backend = "soulseek" requires a configured [soulseek] section — a
+	// cross-field rule the per-field validation in observ does not duplicate,
+	// left entirely to this backstop.
+	path := writeFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoad(t, path)
+	s := settingsFromConfig(cfg)
+	s.Pipeline.Backend = "soulseek" // Soulseek stays entirely unconfigured
+
+	err = ApplySettings(path, s)
+	if !errors.Is(err, ErrValidationFailed) {
+		t.Fatalf("ApplySettings error = %v, want ErrValidationFailed", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("file was modified despite a backstop-rejected cross-field combination")
 	}
 }

@@ -302,28 +302,24 @@ func main() {
 	// once here too: a settings update always restarts the process (see
 	// configWriter/restartFn below), so this can never go stale mid-process.
 	writable := config.ProbeWritable(*configPath)
-	appConfig := observ.NewAppConfig(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
-		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive, cfg.Pipeline.MinBitrate,
-		cfg.Pipeline.StallTimeout.Duration.String(), cfg.Soulseek.Enabled(), writable)
+	appConfig := buildAppConfig(cfg, writable)
 	configFn := func() observ.AppConfig { return appConfig }
 	// configWriter converts a validated settings-view update into config.Settings
-	// and applies it to the on-disk file; ErrNotWritable is remapped to observ's
-	// own sentinel so observ can report a 409 without importing internal/config.
+	// and applies it to the on-disk file; ErrNotWritable and ErrValidationFailed
+	// are remapped to observ's own sentinels so observ can report the right
+	// status code (409, 422) without importing internal/config.
 	// restartFn schedules a graceful shutdown (see restartCtx above) so the
 	// container's restart policy brings the process back up with the new config.
 	configWriter := func(u observ.ConfigUpdate) error {
-		err := config.ApplySettings(*configPath, config.Settings{
-			LidarrURL:          u.LidarrURL,
-			LidarrAPIKey:       u.LidarrAPIKey,
-			WantedSyncInterval: u.WantedSyncInterval,
-			StallTimeout:       u.StallTimeout,
-			MaxActive:          u.MaxActive,
-			MinBitrate:         u.MinBitrate,
-		})
-		if errors.Is(err, config.ErrNotWritable) {
+		err := config.ApplySettings(*configPath, settingsFromConfigUpdate(u))
+		switch {
+		case errors.Is(err, config.ErrNotWritable):
 			return observ.ErrConfigNotWritable
+		case errors.Is(err, config.ErrValidationFailed):
+			return &observ.ConfigValidationError{Message: err.Error()}
+		default:
+			return err
 		}
-		return err
 	}
 	restartFn := func() {
 		logger.Info("restarting to apply configuration change")
@@ -430,6 +426,149 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("slskdarr stopped cleanly")
+}
+
+// buildAppConfig renders the settings view's read model from the loaded
+// config. Every ...Configured boolean is computed here, once, from the real
+// secret value; none of those values are ever copied into the observ.AppConfig
+// this returns, which is the mechanism (not a convention) that keeps secrets
+// out of the settings view's marshalled JSON.
+func buildAppConfig(cfg config.Config, writable bool) observ.AppConfig {
+	sharedFolders := make([]observ.SharedFolderView, len(cfg.Soulseek.SharedFolders))
+	for i, f := range cfg.Soulseek.SharedFolders {
+		sharedFolders[i] = observ.SharedFolderView{Name: f.Name, Path: f.Path}
+	}
+	return observ.AppConfig{
+		Lidarr: observ.LidarrView{
+			URL:              cfg.Lidarr.URL,
+			APIKeyConfigured: cfg.Lidarr.APIKey != "",
+		},
+		Slskd: observ.SlskdView{
+			URL:              cfg.Slskd.URL,
+			APIKeyConfigured: cfg.Slskd.APIKey != "",
+		},
+		Pipeline: observ.PipelineView{
+			Backend:               cfg.Pipeline.Backend,
+			MaxCandidatesPerAlbum: cfg.Pipeline.MaxCandidatesPerAlbum,
+			MaxActive:             cfg.Pipeline.MaxActive,
+			MaxRetries:            cfg.Pipeline.MaxRetries,
+			MaxInflightPerPeer:    cfg.Pipeline.MaxInflightPerPeer,
+			MaxTransferRetries:    cfg.Pipeline.MaxTransferRetries,
+			MinBitrate:            cfg.Pipeline.MinBitrate,
+			TransferDeadline:      cfg.Pipeline.TransferDeadline.Duration.String(),
+			StallTimeout:          cfg.Pipeline.StallTimeout.Duration.String(),
+			SearchTimeout:         cfg.Pipeline.SearchTimeout.Duration.String(),
+			BackoffBase:           cfg.Pipeline.BackoffBase.Duration.String(),
+			BackoffCap:            cfg.Pipeline.BackoffCap.Duration.String(),
+			CandidateTTL:          cfg.Pipeline.CandidateTTL.Duration.String(),
+			FailedReviveAfter:     cfg.Pipeline.FailedReviveAfter.Duration.String(),
+			StuckAfter:            cfg.Pipeline.StuckAfter.Duration.String(),
+			TickTimeout:           cfg.Pipeline.TickTimeout.Duration.String(),
+			ImportConfirmTimeout:  cfg.Pipeline.ImportConfirmTimeout.Duration.String(),
+			WantedSyncInterval:    cfg.Pipeline.WantedSyncInterval.Duration.String(),
+			DiscoveryInterval:     cfg.Pipeline.DiscoveryInterval.Duration.String(),
+			SelectingInterval:     cfg.Pipeline.SelectingInterval.Duration.String(),
+			DownloadingInterval:   cfg.Pipeline.DownloadingInterval.Duration.String(),
+			ImportingInterval:     cfg.Pipeline.ImportingInterval.Duration.String(),
+			ManualImportTimeout:   cfg.Pipeline.ManualImportTimeout.Duration.String(),
+			ImportRetryCooldown:   cfg.Pipeline.ImportRetryCooldown.Duration.String(),
+			Weights: observ.WeightsView{
+				Format:      cfg.Pipeline.Weights.Format,
+				Bitrate:     cfg.Pipeline.Weights.Bitrate,
+				Reliability: cfg.Pipeline.Weights.Reliability,
+				FileCount:   cfg.Pipeline.Weights.FileCount,
+				KnownUser:   cfg.Pipeline.Weights.KnownUser,
+			},
+		},
+		Soulseek: observ.SoulseekView{
+			Enabled:            cfg.Soulseek.Enabled(),
+			ServerAddress:      cfg.Soulseek.ServerAddress,
+			Username:           cfg.Soulseek.Username,
+			PasswordConfigured: cfg.Soulseek.Password != "",
+			ListenAddr:         cfg.Soulseek.ListenAddr,
+			UploadSlots:        cfg.Soulseek.UploadSlots,
+			Gluetun: observ.GluetunView{
+				ControlURL:       cfg.Soulseek.Gluetun.ControlURL,
+				APIKeyConfigured: cfg.Soulseek.Gluetun.APIKey != "",
+			},
+			SharedFolders: sharedFolders,
+		},
+		Store: observ.StoreView{DSNConfigured: cfg.Store.DSN != ""},
+		Observ: observ.ObservView{
+			ListenAddr:          cfg.Observ.ListenAddr,
+			AuthTokenConfigured: cfg.Observ.AuthToken != "",
+			LogLevel:            cfg.Observ.LogLevel,
+		},
+		Paths:    observ.PathsView{SlskdCompleteDir: cfg.Paths.SlskdCompleteDir},
+		Writable: writable,
+	}
+}
+
+// settingsFromConfigUpdate converts a validated settings-view update into the
+// shape internal/config.ApplySettings understands. observ deliberately does
+// not import internal/config (see internal/observ/config.go's package
+// comment), so this trivial field-by-field mapping lives here instead.
+func settingsFromConfigUpdate(u observ.ConfigUpdate) config.Settings {
+	sharedFolders := make([]config.SharedFolderConfig, len(u.Soulseek.SharedFolders))
+	for i, f := range u.Soulseek.SharedFolders {
+		sharedFolders[i] = config.SharedFolderConfig{Name: f.Name, Path: f.Path}
+	}
+	return config.Settings{
+		Lidarr: config.LidarrSettings{URL: u.Lidarr.URL, APIKey: u.Lidarr.APIKey},
+		Slskd:  config.SlskdSettings{URL: u.Slskd.URL, APIKey: u.Slskd.APIKey},
+		Pipeline: config.PipelineSettings{
+			Backend:               u.Pipeline.Backend,
+			MaxCandidatesPerAlbum: u.Pipeline.MaxCandidatesPerAlbum,
+			MaxActive:             u.Pipeline.MaxActive,
+			MaxRetries:            u.Pipeline.MaxRetries,
+			MaxInflightPerPeer:    u.Pipeline.MaxInflightPerPeer,
+			MaxTransferRetries:    u.Pipeline.MaxTransferRetries,
+			MinBitrate:            u.Pipeline.MinBitrate,
+			TransferDeadline:      u.Pipeline.TransferDeadline,
+			StallTimeout:          u.Pipeline.StallTimeout,
+			SearchTimeout:         u.Pipeline.SearchTimeout,
+			BackoffBase:           u.Pipeline.BackoffBase,
+			BackoffCap:            u.Pipeline.BackoffCap,
+			CandidateTTL:          u.Pipeline.CandidateTTL,
+			FailedReviveAfter:     u.Pipeline.FailedReviveAfter,
+			StuckAfter:            u.Pipeline.StuckAfter,
+			TickTimeout:           u.Pipeline.TickTimeout,
+			ImportConfirmTimeout:  u.Pipeline.ImportConfirmTimeout,
+			WantedSyncInterval:    u.Pipeline.WantedSyncInterval,
+			DiscoveryInterval:     u.Pipeline.DiscoveryInterval,
+			SelectingInterval:     u.Pipeline.SelectingInterval,
+			DownloadingInterval:   u.Pipeline.DownloadingInterval,
+			ImportingInterval:     u.Pipeline.ImportingInterval,
+			ManualImportTimeout:   u.Pipeline.ManualImportTimeout,
+			ImportRetryCooldown:   u.Pipeline.ImportRetryCooldown,
+			Weights: config.WeightsSettings{
+				Format:      u.Pipeline.Weights.Format,
+				Bitrate:     u.Pipeline.Weights.Bitrate,
+				Reliability: u.Pipeline.Weights.Reliability,
+				FileCount:   u.Pipeline.Weights.FileCount,
+				KnownUser:   u.Pipeline.Weights.KnownUser,
+			},
+		},
+		Soulseek: config.SoulseekSettings{
+			ServerAddress: u.Soulseek.ServerAddress,
+			Username:      u.Soulseek.Username,
+			Password:      u.Soulseek.Password,
+			ListenAddr:    u.Soulseek.ListenAddr,
+			UploadSlots:   u.Soulseek.UploadSlots,
+			Gluetun: config.GluetunSettings{
+				ControlURL: u.Soulseek.Gluetun.ControlURL,
+				APIKey:     u.Soulseek.Gluetun.APIKey,
+			},
+			SharedFolders: sharedFolders,
+		},
+		Store: config.StoreSettings{DSN: u.Store.DSN},
+		Observ: config.ObservSettings{
+			ListenAddr: u.Observ.ListenAddr,
+			AuthToken:  u.Observ.AuthToken,
+			LogLevel:   u.Observ.LogLevel,
+		},
+		Paths: config.PathsSettings{SlskdCompleteDir: u.Paths.SlskdCompleteDir},
+	}
 }
 
 func listenHTTP(ctx context.Context, addr string) (net.Listener, error) {
