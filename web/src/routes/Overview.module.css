@@ -5,5 +5,16 @@
   margin-bottom: 16px;
 }
 
+.charts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 13px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 640px) {
+  .charts { grid-template-columns: 1fr; }
+}
+
 .sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .bytes { font-size: 11px; color: var(--text-detail); margin-bottom: 3px; }

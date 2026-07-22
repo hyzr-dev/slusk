@@ -535,3 +535,213 @@ func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 		t.Errorf("expected no candidates cached, got %+v", cands)
 	}
 }
+
+// TestDiscoveryNoSearchPassOnAlbumReleasesError asserts a job whose
+// AlbumReleases call fails (an abort path) records nothing (issue #88).
+func TestDiscoveryNoSearchPassOnAlbumReleasesError(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleasesErr: errors.New("boom")}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 0 {
+		t.Errorf("expected no search pass when AlbumReleases fails, got %+v", passes)
+	}
+}
+
+// failingSearchPassStore wraps a real store, promoting every DiscoveryStore
+// method except RecordSearchPass (always fails), so tests can assert
+// Discovery.Tick swallows a RecordSearchPass failure - same best-effort
+// policy as recordEvent - rather than failing the tick.
+type failingSearchPassStore struct {
+	*store.Store
+}
+
+func (f *failingSearchPassStore) RecordSearchPass(ctx context.Context, p core.SearchPass) error {
+	return errors.New("record search pass boom")
+}
+
+// TestDiscoveryRecordsSearchPassMatchedOnCandidatesPath asserts a completed
+// search cycle that finds viable candidates records Matched=1 (issue #88).
+func TestDiscoveryRecordsSearchPassMatchedOnCandidatesPath(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 1 {
+		t.Fatalf("expected 1 recorded pass, got %d: %+v", len(passes), passes)
+	}
+	if passes[0].Searched != 1 || passes[0].Matched != 1 {
+		t.Errorf("pass = %+v, want Searched=1 Matched=1", passes[0])
+	}
+}
+
+// TestDiscoveryRecordsSearchPassUnmatchedOnBackoffPath asserts a completed
+// search cycle with no viable candidates records Matched=0 (issue #88).
+func TestDiscoveryRecordsSearchPassUnmatchedOnBackoffPath(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	searcher := &fakeSearcher{} // no results ever, primary or fallback -> backs off
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 1 {
+		t.Fatalf("expected 1 recorded pass, got %d: %+v", len(passes), passes)
+	}
+	if passes[0].Searched != 1 || passes[0].Matched != 0 {
+		t.Errorf("pass = %+v, want Searched=1 Matched=0", passes[0])
+	}
+}
+
+// TestDiscoveryNoSearchPassOnIdleTick asserts a tick with no runnable WANTED
+// job records nothing (issue #88).
+func TestDiscoveryNoSearchPassOnIdleTick(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newDiscoveryParams(t, &fakeMusic{}, &fakeSearcher{}, map[int64]core.WantedRelease{})
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 0 {
+		t.Errorf("expected no search pass on an idle tick, got %+v", passes)
+	}
+}
+
+// TestDiscoveryNoSearchPassOnSnapshotMiss asserts a job whose album is
+// absent from the WantedSource snapshot (an abort path) records nothing
+// (issue #88).
+func TestDiscoveryNoSearchPassOnSnapshotMiss(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newDiscoveryParams(t, &fakeMusic{}, &fakeSearcher{}, map[int64]core.WantedRelease{})
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 0 {
+		t.Errorf("expected no search pass when the album is missing from the wanted snapshot, got %+v", passes)
+	}
+}
+
+// TestDiscoveryNoSearchPassOnSearchError asserts a Search error (an abort
+// path) propagates and records nothing (issue #88).
+func TestDiscoveryNoSearchPassOnSearchError(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	searcher := &fakeSearcher{searchErrForQuery: map[string]error{"Artist Album": errors.New("search boom")}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err == nil {
+		t.Fatal("expected Tick to propagate the search error")
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 0 {
+		t.Errorf("expected no search pass recorded on a search error, got %+v", passes)
+	}
+}
+
+// TestDiscoveryRecordSearchPassFailureDoesNotFailTick asserts a
+// RecordSearchPass write failure is swallowed (best-effort, same policy as
+// recordEvent) rather than failing the tick (issue #88).
+func TestDiscoveryRecordSearchPassFailureDoesNotFailTick(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	searcher := &fakeSearcher{} // empty results -> backoff path, still "completed"
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	p.Store = &failingSearchPassStore{Store: st}
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick should swallow a RecordSearchPass failure, got: %v", err)
+	}
+}

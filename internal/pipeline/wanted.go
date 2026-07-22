@@ -21,6 +21,9 @@ type WantedMusicSource interface {
 type WantedSyncStore interface {
 	SyncWantedJobs(ctx context.Context, releases []core.WantedRelease, failedCutoff, now time.Time) (cancelled, revived int, err error)
 	PruneJobEvents(ctx context.Context, now time.Time) error
+	// PruneSearchPasses deletes expired search_passes rows (see
+	// store.PruneSearchPasses), on the same fixed 30-day window as job events.
+	PruneSearchPasses(ctx context.Context, now time.Time) error
 }
 
 // WantedSyncParams configures a WantedSync.
@@ -84,7 +87,7 @@ func (w *WantedSync) Wanted() map[int64]core.WantedRelease {
 // Tick performs one sync pass: fetch Lidarr's wanted-missing list, upsert and
 // refresh metadata for every album on it, cancel jobs whose album has left
 // it, revive old FAILED jobs whose album is still wanted, prune expired job
-// events, then publish the new snapshot for Wanted().
+// events and search passes, then publish the new snapshot for Wanted().
 //
 // Ordering is deliberate: cancellation and revival only run once the fetch
 // has succeeded, so a Lidarr outage (WantedMissing erroring) leaves every job
@@ -113,6 +116,9 @@ func (w *WantedSync) Tick(ctx context.Context, now time.Time) error {
 	// transaction boundaries. Do not publish a snapshot unless both persistence
 	// operations have succeeded.
 	if err := w.p.Store.PruneJobEvents(ctx, now); err != nil {
+		return err
+	}
+	if err := w.p.Store.PruneSearchPasses(ctx, now); err != nil {
 		return err
 	}
 

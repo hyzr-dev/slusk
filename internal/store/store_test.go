@@ -425,11 +425,14 @@ func TestMigrateAppliesEachVersionExactlyOnce(t *testing.T) {
 func TestMigrateFailedMigrationRollsBackCleanly(t *testing.T) {
 	s := newTestStore(t)
 
+	// Versions deliberately unclaimed by any real embedded migration (newTestStore
+	// already applied those via Open) - otherwise migrationApplied would see them
+	// as already-recorded and skip both without ever running this fake fs's SQL.
 	fsys := fstest.MapFS{
-		"migrations/0001_ok.sql": &fstest.MapFile{
+		"migrations/9001_ok.sql": &fstest.MapFile{
 			Data: []byte(`CREATE TABLE IF NOT EXISTS broken_migration_ok (id BIGINT)`),
 		},
-		"migrations/0002_broken.sql": &fstest.MapFile{
+		"migrations/9002_broken.sql": &fstest.MapFile{
 			Data: []byte(`CREATE TABLE IF NOT EXISTS broken_migration_partial (id BIGINT);
 THIS IS NOT VALID SQL;`),
 		},
@@ -441,11 +444,11 @@ THIS IS NOT VALID SQL;`),
 	}
 
 	var version2Count int
-	if err := s.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = 2`).Scan(&version2Count); err != nil {
+	if err := s.db.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = 9002`).Scan(&version2Count); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
 	if version2Count != 0 {
-		t.Errorf("schema_migrations has a row for the failed version 2 migration")
+		t.Errorf("schema_migrations has a row for the failed version 9002 migration")
 	}
 
 	var partialTableCount int

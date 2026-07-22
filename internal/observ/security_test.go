@@ -22,7 +22,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	if cancel == nil {
 		cancel = func(context.Context, int64) error { return nil }
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{})
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts)
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 

@@ -239,6 +239,21 @@ func main() {
 	recentEventsFn := func(ctx context.Context, limit int) ([]core.JobEvent, error) {
 		return st.RecentEvents(ctx, limit)
 	}
+	chartsFn := func(ctx context.Context) (observ.ChartsData, error) {
+		passes, err := st.RecentSearchPasses(ctx, observ.ChartsRecentPasses)
+		if err != nil {
+			return observ.ChartsData{}, err
+		}
+		// Aligned to the 24 whole-hour buckets the Overview chart displays
+		// (see observ.toChartsDTO): starting mid-hour would query a partial
+		// first hour that the zero-fill then silently discards.
+		since := time.Now().UTC().Truncate(time.Hour).Add(-23 * time.Hour)
+		counts, err := st.CompletedByHour(ctx, since)
+		if err != nil {
+			return observ.ChartsData{}, err
+		}
+		return observ.ChartsData{Passes: passes, CompletedByHour: counts}, nil
+	}
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
@@ -320,7 +335,7 @@ func main() {
 	}
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)

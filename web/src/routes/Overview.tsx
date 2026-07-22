@@ -1,6 +1,9 @@
 import { useNavigate } from 'react-router-dom';
-import { useJobs } from '../api/queries';
+import { useCharts, useJobs } from '../api/queries';
 import type { JobStatus } from '../api/types';
+import ChartCard from '../components/charts/ChartCard';
+import CumulativeAreaChart from '../components/charts/CumulativeAreaChart';
+import PassBarChart from '../components/charts/PassBarChart';
 import PageHeading from '../components/PageHeading';
 import ProgressBar from '../components/ProgressBar';
 import StatCard from '../components/StatCard';
@@ -16,6 +19,7 @@ const CARDS: JobStatus[] = ['queued', 'active', 'stalled', 'done', 'failed'];
 export default function Overview() {
   const navigate = useNavigate();
   const { data: jobs = [] } = useJobs();
+  const { data: charts } = useCharts();
 
   const counts = Object.fromEntries(
     CARDS.map((s) => [s, jobs.filter((j) => j.status === s).length]),
@@ -32,6 +36,15 @@ export default function Overview() {
         {CARDS.map((s) => (
           <StatCard key={s} label={t.status[s]} value={counts[s]} />
         ))}
+      </div>
+
+      <div className={styles.charts}>
+        <ChartCard title={t.overview.chartPasses}>
+          <PassBarChart passes={charts?.passes ?? []} />
+        </ChartCard>
+        <ChartCard title={t.overview.chartCompleted}>
+          <CumulativeAreaChart buckets={charts?.completedByHour ?? []} />
+        </ChartCard>
       </div>
 
       <table className={table.table}>
