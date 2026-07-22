@@ -178,6 +178,32 @@ func readFramePayload(conn net.Conn) ([]byte, error) {
 	return buf, nil
 }
 
+// readUntilSharedFoldersFiles reads frames off conn, skipping anything that
+// is not a matching SharedFoldersFiles announcement, until one with the
+// wanted directory/file counts arrives or a read fails. The initial share
+// scan now runs in the background (issue #112), so the login-time
+// announcement may legitimately be 0/0 before a later announcement carries
+// the real counts.
+func readUntilSharedFoldersFiles(conn net.Conn, wantDir, wantFile uint32) error {
+	for {
+		payload, err := readFramePayload(conn)
+		if err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(payload[:4]) != uint32(server.CodeSharedFoldersFiles) {
+			continue
+		}
+		if len(payload) != 12 {
+			return fmt.Errorf("shared counts payload malformed: %x", payload)
+		}
+		gotDir := binary.LittleEndian.Uint32(payload[4:8])
+		gotFile := binary.LittleEndian.Uint32(payload[8:12])
+		if gotDir == wantDir && gotFile == wantFile {
+			return nil
+		}
+	}
+}
+
 func drainInitialTreeAdvertisements(conn net.Conn) error {
 	want := []uint32{
 		uint32(server.CodeHaveNoParent),
@@ -324,13 +350,8 @@ func TestClientAlwaysAnnouncesSharedFolderFileCounts(t *testing.T) {
 						return
 					}
 				}
-				payload, err := readFramePayload(conn)
-				if err != nil {
-					observed <- err
-					return
-				}
-				if len(payload) != 12 || binary.LittleEndian.Uint32(payload[:4]) != uint32(server.CodeSharedFoldersFiles) || binary.LittleEndian.Uint32(payload[4:8]) != tt.wantDir || binary.LittleEndian.Uint32(payload[8:12]) != tt.wantFile {
-					observed <- fmt.Errorf("shared counts payload=%x want dirs=%d files=%d", payload, tt.wantDir, tt.wantFile)
+				if err := readUntilSharedFoldersFiles(conn, tt.wantDir, tt.wantFile); err != nil {
+					observed <- fmt.Errorf("waiting for shared counts dirs=%d files=%d: %w", tt.wantDir, tt.wantFile, err)
 					return
 				}
 				observed <- nil
@@ -921,6 +942,314 @@ func TestRunRetriesTransientStartupFailure(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestClientConnectsBeforeInitialShareScanCompletes locks issue #112: Run must
+// bind the listener and log in to the server without waiting on the initial
+// share scan. While shareScanHook blocks, the client reaches StateConnected
+// and announces an empty (0/0) share index; once the hook is released and the
+// scan completes, an updated announcement carrying the real counts follows on
+// the same connection.
+func TestClientConnectsBeforeInitialShareScanCompletes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+
+	srv := newFakeServer(t)
+	initialAnnounce := make(chan error, 1)
+	updatedAnnounce := make(chan error, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			initialAnnounce <- err
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			initialAnnounce <- err
+			return
+		}
+		for _, want := range []server.Code{server.CodeSetListenPort, server.CodeHaveNoParent, server.CodeBranchRoot, server.CodeBranchLevel, server.CodeAcceptChildren, server.CodeGetUserStats} {
+			if code, err := readFrameCode(conn); err != nil || code != uint32(want) {
+				initialAnnounce <- fmt.Errorf("startup code=%d want=%d err=%v", code, want, err)
+				return
+			}
+		}
+		payload, err := readFramePayload(conn)
+		if err != nil {
+			initialAnnounce <- err
+			return
+		}
+		if len(payload) != 12 || binary.LittleEndian.Uint32(payload[:4]) != uint32(server.CodeSharedFoldersFiles) ||
+			binary.LittleEndian.Uint32(payload[4:8]) != 0 || binary.LittleEndian.Uint32(payload[8:12]) != 0 {
+			initialAnnounce <- fmt.Errorf("login-time shared counts payload=%x, want dirs=0 files=0", payload)
+			return
+		}
+		initialAnnounce <- nil
+		updatedAnnounce <- readUntilSharedFoldersFiles(conn, 1, 1)
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{
+		Address:       srv.addr(),
+		Username:      "me",
+		Password:      "p",
+		SharedFolders: []SharedFolder{{Name: "Music", Path: root}},
+	}, testLogger())
+	c.cfg.shareScanHook = func(ctx context.Context) error {
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	waitForState(t, c, StateConnected, 2*time.Second)
+
+	select {
+	case err := <-initialAnnounce:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for login-time (0/0) share announcement")
+	}
+
+	close(release)
+
+	select {
+	case err := <-updatedAnnounce:
+		if err != nil {
+			t.Fatalf("waiting for updated share announcement: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for updated share announcement")
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() after ctx cancel = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestInitialShareScanFailureRetriedWithoutDroppingConnection locks issue
+// #112: a failing initial share scan must be retried in the background with
+// backoff, and must never tear down the already-established server
+// connection to do so.
+func TestInitialShareScanFailureRetriedWithoutDroppingConnection(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const failuresWanted = 3
+	var attempts atomic.Int32
+
+	srv := newFakeServer(t)
+	initialAnnounce := make(chan error, 1)
+	updatedAnnounce := make(chan error, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			initialAnnounce <- err
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			initialAnnounce <- err
+			return
+		}
+		if code, err := readFrameCode(conn); err != nil || code != uint32(server.CodeSetListenPort) {
+			initialAnnounce <- fmt.Errorf("startup code=%d want=%d err=%v", code, server.CodeSetListenPort, err)
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			initialAnnounce <- err
+			return
+		}
+		initialAnnounce <- nil
+		updatedAnnounce <- readUntilSharedFoldersFiles(conn, 1, 1)
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{
+		Address:       srv.addr(),
+		Username:      "me",
+		Password:      "p",
+		SharedFolders: []SharedFolder{{Name: "Music", Path: root}},
+	}, testLogger())
+	c.cfg.backoffBase = 5 * time.Millisecond
+	c.cfg.backoffCap = 10 * time.Millisecond
+	loginAnnounced := make(chan struct{})
+	c.cfg.shareScanHook = func(ctx context.Context) error {
+		if attempts.Add(1) <= failuresWanted {
+			return errors.New("simulated scan failure")
+		}
+		// Hold the eventual success until the fake server has consumed the
+		// login-time announcement, so the updated 1/1 announcement below is
+		// deterministically a separate, later frame on the same connection.
+		select {
+		case <-loginAnnounced:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	select {
+	case err := <-initialAnnounce:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for login-time share announcement")
+	}
+	close(loginAnnounced)
+
+	// The failing scan attempts happen in the background; the server
+	// connection must stay up throughout. Poll until every wanted failure has
+	// actually been observed (rather than counting attempts within a fixed
+	// window, which was timing-dependent on a loaded machine), checking along
+	// the way that the retries never tear the connection down.
+	deadline := time.Now().Add(5 * time.Second)
+	for attempts.Load() < failuresWanted {
+		if state := c.Status().State; state != StateConnected {
+			t.Fatalf("state = %q while initial share scan retries in background, want %q", state, StateConnected)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d scan attempts observed before deadline, want at least %d failures before success", attempts.Load(), failuresWanted)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case err := <-updatedAnnounce:
+		if err != nil {
+			t.Fatalf("waiting for updated share announcement: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for updated share announcement after scan succeeded")
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() after ctx cancel = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestAnnounceSharesReadsCurrentStatsAndDedupsPerGeneration locks the
+// announce helper's contract: it reads the currently published snapshot stats
+// at send time (so the wire order of announcements matches publish order under
+// any interleaving of login-time, background-scan and rescan announcers), it
+// holds every non-login announcement back until the generation's mandatory
+// login-time announcement has happened, it skips a send when the current
+// server generation was already told identical stats, and a new generation
+// re-announces even unchanged stats. Frame order on the pipe is the
+// assertion: a wrongly-sent extra frame would arrive before the next expected
+// frame and fail the comparison.
+func TestAnnounceSharesReadsCurrentStatsAndDedupsPerGeneration(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c.serverConn = a
+	c.serverGeneration = 1
+
+	frames := make(chan [2]uint32, 8)
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			payload, err := readFramePayload(b)
+			if err != nil {
+				readErr <- err
+				return
+			}
+			if len(payload) != 12 || binary.LittleEndian.Uint32(payload[:4]) != uint32(server.CodeSharedFoldersFiles) {
+				readErr <- fmt.Errorf("unexpected frame %x", payload)
+				return
+			}
+			frames <- [2]uint32{binary.LittleEndian.Uint32(payload[4:8]), binary.LittleEndian.Uint32(payload[8:12])}
+		}
+	}()
+	expectFrame := func(want [2]uint32) {
+		t.Helper()
+		select {
+		case got := <-frames:
+			if got != want {
+				t.Fatalf("announced dirs/files = %v, want %v", got, want)
+			}
+		case err := <-readErr:
+			t.Fatalf("reading announcement frame: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for SharedFoldersFiles frame")
+		}
+	}
+
+	// Before the generation's login-time announcement, a background-scan or
+	// rescan announcement must be held back entirely: the pending login-time
+	// announcement will read the then-current stats when it sends.
+	c.shares.Store(&shareSnapshot{stats: ShareStats{Directories: 1, Files: 2}})
+	if err := c.announceShares(); err != nil {
+		t.Fatalf("gated announce before login announcement: %v", err)
+	}
+	if err := c.announceSharesOnLogin(); err != nil {
+		t.Fatalf("login announce: %v", err)
+	}
+	// The login-time announcement must carry the published 1/2 - not a stale
+	// earlier read - and be the first frame on the wire, proving the gated
+	// call above sent nothing.
+	expectFrame([2]uint32{1, 2})
+
+	// Identical stats on the same generation: dedup must skip the send.
+	if err := c.announceShares(); err != nil {
+		t.Fatalf("deduped announce: %v", err)
+	}
+
+	// A newer publish must be announced; it must also be the very next frame
+	// on the wire, proving the deduped call above sent nothing.
+	c.shares.Store(&shareSnapshot{stats: ShareStats{Directories: 3, Files: 4}})
+	if err := c.announceShares(); err != nil {
+		t.Fatalf("announce after new publish: %v", err)
+	}
+	expectFrame([2]uint32{3, 4})
+
+	// A new server generation (reconnect) must re-announce even unchanged
+	// stats at login: the new session has not been told anything yet.
+	c.mu.Lock()
+	c.serverGeneration = 2
+	c.mu.Unlock()
+	if err := c.announceSharesOnLogin(); err != nil {
+		t.Fatalf("login announce on new generation: %v", err)
+	}
+	expectFrame([2]uint32{3, 4})
+
+	// No server connection: a silent no-op, never an error.
+	c.mu.Lock()
+	c.serverConn = nil
+	c.mu.Unlock()
+	if err := c.announceShares(); err != nil {
+		t.Fatalf("announce without server connection = %v, want nil", err)
 	}
 }
 
