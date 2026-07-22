@@ -321,7 +321,7 @@ func (c *Client) dialPeer(ctx context.Context, username string, ct soul.Connecti
 			return nil, nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
 		}
 		if c.logger != nil {
-			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "direct")
+			c.logger.Debug("peer connection established", "username", username, "type", ct, "path", "direct")
 		}
 		return directConn, nil, nil
 	}
@@ -344,7 +344,7 @@ func (c *Client) dialPeer(ctx context.Context, username string, ct soul.Connecti
 				username, token, directAddr, directErr, res.err)
 		}
 		if c.logger != nil {
-			c.logger.Info("peer connection established", "username", username, "type", ct, "path", "indirect", "direct_dial_err", directErr)
+			c.logger.Debug("peer connection established", "username", username, "type", ct, "path", "indirect", "direct_dial_err", directErr)
 		}
 		return res.conn, res.lease, nil
 

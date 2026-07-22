@@ -171,7 +171,7 @@ func (c *Client) handlePeerConn(ctx context.Context, conn net.Conn, lease *inbou
 			winner.Close(errNoServerConnection)
 		}
 		if c.logger != nil {
-			c.logger.Info("incoming peer session", "username", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
+			c.logger.Debug("incoming peer session", "username", pi.Username, "type", pi.ConnectionType, "remote", conn.RemoteAddr())
 		}
 
 	default:
