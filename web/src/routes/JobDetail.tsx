@@ -9,7 +9,7 @@ import {
 import PageHeading from '../components/PageHeading';
 import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
-import { formatBytes, formatDateTime, formatShortTime } from '../format';
+import { formatBytes, formatDateTime, formatShortTime, formatSpeed } from '../format';
 import { candidateStateLabel, eventLabel, t } from '../strings';
 import styles from './JobDetail.module.css';
 
@@ -146,6 +146,11 @@ export default function JobDetail() {
               <div key={tr.filename} className={styles.transfer}>
                 {tr.filename} — {tr.state} {formatBytes(tr.bytesDone)} /{' '}
                 {formatBytes(tr.bytesTotal)}
+                {/* speed and queue position are live-only and mutually exclusive
+                    in practice (downloading vs waiting in the peer's queue); each
+                    is absent unless the native backend reported it. */}
+                {tr.speed ? ` · ${formatSpeed(tr.speed)}` : ''}
+                {tr.queuePosition ? ` · ${t.jobs.queuePosition(tr.queuePosition)}` : ''}
                 {tr.retries > 0 && ` (${tr.retries} retries)`}
               </div>
             ))}

@@ -38,3 +38,13 @@ export function formatShortTime(iso: string): string {
 export function formatScore(n: number): string {
   return n.toFixed(2);
 }
+
+// Download speed in bytes/sec. Soulseek transfers commonly sit in the KB/s
+// range, so scale to KB/s below 1 MB/s and MB/s above, unlike formatBytes which
+// is always MB.
+export function formatSpeed(bytesPerSec: number | null | undefined): string {
+  if (!bytesPerSec) return '—';
+  const kb = bytesPerSec / 1024;
+  if (kb < 1024) return `${kb.toFixed(0)} KB/s`;
+  return `${(kb / 1024).toFixed(1)} MB/s`;
+}
