@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { Job, JobDetail as JobDetailDTO, JobEvent } from '../api/types';
+import type { Job, JobDetail as JobDetailDTO, JobEvent, TransferDetail } from '../api/types';
 import { t } from '../strings';
 import JobDetail from './JobDetail';
 
@@ -130,6 +130,77 @@ describe('meta row: nextAttemptAt and retries', () => {
 
     expect(screen.queryByText(/Next attempt:/)).not.toBeInTheDocument();
     expect(screen.queryByText(/retries/)).not.toBeInTheDocument();
+  });
+});
+
+describe('transfer live progress', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  function detailWithTransfers(transfers: TransferDetail[]): JobDetailDTO {
+    return makeDetail({
+      attempts: [
+        {
+          id: 100,
+          username: 'peer-one',
+          fileCount: transfers.length,
+          state: 'ACTIVE',
+          failReason: '',
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+          transfers,
+        },
+      ],
+    });
+  }
+
+  function makeTransfer(overrides: Partial<TransferDetail> = {}): TransferDetail {
+    return {
+      filename: '01.flac',
+      state: 'IN_PROGRESS',
+      bytesDone: 0,
+      bytesTotal: 0,
+      retries: 0,
+      lastProgressAt: '',
+      ...overrides,
+    };
+  }
+
+  it('shows speed for a downloading transfer and queue position for a queued one', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      detailWithTransfers([
+        makeTransfer({ filename: '01.flac', state: 'IN_PROGRESS', speed: 524288 }),
+        makeTransfer({ filename: '02.flac', state: 'PENDING', queuePosition: 5 }),
+      ]),
+    );
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(/512 KB\/s/)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(t.jobs.queuePosition(5)))).toBeInTheDocument();
+  });
+
+  it('omits speed and queue markers when the fields are absent', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      detailWithTransfers([makeTransfer({ filename: '01.flac', state: 'ERRORED' })]),
+    );
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(/01\.flac/)).toBeInTheDocument();
+    expect(screen.queryByText(/KB\/s|MB\/s/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/queue #/)).not.toBeInTheDocument();
   });
 });
 

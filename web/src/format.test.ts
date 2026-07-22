@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
+import { formatBytes, formatSpeed, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -16,6 +16,23 @@ describe('formatBytes', () => {
   // Matches the legacy dashboard: everything is expressed in MB, never scaled.
   it('does not scale to GB', () => {
     expect(formatBytes(5 * 1024 * 1024 * 1024)).toBe('5120.0 MB');
+  });
+});
+
+describe('formatSpeed', () => {
+  it('returns an em dash for zero and nullish input, never "0 B/s"', () => {
+    expect(formatSpeed(0)).toBe('—');
+    expect(formatSpeed(null)).toBe('—');
+    expect(formatSpeed(undefined)).toBe('—');
+  });
+
+  it('scales to KB/s below 1 MB/s', () => {
+    expect(formatSpeed(524288)).toBe('512 KB/s');
+  });
+
+  it('scales to MB/s at or above 1 MB/s', () => {
+    expect(formatSpeed(1024 * 1024)).toBe('1.0 MB/s');
+    expect(formatSpeed(1536 * 1024)).toBe('1.5 MB/s');
   });
 });
 

@@ -83,6 +83,7 @@ export const t = {
     candidates: (tried: number, max: number) => `${tried} of ${max} candidates tried`,
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
+    queuePosition: (n: number) => `queue #${n}`,
   },
   events: {
     filterPlaceholder: 'Filter events…',

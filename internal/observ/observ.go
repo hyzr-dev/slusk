@@ -159,9 +159,9 @@ type ModulesFunc func() map[string]ModuleStatus
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, tester ConnectionTester) http.Handler {
+	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config, tester)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
@@ -172,7 +172,7 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, tester ConnectionTester) http.Handler {
+	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -315,8 +315,16 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "job not found", http.StatusNotFound)
 			return
 		}
+		// Live queue-position/speed is best-effort cosmetic enrichment: if
+		// ListDownloads fails, serve the persisted detail unenriched rather than
+		// failing the whole request. Fetched only after the job is found so a 404
+		// costs no backend call.
+		var live []core.RemoteTransfer
+		if lt, liveErr := liveTransfers(r.Context()); liveErr == nil {
+			live = lt
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toJobDetailDTO(d))
+		_ = json.NewEncoder(w).Encode(toJobDetailDTO(d, newLiveTransferIndex(live)))
 	})
 	mux.HandleFunc("/api/jobs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

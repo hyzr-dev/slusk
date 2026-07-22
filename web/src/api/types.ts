@@ -37,6 +37,12 @@ export interface TransferDetail {
   bytesTotal: number;
   retries: number;
   lastProgressAt: string;
+  // Live, non-persisted values the native backend joins in from ListDownloads;
+  // omitempty on the Go side means they are absent (not zero) for queued-only,
+  // actively-downloading, or terminal transfers respectively — so treat absent
+  // as "hide" rather than showing a misleading 0.
+  queuePosition?: number;
+  speed?: number;
 }
 
 /** internal/observ/jobdetail.go attemptDetailDTO */
