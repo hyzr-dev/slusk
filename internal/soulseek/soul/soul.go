@@ -2,8 +2,9 @@
 package soul
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
-	"math/rand/v2"
 )
 
 // ConnectionType represents the type of connection. Possible values are "P", "F" and "D".
@@ -21,8 +22,9 @@ var ErrMessageTooLarge = errors.New("message declares a size larger than the max
 // Token is a unique identifier of type uint32 that is used throughout the protocol.
 type Token uint32
 
-// NewToken returns a new randomly generated uint32 long token.
-// Under the hood, it uses math/rand/v2.Uint32().
+// NewToken returns a new cryptographically secure random token.
 func NewToken() Token {
-	return Token(rand.Uint32())
+	var tokenBytes [4]byte
+	rand.Read(tokenBytes[:])
+	return Token(binary.LittleEndian.Uint32(tokenBytes[:]))
 }
