@@ -124,4 +124,15 @@ export interface AppConfig {
   lidarrApiKeyConfigured: boolean;
   wantedSyncInterval: string;
   maxActive: number;
+  soulseekEnabled: boolean;
+}
+
+/**
+ * POST /api/config/test/{lidarr,soulseek} — connectionTestResult. ok is true
+ * when the dependency answered; error is a human-readable reason otherwise and
+ * never contains secrets.
+ */
+export interface ConnectionTestResult {
+  ok: boolean;
+  error?: string;
 }

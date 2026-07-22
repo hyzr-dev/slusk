@@ -117,6 +117,33 @@ func (c *Client) WantedMissing(ctx context.Context) ([]core.WantedRelease, error
 	return out, nil
 }
 
+// Ping verifies the configured URL and API key by requesting Lidarr's system
+// status, for the settings view's connection test. It returns nil when Lidarr
+// answers 2xx; a 401 is reported distinctly (wrong API key) since that is the
+// most common misconfiguration, and any other non-2xx or transport error is
+// returned verbatim. The response body is discarded — only reachability and
+// authorization matter here.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/system/status", c.baseURL), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not reach Lidarr: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("lidarr rejected the API key (status 401)")
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("lidarr system/status: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // TriggerImport asks Lidarr to scan and import the downloaded folder at path.
 func (c *Client) TriggerImport(ctx context.Context, path string) error {
 	body := map[string]any{"name": "DownloadedAlbumsScan", "path": path}

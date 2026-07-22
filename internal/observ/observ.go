@@ -159,9 +159,9 @@ type ModulesFunc func() map[string]ModuleStatus
 func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc) http.Handler {
+	config ConfigFunc, tester ConnectionTester) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config, tester)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
@@ -172,7 +172,7 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc) http.Handler {
+	config ConfigFunc, tester ConnectionTester) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +364,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
-	mux.Handle("/api/config", newConfigHandler(config))
+	registerConfig(mux, config, tester)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
