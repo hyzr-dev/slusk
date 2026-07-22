@@ -44,6 +44,9 @@ func flacDuration(path string) (float64, error) {
 		return 0, err
 	}
 	defer f.Close()
+	if err := skipID3v2(f); err != nil {
+		return 0, err
+	}
 	var signature [4]byte
 	if _, err := io.ReadFull(f, signature[:]); err != nil {
 		return 0, err
@@ -82,6 +85,18 @@ func flacDuration(path string) (float64, error) {
 			return 0, errors.New("FLAC STREAMINFO missing")
 		}
 	}
+}
+
+// skipID3v2 positions f just past a leading ID3v2 tag, or at offset 0 if none.
+func skipID3v2(f *os.File) error {
+	var head [10]byte
+	if _, err := io.ReadFull(f, head[:]); err != nil || string(head[:3]) != "ID3" {
+		_, serr := f.Seek(0, io.SeekStart)
+		return serr // a too-short file surfaces as a signature error in the caller
+	}
+	size := int64(head[6]&0x7f)<<21 | int64(head[7]&0x7f)<<14 | int64(head[8]&0x7f)<<7 | int64(head[9]&0x7f)
+	_, err := f.Seek(10+size, io.SeekStart)
+	return err
 }
 
 func mp3Duration(path string) (float64, error) {
