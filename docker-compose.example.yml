@@ -79,3 +79,48 @@ volumes:
 # networks:
 #   arr:
 #     external: true
+
+# --- Option: run behind gluetun with VPN port forwarding ---
+# With soulseek.gluetun set in config.toml, slskdarr fetches its forwarded
+# port from gluetun's control server at startup instead of using a static
+# port. This requires slskdarr to share gluetun's network namespace (so it can
+# reach the control server at 127.0.0.1 and receive inbound peer connections
+# on the forwarded port), which means:
+#   - remove slskdarr's own "ports:" section above; the port is published on
+#     the gluetun service instead (below, 9090 for the observ endpoint - the
+#     Soulseek peer port does not need publishing, gluetun forwards it).
+#   - add network_mode: "service:gluetun" to the slskdarr service.
+#   - soulseek.gluetun.control_url in config.toml is "http://127.0.0.1:8000"
+#     (same network namespace as gluetun, so localhost reaches it).
+#
+# NOTE: network_mode: "service:<name>" is NOT supported by Docker Swarm - this
+# option is for plain docker-compose only.
+#
+# services:
+#   gluetun:
+#     image: qmcgaw/gluetun
+#     container_name: gluetun
+#     cap_add:
+#       - NET_ADMIN
+#     devices:
+#       - /dev/net/tun
+#     environment:
+#       VPN_SERVICE_PROVIDER: your-provider
+#       VPN_TYPE: wireguard
+#       VPN_PORT_FORWARDING: "on"
+#     # gluetun >= v3.40 requires control-server auth config on ITS side for
+#     # /v1/portforward - without it, slskdarr's fetch gets 401 forever. Mount
+#     # a config granting the route to the same key as soulseek.gluetun.api_key:
+#     #   volumes: [./gluetun-auth.toml:/gluetun/auth/config.toml:ro]
+#     # with: [[roles]] name="slskdarr" routes=["GET /v1/portforward"]
+#     #       auth="apikey" apikey="<same key>"
+#     # (older gluetun: no auth needed, the api_key is simply unused)
+#     ports:
+#       - "127.0.0.1:9090:9090" # slskdarr's observ endpoint, published here
+#
+#   slskdarr:
+#     network_mode: "service:gluetun"
+#     depends_on:
+#       - gluetun
+#       - postgres
+#     # ports: intentionally omitted - see gluetun's ports above

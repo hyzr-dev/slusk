@@ -17,7 +17,9 @@ func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, logger *sl
 	return soulseek.New(soulseek.Config{
 		Address: cfg.ServerAddress, Username: cfg.Username, Password: cfg.Password,
 		ListenAddr: cfg.ListenAddr, SharedFolders: folders, UploadSlots: cfg.UploadSlots,
-		DownloadDir: downloadDir,
+		DownloadDir:       downloadDir,
+		GluetunControlURL: cfg.Gluetun.ControlURL,
+		GluetunAPIKey:     cfg.Gluetun.APIKey,
 	}, logger)
 }
 

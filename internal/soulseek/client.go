@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,8 @@ const (
 	// it exists so tests that don't care about the peer listener don't have
 	// to set one.
 	defaultListenAddr = "127.0.0.1:0"
+	// defaultGluetunTimeout bounds one gluetun control-server fetch.
+	defaultGluetunTimeout = 5 * time.Second
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -83,6 +86,14 @@ type Config struct {
 	// is only appropriate for tests: production configuration always
 	// supplies a real, routable ListenAddr (see config.SoulseekConfig).
 	ListenAddr string
+
+	// GluetunControlURL, when nonempty, makes trySetup fetch the forwarded
+	// port from {GluetunControlURL}/v1/portforward and substitute it for the
+	// port in ListenAddr before binding the peer listener.
+	GluetunControlURL string
+	// GluetunAPIKey, when nonempty, is sent as X-API-Key on the gluetun
+	// control-server request.
+	GluetunAPIKey string
 
 	// DownloadDir is the local root directory native downloads (issue #55)
 	// are written under, in the same completeDir/<leaf>/<basename> layout
@@ -157,6 +168,9 @@ type Config struct {
 	// so a stalled server cannot pin serverWriteMu (and the ping ticker's write
 	// cannot wedge shutdown) forever. Default 30s.
 	serverWriteTimeout time.Duration
+	// gluetunTimeout bounds one control-server fetch so a hung gluetun cannot
+	// stall the startup backoff rhythm. Default 5s.
+	gluetunTimeout time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -208,8 +222,8 @@ type Client struct {
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
-	shares                 atomic.Pointer[shareSnapshot]
-	shareScanMu            sync.Mutex
+	shares      atomic.Pointer[shareSnapshot]
+	shareScanMu sync.Mutex
 	// shareWorkers bounds CPU-bound share work (search match, folder-contents
 	// build); deliverWorkers bounds the network-bound search-response delivery
 	// that opens a session to the searcher. Separate pools so a slow delivery
@@ -303,6 +317,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.serverWriteTimeout <= 0 {
 		cfg.serverWriteTimeout = defaultServerWriteTimeout
+	}
+	if cfg.gluetunTimeout <= 0 {
+		cfg.gluetunTimeout = defaultGluetunTimeout
 	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2
@@ -517,16 +534,34 @@ func (c *Client) retryStartup(ctx context.Context) net.Listener {
 	}
 }
 
-// trySetup runs the initial share scan then binds the peer listener, returning
-// the bound listener or the first error. On a scan failure no listener is
+// trySetup resolves the peer listener address (fetching the forwarded port
+// from gluetun first, when configured), runs the initial share scan, then
+// binds the peer listener, returning the bound listener or the first error.
+// The gluetun fetch runs before the share scan since it is cheap and, when
+// the VPN has not yet established port forwarding, should not force an
+// expensive rescan every backoff cycle. On a scan failure no listener is
 // opened; the scan is idempotent, so retryStartup safely re-runs it.
 func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
+	addr := c.cfg.ListenAddr
+	if c.cfg.GluetunControlURL != "" {
+		port, err := c.fetchGluetunPort(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("gluetun forwarded port: %w", err)
+		}
+		host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
+		if err != nil {
+			return nil, fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
+		}
+		addr = net.JoinHostPort(host, strconv.Itoa(port))
+		c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
+	}
+
 	if _, err := c.RescanShares(ctx); err != nil {
 		return nil, fmt.Errorf("initial share scan: %w", err)
 	}
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.cfg.ListenAddr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("listen for peer connections on %s: %w", c.cfg.ListenAddr, err)
+		return nil, fmt.Errorf("listen for peer connections on %s: %w", addr, err)
 	}
 	return ln, nil
 }
