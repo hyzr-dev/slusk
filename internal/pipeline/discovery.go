@@ -192,6 +192,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	// resetting retries, and ResetJobToWanted deleting prior candidates), so
 	// there is no cross-cycle "already tried" state left to consult.
 	var survivors []store.NewCandidate
+	var tooManyTracks, tooFewTracks int
 	for _, cand := range ranked {
 		if len(survivors) >= d.p.MaxCandidates {
 			break
@@ -200,19 +201,26 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			// More files than the largest known edition — almost certainly not
 			// a single release (e.g. a whole discography in one flat folder).
 			detail := fmt.Sprintf("candidate %s has more files than any known release (%d files, max %d), skipping", cand.Username, len(cand.Files), maxTracks)
-			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "max", maxTracks)
-			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
+			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "max", maxTracks)
+			tooManyTracks++
 			continue
 		}
 		if minTracks > 0 && len(cand.Files) < minTracks {
 			// Can't cover even the smallest edition — guaranteed to fail the
 			// IMPORTING coverage gate after burning a full download cycle.
 			detail := fmt.Sprintf("candidate %s has fewer files than the smallest release (%d files, min %d), skipping", cand.Username, len(cand.Files), minTracks)
-			d.log().Info(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "min", minTracks)
-			d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
+			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "files", len(cand.Files), "min", minTracks)
+			tooFewTracks++
 			continue
 		}
 		survivors = append(survivors, newCandidateFrom(cand))
+	}
+
+	if rejected := tooManyTracks + tooFewTracks; rejected > 0 {
+		detail := fmt.Sprintf("rejected %d candidates: %d above maximum track count, %d below minimum track count", rejected, tooManyTracks, tooFewTracks)
+		d.log().Info(detail, "album_job", job.ID, "rejected", rejected,
+			"above_max_tracks", tooManyTracks, "below_min_tracks", tooFewTracks)
+		d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 	}
 
 	if len(survivors) == 0 {

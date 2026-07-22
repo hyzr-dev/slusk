@@ -16,7 +16,10 @@ import (
 // jobEventRetention bounds how long job_events rows are kept; PruneJobEvents
 // deletes anything older. Hardcoded (not configurable) per issue #34's scope:
 // a fixed 30-day window is enough for troubleshooting without unbounded growth.
-const jobEventRetention = 30 * 24 * time.Hour
+const (
+	jobEventRetention      = 30 * 24 * time.Hour
+	jobEventPruneBatchSize = 1000
+)
 
 // AddJobEvent appends one row to a job's audit trail.
 func (s *Store) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
@@ -66,10 +69,19 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]core.JobEvent, e
 	return scanJobEvents(rows)
 }
 
-// PruneJobEvents deletes events older than jobEventRetention, called from the
-// engine loop at most once per hour.
+// PruneJobEvents deletes at most jobEventPruneBatchSize of the oldest events
+// beyond jobEventRetention. It is called from the engine loop at most once per
+// hour, so a large backlog drains across ticks without one large transaction.
 func (s *Store) PruneJobEvents(ctx context.Context, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM job_events WHERE created_at < $1`, now.Add(-jobEventRetention))
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM job_events
+		WHERE id IN (
+			SELECT id
+			FROM job_events
+			WHERE created_at < $1
+			ORDER BY created_at, id
+			LIMIT $2
+		)`, now.Add(-jobEventRetention), jobEventPruneBatchSize)
 	if err != nil {
 		return fmt.Errorf("prune job events: %w", err)
 	}
