@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -219,10 +220,25 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		return m.escalateIfStuck(ctx, job, cand, names, "import candidates failed", now)
 	}
 	if len(items) == 0 {
-		// Empty folder on a job whose transfers all completed means the files
-		// were already imported (e.g. a crash between a prior successful
-		// ExecuteManualImport and this state write). Treat it as done so verify
-		// is idempotent across restarts.
+		// An empty Lidarr preview only proves the import already happened when
+		// the exact local folder Lidarr scanned is also absent or empty. Lidarr
+		// may otherwise return an empty preview when it cannot see the supplied
+		// path (for example, because of a container path mismatch).
+		entries, readErr := os.ReadDir(folder)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			m.log().Error("inspect folder after empty import candidates failed",
+				"album_job", job.ID, "folder", folder, "err", readErr)
+			return m.escalateIfStuck(ctx, job, cand, names, "inspect folder after empty import candidates failed", now)
+		}
+		if readErr == nil && len(entries) > 0 {
+			m.log().Error("empty import candidates for non-empty folder",
+				"album_job", job.ID, "folder", folder, "entries", len(entries))
+			return m.escalateIfStuck(ctx, job, cand, names, "empty import candidates for non-empty folder", now)
+		}
+
+		// The folder is absent or actually empty, consistent with a crash
+		// between a prior successful ExecuteManualImport and this state write.
+		// Treat it as done so verify remains idempotent across restarts.
 		emptyDetail := fmt.Sprintf("empty folder treated as already imported (folder %s)", folder)
 		m.log().Info(emptyDetail, "album_job", job.ID, "folder", folder)
 		m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, emptyDetail, now)
