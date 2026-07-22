@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,4 +285,55 @@ func TestManualImportCandidatesUsesScanTimeout(t *testing.T) {
 	if _, err := slow.ManualImportCandidates(context.Background(), "/f"); err == nil {
 		t.Fatal("scan exceeding its own timeout should fail")
 	}
+}
+
+func TestPing(t *testing.T) {
+	t.Run("succeeds on 200 with the api key", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/system/status" {
+				t.Errorf("path = %q, want /api/v1/system/status", r.URL.Path)
+			}
+			if r.Header.Get("X-Api-Key") != "k" {
+				t.Errorf("missing api key")
+			}
+			w.Write([]byte(`{"version":"2.5.0"}`))
+		}))
+		defer srv.Close()
+		if err := New(srv.URL, "k").Ping(context.Background()); err != nil {
+			t.Fatalf("Ping: %v", err)
+		}
+	})
+
+	t.Run("reports a bad api key distinctly", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		err := New(srv.URL, "wrong").Ping(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "API key") {
+			t.Fatalf("want an API-key error, got %v", err)
+		}
+	})
+
+	t.Run("surfaces other non-2xx statuses", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		err := New(srv.URL, "k").Ping(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "500") {
+			t.Fatalf("want a status-500 error, got %v", err)
+		}
+	})
+
+	t.Run("wraps a transport failure as unreachable", func(t *testing.T) {
+		// Close the server immediately so the dial is refused.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		url := srv.URL
+		srv.Close()
+		err := New(url, "k").Ping(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "could not reach Lidarr") {
+			t.Fatalf("want an unreachable error, got %v", err)
+		}
+	})
 }

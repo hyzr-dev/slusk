@@ -31,3 +31,23 @@
   color: var(--text-muted);
   font-size: 12.5px;
 }
+
+.testButton {
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.testButton:disabled { opacity: 0.5; cursor: default; }
+
+.status { font-size: 12px; font-weight: 600; }
+.untested { color: var(--text-dim); }
+.testing { color: var(--active); }
+.success { color: var(--done); }
+.failure { color: var(--failed); }
+
+/* The failure reason can be long; let it take the rest of the row and wrap. */
+.testError { flex: 1; font-size: 12px; color: var(--text-muted); }

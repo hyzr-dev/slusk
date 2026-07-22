@@ -121,6 +121,17 @@ export const t = {
       wantedSyncInterval: 'wanted_sync_interval',
       maxActive: 'max_active',
     },
+    connections: 'Connections',
+    soulseek: 'Soulseek',
+    testConnection: 'Test',
+    testStatus: {
+      untested: 'Not tested',
+      testing: 'Testing…',
+      success: 'Connected',
+      failure: 'Failed',
+    },
+    testUnreachable: 'The test endpoint could not be reached.',
+    testFailed: 'Connection test failed.',
   },
 } as const;
 

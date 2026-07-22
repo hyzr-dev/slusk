@@ -3,8 +3,16 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { apiGet, apiPost } from './client';
-import type { AppConfig, Job, JobDetail, JobEvent, Peer, StatusReport } from './types';
+import { apiGet, apiPost, apiPostJson } from './client';
+import type {
+  AppConfig,
+  ConnectionTestResult,
+  Job,
+  JobDetail,
+  JobEvent,
+  Peer,
+  StatusReport,
+} from './types';
 
 // Intervals match the legacy dashboard exactly so perceived freshness is
 // unchanged by the migration.
@@ -79,6 +87,16 @@ export function useConfig() {
     queryKey: queryKeys.config,
     queryFn: () => apiGet<AppConfig>('/api/config'),
     staleTime: Infinity, // config only changes when the file changes
+  });
+}
+
+// The connection test is a one-shot action (not cached state), so it's a
+// mutation. It has no side effects on server state, so nothing is invalidated;
+// the button reads mutation status directly for its four display states.
+export function useTestConnection(dependency: 'lidarr' | 'soulseek') {
+  return useMutation({
+    mutationFn: () =>
+      apiPostJson<ConnectionTestResult>(`/api/config/test/${dependency}`),
   });
 }
 

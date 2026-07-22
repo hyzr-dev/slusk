@@ -279,7 +279,7 @@ func main() {
 	// once at startup, same as the rest of cfg), so the ConfigFunc closes over
 	// a single fixed value instead of re-reading the file.
 	appConfig := observ.NewAppConfig(cfg.Lidarr.URL, cfg.Lidarr.APIKey,
-		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive)
+		cfg.Pipeline.WantedSyncInterval.Duration.String(), cfg.Pipeline.MaxActive, cfg.Soulseek.Enabled())
 	configFn := func() observ.AppConfig { return appConfig }
 	// Live queue-position/speed on the job detail page comes from the native
 	// backend's in-memory ListDownloads snapshot. The slskd backend leaves those
@@ -291,9 +291,36 @@ func main() {
 			return peers.ListDownloads(ctx)
 		}
 	}
+	// Connection tests for the settings view probe the loaded config, not any
+	// request payload. Lidarr is always configured; the Soulseek probe reports
+	// the current login state (a passive read of the background Run loop, not an
+	// active re-login) and is left nil when the native client is disabled so its
+	// endpoint answers "not enabled" rather than a misleading failure.
+	connectionTester := observ.ConnectionTester{
+		Lidarr: func(ctx context.Context) error { return lidarrClient.Ping(ctx) },
+	}
+	if soulClient != nil {
+		connectionTester.Soulseek = func(ctx context.Context) error {
+			st := soulClient.Status()
+			switch st.State {
+			case soulseek.StateConnected:
+				return nil
+			case soulseek.StateFailed:
+				if st.LastError != "" {
+					return fmt.Errorf("soulseek login failed: %s", st.LastError)
+				}
+				return fmt.Errorf("soulseek login failed")
+			default:
+				if st.LastError != "" {
+					return fmt.Errorf("soulseek not connected (%s): %s", st.State, st.LastError)
+				}
+				return fmt.Errorf("soulseek not connected (%s)", st.State)
+			}
+		}
+	}
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn)
+		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
