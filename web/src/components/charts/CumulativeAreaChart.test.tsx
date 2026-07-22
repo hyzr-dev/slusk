@@ -20,4 +20,9 @@ describe('CumulativeAreaChart', () => {
     render(<CumulativeAreaChart buckets={makeBuckets([0, 0, 0, 0])} />);
     expect(screen.getByText('0')).toBeInTheDocument();
   });
+
+  it('shows the empty state when there are no buckets', () => {
+    render(<CumulativeAreaChart buckets={[]} />);
+    expect(screen.getByText('No pass history yet')).toBeInTheDocument();
+  });
 });

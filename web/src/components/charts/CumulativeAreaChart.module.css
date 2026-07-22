@@ -11,3 +11,4 @@
 .area { fill: var(--active-bg); stroke: none; }
 .line { fill: none; stroke: var(--active); stroke-width: 2; }
 .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); }
+.empty { font-size: 12px; color: var(--text-muted); padding: 20px 0; text-align: center; }

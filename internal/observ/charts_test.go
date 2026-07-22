@@ -23,11 +23,12 @@ func newChartsTestHandler(reg *prometheus.Registry, charts ChartsFunc) http.Hand
 		ConnectionTester{}, charts)
 }
 
-// TestChartsEndpointZeroFillsHoursAndOrdersPassesOldestFirst asserts the JSON
-// shape: exactly 24 zero-filled hour buckets ending at "now" (oldest first),
-// and passes reversed from the store's newest-first order into oldest-first.
-func TestChartsEndpointZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
-	reg := prometheus.NewRegistry()
+// TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst asserts the bucket
+// math and pass-ordering logic directly against a fixed now, rather than
+// through the HTTP handler (which stamps time.Now()): calling toChartsDTO
+// with an injected now keeps this test's assertions - which pin exact bucket
+// boundaries relative to now - independent of wall-clock time.
+func TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
 	now := time.Date(2026, 7, 22, 15, 30, 0, 0, time.UTC)
 	newer := now.Add(-time.Minute)
 	older := now.Add(-2 * time.Minute)
@@ -39,22 +40,8 @@ func TestChartsEndpointZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
 	// Only one hour bucket has data - the rest must be zero-filled.
 	sparseHour := now.Truncate(time.Hour).Add(-3 * time.Hour)
 	counts := []core.HourCount{{Hour: sparseHour, Count: 7}}
-	charts := func(ctx context.Context) (ChartsData, error) {
-		return ChartsData{Passes: passes, CompletedByHour: counts}, nil
-	}
-	h := newChartsTestHandler(reg, charts)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/charts", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var got chartsDTO
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	got := toChartsDTO(ChartsData{Passes: passes, CompletedByHour: counts}, now)
 
 	if len(got.Passes) != 2 {
 		t.Fatalf("expected 2 passes, got %d: %+v", len(got.Passes), got.Passes)
@@ -86,6 +73,41 @@ func TestChartsEndpointZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
 	}
 	if got.CompletedByHour[23].Hour != wantLast {
 		t.Errorf("last bucket = %s, want %s", got.CompletedByHour[23].Hour, wantLast)
+	}
+}
+
+// TestChartsEndpointServesPassesAndZeroFilledHourBuckets is an HTTP-level
+// sanity check limited to shape (status, array presence, bucket count) since
+// the handler stamps time.Now() itself - anything pinned to exact bucket
+// boundaries belongs in TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst
+// instead, which controls now directly.
+func TestChartsEndpointServesPassesAndZeroFilledHourBuckets(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	passes := []core.SearchPass{
+		{StartedAt: time.Now(), FinishedAt: time.Now(), Searched: 1, Matched: 1},
+		{StartedAt: time.Now(), FinishedAt: time.Now(), Searched: 1, Matched: 0},
+	}
+	charts := func(ctx context.Context) (ChartsData, error) {
+		return ChartsData{Passes: passes}, nil
+	}
+	h := newChartsTestHandler(reg, charts)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/charts", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got chartsDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Passes) != 2 {
+		t.Fatalf("expected 2 passes, got %d: %+v", len(got.Passes), got.Passes)
+	}
+	if len(got.CompletedByHour) != 24 {
+		t.Fatalf("expected 24 zero-filled hour buckets, got %d", len(got.CompletedByHour))
 	}
 }
 

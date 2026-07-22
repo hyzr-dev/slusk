@@ -65,9 +65,18 @@ func (s *Store) PruneSearchPasses(ctx context.Context, now time.Time) error {
 // CompletedByHour returns the count of attempt_succeeded job events per hour
 // since the given time, sparse (only hours with at least one event), oldest
 // first. Callers zero-fill missing hours. Backs GET /api/charts.
+//
+// The bucketing truncates in UTC explicitly (AT TIME ZONE 'UTC' twice: once
+// to interpret created_at's instant as a UTC timestamp for truncation, once
+// to reattach the UTC zone to the resulting timestamp) rather than relying on
+// date_trunc's implicit session-timezone truncation. Without this, a session
+// timezone with a fractional UTC offset would truncate to bucket boundaries
+// like :30 that never match the Go side's UTC time.Truncate(time.Hour) keys
+// in toChartsDTO, so every row would silently fail to zero-fill into place.
 func (s *Store) CompletedByHour(ctx context.Context, since time.Time) ([]core.HourCount, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT date_trunc('hour', created_at), count(*) FROM job_events
+		`SELECT date_trunc('hour', created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC', count(*)
+		 FROM job_events
 		 WHERE event = $1 AND created_at >= $2 GROUP BY 1 ORDER BY 1`,
 		string(core.EventAttemptSucceeded), since)
 	if err != nil {
@@ -81,6 +90,7 @@ func (s *Store) CompletedByHour(ctx context.Context, since time.Time) ([]core.Ho
 		if err := rows.Scan(&hc.Hour, &hc.Count); err != nil {
 			return nil, err
 		}
+		hc.Hour = hc.Hour.UTC()
 		out = append(out, hc)
 	}
 	return out, rows.Err()

@@ -127,7 +127,9 @@ func (d *Discovery) Tick(ctx context.Context, now time.Time) error {
 // failure must never block the pipeline, so it is logged at warn level and
 // swallowed rather than propagated (same pattern as recordEvent).
 func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time.Time) {
-	pass := core.SearchPass{StartedAt: now, FinishedAt: time.Now(), Searched: 1}
+	// A pass is one search within one tick, so both timestamps use the
+	// injected tick time rather than mixing in a wall-clock time.Now().
+	pass := core.SearchPass{StartedAt: now, FinishedAt: now, Searched: 1}
 	if matched {
 		pass.Matched = 1
 	}
@@ -142,8 +144,11 @@ func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time
 // search cycle ran to one of its two normal conclusions (backed off or
 // matched) rather than aborting early (album missing from the wanted
 // snapshot, a search error, or an AlbumReleases error) - Tick only records a
-// search pass when completed is true. matched is true only once
-// InsertCandidates has cached surviving candidates.
+// search pass when completed is true. matched is true only when the job
+// actually advanced to SELECTING: InsertCandidates cached surviving
+// candidates AND AdvanceJobStateFrom confirms the job was still WANTED to
+// advance from (it can report advanced=false if the job concurrently left
+// WANTED, e.g. cancelled by WantedSync between RunnableJobsInState and here).
 func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.Time) (completed, matched bool, err error) {
 	album, ok := d.p.WantedSource.Wanted()[job.LidarrAlbumID]
 	if !ok {
@@ -271,11 +276,12 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// between RunnableJobsInState and here). The candidates just inserted
 		// are inert rows on a job nothing will ever pick up again - acceptable,
 		// same as a cancelled job's stale candidate_attempts under the legacy
-		// engine.
+		// engine. This search cycle did not actually match anything usable, so
+		// matched must be false even though InsertCandidates succeeded.
 		d.log().Info("job left WANTED before candidates could be applied, leaving candidates in place",
 			"album_job", job.ID)
 	}
-	return true, true, nil
+	return true, advanced, nil
 }
 
 // newCandidateFrom converts a ranked core.RankedCandidate into the store's

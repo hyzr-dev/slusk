@@ -37,7 +37,7 @@ export default function PassBarChart({ passes }: { passes: SearchPass[] }) {
         const y = VIEW_HEIGHT - height;
         return (
           <rect
-            key={pass.startedAt}
+            key={slot}
             x={x}
             y={y}
             width={BAR_WIDTH}

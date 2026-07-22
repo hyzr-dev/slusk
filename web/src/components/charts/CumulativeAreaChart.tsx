@@ -6,7 +6,13 @@ const VIEW_WIDTH = 240;
 const VIEW_HEIGHT = 44;
 
 export default function CumulativeAreaChart({ buckets }: { buckets: HourCount[] }) {
-  if (buckets.length === 0) return null;
+  // Empty only happens before the first successful /api/charts load; in
+  // normal operation buckets is always the 24 zero-filled entries (all-zero
+  // included), which renders the flat baseline below. Match PassBarChart's
+  // empty-state presentation rather than rendering nothing.
+  if (buckets.length === 0) {
+    return <div className={styles.empty}>{t.overview.noChartData}</div>;
+  }
 
   let running = 0;
   const cumulative = buckets.map((b) => (running += b.count));

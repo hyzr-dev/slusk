@@ -16,9 +16,14 @@ import (
 // hour series is zero-filled to.
 const chartsHourBuckets = 24
 
+// ChartsRecentPasses caps how many recent search passes GET /api/charts
+// serves. Exported so main.go's chartsFn (the RecentSearchPasses caller) and
+// this package share a single source of truth for the cap.
+const ChartsRecentPasses = 20
+
 // ChartsData is the raw chart source; the handler formats and zero-fills it
 // into chartsDTO. Passes is newest first (see store.RecentSearchPasses),
-// capped at chartsRecentPasses; CompletedByHour is sparse (see
+// capped at ChartsRecentPasses; CompletedByHour is sparse (see
 // store.CompletedByHour).
 type ChartsData struct {
 	Passes          []core.SearchPass

@@ -536,6 +536,37 @@ func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 	}
 }
 
+// TestDiscoveryNoSearchPassOnAlbumReleasesError asserts a job whose
+// AlbumReleases call fails (an abort path) records nothing (issue #88).
+func TestDiscoveryNoSearchPassOnAlbumReleasesError(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleasesErr: errors.New("boom")}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 0 {
+		t.Errorf("expected no search pass when AlbumReleases fails, got %+v", passes)
+	}
+}
+
 // failingSearchPassStore wraps a real store, promoting every DiscoveryStore
 // method except RecordSearchPass (always fails), so tests can assert
 // Discovery.Tick swallows a RecordSearchPass failure - same best-effort

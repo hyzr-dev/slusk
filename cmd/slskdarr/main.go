@@ -240,11 +240,15 @@ func main() {
 		return st.RecentEvents(ctx, limit)
 	}
 	chartsFn := func(ctx context.Context) (observ.ChartsData, error) {
-		passes, err := st.RecentSearchPasses(ctx, 20)
+		passes, err := st.RecentSearchPasses(ctx, observ.ChartsRecentPasses)
 		if err != nil {
 			return observ.ChartsData{}, err
 		}
-		counts, err := st.CompletedByHour(ctx, time.Now().Add(-24*time.Hour))
+		// Aligned to the 24 whole-hour buckets the Overview chart displays
+		// (see observ.toChartsDTO): starting mid-hour would query a partial
+		// first hour that the zero-fill then silently discards.
+		since := time.Now().UTC().Truncate(time.Hour).Add(-23 * time.Hour)
+		counts, err := st.CompletedByHour(ctx, since)
 		if err != nil {
 			return observ.ChartsData{}, err
 		}

@@ -76,7 +76,11 @@ describe('Overview', () => {
   });
 
   it('shows the empty pass-history state when the charts report has no passes', () => {
-    renderOverview({ passes: [], completedByHour: [] });
+    // completedByHour is seeded (as it always is in real operation - the
+    // backend zero-fills it to 24 buckets) so only the pass chart's empty
+    // state renders here; an empty completedByHour is CumulativeAreaChart's
+    // own, separately-covered empty state.
+    renderOverview({ passes: [], completedByHour: charts.completedByHour });
     expect(screen.getByText('No pass history yet')).toBeInTheDocument();
   });
 });
