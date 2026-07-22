@@ -57,6 +57,9 @@ const (
 	defaultListenAddr = "127.0.0.1:0"
 	// defaultGluetunTimeout bounds one gluetun control-server fetch.
 	defaultGluetunTimeout = 5 * time.Second
+	// defaultShareScanLogInterval is how often scanShares logs progress
+	// during a share rescan.
+	defaultShareScanLogInterval = 30 * time.Second
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -171,6 +174,9 @@ type Config struct {
 	// gluetunTimeout bounds one control-server fetch so a hung gluetun cannot
 	// stall the startup backoff rhythm. Default 5s.
 	gluetunTimeout time.Duration
+	// shareScanLogInterval is how often scan progress is logged during a
+	// share rescan. Default 30s; test seam.
+	shareScanLogInterval time.Duration
 	// shareScanHook, when non-nil, is invoked at the start of every share
 	// scan (see scanShares) instead of nothing, letting tests block or fail
 	// the scan deterministically without touching the filesystem. Always nil
@@ -340,6 +346,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.gluetunTimeout <= 0 {
 		cfg.gluetunTimeout = defaultGluetunTimeout
+	}
+	if cfg.shareScanLogInterval <= 0 {
+		cfg.shareScanLogInterval = defaultShareScanLogInterval
 	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2

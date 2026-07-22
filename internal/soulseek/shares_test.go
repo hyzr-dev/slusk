@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -72,6 +74,82 @@ func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
 	}
 	if c.shareSnapshot() != snapshot {
 		t.Fatal("failed rescan replaced last-known-good snapshot")
+	}
+}
+
+// TestRescanSharesLogsFinalSummary asserts RescanShares logs a summary line
+// with the directory/file counts and a duration once the snapshot is stored.
+func TestRescanSharesLogsFinalSummary(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Album", "track.flac"), []byte("not really flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, logger)
+
+	stats, err := c.RescanShares(context.Background())
+	if err != nil {
+		t.Fatalf("RescanShares: %v", err)
+	}
+
+	output := logBuf.String()
+	if !strings.Contains(output, "shares scanned") {
+		t.Fatalf("expected final summary log, got %q", output)
+	}
+	if !strings.Contains(output, fmt.Sprintf("directories=%d", stats.Directories)) {
+		t.Fatalf("expected directories=%d in log, got %q", stats.Directories, output)
+	}
+	if !strings.Contains(output, fmt.Sprintf("files=%d", stats.Files)) {
+		t.Fatalf("expected files=%d in log, got %q", stats.Files, output)
+	}
+	if !strings.Contains(output, "duration=") {
+		t.Fatalf("expected duration= in log, got %q", output)
+	}
+}
+
+// TestRescanSharesLogsPeriodicProgress asserts scanShares logs at least one
+// throttled progress line while walking a share, using a near-zero log
+// interval so the assertion is deterministic without sleeps or a fake clock.
+func TestRescanSharesLogsPeriodicProgress(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("track%d.flac", i)
+		if err := os.WriteFile(filepath.Join(root, "Album", name), []byte("not really flac"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	c := New(Config{
+		SharedFolders:        []SharedFolder{{Name: "Music", Path: root}},
+		shareScanLogInterval: time.Nanosecond,
+	}, logger)
+
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatalf("RescanShares: %v", err)
+	}
+
+	output := logBuf.String()
+	if !strings.Contains(output, "share scan in progress") {
+		t.Fatalf("expected periodic progress log, got %q", output)
+	}
+	if !strings.Contains(output, "share=Music") {
+		t.Fatalf("expected share= in progress log, got %q", output)
+	}
+	if !strings.Contains(output, "directories=") {
+		t.Fatalf("expected directories= in progress log, got %q", output)
+	}
+	if !strings.Contains(output, "files=") {
+		t.Fatalf("expected files= in progress log, got %q", output)
 	}
 }
 

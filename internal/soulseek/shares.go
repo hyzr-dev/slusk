@@ -96,11 +96,20 @@ func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
 	c.shareScanMu.Lock()
 	defer c.shareScanMu.Unlock()
 
+	start := time.Now()
 	snapshot, err := c.scanShares(ctx)
 	if err != nil {
 		return ShareStats{}, err
 	}
 	c.shares.Store(snapshot)
+
+	if c.logger != nil {
+		c.logger.Info("shares scanned",
+			"directories", snapshot.stats.Directories,
+			"files", snapshot.stats.Files,
+			"duration", time.Since(start))
+	}
+
 	return snapshot.stats, nil
 }
 
@@ -215,6 +224,8 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 	s := &shareSnapshot{files: make(map[string]*indexedFile), byDirectory: make(map[string]peer.Directory)}
 	names := make(map[string]struct{}, len(c.cfg.SharedFolders))
 	paths := make(map[string]struct{}, len(c.cfg.SharedFolders))
+	start := time.Now()
+	lastLog := start
 	for _, configured := range c.cfg.SharedFolders {
 		name := strings.TrimSpace(configured.Name)
 		if name == "" || name != configured.Name || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
@@ -273,6 +284,14 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 					return filepath.SkipDir
 				}
 				return nil
+			}
+			if c.logger != nil && time.Since(lastLog) >= c.cfg.shareScanLogInterval {
+				lastLog = time.Now()
+				c.logger.Info("share scan in progress",
+					"share", configured.Name,
+					"directories", len(s.byDirectory),
+					"files", len(s.files),
+					"elapsed", time.Since(start))
 			}
 			rel, err := filepath.Rel(root, path)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
