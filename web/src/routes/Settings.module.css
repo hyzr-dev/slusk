@@ -11,63 +11,124 @@
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 18px 20px;
   margin-bottom: 14px;
 }
 
-.groupTitle { font-size: 13px; font-weight: 600; margin: 0 0 12px; }
-.field { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-.label { width: 220px; font-size: 12.5px; color: var(--text-muted); }
+.groupTitle { font-size: 14px; font-weight: 600; margin: 0 0 16px; }
+
+/* A named subsection within a card (Gluetun, Shared folders inside
+   Soulseek) — one step quieter than groupTitle since it isn't its own card. */
+.subTitle {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 18px 0 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label { font-size: 12px; color: var(--text-muted); }
 .key { font-family: var(--font-mono); color: var(--text-dim); }
 
-.input {
-  flex: 1;
-  padding: 8px 10px;
+.input,
+.select {
+  padding: 8px 11px;
   border-radius: var(--radius-sm);
-  /* --panel, not --panel-raised: the latter marks elevated/active surfaces
-     (see Jobs.module.css) and is visibly lighter than form chrome should be. */
-  background: var(--panel);
+  /* --panel-inset, not --panel: inputs read as recessed relative to the
+     card they sit in, matching the design mock's darker input surface. */
+  background: var(--panel-inset);
   border: 1px solid var(--border);
-  color: var(--text-muted);
+  color: var(--text);
   font-size: 12.5px;
 }
+/* Numeric/technical values (durations, addresses, DSNs, ids) read better in
+   the monospace face; the backend/log-level dropdowns stay in the sans font
+   used for prose labels. */
+.input { font-family: var(--font-mono); }
 
-.input:not(:disabled) {
-  color: var(--text);
-  cursor: text;
+.input:disabled,
+.select:disabled {
+  color: var(--text-muted);
+  cursor: default;
 }
-.input:not(:disabled):focus {
+.input:not(:disabled) { cursor: text; }
+.input:not(:disabled):focus,
+.select:not(:disabled):focus {
   outline: none;
   border-color: var(--active);
 }
 
 .fieldError {
-  flex: 1;
   font-size: 12px;
   color: var(--failed);
 }
 
-.saveRow {
-  display: flex;
-  align-items: center;
+.folderRows { display: flex; flex-direction: column; gap: 12px; }
+
+.folderRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
   gap: 12px;
-  /* Sits between two .group cards: inset horizontally to line up with their
-     inner padding, and keep clear air before the Connections card below. */
-  margin: 4px 16px 20px;
+  align-items: end;
 }
 
-.saveButton {
-  padding: 8px 18px;
+.removeFolderButton,
+.addFolderButton {
+  padding: 8px 14px;
   border-radius: var(--radius-sm);
   background: var(--panel-raised);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 12.5px;
   cursor: pointer;
+  height: fit-content;
+}
+.addFolderButton { margin-top: 2px; align-self: flex-start; }
+
+/* Danger zone: same card chrome, but bordered and titled in the failed
+   accent so it visually reads as higher-stakes than the rest of the form. */
+.dangerGroup {
+  background: var(--panel);
+  border: 1px solid var(--failed);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 14px;
+}
+.dangerTitle { font-size: 14px; font-weight: 600; margin: 0 0 16px; color: var(--failed); }
+.dangerHint { font-size: 12px; color: var(--text-muted); margin-top: 14px; }
+
+.saveRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* Sits between two .group cards: inset horizontally to line up with their
+     inner padding, and keep clear air before the Connections card below. */
+  margin: 4px 16px 20px;
+}
+
+.saveButton {
+  padding: 9px 18px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  border: none;
+  /* --bg, not a bespoke near-black hex: it's the same dark surface color
+     used elsewhere, and reads correctly against the accent-green fill. */
+  color: var(--bg);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
 }
 .saveButton:disabled { opacity: 0.5; cursor: default; }
 
 .saveError { font-size: 12px; color: var(--failed); }
+.dangerWarning { font-size: 12px; font-weight: 600; color: var(--failed); }
 
 .restartingBanner {
   font-size: 12.5px;
@@ -85,6 +146,9 @@
   cursor: pointer;
 }
 .testButton:disabled { opacity: 0.5; cursor: default; }
+
+.testRow { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.testLabel { width: 220px; font-size: 12.5px; color: var(--text-muted); }
 
 .status { font-size: 12px; font-weight: 600; }
 .untested { color: var(--text-dim); }

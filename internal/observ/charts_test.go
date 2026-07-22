@@ -20,7 +20,7 @@ func newChartsTestHandler(reg *prometheus.Registry, charts ChartsFunc) http.Hand
 	cancel := func(ctx context.Context, jobID int64) error { return nil }
 	return NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers,
 		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers,
-		ConnectionTester{}, charts)
+		ConnectionTester{}, charts, noopConfigWriter, noopRestart)
 }
 
 // TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst asserts the bucket

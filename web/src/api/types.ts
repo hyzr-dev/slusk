@@ -119,38 +119,178 @@ export interface StatusReport {
   moduleDetails: Record<string, ModuleStatus>;
 }
 
+/** internal/observ/config.go LidarrView */
+export interface LidarrConfigDTO {
+  url: string;
+  apiKeyConfigured: boolean;
+}
+
+/** internal/observ/config.go SlskdView */
+export interface SlskdConfigDTO {
+  url: string;
+  apiKeyConfigured: boolean;
+}
+
+/** internal/observ/config.go WeightsView — [pipeline.weights] TOML keys. */
+export interface PipelineWeightsDTO {
+  format: number;
+  bitrate: number;
+  reliability: number;
+  fileCount: number;
+  knownUser: number;
+}
+
 /**
- * GET /api/config — internal/observ/config.go AppConfig. Secrets are never
- * sent, only their presence. Field names mirror the [pipeline] TOML keys so
- * the settings view can display something that matches the config file the
- * user actually edits. writable reports whether the config file's directory
- * currently accepts writes (see config.ProbeWritable) — false renders a
- * read-only view instead of the editable form.
+ * internal/observ/config.go PipelineView. Durations are Go's
+ * time.Duration.String() form (e.g. "1h0m0s", "45s") — always parseable as
+ * plain text, no client-side parsing needed.
+ */
+export interface PipelineConfigDTO {
+  backend: 'slskd' | 'soulseek';
+  maxCandidatesPerAlbum: number;
+  maxActive: number;
+  maxRetries: number;
+  maxInflightPerPeer: number;
+  maxTransferRetries: number;
+  minBitrate: number;
+  transferDeadline: string;
+  stallTimeout: string;
+  searchTimeout: string;
+  backoffBase: string;
+  backoffCap: string;
+  candidateTtl: string;
+  failedReviveAfter: string;
+  stuckAfter: string;
+  tickTimeout: string;
+  importConfirmTimeout: string;
+  wantedSyncInterval: string;
+  discoveryInterval: string;
+  selectingInterval: string;
+  downloadingInterval: string;
+  importingInterval: string;
+  manualImportTimeout: string;
+  importRetryCooldown: string;
+  weights: PipelineWeightsDTO;
+}
+
+/** internal/observ/config.go SharedFolderView — one [[soulseek.shared_folders]] entry. */
+export interface SharedFolderDTO {
+  name: string;
+  path: string;
+}
+
+/** internal/observ/config.go GluetunView — [soulseek.gluetun]. */
+export interface GluetunConfigDTO {
+  controlUrl: string;
+  apiKeyConfigured: boolean;
+}
+
+/**
+ * internal/observ/config.go SoulseekView. enabled is derived
+ * server-side from whether the section is configured, and is never sent
+ * back in the POST body.
+ */
+export interface SoulseekConfigDTO {
+  enabled: boolean;
+  serverAddress: string;
+  username: string;
+  passwordConfigured: boolean;
+  listenAddr: string;
+  uploadSlots: number;
+  gluetun: GluetunConfigDTO;
+  sharedFolders: SharedFolderDTO[];
+}
+
+/** internal/observ/config.go StoreView. */
+export interface StoreConfigDTO {
+  dsnConfigured: boolean;
+}
+
+/**
+ * internal/observ/config.go ObservView. logLevel may be "" (meaning
+ * "use the default, info") or one of debug/info/warn/error.
+ */
+export interface ObservConfigDTO {
+  listenAddr: string;
+  authTokenConfigured: boolean;
+  logLevel: string;
+}
+
+/** internal/observ/config.go PathsView. */
+export interface PathsConfigDTO {
+  slskdCompleteDir: string;
+}
+
+/**
+ * GET /api/config — internal/observ/config.go AppConfig. Every non-secret
+ * field is always present, nested by TOML section; secrets are never sent,
+ * only their presence via the *Configured booleans. writable reports
+ * whether the config file's directory currently accepts writes (see
+ * config.ProbeWritable) — false renders a read-only view instead of the
+ * editable form.
  */
 export interface AppConfig {
-  lidarrUrl: string;
-  lidarrApiKeyConfigured: boolean;
-  wantedSyncInterval: string;
-  maxActive: number;
-  minBitrate: number;
-  stallTimeout: string;
-  soulseekEnabled: boolean;
+  lidarr: LidarrConfigDTO;
+  slskd: SlskdConfigDTO;
+  pipeline: PipelineConfigDTO;
+  soulseek: SoulseekConfigDTO;
+  store: StoreConfigDTO;
+  observ: ObservConfigDTO;
+  paths: PathsConfigDTO;
   writable: boolean;
 }
 
 /**
  * POST /api/config request body — internal/observ/config.go
- * configUpdateRequest. lidarrApiKey omitted or blank means "keep the
- * currently configured value"; the settings view never receives the secret
- * back, so it has no way to resend it unchanged.
+ * configUpdateRequest. All non-secret fields are always included (there is
+ * no partial-update semantics: the form always submits the full current
+ * state of every field). Each secret field below is omitted (or blank) to
+ * mean "keep the currently configured value"; the settings view never
+ * receives a secret back, so it has no way to resend one unchanged.
  */
 export interface ConfigUpdateRequest {
-  lidarrUrl: string;
-  lidarrApiKey?: string;
-  wantedSyncInterval: string;
-  stallTimeout: string;
-  maxActive: number;
-  minBitrate: number;
+  lidarr: { url: string; apiKey?: string };
+  slskd: { url: string; apiKey?: string };
+  pipeline: {
+    backend: 'slskd' | 'soulseek';
+    maxCandidatesPerAlbum: number;
+    maxActive: number;
+    maxRetries: number;
+    maxInflightPerPeer: number;
+    maxTransferRetries: number;
+    minBitrate: number;
+    transferDeadline: string;
+    stallTimeout: string;
+    searchTimeout: string;
+    backoffBase: string;
+    backoffCap: string;
+    candidateTtl: string;
+    failedReviveAfter: string;
+    stuckAfter: string;
+    tickTimeout: string;
+    importConfirmTimeout: string;
+    wantedSyncInterval: string;
+    discoveryInterval: string;
+    selectingInterval: string;
+    downloadingInterval: string;
+    importingInterval: string;
+    manualImportTimeout: string;
+    importRetryCooldown: string;
+    weights: PipelineWeightsDTO;
+  };
+  // soulseek.enabled is derived server-side and deliberately absent here.
+  soulseek: {
+    serverAddress: string;
+    username: string;
+    password?: string;
+    listenAddr: string;
+    uploadSlots: number;
+    gluetun: { controlUrl: string; apiKey?: string };
+    sharedFolders: SharedFolderDTO[];
+  };
+  store: { dsn?: string };
+  observ: { listenAddr: string; authToken?: string; logLevel: string };
+  paths: { slskdCompleteDir: string };
 }
 
 /** POST /api/config 200 response body. */
@@ -161,8 +301,12 @@ export interface ConfigUpdateResult {
 
 /**
  * Error body shared by POST /api/config's 400/409/422/500 responses.
- * fieldErrors is present only for a 422 validation failure, keyed by the
- * request field name it applies to.
+ * fieldErrors is present only for a 422 validation failure, keyed by a
+ * dot-path into the request body matching its own (camelCase) key names,
+ * e.g. "pipeline.maxActive" or "soulseek.sharedFolders[0].name". A 422 can
+ * also carry an empty fieldErrors object when the failure is a cross-field
+ * rule with no single field to attach to — the message in `error` is the
+ * thing to show in that case.
  */
 export interface ApiErrorBody {
   error: string;
