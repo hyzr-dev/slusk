@@ -140,6 +140,60 @@ func waitTree(t *testing.T, condition func() bool, message string) {
 	t.Fatal(message)
 }
 
+type treeTestClock struct{ current time.Time }
+
+func (c *treeTestClock) Now() time.Time { return c.current }
+func (c *treeTestClock) Advance(d time.Duration) {
+	c.current = c.current.Add(d)
+}
+
+func treePeer(t *testing.T, c *Client, generation uint64, username string) *peerSession {
+	t.Helper()
+	local, remote := net.Pipe()
+	session := c.newSession(local, sessionKey{username: username, connType: distributed.ConnectionType}, sessionInitiatorLocal, sessionRoleParent, generation, nil)
+	t.Cleanup(func() {
+		session.Close(errors.New("test complete"))
+		_ = remote.Close()
+	})
+	return session
+}
+
+func branchLevelSessionFrame(t *testing.T, level int32) sessionFrame {
+	t.Helper()
+	message := &distributed.BranchLevel{Level: level}
+	wire, err := message.Serialize(message)
+	if err != nil {
+		t.Fatalf("serialize branch level: %v", err)
+	}
+	return sessionFrame{connType: distributed.ConnectionType, code: int(distributed.CodeBranchLevel), wire: wire}
+}
+
+func branchRootSessionFrame(t *testing.T, root string) sessionFrame {
+	t.Helper()
+	message := &distributed.BranchRoot{Root: root}
+	wire, err := message.Serialize(message)
+	if err != nil {
+		t.Fatalf("serialize branch root: %v", err)
+	}
+	return sessionFrame{connType: distributed.ConnectionType, code: int(distributed.CodeBranchRoot), wire: wire}
+}
+
+func searchSessionFrame(t *testing.T, username, query string, token soul.Token) sessionFrame {
+	t.Helper()
+	wire := rawDistributedSearchFrame(searchBody(t, username, query, token))
+	return sessionFrame{connType: distributed.ConnectionType, code: int(distributed.CodeSearch), wire: wire}
+}
+
+func embeddedSearchSessionFrame(t *testing.T, username, query string, token soul.Token) sessionFrame {
+	t.Helper()
+	message := &distributed.EmbeddedMessage{Code: distributed.CodeSearch, Message: searchBody(t, username, query, token)}
+	wire, err := message.Serialize(message)
+	if err != nil {
+		t.Fatalf("serialize embedded search: %v", err)
+	}
+	return sessionFrame{connType: distributed.ConnectionType, code: int(distributed.CodeEmbeddedMessage), wire: wire}
+}
+
 func TestDistributedTreeInitialAdvertisements(t *testing.T) {
 	c, conn, _ := startTreeClient(t)
 	frames := conn.snapshot()
@@ -655,6 +709,271 @@ func TestCandidateStaleAfterReset(t *testing.T) {
 	if c.sessions.Get(sessionKey{username: "late", connType: distributed.ConnectionType}) != nil {
 		t.Fatal("stale candidate session survived reset")
 	}
+}
+
+func TestDistributedInboundRateLimitMixedFramesAndRefill(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	clock := &treeTestClock{current: time.Unix(100, 0)}
+	parent := treePeer(t, c, generation, "limited-parent")
+	child := treePeer(t, c, generation, "healthy-child")
+
+	searches := 0
+	c.tree.mu.Lock()
+	c.tree.now = clock.Now
+	c.tree.parent = parent
+	c.tree.children[child] = struct{}{}
+	c.tree.onSearch = func(distributed.Search, []byte) { searches++ }
+	c.tree.mu.Unlock()
+
+	burst := []sessionFrame{
+		branchLevelSessionFrame(t, 1),
+		branchRootSessionFrame(t, "root-a"),
+		searchSessionFrame(t, "alice", "one", 1),
+		branchLevelSessionFrame(t, 2),
+		branchRootSessionFrame(t, "root-b"),
+		searchSessionFrame(t, "bob", "two", 2),
+		branchLevelSessionFrame(t, 3),
+		branchRootSessionFrame(t, "root-c"),
+	}
+	for i, frame := range burst {
+		if err := c.tree.frame(parent, frame); err != nil {
+			t.Fatalf("burst frame %d: %v", i, err)
+		}
+	}
+	if searches != 2 || len(child.writes) != inboundFrameBurst {
+		t.Fatalf("burst dispatches searches/child writes = %d/%d, want 2/%d", searches, len(child.writes), inboundFrameBurst)
+	}
+
+	dropped := searchSessionFrame(t, "carol", "dropped", 3)
+	if err := c.tree.frame(parent, dropped); err != nil {
+		t.Fatalf("over-limit search: %v", err)
+	}
+	clock.Advance(99 * time.Millisecond)
+	if err := c.tree.frame(parent, dropped); err != nil {
+		t.Fatalf("99ms search: %v", err)
+	}
+	if searches != 2 || len(child.writes) != inboundFrameBurst {
+		t.Fatalf("over-limit search dispatched: searches/child writes = %d/%d", searches, len(child.writes))
+	}
+
+	ping := sessionFrame{connType: distributed.ConnectionType, code: 0, wire: []byte{1, 0, 0, 0, 0}}
+	if err := c.tree.frame(parent, ping); err != nil {
+		t.Fatalf("rate-exempt ping: %v", err)
+	}
+	if err := c.tree.frame(parent, dropped); err != nil {
+		t.Fatalf("post-ping search: %v", err)
+	}
+	if searches != 2 {
+		t.Fatal("ping refilled or consumed the exhausted bucket")
+	}
+
+	clock.Advance(time.Millisecond)
+	if err := c.tree.frame(parent, dropped); err != nil {
+		t.Fatalf("100ms search: %v", err)
+	}
+	if searches != 3 || len(child.writes) != inboundFrameBurst+1 {
+		t.Fatalf("refilled dispatches searches/child writes = %d/%d, want 3/%d", searches, len(child.writes), inboundFrameBurst+1)
+	}
+
+	malformed := sessionFrame{connType: distributed.ConnectionType, code: int(distributed.CodeBranchRoot), wire: []byte{0}}
+	if err := c.tree.frame(parent, malformed); !errors.Is(err, errInvalidDistributedFrame) {
+		t.Fatalf("malformed over-limit frame error = %v, want invalid frame", err)
+	}
+	select {
+	case <-parent.done:
+		t.Fatal("valid over-limit traffic closed source")
+	default:
+	}
+	select {
+	case <-child.done:
+		t.Fatal("valid over-limit traffic closed healthy child")
+	default:
+	}
+}
+
+func TestDistributedInboundRateLimitRawAndEmbeddedSearchShareBucket(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	clock := &treeTestClock{current: time.Unix(200, 0)}
+	parent := treePeer(t, c, generation, "search-parent")
+	callbacks := 0
+	c.tree.mu.Lock()
+	c.tree.now = clock.Now
+	c.tree.parent = parent
+	c.tree.onSearch = func(distributed.Search, []byte) { callbacks++ }
+	c.tree.mu.Unlock()
+
+	for i := 0; i < inboundFrameBurst-1; i++ {
+		if err := c.tree.frame(parent, branchRootSessionFrame(t, "shared-root")); err != nil {
+			t.Fatalf("consume metadata token %d: %v", i, err)
+		}
+	}
+	if err := c.tree.frame(parent, searchSessionFrame(t, "raw", "last-token", 1)); err != nil {
+		t.Fatalf("raw search: %v", err)
+	}
+	if err := c.tree.frame(parent, embeddedSearchSessionFrame(t, "embedded", "shared", 2)); err != nil {
+		t.Fatalf("over-limit embedded search: %v", err)
+	}
+	if callbacks != 1 {
+		t.Fatalf("shared-bucket callbacks = %d, want 1", callbacks)
+	}
+	clock.Advance(inboundFrameRefillInterval)
+	if err := c.tree.frame(parent, embeddedSearchSessionFrame(t, "embedded", "refilled", 3)); err != nil {
+		t.Fatalf("refilled embedded search: %v", err)
+	}
+	if callbacks != 2 {
+		t.Fatalf("refilled callbacks = %d, want 2", callbacks)
+	}
+}
+
+func TestDistributedInboundRateLimitSurvivesCandidatePromotion(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	clock := &treeTestClock{current: time.Unix(300, 0)}
+	candidate := treePeer(t, c, generation, "promoted-parent")
+	loser := treePeer(t, c, generation, "losing-parent")
+	callbacks := 0
+	c.tree.mu.Lock()
+	c.tree.now = clock.Now
+	c.tree.candidates[candidate] = &parentCandidateState{session: candidate, epoch: c.tree.epoch, signal: make(chan struct{}, 1)}
+	c.tree.candidates[loser] = &parentCandidateState{session: loser, epoch: c.tree.epoch, signal: make(chan struct{}, 1)}
+	c.tree.inboundBuckets[loser] = &inboundFrameBucket{tokens: 1, lastRefill: clock.Now()}
+	c.tree.onSearch = func(distributed.Search, []byte) { callbacks++ }
+	c.tree.mu.Unlock()
+
+	if err := c.tree.frame(candidate, branchLevelSessionFrame(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.tree.frame(candidate, branchRootSessionFrame(t, "promotion-root")); err != nil {
+		t.Fatal(err)
+	}
+	c.tree.mu.Lock()
+	bucketBefore := c.tree.inboundBuckets[candidate]
+	c.tree.mu.Unlock()
+	if err := c.tree.frame(candidate, searchSessionFrame(t, "candidate", "promote", 1)); err != nil {
+		t.Fatal(err)
+	}
+	c.tree.mu.Lock()
+	promoted := c.tree.parent == candidate
+	bucketAfter := c.tree.inboundBuckets[candidate]
+	_, loserBucket := c.tree.inboundBuckets[loser]
+	c.tree.mu.Unlock()
+	if !promoted || bucketBefore == nil || bucketAfter != bucketBefore {
+		t.Fatalf("promotion reset bucket: promoted=%v before=%p after=%p", promoted, bucketBefore, bucketAfter)
+	}
+	if loserBucket {
+		t.Fatal("promotion retained losing candidate bucket")
+	}
+
+	for i := 0; i < inboundFrameBurst-3; i++ {
+		if err := c.tree.frame(candidate, branchRootSessionFrame(t, "promotion-root")); err != nil {
+			t.Fatalf("post-promotion metadata %d: %v", i, err)
+		}
+	}
+	if err := c.tree.frame(candidate, searchSessionFrame(t, "candidate", "over-limit", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if callbacks != 1 {
+		t.Fatalf("promotion search callbacks = %d, want 1", callbacks)
+	}
+	select {
+	case <-loser.done:
+	default:
+		t.Fatal("losing candidate was not retired")
+	}
+}
+
+func TestDistributedInboundRateLimitLifecycleCleanup(t *testing.T) {
+	t.Run("close", func(t *testing.T) {
+		c, _, generation := startTreeClient(t)
+		parent := treePeer(t, c, generation, "closed-parent")
+		c.tree.mu.Lock()
+		c.tree.parent = parent
+		c.tree.mu.Unlock()
+		if err := c.tree.frame(parent, branchRootSessionFrame(t, "root")); err != nil {
+			t.Fatal(err)
+		}
+		parent.Close(errors.New("close test"))
+		c.tree.mu.Lock()
+		_, exists := c.tree.inboundBuckets[parent]
+		c.tree.mu.Unlock()
+		if exists {
+			t.Fatal("closed session retained bucket")
+		}
+	})
+
+	t.Run("retire and replace candidates", func(t *testing.T) {
+		c, _, generation := startTreeClient(t)
+		retired := treePeer(t, c, generation, "retired")
+		replaced := treePeer(t, c, generation, "replaced")
+		c.tree.mu.Lock()
+		epoch := c.tree.epoch
+		c.tree.candidates[retired] = &parentCandidateState{session: retired, epoch: epoch, signal: make(chan struct{}, 1)}
+		c.tree.candidates[replaced] = &parentCandidateState{session: replaced, epoch: epoch, signal: make(chan struct{}, 1)}
+		c.tree.inboundBuckets[retired] = &inboundFrameBucket{}
+		c.tree.inboundBuckets[replaced] = &inboundFrameBucket{}
+		c.tree.mu.Unlock()
+		c.tree.retireCandidate(retired, generation, epoch, errors.New("retired"))
+		c.tree.offerParents(context.Background(), generation, nil)
+		c.tree.mu.Lock()
+		remaining := len(c.tree.inboundBuckets)
+		c.tree.mu.Unlock()
+		if remaining != 0 {
+			t.Fatalf("candidate cleanup retained %d buckets", remaining)
+		}
+	})
+
+	t.Run("reset deactivate activate", func(t *testing.T) {
+		c, _, generation := startTreeClient(t)
+		session := treePeer(t, c, generation, "lifecycle")
+		putBucket := func() {
+			c.tree.mu.Lock()
+			c.tree.inboundBuckets[session] = &inboundFrameBucket{}
+			c.tree.mu.Unlock()
+		}
+		bucketCount := func() int {
+			c.tree.mu.Lock()
+			defer c.tree.mu.Unlock()
+			return len(c.tree.inboundBuckets)
+		}
+		putBucket()
+		c.tree.reset(generation)
+		if got := bucketCount(); got != 0 {
+			t.Fatalf("reset retained %d buckets", got)
+		}
+		putBucket()
+		c.tree.deactivate(generation)
+		if got := bucketCount(); got != 0 {
+			t.Fatalf("deactivate retained %d buckets", got)
+		}
+		putBucket()
+		if err := c.tree.activate(generation); err != nil {
+			t.Fatal(err)
+		}
+		if got := bucketCount(); got != 0 {
+			t.Fatalf("activate retained %d buckets", got)
+		}
+	})
+
+	t.Run("server takeover", func(t *testing.T) {
+		c, _, generation := startTreeClient(t)
+		candidate := treePeer(t, c, generation, "server-loser")
+		c.tree.mu.Lock()
+		c.tree.candidates[candidate] = &parentCandidateState{session: candidate, epoch: c.tree.epoch, signal: make(chan struct{}, 1)}
+		c.tree.inboundBuckets[candidate] = &inboundFrameBucket{}
+		c.tree.mu.Unlock()
+		err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{
+			Code:    distributed.CodeSearch,
+			Message: searchBody(t, "server", "takeover", 1),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.tree.mu.Lock()
+		remaining := len(c.tree.inboundBuckets)
+		c.tree.mu.Unlock()
+		if remaining != 0 {
+			t.Fatalf("server takeover retained %d buckets", remaining)
+		}
+	})
 }
 
 func TestDistributedValidationSlowChildAndReset(t *testing.T) {
