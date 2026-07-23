@@ -11,9 +11,33 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
-// acceptPeerErrBackoff is how long acceptPeers pauses after a transient
-// Accept error so a persistent descriptor failure cannot busy-spin.
-const acceptPeerErrBackoff = 100 * time.Millisecond
+const (
+	acceptPeerErrBackoff    = 100 * time.Millisecond
+	acceptPeerErrBackoffCap = time.Second
+)
+
+// acceptPeerRetryDelay maps consecutive transient Accept errors to their wait.
+// The first error retries immediately; subsequent errors use exponential
+// backoff until the listener-specific cap is reached.
+func acceptPeerRetryDelay(consecutiveErrors int) time.Duration {
+	if consecutiveErrors <= 1 {
+		return 0
+	}
+	return nextBackoff(consecutiveErrors-2, acceptPeerErrBackoff, acceptPeerErrBackoffCap)
+}
+
+// waitForAcceptPeerRetry waits for delay or reports that ctx was canceled.
+func waitForAcceptPeerRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 func (c *Client) acquireInboundLease() *inboundLease {
 	select {
@@ -52,19 +76,32 @@ func (c *Client) closeHandshakes() {
 // a handshake goroutine starts and remains attached to an internally retained
 // inbound session (or caller-owned indirect PeerConn) until that owner closes.
 func (c *Client) acceptPeers(ctx context.Context, ln net.Listener) {
+	c.acceptPeersWithRetryWait(ctx, ln, waitForAcceptPeerRetry)
+}
+
+func (c *Client) acceptPeersWithRetryWait(
+	ctx context.Context,
+	ln net.Listener,
+	retryWait func(context.Context, time.Duration) bool,
+) {
+	consecutiveAcceptErrors := 0
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
+			consecutiveAcceptErrors++
 			if c.logger != nil {
 				c.logger.Debug("accept peer connection", "err", err)
 			}
-			time.Sleep(acceptPeerErrBackoff)
+			if delay := acceptPeerRetryDelay(consecutiveAcceptErrors); delay > 0 && !retryWait(ctx, delay) {
+				return
+			}
 			continue
 		}
 
+		consecutiveAcceptErrors = 0
 		lease := c.acquireInboundLease()
 		if lease == nil {
 			_ = conn.Close()

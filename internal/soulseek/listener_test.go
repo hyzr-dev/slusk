@@ -3,15 +3,233 @@ package soulseek
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
+
+type scriptedAcceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+type scriptedPeerListener struct {
+	calls   chan struct{}
+	results chan scriptedAcceptResult
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newScriptedPeerListener() *scriptedPeerListener {
+	return &scriptedPeerListener{
+		calls:   make(chan struct{}),
+		results: make(chan scriptedAcceptResult),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (l *scriptedPeerListener) Accept() (net.Conn, error) {
+	select {
+	case l.calls <- struct{}{}:
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+
+	select {
+	case result := <-l.results:
+		return result.conn, result.err
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *scriptedPeerListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *scriptedPeerListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func waitForAcceptCall(t *testing.T, l *scriptedPeerListener, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-l.calls:
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for listener Accept call")
+	}
+}
+
+type controlledRetryWait struct {
+	calls    chan time.Duration
+	releases chan struct{}
+}
+
+func newControlledRetryWait() *controlledRetryWait {
+	return &controlledRetryWait{
+		calls:    make(chan time.Duration),
+		releases: make(chan struct{}),
+	}
+}
+
+func (w *controlledRetryWait) wait(ctx context.Context, delay time.Duration) bool {
+	select {
+	case w.calls <- delay:
+	case <-ctx.Done():
+		return false
+	}
+
+	select {
+	case <-w.releases:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func waitForAcceptWithoutRetryWait(
+	t *testing.T,
+	l *scriptedPeerListener,
+	wait *controlledRetryWait,
+	timeout time.Duration,
+) {
+	t.Helper()
+	select {
+	case <-l.calls:
+	case delay := <-wait.calls:
+		t.Fatalf("retry wait called with %v before the next Accept", delay)
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for listener Accept call")
+	}
+}
+
+func TestAcceptPeerRetryDelay(t *testing.T) {
+	want := []time.Duration{
+		0,
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+		time.Second,
+		time.Second,
+	}
+	for i, wantDelay := range want {
+		consecutiveErrors := i + 1
+		if got := acceptPeerRetryDelay(consecutiveErrors); got != wantDelay {
+			t.Errorf("acceptPeerRetryDelay(%d) = %v, want %v", consecutiveErrors, got, wantDelay)
+		}
+	}
+}
+
+func TestAcceptPeersImmediateFirstRetryAndResetOnSuccess(t *testing.T) {
+	const timeout = 5 * time.Second
+
+	c := New(Config{}, nil)
+	c.inboundSlots = make(chan struct{}, 1)
+	occupiedLease := c.acquireInboundLease()
+	if occupiedLease == nil {
+		t.Fatal("failed to occupy inbound lease slot")
+	}
+	defer occupiedLease.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln := newScriptedPeerListener()
+	defer ln.Close()
+	wait := newControlledRetryWait()
+
+	done := make(chan struct{})
+	go func() {
+		c.acceptPeersWithRetryWait(ctx, ln, wait.wait)
+		close(done)
+	}()
+
+	waitForAcceptCall(t, ln, timeout)
+	ln.results <- scriptedAcceptResult{err: errors.New("first transient accept error")}
+	waitForAcceptWithoutRetryWait(t, ln, wait, timeout)
+
+	ln.results <- scriptedAcceptResult{err: errors.New("second transient accept error")}
+	select {
+	case delay := <-wait.calls:
+		if delay != 100*time.Millisecond {
+			t.Fatalf("second-error retry wait = %v, want 100ms", delay)
+		}
+	case <-ln.calls:
+		t.Fatal("second retry reached Accept without waiting")
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for second-error retry wait")
+	}
+	select {
+	case <-ln.calls:
+		t.Fatal("second retry reached Accept before wait was released")
+	default:
+	}
+	wait.releases <- struct{}{}
+	waitForAcceptCall(t, ln, timeout)
+
+	accepted, peer := net.Pipe()
+	defer peer.Close()
+	ln.results <- scriptedAcceptResult{conn: accepted}
+	waitForAcceptCall(t, ln, timeout)
+
+	type readResult struct {
+		n   int
+		err error
+	}
+	peerRead := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 1)
+		n, err := peer.Read(buf)
+		peerRead <- readResult{n: n, err: err}
+	}()
+	select {
+	case result := <-peerRead:
+		if result.n != 0 || !errors.Is(result.err, io.EOF) {
+			t.Fatalf("rejected peer read = (%d, %v), want (0, EOF)", result.n, result.err)
+		}
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for rejected peer connection to close")
+	}
+
+	ln.results <- scriptedAcceptResult{err: errors.New("isolated error after success")}
+	waitForAcceptWithoutRetryWait(t, ln, wait, timeout)
+
+	ln.results <- scriptedAcceptResult{err: net.ErrClosed}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("acceptPeers did not return after net.ErrClosed")
+	}
+}
+
+func TestWaitForAcceptPeerRetryCancellation(t *testing.T) {
+	const timeout = 5 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		close(started)
+		result <- waitForAcceptPeerRetry(ctx, time.Hour)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case completed := <-result:
+		if completed {
+			t.Fatal("waitForAcceptPeerRetry completed after context cancellation")
+		}
+	case <-time.After(timeout):
+		t.Fatal("waitForAcceptPeerRetry did not return after context cancellation")
+	}
+}
 
 // readSetListenPortFrame reads one raw frame off conn and parses it as a
 // server.SetListenPort payload (which has no vendored Deserialize, since the
