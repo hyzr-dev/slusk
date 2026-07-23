@@ -19,6 +19,8 @@ import (
 const (
 	defaultParentCandidateTimeout = 10 * time.Second
 	maxConcurrentParentCandidates = 4
+	inboundFrameBurst             = 8
+	inboundFrameRefillInterval    = 100 * time.Millisecond
 )
 
 var (
@@ -77,6 +79,11 @@ type parentCandidateState struct {
 	signal     chan struct{}
 }
 
+type inboundFrameBucket struct {
+	tokens     int
+	lastRefill time.Time
+}
+
 func (c *parentCandidateState) notify() {
 	select {
 	case c.signal <- struct{}{}:
@@ -112,7 +119,9 @@ type distributedTree struct {
 	capacity       int
 	acceptSent     *bool
 
-	onSearch distributedSearchCallback
+	inboundBuckets map[*peerSession]*inboundFrameBucket
+	now            func() time.Time
+	onSearch       distributedSearchCallback
 }
 
 func newDistributedTree(c *Client) *distributedTree {
@@ -121,6 +130,8 @@ func newDistributedTree(c *Client) *distributedTree {
 		candidateUsers: make(map[string]struct{}),
 		candidates:     make(map[*peerSession]*parentCandidateState),
 		children:       make(map[*peerSession]struct{}),
+		inboundBuckets: make(map[*peerSession]*inboundFrameBucket),
+		now:            time.Now,
 		onSearch:       func(distributed.Search, []byte) {},
 	}
 }
@@ -141,6 +152,7 @@ func (t *distributedTree) activate(generation uint64) error {
 	t.parentLevel = 0
 	t.serverParent = false
 	t.children = make(map[*peerSession]struct{})
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	t.branchLevel = 0
 	t.branchRoot = t.c.cfg.Username
 	t.parentMinSpeed = 0
@@ -173,6 +185,7 @@ func (t *distributedTree) deactivate(generation uint64) {
 	t.parent = nil
 	t.serverParent = false
 	t.children = make(map[*peerSession]struct{})
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	t.acceptSent = nil
 	t.mu.Unlock()
 }
@@ -212,6 +225,7 @@ func (t *distributedTree) reset(generation uint64) {
 	t.parentLevel = 0
 	t.serverParent = false
 	t.children = make(map[*peerSession]struct{})
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	t.branchLevel = 0
 	t.branchRoot = t.c.cfg.Username
 	accept := false
@@ -255,6 +269,7 @@ func (t *distributedTree) offerParents(ctx context.Context, generation uint64, p
 	}
 	t.currentCandidate = ""
 	t.candidates = make(map[*peerSession]*parentCandidateState)
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	t.mu.Unlock()
 
 	for _, session := range closing {
@@ -373,6 +388,7 @@ func (t *distributedTree) retireCandidate(session *peerSession, generation, epoc
 		return
 	}
 	delete(t.candidates, session)
+	delete(t.inboundBuckets, session)
 	t.mu.Unlock()
 	session.Close(reason)
 }
@@ -445,6 +461,41 @@ func (t *distributedTree) childByUsernameLocked(username string) (*peerSession, 
 	return nil, false
 }
 
+// admitInboundFrame reauthorizes the source and consumes from its shared
+// metadata/search bucket under the tree lock. Callers validate the complete
+// frame first so malformed or unsupported input retains its existing error.
+func (t *distributedTree) admitInboundFrame(session *peerSession, parentOnly bool) (bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	candidate := t.candidates[session]
+	parent := t.parent == session
+	if !t.active || session.generation != t.generation || (!parent && candidate == nil) || (parentOnly && !parent) {
+		return false, errRejectedDistributedPeer
+	}
+
+	now := t.now()
+	bucket := t.inboundBuckets[session]
+	if bucket == nil {
+		bucket = &inboundFrameBucket{tokens: inboundFrameBurst, lastRefill: now}
+		t.inboundBuckets[session] = bucket
+	} else if elapsed := now.Sub(bucket.lastRefill); elapsed >= inboundFrameRefillInterval {
+		refills := int64(elapsed / inboundFrameRefillInterval)
+		missing := inboundFrameBurst - bucket.tokens
+		if refills >= int64(missing) {
+			bucket.tokens = inboundFrameBurst
+		} else {
+			bucket.tokens += int(refills)
+		}
+		bucket.lastRefill = bucket.lastRefill.Add(time.Duration(refills) * inboundFrameRefillInterval)
+	}
+	if bucket.tokens == 0 {
+		return false, nil
+	}
+	bucket.tokens--
+	return true, nil
+}
+
 func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error {
 	if frame.connType != distributed.ConnectionType {
 		return errUnhandledPeerFrame
@@ -475,6 +526,10 @@ func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error 
 		if msg.Level < 0 || msg.Level == math.MaxInt32 {
 			return fmt.Errorf("%w: invalid parent branch level %d", errInvalidDistributedFrame, msg.Level)
 		}
+		admitted, err := t.admitInboundFrame(session, false)
+		if err != nil || !admitted {
+			return err
+		}
 		return t.handleBranchLevel(session, msg.Level)
 
 	case distributed.CodeBranchRoot:
@@ -485,11 +540,19 @@ func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error 
 		if msg.Root == "" {
 			return fmt.Errorf("%w: empty branch root", errInvalidDistributedFrame)
 		}
+		admitted, err := t.admitInboundFrame(session, false)
+		if err != nil || !admitted {
+			return err
+		}
 		return t.handleBranchRoot(session, msg.Root)
 
 	case distributed.CodeSearch:
 		search, err := validateSearchFrame(frame.wire)
 		if err != nil {
+			return err
+		}
+		admitted, err := t.admitInboundFrame(session, false)
+		if err != nil || !admitted {
 			return err
 		}
 		return t.handleSearch(session, search, frame.wire)
@@ -508,6 +571,10 @@ func (t *distributedTree) frame(session *peerSession, frame sessionFrame) error 
 		wire := rawDistributedSearchFrame(embedded.Message)
 		search, err := validateSearchFrame(wire)
 		if err != nil {
+			return err
+		}
+		admitted, err := t.admitInboundFrame(session, true)
+		if err != nil || !admitted {
 			return err
 		}
 		return t.handleSearch(session, search, wire)
@@ -649,6 +716,7 @@ func (t *distributedTree) tryPromote(session *peerSession) bool {
 	for other := range t.candidates {
 		if other != session {
 			closing = append(closing, other)
+			delete(t.inboundBuckets, other)
 		}
 	}
 	t.candidates = make(map[*peerSession]*parentCandidateState)
@@ -685,6 +753,7 @@ func (t *distributedTree) closed(session *peerSession, _ error) {
 	}
 
 	t.mu.Lock()
+	delete(t.inboundBuckets, session)
 	if _, ok := t.children[session]; ok {
 		delete(t.children, session)
 		generation := t.generation
@@ -713,6 +782,7 @@ func (t *distributedTree) closed(session *peerSession, _ error) {
 	t.currentCandidate = ""
 	t.candidateUsers = make(map[string]struct{})
 	t.candidates = make(map[*peerSession]*parentCandidateState)
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	accept := false
 	t.acceptSent = &accept
 	active, generation := t.active && session.generation == t.generation, t.generation
@@ -775,6 +845,7 @@ func (t *distributedTree) handleServerEmbedded(generation uint64, embedded serve
 	t.currentCandidate = ""
 	t.candidateUsers = make(map[string]struct{})
 	t.candidates = make(map[*peerSession]*parentCandidateState)
+	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	children := t.childSnapshotLocked()
 	var failed []*peerSession
 	if !alreadyRoot {
