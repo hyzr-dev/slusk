@@ -252,6 +252,7 @@ type SoulseekFieldKey =
   | 'password'
   | 'listenAddr'
   | 'uploadSlots'
+  | 'allowPrivatePeerAddresses'
   | 'gluetunControlUrl'
   | 'gluetunApiKey';
 type SoulseekFormState = Record<SoulseekFieldKey, string>;
@@ -311,6 +312,7 @@ function soulseekToForm(s: AppConfig['soulseek']): SoulseekFormState {
     password: '',
     listenAddr: s.listenAddr,
     uploadSlots: String(s.uploadSlots),
+    allowPrivatePeerAddresses: String(s.allowPrivatePeerAddresses),
     gluetunControlUrl: s.gluetun.controlUrl,
     gluetunApiKey: '',
   };
@@ -475,6 +477,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
         username: soulseek.username,
         listenAddr: soulseek.listenAddr,
         uploadSlots: Number(soulseek.uploadSlots),
+        allowPrivatePeerAddresses: soulseek.allowPrivatePeerAddresses === 'true',
         gluetun: { controlUrl: soulseek.gluetunControlUrl },
         sharedFolders,
       },
@@ -590,6 +593,11 @@ function ConfigForm({ config }: { config: AppConfig }) {
     { key: 'knownUser', label: t.settings.weightKnownUser, configKey: t.settings.configKeys.weightKnownUser, kind: 'float', errorKey: 'pipeline.weights.knownUser' },
   ];
 
+  const allowPrivatePeerAddressesOptions: readonly SelectOption[] = [
+    { value: 'false', label: t.settings.allowPrivatePeerAddressesBlocked },
+    { value: 'true', label: t.settings.allowPrivatePeerAddressesAllowed },
+  ];
+
   const soulseekFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
     { key: 'serverAddress', label: t.settings.serverAddress, configKey: t.settings.configKeys.serverAddress, kind: 'text', errorKey: 'soulseek.serverAddress' },
     { key: 'username', label: t.settings.username, configKey: t.settings.configKeys.username, kind: 'text', errorKey: 'soulseek.username' },
@@ -603,6 +611,14 @@ function ConfigForm({ config }: { config: AppConfig }) {
     },
     { key: 'listenAddr', label: t.settings.listenAddr, configKey: t.settings.configKeys.soulseekListenAddr, kind: 'text', errorKey: 'soulseek.listenAddr' },
     { key: 'uploadSlots', label: t.settings.uploadSlots, configKey: t.settings.configKeys.uploadSlots, kind: 'integer', errorKey: 'soulseek.uploadSlots' },
+    {
+      key: 'allowPrivatePeerAddresses',
+      label: t.settings.allowPrivatePeerAddresses,
+      configKey: t.settings.configKeys.allowPrivatePeerAddresses,
+      kind: 'select',
+      options: allowPrivatePeerAddressesOptions,
+      errorKey: 'soulseek.allowPrivatePeerAddresses',
+    },
   ];
 
   const gluetunFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [

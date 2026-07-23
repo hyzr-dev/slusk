@@ -111,6 +111,14 @@ type Config struct {
 	SharedFolders []SharedFolder
 	UploadSlots   int
 
+	// AllowPrivatePeerAddresses permits dialing server-supplied peer
+	// addresses in RFC 1918 / ULA private ranges (threat T12: the central
+	// server supplies raw IP:port for peers, which is otherwise untrusted
+	// input). Loopback and link-local addresses are always refused
+	// regardless of this flag. Defaults to false (private addresses
+	// blocked); set true to reach peers on your own LAN.
+	AllowPrivatePeerAddresses bool
+
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
 	// pingInterval is how often a keepalive Ping is sent once connected.

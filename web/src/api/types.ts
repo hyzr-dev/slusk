@@ -197,6 +197,7 @@ export interface SoulseekConfigDTO {
   passwordConfigured: boolean;
   listenAddr: string;
   uploadSlots: number;
+  allowPrivatePeerAddresses: boolean;
   gluetun: GluetunConfigDTO;
   sharedFolders: SharedFolderDTO[];
 }
@@ -285,6 +286,7 @@ export interface ConfigUpdateRequest {
     password?: string;
     listenAddr: string;
     uploadSlots: number;
+    allowPrivatePeerAddresses: boolean;
     gluetun: { controlUrl: string; apiKey?: string };
     sharedFolders: SharedFolderDTO[];
   };

@@ -87,12 +87,13 @@ func settingsFromConfig(cfg Config) Settings {
 			},
 		},
 		Soulseek: SoulseekSettings{
-			ServerAddress: cfg.Soulseek.ServerAddress,
-			Username:      cfg.Soulseek.Username,
-			ListenAddr:    cfg.Soulseek.ListenAddr,
-			UploadSlots:   cfg.Soulseek.UploadSlots,
-			Gluetun:       GluetunSettings{ControlURL: cfg.Soulseek.Gluetun.ControlURL},
-			SharedFolders: append([]SharedFolderConfig(nil), cfg.Soulseek.SharedFolders...),
+			ServerAddress:             cfg.Soulseek.ServerAddress,
+			Username:                  cfg.Soulseek.Username,
+			ListenAddr:                cfg.Soulseek.ListenAddr,
+			UploadSlots:               cfg.Soulseek.UploadSlots,
+			AllowPrivatePeerAddresses: cfg.Soulseek.AllowPrivatePeerAddresses,
+			Gluetun:                   GluetunSettings{ControlURL: cfg.Soulseek.Gluetun.ControlURL},
+			SharedFolders:             append([]SharedFolderConfig(nil), cfg.Soulseek.SharedFolders...),
 		},
 		Store: StoreSettings{},
 		Observ: ObservSettings{
@@ -128,11 +129,12 @@ func TestApplySettingsUpdatesRepresentativeFieldsAcrossEverySection(t *testing.T
 	s.Pipeline.WantedSyncInterval = 20 * time.Minute
 	s.Pipeline.Weights.KnownUser = 0.6
 	s.Soulseek = SoulseekSettings{
-		ServerAddress: "server.slsknet.org:2242",
-		Username:      "souluser",
-		Password:      strPtr("soulpass"),
-		ListenAddr:    "0.0.0.0:2234",
-		UploadSlots:   2,
+		ServerAddress:             "server.slsknet.org:2242",
+		Username:                  "souluser",
+		Password:                  strPtr("soulpass"),
+		ListenAddr:                "0.0.0.0:2234",
+		UploadSlots:               2,
+		AllowPrivatePeerAddresses: true,
 		Gluetun: GluetunSettings{
 			ControlURL: "http://127.0.0.1:8000",
 			APIKey:     strPtr("gluetun-key"),
@@ -164,7 +166,8 @@ func TestApplySettingsUpdatesRepresentativeFieldsAcrossEverySection(t *testing.T
 		t.Fatal("soulseek section was not created/enabled")
 	}
 	if got.Soulseek.ServerAddress != "server.slsknet.org:2242" || got.Soulseek.Username != "souluser" ||
-		got.Soulseek.Password != "soulpass" || got.Soulseek.ListenAddr != "0.0.0.0:2234" || got.Soulseek.UploadSlots != 2 {
+		got.Soulseek.Password != "soulpass" || got.Soulseek.ListenAddr != "0.0.0.0:2234" || got.Soulseek.UploadSlots != 2 ||
+		!got.Soulseek.AllowPrivatePeerAddresses {
 		t.Errorf("Soulseek = %+v", got.Soulseek)
 	}
 	if got.Soulseek.Gluetun.ControlURL != "http://127.0.0.1:8000" || got.Soulseek.Gluetun.APIKey != "gluetun-key" {

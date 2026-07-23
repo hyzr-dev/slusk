@@ -308,8 +308,8 @@ func (c *Client) dialPeer(ctx context.Context, username string, ct soul.Connecti
 	if err != nil {
 		return nil, nil, err
 	}
-	if addr.IP == nil || addr.IP.IsUnspecified() || addr.Port == 0 {
-		return nil, nil, fmt.Errorf("peer %s is offline (server reported no reachable address)", username)
+	if err := c.validateDialAddr(addr.IP, addr.Port); err != nil {
+		return nil, nil, fmt.Errorf("peer %s: %w", username, err)
 	}
 
 	directAddr := net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
@@ -405,6 +405,16 @@ func (c *Client) connectPeerSession(ctx context.Context, username string) (*peer
 // belong to the exact central-server session that supplied the request.
 func (c *Client) handleConnectToPeer(ctx context.Context, generation uint64, msg server.ConnectToPeer) {
 	c.startTracked(func() {
+		if err := c.validateDialAddr(msg.IP, msg.Port); err != nil {
+			if c.logger != nil {
+				c.logger.Warn("refusing connect-to-peer dial to blocked address", "username", msg.Username, "ip", msg.IP, "port", msg.Port, "err", err)
+			}
+			if sendErr := sendToServerGeneration(c, generation, &server.CantConnectToPeer{Token: msg.Token, Username: msg.Username}); sendErr != nil && c.logger != nil {
+				c.logger.Debug("write cant connect to peer", "username", msg.Username, "token", msg.Token, "err", sendErr)
+			}
+			return
+		}
+
 		addr := net.JoinHostPort(msg.IP.String(), strconv.Itoa(msg.Port))
 		dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
