@@ -458,3 +458,211 @@ func TestDownloadRejectsOutOfRangeFileSizeWithoutLeakingFileConn(t *testing.T) {
 		t.Errorf("inboundSlots still holds %d lease(s) after the errored transfer — F connection leaked", got)
 	}
 }
+
+// TestDownloadCancelAbortsActiveStream is the regression guard for issue #99:
+// Cancel used to mark the transfer TransferCancelled but let the in-flight
+// streamFile run on until completion or idle timeout, holding the F connection
+// and its inbound lease. Here the fake peer streams half the payload and then
+// deliberately stalls, holding its end open; Cancel must close the client's
+// side of the F connection promptly (long before the 60s idle timeout set
+// below), the transfer must stay TransferCancelled - not flip to
+// Errored/Completed - and the ".part" file must remain for Remove.
+func TestDownloadCancelAbortsActiveStream(t *testing.T) {
+	const filename = `Artist - Album\02 Track.flac`
+	payload := bytes.Repeat([]byte("soulseek-cancel-payload-"), 100)
+	size := int64(len(payload))
+	half := size / 2
+	const transferToken = soul.Token(9002)
+
+	peerLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake peer: %v", err)
+	}
+	defer peerLn.Close()
+	peerAddr := peerLn.Addr().(*net.TCPAddr)
+
+	var listenAddr string
+	// Closed by the fake peer once its stalled F connection is torn down by
+	// the client - the observable proof that Cancel aborted the stream.
+	fconnClosed := make(chan struct{})
+
+	go func() {
+		conn, err := peerLn.Accept()
+		if err != nil {
+			t.Logf("fake peer: accept: %v", err)
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+		reader, _, _, err := peer.Read(peer.CodeInit(0), conn, false)
+		if err != nil {
+			t.Logf("fake peer: read peer init: %v", err)
+			return
+		}
+		if err := (&peer.PeerInit{}).Deserialize(reader); err != nil {
+			t.Logf("fake peer: deserialize peer init: %v", err)
+			return
+		}
+
+		reader, _, code, err := peer.Read(peer.Code(0), conn, false)
+		if err != nil || peer.Code(code) != peer.CodeQueueUpload {
+			t.Logf("fake peer: read queue upload: code=%d err=%v", code, err)
+			return
+		}
+		qu := &peer.QueueUpload{}
+		if err := qu.Deserialize(reader); err != nil {
+			t.Errorf("fake peer: deserialize queue upload: %v", err)
+			return
+		}
+
+		transferRequest := &peer.TransferRequest{
+			Direction: peer.UploadToPeer, Token: transferToken,
+			Filename: qu.Filename, FileSize: uint64(size),
+		}
+		if _, err := peer.Write(conn, transferRequest, false); err != nil {
+			t.Errorf("fake peer: write transfer request: %v", err)
+			return
+		}
+
+		var tresp *peer.TransferResponse
+		for tresp == nil {
+			reader, _, code, err = peer.Read(peer.Code(0), conn, false)
+			if err != nil {
+				t.Logf("fake peer: read transfer response: %v", err)
+				return
+			}
+			switch peer.Code(code) {
+			case peer.CodePlaceInQueueRequest:
+				if err := (&peer.PlaceInQueueRequest{}).Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize place in queue request: %v", err)
+					return
+				}
+			case peer.CodeTransferResponse:
+				tresp = &peer.TransferResponse{}
+				if err := tresp.Deserialize(reader); err != nil {
+					t.Errorf("fake peer: deserialize transfer response: %v", err)
+					return
+				}
+			default:
+				t.Errorf("fake peer: code = %d, want CodeTransferResponse or CodePlaceInQueueRequest", code)
+				return
+			}
+		}
+
+		fconn, err := net.Dial("tcp", listenAddr)
+		if err != nil {
+			t.Errorf("fake peer: dial client listener for F connection: %v", err)
+			return
+		}
+		defer fconn.Close()
+		_ = fconn.SetDeadline(time.Now().Add(10 * time.Second))
+		if _, err := peer.Write(fconn, &peer.PeerInit{Username: "friend", ConnectionType: file.ConnectionType}, false); err != nil {
+			t.Errorf("fake peer: write F peer init: %v", err)
+			return
+		}
+		if _, err := file.Write(fconn, &file.TransferInit{Token: transferToken}); err != nil {
+			t.Errorf("fake peer: write transfer init: %v", err)
+			return
+		}
+		if err := (&file.Offset{}).Deserialize(fconn); err != nil {
+			t.Errorf("fake peer: read offset: %v", err)
+			return
+		}
+		if _, err := fconn.Write(payload[:half]); err != nil {
+			t.Errorf("fake peer: write first half of payload: %v", err)
+			return
+		}
+		// Stall: send nothing more, and wait for the client to close its end.
+		// A Read here only returns once the client's side goes away (or the
+		// 10s deadline above fires, which the assertions below would catch).
+		buf := make([]byte, 1)
+		_, _ = fconn.Read(buf)
+		close(fconnClosed)
+	}()
+
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
+		code, body, err := readRawFrame(conn)
+		if err != nil || code != uint32(server.CodeGetPeerAddress) {
+			t.Logf("read get peer address request: code=%d err=%v", code, err)
+			return
+		}
+		username, err := parseGetPeerAddressRequest(body)
+		if err != nil {
+			t.Errorf("parse get peer address request: %v", err)
+			return
+		}
+		writeGetPeerAddressResponse(t, conn, username, peerAddr.IP, peerAddr.Port, 0)
+		_, _ = io.Copy(io.Discard, conn)
+	})
+	listenAddr = addr
+	c.cfg.DownloadDir = t.TempDir()
+	// Long enough that only an aborted stream - never the idle timeout - can
+	// explain the F connection closing within this test's deadlines.
+	c.cfg.fileIdleTimeout = 60 * time.Second
+
+	id, err := c.Enqueue(context.Background(), "friend", filename, size)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Wait until the stream is demonstrably in flight (half the payload
+	// landed) before cancelling mid-stream.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the stream to reach the half-payload mark")
+		}
+		list, err := c.ListDownloads(context.Background())
+		if err != nil {
+			t.Fatalf("ListDownloads: %v", err)
+		}
+		var done int64
+		for _, tr := range list {
+			if tr.ID == id {
+				done = tr.BytesDone
+			}
+		}
+		if done >= half {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := c.Cancel(context.Background(), "friend", id); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	select {
+	case <-fconnClosed:
+		// Cancel tore down the F connection while the peer was stalling.
+	case <-time.After(3 * time.Second):
+		t.Fatal("the F connection was not closed within 3s of Cancel; the stream kept running")
+	}
+
+	// The state must remain TransferCancelled - give the orchestration
+	// goroutine time to run its post-stream branches, then confirm nothing
+	// resurrected or re-labelled the transfer.
+	time.Sleep(100 * time.Millisecond)
+	list, err := c.ListDownloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListDownloads: %v", err)
+	}
+	var final core.RemoteTransfer
+	for _, tr := range list {
+		if tr.ID == id {
+			final = tr
+		}
+	}
+	if final.State != core.TransferCancelled {
+		t.Fatalf("state after Cancel = %q (failure=%q), want %q", final.State, final.Failure, core.TransferCancelled)
+	}
+
+	destPath := downloadDestPath(c.cfg.DownloadDir, filename)
+	if _, err := os.Stat(destPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat dest after cancel: err = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(destPath + ".part"); err != nil {
+		t.Errorf("stat .part after cancel: %v, want it left in place for Remove", err)
+	}
+}
