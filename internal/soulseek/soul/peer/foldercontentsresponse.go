@@ -13,6 +13,14 @@ import (
 
 const CodeFolderContentsResponse Code = 37
 
+const (
+	maxFolderContentsResponseDecompressedSize = 16 << 20
+	maxFolderContentsResponseFolders          = 100_000
+	maxFolderContentsResponseFiles            = 1_000_000
+	maxFolderContentsResponseAttributes       = 32
+	maxFolderContentsResponseStringSize       = 1 << 20
+)
+
 // FolderContentsResponse code 37 peer responds with the contents of a
 // particular folder (with all subfolders) after we’ve sent a FolderContentsRequest.
 type FolderContentsResponse struct {
@@ -107,107 +115,44 @@ func (f *FolderContentsResponse) Serialize(message *FolderContentsResponse) ([]b
 
 // Deserialize populates a FolderContentsResponse with the data in the provided reader.
 func (f *FolderContentsResponse) Deserialize(reader io.Reader) error {
-	_, err := internal.ReadUint32(reader) // size
-	if err != nil {
+	if _, err := internal.ReadUint32(reader); err != nil { // size
 		return err
 	}
 
-	code, err := internal.ReadUint32(reader) // code 37
+	code, err := internal.ReadUint32(reader)
 	if err != nil {
 		return err
 	}
-
 	if code != uint32(CodeFolderContentsResponse) {
 		return errors.Join(soul.ErrMismatchingCodes,
 			fmt.Errorf("expected code %d, got %d", CodeFolderContentsResponse, code))
 	}
 
-	zr, err := zlib.NewReader(reader)
+	decompressed, err := readBoundedBrowsePayload(reader, maxFolderContentsResponseDecompressedSize, "folder contents response")
+	if err != nil {
+		return err
+	}
+	payload := bytes.NewReader(decompressed)
+	var decoded FolderContentsResponse
+	decoded.Token, err = internal.ReadUint32ToToken(payload)
+	if err != nil {
+		return err
+	}
+	decoded.Folder, err = readBrowseString(payload, maxFolderContentsResponseStringSize, "folder contents response")
+	if err != nil {
+		return err
+	}
+	folderCount, err := internal.ReadUint32(payload)
+	if err != nil {
+		return err
+	}
+	remainingFolders := uint32(maxFolderContentsResponseFolders)
+	remainingFiles := uint32(maxFolderContentsResponseFiles)
+	decoded.Folders, err = readBrowseDirectories(payload, folderCount, &remainingFolders, &remainingFiles, maxFolderContentsResponseFolders, maxFolderContentsResponseFiles, maxFolderContentsResponseAttributes, maxFolderContentsResponseStringSize, "folder contents response")
 	if err != nil {
 		return err
 	}
 
-	defer zr.Close()
-
-	f.Token, err = internal.ReadUint32ToToken(zr)
-	if err != nil {
-		return err
-	}
-
-	f.Folder, err = internal.ReadString(zr)
-	if err != nil {
-		return err
-	}
-
-	folders, err := internal.ReadUint32(zr)
-	if err != nil {
-		return err
-	}
-
-	for range int(folders) {
-		var folder Directory
-
-		folder.Name, err = internal.ReadString(zr)
-		if err != nil {
-			return err
-		}
-
-		files, err := internal.ReadUint32(zr)
-		if err != nil {
-			return err
-		}
-
-		for range int(files) {
-			var file File
-
-			_, err = internal.ReadUint8(zr)
-			if err != nil {
-				return err
-			}
-
-			file.Name, err = internal.ReadString(zr)
-			if err != nil {
-				return err
-			}
-
-			file.Size, err = internal.ReadUint64(zr)
-			if err != nil {
-				return err
-			}
-
-			file.Extension, err = internal.ReadString(zr)
-			if err != nil {
-				return err
-			}
-
-			attributes, err := internal.ReadUint32(zr)
-			if err != nil {
-				return err
-			}
-
-			for range int(attributes) {
-				var a Attribute
-
-				code, err := internal.ReadUint32(zr)
-				if err != nil {
-					return err
-				}
-
-				a.Code = FileAttributeType(code)
-
-				a.Value, err = internal.ReadUint32(zr)
-				if err != nil {
-					return err
-				}
-
-				file.Attributes = append(file.Attributes, a)
-			}
-
-			folder.Files = append(folder.Files, file)
-		}
-
-		f.Folders = append(f.Folders, folder)
-	}
-
+	*f = decoded
 	return nil
 }

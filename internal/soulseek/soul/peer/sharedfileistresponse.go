@@ -214,122 +214,149 @@ func (SharedFileListResponse) walkWrite(directories []Directory, writer io.Write
 
 // Deserialize accepts a reader and deserializes the message into the SharedFileListResponse struct.
 func (s *SharedFileListResponse) Deserialize(reader io.Reader) error {
-	_, err := internal.ReadUint32(reader) // size
-	if err != nil {
+	if _, err := internal.ReadUint32(reader); err != nil { // size
 		return err
 	}
 
-	code, err := internal.ReadUint32(reader) // code 5
+	code, err := internal.ReadUint32(reader)
 	if err != nil {
 		return err
 	}
-
 	if code != uint32(CodeSharedFileListResponse) {
 		return errors.Join(soul.ErrMismatchingCodes,
 			fmt.Errorf("expected code %d, got %d", CodeSharedFileListResponse, code))
 	}
 
-	zr, err := zlib.NewReader(reader)
+	decompressed, err := readBoundedBrowsePayload(reader, maxSharedFileListDecompressedSize, "shared file list response")
+	if err != nil {
+		return err
+	}
+	payload := bytes.NewReader(decompressed)
+	var decoded SharedFileListResponse
+	remainingDirectories := uint32(maxSharedFileListDirectories)
+	remainingFiles := uint32(maxSharedFileListFiles)
+
+	directories, err := internal.ReadUint32(payload)
+	if err != nil {
+		return err
+	}
+	decoded.Directories, err = readBrowseDirectories(payload, directories, &remainingDirectories, &remainingFiles, maxSharedFileListDirectories, maxSharedFileListFiles, maxSharedFileListAttributes, maxSharedFileListStringSize, "shared file list response")
 	if err != nil {
 		return err
 	}
 
-	defer zr.Close()
-
-	directories, err := internal.ReadUint32(zr)
+	if _, err = internal.ReadUint32(payload); err != nil { // unknown separator
+		return err
+	}
+	privateDirectories, err := internal.ReadUint32(payload)
+	if err != nil {
+		return err
+	}
+	decoded.PrivateDirectories, err = readBrowseDirectories(payload, privateDirectories, &remainingDirectories, &remainingFiles, maxSharedFileListDirectories, maxSharedFileListFiles, maxSharedFileListAttributes, maxSharedFileListStringSize, "shared file list response")
 	if err != nil {
 		return err
 	}
 
-	s.Directories, err = s.walkRead(directories, zr)
-	if err != nil {
-		return err
-	}
-
-	_, err = internal.ReadUint32(zr)
-	if err != nil {
-		return err
-	}
-
-	privateDirectories, err := internal.ReadUint32(zr)
-	if err != nil {
-		return err
-	}
-
-	s.PrivateDirectories, err = s.walkRead(privateDirectories, zr)
-	if err != nil {
-		return err
-	}
-
+	*s = decoded
 	return nil
 }
 
-func (s *SharedFileListResponse) walkRead(numberOfDirectories uint32, zr io.ReadCloser) (directories []Directory, err error) {
-	for range int(numberOfDirectories) {
-		var directory Directory
-		var err error
-
-		directory.Name, err = internal.ReadString(zr)
-		if err != nil {
-			return nil, err
-		}
-
-		files, err := internal.ReadUint32(zr)
-		if err != nil {
-			return nil, err
-		}
-
-		for range int(files) {
-			var f File
-
-			_, err := internal.ReadUint8(zr)
-			if err != nil {
-				return nil, err
-			}
-
-			f.Name, err = internal.ReadString(zr)
-			if err != nil {
-				return nil, err
-			}
-
-			f.Size, err = internal.ReadUint64(zr)
-			if err != nil {
-				return nil, err
-			}
-
-			f.Extension, err = internal.ReadString(zr)
-			if err != nil {
-				return nil, err
-			}
-
-			attributes, err := internal.ReadUint32(zr)
-			if err != nil {
-				return nil, err
-			}
-
-			for range int(attributes) {
-				var a Attribute
-
-				code, err := internal.ReadUint32(zr)
-				if err != nil {
-					return nil, err
-				}
-
-				a.Code = FileAttributeType(code)
-
-				a.Value, err = internal.ReadUint32(zr)
-				if err != nil {
-					return nil, err
-				}
-
-				f.Attributes = append(f.Attributes, a)
-			}
-
-			directory.Files = append(directory.Files, f)
-		}
-
-		directories = append(directories, directory)
+func readBoundedBrowsePayload(reader io.Reader, limit int64, what string) ([]byte, error) {
+	zr, err := zlib.NewReader(reader)
+	if err != nil {
+		return nil, err
 	}
+	decompressed, readErr := io.ReadAll(io.LimitReader(zr, limit+1))
+	closeErr := zr.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(decompressed)) > limit {
+		return nil, fmt.Errorf("%w: decompressed %s exceeds %d bytes", soul.ErrMessageTooLarge, what, limit)
+	}
+	return decompressed, nil
+}
 
-	return directories, err
+func readBrowseString(reader io.Reader, limit uint32, what string) (string, error) {
+	size, err := internal.ReadStringLen(reader)
+	if err != nil {
+		return "", err
+	}
+	if size > limit {
+		return "", fmt.Errorf("%w: %s string exceeds %d bytes", soul.ErrMessageTooLarge, what, limit)
+	}
+	return internal.ReadStringBody(reader, size)
+}
+
+func readBrowseDirectories(reader io.Reader, count uint32, remainingDirectories, remainingFiles *uint32, directoryLimit, fileLimit, attributeLimit, stringLimit uint32, what string) ([]Directory, error) {
+	if count > *remainingDirectories {
+		return nil, fmt.Errorf("%w: %s contains more than %d directories", soul.ErrMessageTooLarge, what, directoryLimit)
+	}
+	*remainingDirectories -= count
+	var directories []Directory
+	for i := uint32(0); i < count; i++ {
+		name, err := readBrowseString(reader, stringLimit, what)
+		if err != nil {
+			return nil, err
+		}
+		fileCount, err := internal.ReadUint32(reader)
+		if err != nil {
+			return nil, err
+		}
+		if fileCount > *remainingFiles {
+			return nil, fmt.Errorf("%w: %s contains more than %d files", soul.ErrMessageTooLarge, what, fileLimit)
+		}
+		*remainingFiles -= fileCount
+		files, err := readBrowseFiles(reader, fileCount, attributeLimit, stringLimit, what)
+		if err != nil {
+			return nil, err
+		}
+		directories = append(directories, Directory{Name: name, Files: files})
+	}
+	return directories, nil
+}
+
+func readBrowseFiles(reader io.Reader, count, attributeLimit, stringLimit uint32, what string) ([]File, error) {
+	var files []File
+	for i := uint32(0); i < count; i++ {
+		if _, err := internal.ReadUint8(reader); err != nil {
+			return nil, err
+		}
+		name, err := readBrowseString(reader, stringLimit, what)
+		if err != nil {
+			return nil, err
+		}
+		size, err := internal.ReadUint64(reader)
+		if err != nil {
+			return nil, err
+		}
+		extension, err := readBrowseString(reader, stringLimit, what)
+		if err != nil {
+			return nil, err
+		}
+		attributeCount, err := internal.ReadUint32(reader)
+		if err != nil {
+			return nil, err
+		}
+		if attributeCount > attributeLimit {
+			return nil, fmt.Errorf("%w: %s file contains more than %d attributes", soul.ErrMessageTooLarge, what, attributeLimit)
+		}
+		var attributes []Attribute
+		for j := uint32(0); j < attributeCount; j++ {
+			code, err := internal.ReadUint32(reader)
+			if err != nil {
+				return nil, err
+			}
+			value, err := internal.ReadUint32(reader)
+			if err != nil {
+				return nil, err
+			}
+			attributes = append(attributes, Attribute{Code: FileAttributeType(code), Value: value})
+		}
+		files = append(files, File{Name: name, Size: size, Extension: extension, Attributes: attributes})
+	}
+	return files, nil
 }
