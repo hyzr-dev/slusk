@@ -116,6 +116,9 @@ export const t = {
   settings: {
     notWritableNotice:
       'The configuration file is mounted read-only, so settings cannot be edited here. Mount its directory writable (e.g. ./config:/config) instead of a single-file or read-only mount to enable editing.',
+    helpButtonLabel: 'Help',
+    advanced: 'Advanced',
+    changedBadge: 'Unsaved changes',
     lidarr: 'Lidarr',
     slskd: 'slskd',
     url: 'URL',
@@ -238,6 +241,89 @@ export const t = {
       observListenAddr: 'listen_addr',
       authToken: 'auth_token',
       slskdCompleteDir: 'slskd_complete_dir',
+    },
+    // One help text per field descriptor (see FieldDescriptor.help in
+    // Settings.tsx) plus two subsection-level entries (sharedFolders,
+    // gluetun) shown next to their h3 headings instead of per-input. Keys
+    // mirror configKeys above, including its disambiguating prefixes
+    // (lidarrApiKey vs slskdApiKey, soulseekListenAddr vs observListenAddr).
+    help: {
+      lidarrUrl:
+        'Base URL of the Lidarr instance slskdarr syncs the wanted list from and imports finished albums into.',
+      lidarrApiKey: 'Lidarr API key (Settings → General in Lidarr).',
+      slskdUrl:
+        'Base URL of the slskd daemon used for searching and downloading when the backend is "slskd".',
+      slskdApiKey: "API key configured in slskd's own configuration (slskd.yml).",
+      backend:
+        'Which peer backend drives the pipeline: slskd (default) or the native Soulseek client. Switching to Soulseek requires a configured Soulseek section below; the native backend is experimental.',
+      maxCandidatesPerAlbum:
+        "How many ranked candidates (each one user's copy of the album) are kept per album search; the pipeline works through them best score first.",
+      maxActive:
+        'Global cap on jobs simultaneously in the downloading and importing phases, regardless of how many are eligible per tick. Selecting jobs hold no slot and wait until one frees.',
+      maxRetries:
+        'How many failed search cycles (a search with no viable results, or a candidate cache fully tried and failed) a job may accumulate before it is marked failed. Individual candidate failures within a cycle do not count.',
+      maxInflightPerPeer:
+        'Max files of a candidate album handed to its peer at once (counted per candidate, so two jobs downloading from the same peer each get their own budget); remaining files are released as earlier ones finish. Keeping this low avoids tripping the per-user queued-megabyte limit peers enforce.',
+      maxTransferRetries:
+        'Per-file retry budget: how many times a transiently failed transfer (a peer queue-limit rejection, a stall, or a transfer lost to an slskd restart) is re-queued before it is errored. Permanent rejections (file not shared, banned) are never retried; 0 disables retries.',
+      minBitrate:
+        'Quality floor applied per file during matching: lossy files below this bitrate (kbps) are dropped before ranking, while lossless files (FLAC) always pass regardless of reported bitrate.',
+      transferDeadline:
+        "Maximum time a single file transfer may take from enqueue — including time spent waiting in the peer's remote queue — before it is cancelled as overdue, which fails the candidate so the next one is tried.",
+      stallTimeout:
+        'How long a started transfer may go without byte progress before it is treated as stalled, cancelled, and retried within the transfer-retry budget.',
+      searchTimeout:
+        'Upper bound on how long a single search waits for peer responses. The native backend always waits the full duration; the slskd backend collects as soon as slskd reports the search complete, and retries an empty search a few times.',
+      backoffBase:
+        'Base of the exponential backoff applied when a search cycle leaves a job with nothing to try; the first wait is twice this value and doubles with each further failure.',
+      backoffCap: 'Upper bound on exponential backoff growth.',
+      candidateTtl:
+        "How long a cached search result stays trustworthy. When a candidate older than this is about to be activated, the job's whole candidate cache is discarded and a fresh search is made instead.",
+      failedReviveAfter: 'How long a permanently failed job waits before being revived for another attempt.',
+      stuckAfter:
+        'How long an importing job may keep failing its Lidarr verification without a state change before the candidate is failed and the next one is tried.',
+      tickTimeout: 'Upper bound on the total execution time of a single pipeline tick.',
+      importConfirmTimeout:
+        'How long an import may sit unconfirmed (Lidarr ManualImport command runs asynchronously) before it is treated as failed and rotated to the next candidate.',
+      wantedSyncInterval: 'How often the wanted list is refreshed from Lidarr.',
+      discoveryInterval: 'How often the discovery phase runs.',
+      selectingInterval: 'How often the selecting phase runs.',
+      downloadingInterval: 'How often the downloading phase runs.',
+      importingInterval: 'How often the importing phase runs.',
+      manualImportTimeout:
+        "Upper bound on Lidarr's manual-import folder scan, which parses audio tags per file and can run far longer than a normal API call on large folders.",
+      importRetryCooldown:
+        'How long the importing phase waits before re-attempting a failed manual-import scan on the same job, so a slow-scanning folder is not hammered every importing interval.',
+      weightFormat: 'Relative weight of preferred audio format (e.g. FLAC over MP3) when ranking candidates.',
+      weightBitrate: 'Relative weight of higher bitrate when ranking candidates.',
+      weightReliability:
+        "Relative weight of the peer's current upload availability (a free upload slot and an empty queue) when ranking candidates.",
+      weightFileCount:
+        "Relative weight of the number of files in a release when ranking candidates; more files score higher. Releases outside the album's known track-count range are filtered out separately.",
+      weightKnownUser:
+        "Relative weight of the peer's decayed known-good/known-bad history when ranking candidates; the history factor is normalized to 0..1 and applied once per candidate.",
+      serverAddress: 'Host:port of the central Soulseek server (default server.slsknet.org:2242).',
+      username: 'Username for the Soulseek account the native client logs in with.',
+      password: 'Password for the Soulseek account the native client logs in with.',
+      soulseekListenAddr:
+        'Address slskdarr listens on for incoming peer connections; its port is advertised to the server after login, so peers must be able to reach it directly. With Docker, the published host port must equal the container port, or use host networking instead.',
+      uploadSlots:
+        'Number of upload slots; negotiation and streaming both occupy a slot, and additional requests wait in a bounded global queue.',
+      gluetunControlUrl: 'URL of the gluetun control server, used at startup to fetch the forwarded port.',
+      gluetunApiKey: 'API key for the gluetun control server, if its auth is enabled.',
+      sharedFolders:
+        'Shares use explicit public names so local host/container paths never appear in browse or search results. Mount each path read-only. Shares are scanned at startup (a settings save restarts the process and rescans); SIGHUP triggers a rescan without a restart.',
+      gluetun:
+        'Run behind gluetun for VPN port forwarding: at startup slskdarr asks the gluetun control server for the currently forwarded port and listens on it instead. The port part of the listen address above is ignored (its host is still used).',
+      logLevel:
+        'Minimum log level: debug, info (default), warn, or error. Use debug to trace peer and transfer negotiation in the native Soulseek client (verbose).',
+      dsn: 'PostgreSQL connection string. The schema is created automatically on startup; the database and user must already exist.',
+      observListenAddr:
+        'Address and port the web UI and API listen on. A non-loopback address requires auth_token to be set; after changing it the UI moves to the new address.',
+      authToken:
+        'Token required for the dashboard, JSON API, /status, and /metrics whenever the listener is not loopback-only. Generate one with openssl rand -hex 32, keep it out of URLs and logs, and terminate TLS at a trusted reverse proxy before exposing the listener beyond a private network.',
+      slskdCompleteDir:
+        "Directory where finished downloads land, as seen by both slskdarr and Lidarr. With the slskd backend it must also point at the same location as slskd's completed-downloads directory, so all containers must mount it consistently.",
     },
     connections: 'Connections',
     testConnection: 'Test',
