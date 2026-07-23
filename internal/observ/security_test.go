@@ -61,6 +61,57 @@ func TestPprofEndpointsRequireAuthentication(t *testing.T) {
 	}
 }
 
+func TestAnonymousNonGETPprofRequestRequiresAuthentication(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	req := httptest.NewRequest(http.MethodPut, "/debug/pprof/profile", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestAuthenticatedPprofHandlersRejectNonGETMethods(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "index", method: http.MethodPost, path: "/debug/pprof/"},
+		{name: "index subtree", method: http.MethodPut, path: "/debug/pprof/goroutine?debug=1"},
+		{name: "cmdline", method: http.MethodPost, path: "/debug/pprof/cmdline"},
+		{name: "profile capture", method: http.MethodPut, path: "/debug/pprof/profile"},
+		{name: "symbol", method: http.MethodPost, path: "/debug/pprof/symbol"},
+		{name: "trace capture", method: http.MethodPut, path: "/debug/pprof/trace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+testAuthToken)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405; body = %s", rec.Code, rec.Body.String())
+			}
+			if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+				t.Fatalf("Allow = %q, want %q", allow, "GET, HEAD")
+			}
+		})
+	}
+}
+
+func TestAuthenticatedPprofIndexAllowsHEAD(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	req := httptest.NewRequest(http.MethodHead, "/debug/pprof/", nil)
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAuthenticatedPprofHandlersResolve(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
 	tests := []struct {
