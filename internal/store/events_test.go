@@ -148,7 +148,7 @@ func TestPruneJobEventsDeletesOnlyOldRows(t *testing.T) {
 	}
 }
 
-func TestPruneJobEventsDeletesInBatchesAcrossCalls(t *testing.T) {
+func TestPruneJobEventsDrainsMultipleBatchesInOneCall(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -179,17 +179,10 @@ func TestPruneJobEventsDeletesInBatchesAcrossCalls(t *testing.T) {
 	}
 
 	if err := s.PruneJobEvents(ctx, now); err != nil {
-		t.Fatalf("first PruneJobEvents: %v", err)
-	}
-	if got := countExpired(); got != 1 {
-		t.Fatalf("expired events after first prune = %d, want 1", got)
-	}
-
-	if err := s.PruneJobEvents(ctx, now); err != nil {
-		t.Fatalf("second PruneJobEvents: %v", err)
+		t.Fatalf("PruneJobEvents: %v", err)
 	}
 	if got := countExpired(); got != 0 {
-		t.Fatalf("expired events after second prune = %d, want 0", got)
+		t.Fatalf("expired events after prune = %d, want 0", got)
 	}
 
 	events, err := s.JobEvents(ctx, job.ID)
@@ -198,5 +191,37 @@ func TestPruneJobEventsDeletesInBatchesAcrossCalls(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Detail != "recent" {
 		t.Fatalf("recent event did not survive batched pruning: %+v", events)
+	}
+}
+
+func TestPruneJobEventsStopsAtBatchLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	job, _ := s.UpsertWantedJob(ctx, 1, now)
+
+	const maxBatches = 2
+	expiredBase := now.Add(-jobEventRetention - time.Hour)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO job_events (album_job_id, event, detail, created_at)
+		SELECT $1, $2, 'expired', $3::timestamptz - (n * interval '1 second')
+		FROM generate_series(1, $4::integer) AS n`,
+		job.ID, string(core.EventSearch), expiredBase, maxBatches*jobEventPruneBatchSize+1)
+	if err != nil {
+		t.Fatalf("insert expired events: %v", err)
+	}
+
+	if err := s.pruneJobEvents(ctx, now.Add(-jobEventRetention), maxBatches); err != nil {
+		t.Fatalf("pruneJobEvents: %v", err)
+	}
+
+	var expired int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM job_events WHERE created_at < $1`,
+		now.Add(-jobEventRetention)).Scan(&expired); err != nil {
+		t.Fatalf("count expired events: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expired events after capped prune = %d, want 1", expired)
 	}
 }
