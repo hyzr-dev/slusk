@@ -49,11 +49,12 @@ type ShareStats struct {
 }
 
 type indexedFile struct {
-	virtual string
-	local   string
-	root    string
-	wire    peer.File
-	info    os.FileInfo
+	virtual      string
+	virtualLower string
+	local        string
+	root         string
+	wire         peer.File
+	info         os.FileInfo
 }
 
 type shareSnapshot struct {
@@ -347,7 +348,14 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			if err != nil || !afterInfo.Mode().IsRegular() || !os.SameFile(info, afterInfo) {
 				return fmt.Errorf("share %q file changed during scan: %s", configured.Name, path)
 			}
-			indexed := &indexedFile{virtual: virtual, local: path, root: root, wire: wire, info: info}
+			indexed := &indexedFile{
+				virtual:      virtual,
+				virtualLower: strings.ToLower(virtual),
+				local:        path,
+				root:         root,
+				wire:         wire,
+				info:         info,
+			}
 			s.files[virtual] = indexed
 			s.search = append(s.search, indexed)
 			directory := s.byDirectory[dirVirtual]
@@ -564,16 +572,15 @@ func (s *shareSnapshot) match(query string, limit int) []peer.File {
 	}
 	results := make([]peer.File, 0, min(limit, len(s.search)))
 	for _, indexed := range s.search {
-		path := strings.ToLower(indexed.virtual)
 		matched := true
 		for _, term := range include {
-			if !strings.Contains(path, term) {
+			if !strings.Contains(indexed.virtualLower, term) {
 				matched = false
 				break
 			}
 		}
 		for _, term := range exclude {
-			if strings.Contains(path, term) {
+			if strings.Contains(indexed.virtualLower, term) {
 				matched = false
 				break
 			}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"time"
 
@@ -181,6 +182,22 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	configWriter ConfigWriter, restart func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/debug/pprof/", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	// Keep non-GET pprof requests from falling through to the path-only UI
+	// handler below. GET patterns also accept HEAD, matching net/http semantics.
+	methodNotAllowed := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+	mux.HandleFunc("/debug/pprof", methodNotAllowed)
+	mux.HandleFunc("/debug/pprof/", methodNotAllowed)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !live() {
 			// /healthz is public; keep the body generic so it leaks no
