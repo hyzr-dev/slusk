@@ -55,6 +55,9 @@ func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
 		if strings.Contains(public, root) || strings.Contains(indexed.wire.Name, root) {
 			t.Fatalf("local root leaked in public data: %q / %q", public, indexed.wire.Name)
 		}
+		if got, want := indexed.virtualLower, strings.ToLower(indexed.virtual); got != want {
+			t.Fatalf("cached lowercase virtual path = %q, want %q", got, want)
+		}
 	}
 	if snapshot.files[`Music\escape.mp3`] != nil {
 		t.Fatal("symlink entry was indexed")
@@ -288,7 +291,7 @@ func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
 		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
 	})
 	startSessionLifecycle(t, c)
 	newQueuedSession := func(username string) *peerSession {
@@ -374,7 +377,7 @@ func TestShareSearchDeliverPoolSaturationDoesNotBlockMatch(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
 		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
 	})
 	startSessionLifecycle(t, c)
 
@@ -418,7 +421,7 @@ func TestShareSearchDeliveryFailureCanRetry(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
 		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
 	})
 	startSessionLifecycle(t, c)
 
@@ -463,7 +466,7 @@ func TestShareSearchDeliveryConcurrentDuplicatesQueueOnce(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	c.shares.Store(&shareSnapshot{
 		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
+		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
 	})
 	startSessionLifecycle(t, c)
 	local, remote := net.Pipe()
@@ -520,11 +523,45 @@ func mustFolderRequestWire(t *testing.T, token soul.Token, folder string) []byte
 	return wire
 }
 
+func TestShareSnapshotMatch(t *testing.T) {
+	s := &shareSnapshot{search: []*indexedFile{
+		{virtual: `Music\Artist\Keep.FLAC`, virtualLower: `music\artist\keep.flac`, wire: peer.File{Name: `Music\Artist\Keep.FLAC`}},
+		{virtual: `Music\Artist\Demo.MP3`, virtualLower: `music\artist\demo.mp3`, wire: peer.File{Name: `Music\Artist\Demo.MP3`}},
+		{virtual: `Music\Other\Keep Demo.ogg`, virtualLower: `music\other\keep demo.ogg`, wire: peer.File{Name: `Music\Other\Keep Demo.ogg`}},
+	}}
+	tests := []struct {
+		name  string
+		query string
+		limit int
+		want  []string
+	}{
+		{name: "case insensitive includes", query: "ARTIST KEEP", limit: 10, want: []string{`Music\Artist\Keep.FLAC`}},
+		{name: "slash normalized", query: "music/artist/demo", limit: 10, want: []string{`Music\Artist\Demo.MP3`}},
+		{name: "exclude overrides include", query: "keep -other", limit: 10, want: []string{`Music\Artist\Keep.FLAC`}},
+		{name: "all includes required", query: "artist missing", limit: 10},
+		{name: "include required", query: "-demo", limit: 10},
+		{name: "positive limit", query: "music", limit: 1, want: []string{`Music\Artist\Keep.FLAC`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := s.match(tt.query, tt.limit)
+			if len(matches) != len(tt.want) {
+				t.Fatalf("match count = %d, want %d: %#v", len(matches), len(tt.want), matches)
+			}
+			for i, want := range tt.want {
+				if matches[i].Name != want {
+					t.Fatalf("match %d = %q, want %q", i, matches[i].Name, want)
+				}
+			}
+		})
+	}
+}
+
 func TestShareSearchAndFolderLookup(t *testing.T) {
 	s := &shareSnapshot{
 		search: []*indexedFile{
-			{virtual: `Music\Artist\keep.flac`, wire: peer.File{Name: `Music\Artist\keep.flac`, Size: 1, Extension: "flac"}},
-			{virtual: `Music\Artist\demo.mp3`, wire: peer.File{Name: `Music\Artist\demo.mp3`, Size: 1, Extension: "mp3"}},
+			{virtual: `Music\Artist\keep.flac`, virtualLower: `music\artist\keep.flac`, wire: peer.File{Name: `Music\Artist\keep.flac`, Size: 1, Extension: "flac"}},
+			{virtual: `Music\Artist\demo.mp3`, virtualLower: `music\artist\demo.mp3`, wire: peer.File{Name: `Music\Artist\demo.mp3`, Size: 1, Extension: "mp3"}},
 		},
 		directories: []peer.Directory{{Name: `Music\Artist`, Files: []peer.File{{Name: "keep.flac"}}}, {Name: `Music\Artist\Disc 2`}},
 	}
@@ -540,6 +577,30 @@ func TestShareSearchAndFolderLookup(t *testing.T) {
 		if got := s.folderResponse(1, unsafe); len(got.Folders) != 0 {
 			t.Fatalf("unsafe lookup %q returned folders", unsafe)
 		}
+	}
+}
+
+var benchmarkShareSnapshotMatches []peer.File
+
+func BenchmarkShareSnapshotMatch(b *testing.B) {
+	for _, size := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("files=%d", size), func(b *testing.B) {
+			search := make([]*indexedFile, size)
+			for i := range search {
+				virtual := fmt.Sprintf(`Music\Artist %05d\Album\Track %05d.FLAC`, i, i)
+				search[i] = &indexedFile{
+					virtual:      virtual,
+					virtualLower: strings.ToLower(virtual),
+					wire:         peer.File{Name: virtual},
+				}
+			}
+			snapshot := &shareSnapshot{search: search}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchmarkShareSnapshotMatches = snapshot.match("MISSING/TERM", maxSharedSearchResults)
+			}
+		})
 	}
 }
 

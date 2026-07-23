@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"time"
 
@@ -181,6 +182,11 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	configWriter ConfigWriter, restart func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !live() {
 			// /healthz is public; keep the body generic so it leaks no
