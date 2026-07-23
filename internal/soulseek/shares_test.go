@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -48,6 +49,9 @@ func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
 		t.Fatalf("stats = %+v, want 2 files/2 directories", stats)
 	}
 	snapshot := c.shareSnapshot()
+	if len(snapshot.trigrams) == 0 || len(snapshot.match("album track", 10)) != 1 {
+		t.Fatal("published snapshot is missing its share search index")
+	}
 	if snapshot.files[`Music\Album\track.flac`] == nil || snapshot.files[`Music\README`] == nil {
 		t.Fatalf("virtual files missing: %#v", snapshot.files)
 	}
@@ -289,10 +293,7 @@ func TestRepeatedHugeBrowseResponsesRespectSessionByteBudget(t *testing.T) {
 
 func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
-	c.shares.Store(&shareSnapshot{
-		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
-	})
+	c.shares.Store(newTestShareSnapshot(t, `Music\track.flac`))
 	startSessionLifecycle(t, c)
 	newQueuedSession := func(username string) *peerSession {
 		local, remote := net.Pipe()
@@ -375,10 +376,7 @@ func TestShareSearchSchedulingCentralDistributedAndBackpressure(t *testing.T) {
 // stage the way the old single shared pool did.
 func TestShareSearchDeliverPoolSaturationDoesNotBlockMatch(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
-	c.shares.Store(&shareSnapshot{
-		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
-	})
+	c.shares.Store(newTestShareSnapshot(t, `Music\track.flac`))
 	startSessionLifecycle(t, c)
 
 	// A registered session the delivery would use if it were not dropped.
@@ -419,10 +417,7 @@ func TestShareSearchDeliverPoolSaturationDoesNotBlockMatch(t *testing.T) {
 
 func TestShareSearchDeliveryFailureCanRetry(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
-	c.shares.Store(&shareSnapshot{
-		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
-	})
+	c.shares.Store(newTestShareSnapshot(t, `Music\track.flac`))
 	startSessionLifecycle(t, c)
 
 	newSession := func() (*peerSession, net.Conn) {
@@ -464,10 +459,7 @@ func TestShareSearchDeliveryFailureCanRetry(t *testing.T) {
 
 func TestShareSearchDeliveryConcurrentDuplicatesQueueOnce(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
-	c.shares.Store(&shareSnapshot{
-		files:  map[string]*indexedFile{},
-		search: []*indexedFile{{virtual: `Music\track.flac`, virtualLower: `music\track.flac`, wire: peer.File{Name: `Music\track.flac`, Size: 4, Extension: "flac"}}},
-	})
+	c.shares.Store(newTestShareSnapshot(t, `Music\track.flac`))
 	startSessionLifecycle(t, c)
 	local, remote := net.Pipe()
 	defer remote.Close()
@@ -523,12 +515,33 @@ func mustFolderRequestWire(t *testing.T, token soul.Token, folder string) []byte
 	return wire
 }
 
+func newTestShareSnapshot(tb testing.TB, names ...string) *shareSnapshot {
+	tb.Helper()
+	s := &shareSnapshot{files: map[string]*indexedFile{}}
+	for _, name := range names {
+		indexed := &indexedFile{
+			virtual:      name,
+			virtualLower: strings.ToLower(name),
+			wire:         peer.File{Name: name, Size: 4, Extension: extensionOf(name)},
+		}
+		s.files[name] = indexed
+		s.search = append(s.search, indexed)
+	}
+	sort.Slice(s.search, func(i, j int) bool { return s.search[i].virtualLower < s.search[j].virtualLower })
+	var err error
+	s.trigrams, err = buildShareTrigramIndex(context.Background(), s.search)
+	if err != nil {
+		tb.Fatalf("build test share index: %v", err)
+	}
+	return s
+}
+
 func TestShareSnapshotMatch(t *testing.T) {
-	s := &shareSnapshot{search: []*indexedFile{
-		{virtual: `Music\Artist\Keep.FLAC`, virtualLower: `music\artist\keep.flac`, wire: peer.File{Name: `Music\Artist\Keep.FLAC`}},
-		{virtual: `Music\Artist\Demo.MP3`, virtualLower: `music\artist\demo.mp3`, wire: peer.File{Name: `Music\Artist\Demo.MP3`}},
-		{virtual: `Music\Other\Keep Demo.ogg`, virtualLower: `music\other\keep demo.ogg`, wire: peer.File{Name: `Music\Other\Keep Demo.ogg`}},
-	}}
+	s := newTestShareSnapshot(t,
+		`Music\Artist\Keep.FLAC`,
+		`Music\Artist\Demo.MP3`,
+		`Music\Other\Keep Demo.ogg`,
+	)
 	tests := []struct {
 		name  string
 		query string
@@ -538,9 +551,10 @@ func TestShareSnapshotMatch(t *testing.T) {
 		{name: "case insensitive includes", query: "ARTIST KEEP", limit: 10, want: []string{`Music\Artist\Keep.FLAC`}},
 		{name: "slash normalized", query: "music/artist/demo", limit: 10, want: []string{`Music\Artist\Demo.MP3`}},
 		{name: "exclude overrides include", query: "keep -other", limit: 10, want: []string{`Music\Artist\Keep.FLAC`}},
+		{name: "duplicate terms", query: "artist artist keep -demo -demo", limit: 10, want: []string{`Music\Artist\Keep.FLAC`}},
 		{name: "all includes required", query: "artist missing", limit: 10},
 		{name: "include required", query: "-demo", limit: 10},
-		{name: "positive limit", query: "music", limit: 1, want: []string{`Music\Artist\Keep.FLAC`}},
+		{name: "positive limit", query: "music", limit: 1, want: []string{`Music\Artist\Demo.MP3`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -557,14 +571,148 @@ func TestShareSnapshotMatch(t *testing.T) {
 	}
 }
 
-func TestShareSearchAndFolderLookup(t *testing.T) {
-	s := &shareSnapshot{
-		search: []*indexedFile{
-			{virtual: `Music\Artist\keep.flac`, virtualLower: `music\artist\keep.flac`, wire: peer.File{Name: `Music\Artist\keep.flac`, Size: 1, Extension: "flac"}},
-			{virtual: `Music\Artist\demo.mp3`, virtualLower: `music\artist\demo.mp3`, wire: peer.File{Name: `Music\Artist\demo.mp3`, Size: 1, Extension: "mp3"}},
-		},
-		directories: []peer.Directory{{Name: `Music\Artist`, Files: []peer.File{{Name: "keep.flac"}}}, {Name: `Music\Artist\Disc 2`}},
+func linearShareSnapshotMatch(s *shareSnapshot, query string, limit int) []peer.File {
+	if limit <= 0 {
+		return nil
 	}
+	include, exclude := parseShareSearchQuery(query)
+	if len(include) == 0 {
+		return nil
+	}
+	results := make([]peer.File, 0, min(limit, len(s.search)))
+	for _, indexed := range s.search {
+		if matchesShareSearch(indexed, include, exclude) {
+			results = append(results, indexed.wire)
+			if len(results) == limit {
+				break
+			}
+		}
+	}
+	return results
+}
+
+func TestParseShareSearchQueryDeduplicatesTerms(t *testing.T) {
+	include, exclude := parseShareSearchQuery("Music music MUSIC -demo -DEMO")
+	if fmt.Sprint(include) != "[music]" || fmt.Sprint(exclude) != "[demo]" {
+		t.Fatalf("include=%v exclude=%v", include, exclude)
+	}
+}
+
+func TestShareSnapshotIndexedMatchEquivalentToLinear(t *testing.T) {
+	s := newTestShareSnapshot(t,
+		`Music\Artist\Keep.FLAC`,
+		`Music\Artist\Demo.MP3`,
+		`Music\Other\Keep Demo.ogg`,
+		`Music\Aaaa\bananana--live.flac`,
+		`Music\Ångström\Café.track`,
+		`Music\Path\foo.bar-baz`,
+	)
+	tests := []struct {
+		query string
+		limit int
+	}{
+		{query: "ARTIST KEEP", limit: 10},
+		{query: "music/artist/demo", limit: 10},
+		{query: "keep -other", limit: 10},
+		{query: "keep keep", limit: 10},
+		{query: "aaaa", limit: 10},
+		{query: "bananana", limit: 10},
+		{query: ".flac", limit: 10},
+		{query: `artist\keep`, limit: 10},
+		{query: "foo.bar-baz", limit: 10},
+		{query: "ÅNGSTRÖM CAFÉ", limit: 10},
+		{query: "é", limit: 10},
+		{query: "é track", limit: 10},
+		{query: "mu ar", limit: 10},
+		{query: "missing", limit: 10},
+		{query: "keep -demo -other", limit: 10},
+		{query: "-demo", limit: 10},
+		{query: "music", limit: 2},
+		{query: "music", limit: 0},
+		{query: "music", limit: -1},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/limit=%d", tt.query, tt.limit), func(t *testing.T) {
+			got := s.match(tt.query, tt.limit)
+			want := linearShareSnapshotMatch(s, tt.query, tt.limit)
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("indexed matches = %#v, linear matches = %#v", got, want)
+			}
+		})
+	}
+
+	// A two-byte UTF-8 term has no trigrams and must not depend on the index.
+	withoutIndex := *s
+	withoutIndex.trigrams = nil
+	if got, want := withoutIndex.match("é", 10), linearShareSnapshotMatch(s, "é", 10); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("short-term fallback = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildShareTrigramIndexPostingsUseFinalPositions(t *testing.T) {
+	s := newTestShareSnapshot(t,
+		`Music\Zulu\aaaaa.flac`,
+		`Music\Alpha\aaaa.flac`,
+		`Music\Middle\banana.flac`,
+	)
+	posting := s.trigrams[packShareTrigram("aaa", 0)]
+	if cap(posting) != len(posting) {
+		t.Fatalf("posting retains excess capacity: len=%d cap=%d", len(posting), cap(posting))
+	}
+	if len(posting) != 2 {
+		t.Fatalf("aaa posting = %v, want one position for each of two files", posting)
+	}
+	for i, id := range posting {
+		if int(id) >= len(s.search) {
+			t.Fatalf("posting id %d is outside search", id)
+		}
+		if i > 0 && posting[i-1] >= id {
+			t.Fatalf("posting is not strictly ascending: %v", posting)
+		}
+		if !strings.Contains(s.search[id].virtualLower, "aaa") {
+			t.Fatalf("posting id %d points to %q without trigram", id, s.search[id].virtual)
+		}
+	}
+	if s.search[posting[0]].virtual != `Music\Alpha\aaaa.flac` || s.search[posting[1]].virtual != `Music\Zulu\aaaaa.flac` {
+		t.Fatalf("posting does not use final sorted positions: %v", posting)
+	}
+}
+
+func TestBuildShareTrigramIndexCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := buildShareTrigramIndex(ctx, newTestShareSnapshot(t, `Music\track.flac`).search)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("build error = %v, want context.Canceled", err)
+	}
+}
+
+func TestShareSnapshotConcurrentIndexedMatch(t *testing.T) {
+	s := newTestShareSnapshot(t,
+		`Music\Artist\Keep.FLAC`,
+		`Music\Artist\Demo.MP3`,
+		`Music\Other\Keep Demo.ogg`,
+	)
+	want := fmt.Sprint(s.match("music keep -other", 10))
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				if got := fmt.Sprint(s.match("music keep -other", 10)); got != want {
+					t.Errorf("concurrent match = %s, want %s", got, want)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestShareSearchAndFolderLookup(t *testing.T) {
+	s := newTestShareSnapshot(t, `Music\Artist\keep.flac`, `Music\Artist\demo.mp3`)
+	s.directories = []peer.Directory{{Name: `Music\Artist`, Files: []peer.File{{Name: "keep.flac"}}}, {Name: `Music\Artist\Disc 2`}}
 	matches := s.match("ARTIST -demo", 10)
 	if len(matches) != 1 || matches[0].Name != `Music\Artist\keep.flac` {
 		t.Fatalf("matches = %#v", matches)
@@ -577,30 +725,6 @@ func TestShareSearchAndFolderLookup(t *testing.T) {
 		if got := s.folderResponse(1, unsafe); len(got.Folders) != 0 {
 			t.Fatalf("unsafe lookup %q returned folders", unsafe)
 		}
-	}
-}
-
-var benchmarkShareSnapshotMatches []peer.File
-
-func BenchmarkShareSnapshotMatch(b *testing.B) {
-	for _, size := range []int{1_000, 10_000} {
-		b.Run(fmt.Sprintf("files=%d", size), func(b *testing.B) {
-			search := make([]*indexedFile, size)
-			for i := range search {
-				virtual := fmt.Sprintf(`Music\Artist %05d\Album\Track %05d.FLAC`, i, i)
-				search[i] = &indexedFile{
-					virtual:      virtual,
-					virtualLower: strings.ToLower(virtual),
-					wire:         peer.File{Name: virtual},
-				}
-			}
-			snapshot := &shareSnapshot{search: search}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				benchmarkShareSnapshotMatches = snapshot.match("MISSING/TERM", maxSharedSearchResults)
-			}
-		})
 	}
 }
 
