@@ -511,3 +511,114 @@ func TestStreamFileRejectsNegativeSize(t *testing.T) {
 		t.Errorf("a destination file was created for a negative size: %v", statErr)
 	}
 }
+
+// --- streamFile error classification (issue #103): local filesystem failures
+// are tagged diskError so runDownload can mark them non-retryable, while
+// peer/network failures stay untagged (retryable). ---
+
+func TestStreamFileLocalPathFailureIsDiskError(t *testing.T) {
+	// A regular file where the destination's parent directory should be makes
+	// every local path operation fail before the connection is ever touched.
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker file: %v", err)
+	}
+	destPath := filepath.Join(blocker, "song.flac")
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	_, err := streamFile(local, destPath, 8, time.Second, nil)
+	if err == nil {
+		t.Fatal("streamFile: expected an error for a blocked destination path, got nil")
+	}
+	var de *diskError
+	if !errors.As(err, &de) {
+		t.Errorf("streamFile error = %v, want a diskError (local filesystem failure)", err)
+	}
+}
+
+func TestStreamFileOpenFailureIsDiskError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permission bits; the read-only dir cannot fail the open")
+	}
+	// The destination directory exists but is read-only, so the .part open
+	// fails after the Offset handshake with the peer has already happened.
+	dir := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(dir, 0o555); err != nil {
+		t.Fatalf("mkdir read-only dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	destPath := filepath.Join(dir, "song.flac")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake uploader: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		off := &file.Offset{}
+		_ = off.Deserialize(conn) // absorb the handshake; the failure is local
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial fake uploader: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = streamFile(conn, destPath, 8, time.Second, nil)
+	if err == nil {
+		t.Fatal("streamFile: expected an error for a read-only destination directory, got nil")
+	}
+	var de *diskError
+	if !errors.As(err, &de) {
+		t.Errorf("streamFile error = %v, want a diskError (local filesystem failure)", err)
+	}
+}
+
+func TestStreamFileNetworkFailureIsNotDiskError(t *testing.T) {
+	// The peer sends only half the payload and closes: the failure is the
+	// network/peer's, so it must NOT be tagged diskError.
+	payload := bytes.Repeat([]byte("abcdefgh"), 16) // 128 bytes
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for fake uploader: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		off := &file.Offset{}
+		if err := off.Deserialize(conn); err != nil {
+			return
+		}
+		_, _ = conn.Write(payload[:len(payload)/2])
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial fake uploader: %v", err)
+	}
+	defer conn.Close()
+
+	destPath := filepath.Join(t.TempDir(), "song.flac")
+	_, err = streamFile(conn, destPath, int64(len(payload)), time.Second, nil)
+	if err == nil {
+		t.Fatal("streamFile: expected an error for a short stream, got nil")
+	}
+	var de *diskError
+	if errors.As(err, &de) {
+		t.Errorf("streamFile error = %v, must not be a diskError (peer/network failure)", err)
+	}
+}

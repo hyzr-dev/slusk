@@ -915,7 +915,10 @@ queueWait:
 		}
 	})
 	if err != nil {
-		setTransferErrored(tr, err.Error(), true)
+		// Peer/network failures are worth retrying; local filesystem failures
+		// (diskError) are not — they persist until the operator fixes them.
+		var de *diskError
+		setTransferErrored(tr, err.Error(), !errors.As(err, &de))
 		return
 	}
 
