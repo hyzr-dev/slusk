@@ -611,14 +611,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
     },
     { key: 'listenAddr', label: t.settings.listenAddr, configKey: t.settings.configKeys.soulseekListenAddr, kind: 'text', errorKey: 'soulseek.listenAddr' },
     { key: 'uploadSlots', label: t.settings.uploadSlots, configKey: t.settings.configKeys.uploadSlots, kind: 'integer', errorKey: 'soulseek.uploadSlots' },
-    {
-      key: 'allowPrivatePeerAddresses',
-      label: t.settings.allowPrivatePeerAddresses,
-      configKey: t.settings.configKeys.allowPrivatePeerAddresses,
-      kind: 'select',
-      options: allowPrivatePeerAddressesOptions,
-      errorKey: 'soulseek.allowPrivatePeerAddresses',
-    },
+    { key: 'allowPrivatePeerAddresses', label: t.settings.allowPrivatePeerAddresses, configKey: t.settings.configKeys.allowPrivatePeerAddresses, kind: 'select', options: allowPrivatePeerAddressesOptions, errorKey: 'soulseek.allowPrivatePeerAddresses' },
   ];
 
   const gluetunFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [

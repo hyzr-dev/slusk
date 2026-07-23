@@ -119,6 +119,12 @@ type Config struct {
 	// blocked); set true to reach peers on your own LAN.
 	AllowPrivatePeerAddresses bool
 
+	// allowLoopbackPeerDial carves out loopback addresses from the T12 guard
+	// (see validateDialAddr in addrguard.go). Only this package's own test
+	// helpers set it, since the test suite necessarily runs its fake peers
+	// on 127.0.0.1; production configuration never sets it.
+	allowLoopbackPeerDial bool
+
 	// dialTimeout bounds establishing the TCP connection. Default 10s.
 	dialTimeout time.Duration
 	// pingInterval is how often a keepalive Ping is sent once connected.

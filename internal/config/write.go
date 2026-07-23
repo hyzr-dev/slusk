@@ -224,9 +224,9 @@ const (
 	fieldString fieldKind = iota
 	fieldInt
 	fieldFloat
+	fieldBool
 	fieldDuration
 	fieldSecret
-	fieldBool
 )
 
 // fieldSpec is one declarative entry in the Settings→TOML mapping: which
@@ -241,9 +241,9 @@ type fieldSpec struct {
 	str    string        // fieldString
 	i      int           // fieldInt
 	f      float64       // fieldFloat
+	b      bool          // fieldBool
 	d      time.Duration // fieldDuration
 	secret *string       // fieldSecret; nil means keep the current value
-	b      bool          // fieldBool
 }
 
 // apply upserts the field's value into doc according to its kind, or does
@@ -256,10 +256,10 @@ func (fs fieldSpec) apply(doc *tomledit.Document) error {
 		return applyIntField(doc, fs.table, fs.key, fs.i)
 	case fieldFloat:
 		return applyFloatField(doc, fs.table, fs.key, fs.f)
-	case fieldDuration:
-		return applyDurationField(doc, fs.table, fs.key, fs.d)
 	case fieldBool:
 		return applyBoolField(doc, fs.table, fs.key, fs.b)
+	case fieldDuration:
+		return applyDurationField(doc, fs.table, fs.key, fs.d)
 	case fieldSecret:
 		if fs.secret == nil {
 			return nil

@@ -455,6 +455,7 @@ func TestHandleInboundFileConnIndirectMirrorDial(t *testing.T) {
 	})
 
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 
 	// Register the transfer before Run starts dialing anything, so the
 	// server's ConnectToPeer relay (which can arrive immediately after

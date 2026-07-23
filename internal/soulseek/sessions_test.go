@@ -543,6 +543,7 @@ func TestMirrorDAttachmentRejectedAfterGenerationTeardown(t *testing.T) {
 	}()
 
 	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 	startSessionLifecycle(t, c)
 	const generation = 7
 

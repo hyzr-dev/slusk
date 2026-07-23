@@ -150,6 +150,7 @@ func startConnectedClient(t *testing.T, handle func(conn net.Conn)) (*Client, st
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
 	c.cfg.peerDialTimeout = 200 * time.Millisecond
 	c.cfg.establishTimeout = 2 * time.Second
+	c.cfg.allowLoopbackPeerDial = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -616,6 +617,7 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 	})
 
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
@@ -711,6 +713,7 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
 	c.cfg.peerDialTimeout = 200 * time.Millisecond
+	c.cfg.allowLoopbackPeerDial = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
@@ -822,15 +825,21 @@ func TestHandleConnectToPeerBlockedAddressSendsCantConnect(t *testing.T) {
 	}
 }
 
-// TestConnectPeerBlockedAddressFails is a regression test for threat T12:
-// dialPeer must refuse a server-supplied blocked address in its direct-dial
-// path via validatePeerDialAddr, rather than attempting to connect to it.
-// This uses a link-local address rather than loopback because
+// TestConnectPeerBlockedAddressFallsBackToIndirect is a regression test for
+// threat T12: dialPeer must refuse to dial a server-supplied blocked address
+// directly (via validatePeerDialAddr), but - unlike a server-supplied address
+// with no reachable target at all - it must still fall back to the indirect
+// NAT-traversal path exactly as it would for a failed direct dial, since the
+// indirect path never dials the suspect address itself (the peer dials us
+// back instead). This uses a link-local address rather than loopback because
 // (*Client).validateDialAddr carves out loopback for the test suite's own
 // fake TCP peers (see its comment) - link-local has no such carve-out, so it
-// still exercises the real block.
-func TestConnectPeerBlockedAddressFails(t *testing.T) {
-	c, _ := startConnectedClient(t, func(conn net.Conn) {
+// still exercises the real block. The direct dial to the blocked address must
+// be skipped rather than attempted, so the whole call is asserted to
+// complete well under peerDialTimeout.
+func TestConnectPeerBlockedAddressFallsBackToIndirect(t *testing.T) {
+	var listenAddr string
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
 		code, body, err := readRawFrame(conn)
 		if err != nil || code != uint32(server.CodeGetPeerAddress) {
 			t.Logf("read get peer address request: code=%d err=%v", code, err)
@@ -841,18 +850,53 @@ func TestConnectPeerBlockedAddressFails(t *testing.T) {
 			t.Errorf("parse get peer address request: %v", err)
 			return
 		}
-		// Answer with a link-local address; the client must refuse to dial it
-		// rather than attempt (and possibly fall back to the indirect dance).
+		// Answer with a link-local address: the client must refuse to dial it
+		// directly and fall back to the indirect dance instead.
 		writeGetPeerAddressResponse(t, conn, username, net.ParseIP("169.254.1.1"), 12345, 0)
+
+		code, body, err = readRawFrame(conn)
+		if err != nil {
+			t.Logf("read connect to peer request: %v", err)
+			return
+		}
+		if code != uint32(server.CodeConnectToPeer) {
+			t.Errorf("code = %d, want CodeConnectToPeer", code)
+			return
+		}
+		token, _, _, err := parseConnectToPeerRequest(body)
+		if err != nil {
+			t.Errorf("parse connect to peer request: %v", err)
+			return
+		}
+
+		// Play the peer's part: dial the client's own listener back and
+		// complete with PierceFirewall carrying the relayed token.
+		peerConn, err := net.Dial("tcp", listenAddr)
+		if err != nil {
+			t.Errorf("mock peer dial back: %v", err)
+			return
+		}
+		defer peerConn.Close()
+		if _, err := peer.Write(peerConn, &peer.PierceFirewall{Token: soul.Token(token)}, false); err != nil {
+			t.Errorf("mock peer write pierce firewall: %v", err)
+			return
+		}
 		_, _ = io.Copy(io.Discard, conn)
 	})
+	listenAddr = addr
 
-	_, err := c.ConnectPeer(context.Background(), "friend", peer.ConnectionType)
-	if err == nil {
-		t.Fatal("ConnectPeer: expected an error for a blocked link-local address, got nil")
+	start := time.Now()
+	conn, err := c.ConnectPeer(context.Background(), "friend", peer.ConnectionType)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ConnectPeer: %v", err)
 	}
-	if !strings.Contains(err.Error(), "link-local") {
-		t.Errorf("err = %v, want it to mention the link-local refusal", err)
+	defer conn.Close()
+	if conn.Username != "friend" {
+		t.Errorf("Username = %q, want friend", conn.Username)
+	}
+	if elapsed >= c.cfg.peerDialTimeout {
+		t.Errorf("ConnectPeer took %v, want well under peerDialTimeout %v - the direct dial to the blocked address should have been skipped, not attempted and timed out", elapsed, c.cfg.peerDialTimeout)
 	}
 }
 
