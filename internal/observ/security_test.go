@@ -43,6 +43,7 @@ func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 func TestPprofEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
 	for _, path := range []string{
+		"/debug/pprof",
 		"/debug/pprof/",
 		"/debug/pprof/goroutine?debug=1",
 		"/debug/pprof/cmdline",
@@ -63,11 +64,15 @@ func TestPprofEndpointsRequireAuthentication(t *testing.T) {
 
 func TestAnonymousNonGETPprofRequestRequiresAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	req := httptest.NewRequest(http.MethodPut, "/debug/pprof/profile", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	for _, path := range []string{"/debug/pprof", "/debug/pprof/profile"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPut, path, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+		})
 	}
 }
 
@@ -78,6 +83,7 @@ func TestAuthenticatedPprofHandlersRejectNonGETMethods(t *testing.T) {
 		method string
 		path   string
 	}{
+		{name: "root", method: http.MethodPost, path: "/debug/pprof"},
 		{name: "index", method: http.MethodPost, path: "/debug/pprof/"},
 		{name: "index subtree", method: http.MethodPut, path: "/debug/pprof/goroutine?debug=1"},
 		{name: "cmdline", method: http.MethodPost, path: "/debug/pprof/cmdline"},
@@ -96,6 +102,24 @@ func TestAuthenticatedPprofHandlersRejectNonGETMethods(t *testing.T) {
 			}
 			if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
 				t.Fatalf("Allow = %q, want %q", allow, "GET, HEAD")
+			}
+		})
+	}
+}
+
+func TestAuthenticatedPprofRootRedirectsToCanonicalPath(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/debug/pprof", nil)
+			req.Header.Set("Authorization", "Bearer "+testAuthToken)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusTemporaryRedirect {
+				t.Fatalf("status = %d, want 307; body = %s", rec.Code, rec.Body.String())
+			}
+			if location := rec.Header().Get("Location"); location != "/debug/pprof/" {
+				t.Fatalf("Location = %q, want %q", location, "/debug/pprof/")
 			}
 		})
 	}
