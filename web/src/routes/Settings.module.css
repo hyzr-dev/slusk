@@ -26,6 +26,152 @@
   margin: 18px 0 10px;
 }
 
+/* Row wrapping a subTitle and its HelpPopover, so the popover sits beside
+   the <h3> instead of inside it (heading content is announced as part of
+   the heading). The row carries the vertical margins. */
+.subTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 18px 0 10px;
+}
+.subTitleRow .subTitle { margin: 0; }
+/* Subsection popovers sit just after the heading near the card's left edge,
+   so the right-anchored default (see .helpPanel) would overflow leftward. */
+.subTitleRow .helpPanel {
+  left: 0;
+  right: auto;
+}
+
+/* --- Collapsible section (accordion) chrome ------------------------------ */
+
+/* The header row for a whole card: the toggle <button> lives inside the
+   real <h2> so the heading survives in the accessibility tree, and the
+   button's stretched ::after (positioned against this row) makes the full
+   row clickable anyway. */
+.sectionHeader {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+/* Inside the header row, the title needs no bottom margin of its own —
+   .sectionBody's margin-top provides the gap when the section is open, and
+   there's nothing below it to space from when collapsed. */
+.sectionHeader .groupTitle,
+.sectionHeader .dangerTitle {
+  margin: 0;
+}
+
+.sectionHeaderButton {
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* Stretch the click target over the whole header row. Being a positioned
+   box, it also hit-tests above the (static) badge/chevron siblings. */
+.sectionHeaderButton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.sectionHeaderButton:focus-visible { outline: none; }
+.sectionHeaderButton:focus-visible::after { outline: 2px solid var(--active); outline-offset: 2px; }
+
+.sectionHeaderRight { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+
+.chevron { font-size: 11px; color: var(--text-dim); }
+
+/* Content wrapper for an open section — carries the gap below the header
+   row, since the title's own bottom margin is zeroed there. */
+.sectionBody { margin-top: 16px; }
+
+.changedBadge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--done-bg);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* --- Advanced disclosure (nested, quieter than a top-level section) ----- */
+
+.advancedGroup { margin-top: 18px; }
+
+.advancedHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  margin: 0 0 12px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.advancedHeader:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+
+.advancedTitle { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+
+.advancedBody { display: flex; flex-direction: column; gap: 16px; }
+
+/* --- Per-field help popover ----------------------------------------------- */
+
+.labelRow { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+
+.helpWrapper { position: relative; display: inline-flex; }
+
+.helpButton {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.helpButton:hover { color: var(--text); border-color: var(--text-muted); }
+.helpButton:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+
+/* Anchored right rather than left: the wrapper sits at the right end of its
+   label row, so a left-anchored panel would overflow the card (and likely
+   the viewport) for fields in the grid's right column. */
+.helpPanel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  z-index: 10;
+  width: max-content;
+  max-width: 320px;
+  padding: 10px 12px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: normal;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
