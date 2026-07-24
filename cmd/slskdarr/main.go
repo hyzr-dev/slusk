@@ -50,6 +50,11 @@ const (
 	httpWriteTimeout         = 30 * time.Second
 	httpIdleTimeout          = 60 * time.Second
 	healthcheckTimeout       = 5 * time.Second
+	// throughputRecorderInterval is how often runThroughputRecorder drains
+	// completed per-minute download-throughput rollups into the store (issue
+	// #157). At least twice a minute, so soulseek.throughputPendingCap never
+	// nears its cap under normal operation.
+	throughputRecorderInterval = 30 * time.Second
 )
 
 // ensureWritableDir verifies dir exists (creating it if needed) and is actually
@@ -350,6 +355,16 @@ func main() {
 			return peers.ListDownloads(ctx)
 		}
 	}
+	// throughputFn backs the Overview view's live sparkline (issue #157): only
+	// the native soulseek client tracks byte throughput, so this stays nil
+	// (registerCharts then serves an empty series) on every other backend,
+	// mirroring liveTransfersFn's own backend gate above.
+	var throughputFn observ.ThroughputFunc
+	if cfg.Pipeline.Backend == config.BackendSoulseek {
+		throughputFn = func(ctx context.Context) ([]core.ThroughputSample, error) {
+			return soulClient.ThroughputSamples(), nil
+		}
+	}
 	// Connection tests for the settings view probe the loaded config, not any
 	// request payload. Lidarr is always configured; the Soulseek probe reports
 	// the current login state (a passive read of the background Run loop, not an
@@ -401,6 +416,7 @@ func main() {
 		ConnectionTester: connectionTester,
 		LiveTransfers:    liveTransfersFn,
 		Charts:           chartsFn,
+		Throughput:       throughputFn,
 	})
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
@@ -430,6 +446,12 @@ func main() {
 		signal.Notify(hup, syscall.SIGHUP)
 		defer signal.Stop(hup)
 		go runShareRescanLoop(soulCtx, hup, soulClient, logger)
+		if cfg.Pipeline.Backend == config.BackendSoulseek {
+			// Deliberately not a pipeline.Runner module: Runner modules feed
+			// Live()/Ready(), and a failed throughput write must never make the
+			// daemon unready.
+			go runThroughputRecorder(soulCtx, soulClient, st, throughputRecorderInterval, logger)
+		}
 		soulDone = make(chan error, 1)
 		go func() {
 			err := soulClient.Run(soulCtx)

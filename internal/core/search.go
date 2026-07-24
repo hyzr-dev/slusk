@@ -92,6 +92,13 @@ type RemoteTransfer struct {
 	// Populated by providers that track it natively; the slskd adapter leaves
 	// it 0.
 	Speed int64
+	// SpeedAverage is an EWMA-smoothed transfer rate in bytes per second (0
+	// when unknown), backing ETA math (issue #157): Speed is instantaneous and
+	// jumpy — dividing remaining bytes by it would make an ETA flicker wildly
+	// on every sample, so ETA is computed from this smoothed figure instead.
+	// Populated only by the native soulseek downloader; the slskd adapter
+	// leaves it 0.
+	SpeedAverage int64
 }
 
 // ErrRemoteNotFound is returned (wrapped) by a peer-to-peer provider adapter

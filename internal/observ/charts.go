@@ -34,6 +34,13 @@ type ChartsData struct {
 // store's RecentSearchPasses and CompletedByHour).
 type ChartsFunc func(ctx context.Context) (ChartsData, error)
 
+// ThroughputFunc produces the native soulseek client's recent aggregate
+// download-throughput samples, oldest first (typically backed by
+// soulseek.Client.ThroughputSamples, issue #157). A nil func, or one wired to
+// a non-native backend, simply yields no throughput series — see
+// registerCharts.
+type ThroughputFunc func(ctx context.Context) ([]core.ThroughputSample, error)
+
 // passDTO is the JSON shape of one search pass served at GET /api/charts.
 type passDTO struct {
 	StartedAt  string `json:"startedAt"`
@@ -48,10 +55,31 @@ type hourCountDTO struct {
 	Count int    `json:"count"`
 }
 
+// throughputSampleDTO is the JSON shape of one live download-throughput
+// sample served at GET /api/charts (issue #157).
+type throughputSampleDTO struct {
+	At              string `json:"at"`
+	BytesPerSecond  int64  `json:"bytesPerSecond"`
+	ActiveTransfers int    `json:"activeTransfers"`
+}
+
 // chartsDTO is the JSON shape served at GET /api/charts.
 type chartsDTO struct {
-	Passes          []passDTO      `json:"passes"`
-	CompletedByHour []hourCountDTO `json:"completedByHour"`
+	Passes          []passDTO             `json:"passes"`
+	CompletedByHour []hourCountDTO        `json:"completedByHour"`
+	Throughput      []throughputSampleDTO `json:"throughput"`
+}
+
+func toThroughputDTO(samples []core.ThroughputSample) []throughputSampleDTO {
+	out := make([]throughputSampleDTO, len(samples))
+	for i, s := range samples {
+		out[i] = throughputSampleDTO{
+			At:              s.At.Format(timeFormat),
+			BytesPerSecond:  s.BytesPerSecond,
+			ActiveTransfers: s.ActiveTransfers,
+		}
+	}
+	return out
 }
 
 func toChartsDTO(data ChartsData, now time.Time) chartsDTO {
@@ -81,15 +109,28 @@ func toChartsDTO(data ChartsData, now time.Time) chartsDTO {
 	return chartsDTO{Passes: passes, CompletedByHour: buckets}
 }
 
-// registerCharts wires GET /api/charts onto mux.
-func registerCharts(mux *http.ServeMux, charts ChartsFunc) {
+// registerCharts wires GET /api/charts onto mux. throughput is best-effort
+// (issue #157): a nil func, or one that errors, yields an empty throughput
+// series and still a 200 — a Postgres outage (which does not affect the
+// in-memory throughput meter at all) must not blank the live sparkline, and a
+// non-native backend (which has no throughput data) must not 500 the whole
+// Overview view just because it has nothing to report there.
+func registerCharts(mux *http.ServeMux, charts ChartsFunc, throughput ThroughputFunc) {
 	mux.HandleFunc("/api/charts", func(w http.ResponseWriter, r *http.Request) {
 		data, err := charts(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		dto := toChartsDTO(data, time.Now())
+		var samples []core.ThroughputSample
+		if throughput != nil {
+			if s, tErr := throughput(r.Context()); tErr == nil {
+				samples = s
+			}
+		}
+		dto.Throughput = toThroughputDTO(samples)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toChartsDTO(data, time.Now()))
+		_ = json.NewEncoder(w).Encode(dto)
 	})
 }

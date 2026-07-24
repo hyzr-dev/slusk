@@ -67,6 +67,10 @@ const (
 	// upload's cumulative throughput is sampled against
 	// uploadMinThroughput (see #108).
 	defaultUploadThroughputSampleInterval = 15 * time.Second
+	// defaultThroughputInterval is how often sampleThroughput aggregates
+	// every tracked download's byte throughput into a core.ThroughputSample
+	// (see throughput.go, issue #157).
+	defaultThroughputInterval = time.Second
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -213,6 +217,10 @@ type Config struct {
 	// the scan deterministically without touching the filesystem. Always nil
 	// in production.
 	shareScanHook func(context.Context) error
+	// throughputInterval is how often sampleThroughput aggregates download
+	// byte throughput into a sample (see throughput.go, issue #157). Default
+	// 1s; test seam.
+	throughputInterval time.Duration
 }
 
 // Client manages one connection to the Soulseek server, reconnecting with
@@ -297,6 +305,10 @@ type Client struct {
 	// handoff it feeds; Group E wires Enqueue/ListDownloads/Cancel/Remove and
 	// the P-session download hooks on top without changing its shape.
 	downloads *downloadRegistry
+
+	// throughput aggregates download byte-throughput samples (issue #157);
+	// see throughput.go and the sampleThroughput goroutine started by Run.
+	throughput *throughputMeter
 
 	lifeMu       sync.Mutex
 	lifeCtx      context.Context
@@ -390,6 +402,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2
 	}
+	if cfg.throughputInterval <= 0 {
+		cfg.throughputInterval = defaultThroughputInterval
+	}
 
 	if logger != nil {
 		logger = logger.With("component", "soulseek")
@@ -407,6 +422,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		handshakeConns:         make(map[net.Conn]struct{}),
 		establishes:            make(map[sessionKey]*sessionEstablishment),
 		downloads:              newDownloadRegistry(),
+		throughput:             newThroughputMeter(),
 		shareWorkers:           make(chan struct{}, maxShareWorkers),
 		deliverWorkers:         make(chan struct{}, maxDeliverWorkers),
 		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
@@ -544,6 +560,10 @@ func (c *Client) Run(ctx context.Context) error {
 	if !c.startTracked(func() { c.runInitialShareScan(runCtx) }) {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before initial share scan start")
+	}
+	if !c.startTracked(func() { c.sampleThroughput(runCtx) }) {
+		_ = ln.Close()
+		return errors.New("soulseek: lifecycle stopped before throughput sampler start")
 	}
 
 	for {

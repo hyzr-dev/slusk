@@ -95,12 +95,27 @@ type jobDTO struct {
 	Year            *int    `json:"year"`
 	Tracks          *int    `json:"tracks"`
 	Format          *string `json:"format"`
+	// QueuePosition, Speed and ETASeconds are live, non-persisted values
+	// aggregated across every live transfer belonging to the job's current
+	// candidate (see aggregateLiveAlbum, issue #157) — album-level analogues
+	// of transferDetailDTO's per-file QueuePosition/Speed. omitempty is
+	// deliberate for the same reason: a job with no candidate yet, or no
+	// currently in-flight transfer, has nothing live to report, so the field
+	// is simply absent rather than a misleading zero. ETASeconds is named
+	// with the unit suffix rather than "eta" so it isn't misread as a
+	// timestamp; the frontend formats the duration.
+	QueuePosition uint32 `json:"queuePosition,omitempty"`
+	Speed         int64  `json:"speed,omitempty"`
+	ETASeconds    int64  `json:"etaSeconds,omitempty"`
 }
 
 // toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
 // failedRetryAfter and maxCandidates are engine config values threaded in from
 // NewServer, needed to compute nextAttemptAt for FAILED jobs and maxCandidates.
-func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int) jobDTO {
+// live supplies the peer backend's current ListDownloads snapshot, indexed
+// for album-level aggregation (see aggregateLiveAlbum); its zero value
+// (liveAlbumIndex{}) is a valid "no live data" index for callers with none.
+func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveAlbumIndex) jobDTO {
 	d := jobDTO{
 		ID:              v.Job.ID,
 		Title:           v.Job.Title,
@@ -123,6 +138,12 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int)
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
+		speed, speedAvg, remaining, queuePosition, hasQueuePosition := aggregateLiveAlbum(v.Attempt, live)
+		d.Speed = speed
+		if hasQueuePosition {
+			d.QueuePosition = queuePosition
+		}
+		d.ETASeconds = etaSeconds(remaining, speedAvg)
 	}
 	if v.Job.NotBefore != nil {
 		d.NotBefore = v.Job.NotBefore.Format(timeFormat)
@@ -248,6 +269,11 @@ type ServerDeps struct {
 	// Charts supplies the Overview view's chart data served at /api/charts
 	// (see ChartsData).
 	Charts ChartsFunc
+	// Throughput supplies the Overview view's live download-throughput series
+	// served at /api/charts (issue #157). nil (the non-native backends, or
+	// tests that don't care) yields an empty series rather than omitting the
+	// field.
+	Throughput ThroughputFunc
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -354,9 +380,17 @@ func NewServer(deps ServerDeps) http.Handler {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			// Live album speed/ETA is best-effort cosmetic enrichment, exactly
+			// like the job detail endpoint: a ListDownloads failure degrades to
+			// a list without speed/ETA rather than failing the whole request.
+			var live []core.RemoteTransfer
+			if lt, liveErr := deps.LiveTransfers(r.Context()); liveErr == nil {
+				live = lt
+			}
+			liveIdx := newLiveAlbumIndex(live)
 			dtos := make([]jobDTO, len(views))
 			for i, v := range views {
-				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates)
+				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(dtos)
@@ -522,7 +556,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
-	registerCharts(mux, deps.Charts)
+	registerCharts(mux, deps.Charts, deps.Throughput)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
@@ -598,7 +632,10 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 		v := core.JobView{Job: job, Peer: peer}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates))
+		// A freshly created manual job has no candidate yet (Attempt is nil),
+		// so there is nothing live to aggregate: the zero-value liveAlbumIndex
+		// is exactly right here.
+		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates, liveAlbumIndex{}))
 	case errors.Is(err, app.ErrRemoteFileBusy):
 		writeConfigError(w, http.StatusConflict, err.Error(), nil)
 	default:

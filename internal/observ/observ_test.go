@@ -34,6 +34,7 @@ func noopRetry(ctx context.Context, jobID int64) error                         {
 func noopConfig() AppConfig                                                    { return AppConfig{} }
 func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     { return nil, nil }
 func noopCharts(ctx context.Context) (ChartsData, error)                       { return ChartsData{}, nil }
+func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error)      { return nil, nil }
 func noopConfigWriter(ConfigUpdate) error                                      { return nil }
 func noopRestart()                                                             {}
 func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
@@ -63,6 +64,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		LiveTransfers:    noopLiveTransfers,
 		ConnectionTester: ConnectionTester{},
 		Charts:           noopCharts,
+		Throughput:       noopThroughput,
 		ConfigWriter:     noopConfigWriter,
 		Restart:          noopRestart,
 		CreateJob:        noopCreateJob,
@@ -424,6 +426,119 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status code = %d, want 500", rec.Code)
+	}
+}
+
+// TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA asserts a job
+// whose candidate has a matching live transfer gets queuePosition/speed/
+// etaSeconds populated from LiveTransfers (issue #157).
+func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:     core.AlbumJob{ID: 1, Title: "Live One", ArtistName: "X", State: core.StateDownloading},
+				Attempt: &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+			},
+		}, nil
+	}
+	live := func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		return []core.RemoteTransfer{
+			{Username: "alice", Filename: "01.flac", Speed: 200, SpeedAverage: 100, Size: 1000, BytesDone: 500, QueuePosition: 4},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	deps.LiveTransfers = live
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got[0].Speed != 200 {
+		t.Errorf("Speed = %d, want 200", got[0].Speed)
+	}
+	if got[0].QueuePosition != 4 {
+		t.Errorf("QueuePosition = %d, want 4", got[0].QueuePosition)
+	}
+	// remaining = 500, avgSpeed = 100 -> eta = 5s.
+	if got[0].ETASeconds != 5 {
+		t.Errorf("ETASeconds = %d, want 5", got[0].ETASeconds)
+	}
+}
+
+// TestJobsEndpointOmitsLiveFieldsWhenNoMatch asserts a job with no matching
+// live transfer serves queuePosition/speed/etaSeconds absent entirely (raw
+// JSON check, since omitempty and a zero value are indistinguishable once
+// decoded into a Go struct).
+func TestJobsEndpointOmitsLiveFieldsWhenNoMatch(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 1, Title: "No Live Data", ArtistName: "X", State: core.StateDownloading}},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	deps.LiveTransfers = noopLiveTransfers
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, field := range []string{`"queuePosition"`, `"speed"`, `"etaSeconds"`} {
+		if strings.Contains(body, field) {
+			t.Errorf("expected %s absent from body, got %s", field, body)
+		}
+	}
+}
+
+// TestJobsEndpointDegradesUnenrichedWhenLiveTransfersErrors asserts a
+// LiveTransfers failure still serves 200 with unenriched jobs, matching the
+// job detail endpoint's own best-effort enrichment contract.
+func TestJobsEndpointDegradesUnenrichedWhenLiveTransfersErrors(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:     core.AlbumJob{ID: 1, Title: "Live One", ArtistName: "X", State: core.StateDownloading},
+				Attempt: &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+			},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		return nil, errors.New("listdownloads boom")
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200 (best-effort degrade), body = %s", rec.Code, rec.Body.String())
+	}
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got[0].Speed != 0 || got[0].QueuePosition != 0 || got[0].ETASeconds != 0 {
+		t.Errorf("expected unenriched job on LiveTransfers error, got %+v", got[0])
 	}
 }
 

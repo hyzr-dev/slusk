@@ -20,6 +20,101 @@ func newChartsTestHandler(reg *prometheus.Registry, charts ChartsFunc) http.Hand
 	return NewServer(deps)
 }
 
+func newChartsTestHandlerWithThroughput(reg *prometheus.Registry, charts ChartsFunc, throughput ThroughputFunc) http.Handler {
+	deps := testServerDeps(reg)
+	deps.Charts = charts
+	deps.Throughput = throughput
+	return NewServer(deps)
+}
+
+// TestChartsEndpointServesThroughputOldestFirst asserts the throughput series
+// from ThroughputFunc is served as-is (already oldest-first, see
+// soulseek.throughputMeter.Samples) under the "throughput" key.
+func TestChartsEndpointServesThroughputOldestFirst(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
+	older := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Second)
+	throughput := func(ctx context.Context) ([]core.ThroughputSample, error) {
+		return []core.ThroughputSample{
+			{At: older, BytesPerSecond: 100, ActiveTransfers: 1},
+			{At: newer, BytesPerSecond: 200, ActiveTransfers: 2},
+		}, nil
+	}
+	h := newChartsTestHandlerWithThroughput(reg, charts, throughput)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/charts", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got chartsDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Throughput) != 2 {
+		t.Fatalf("expected 2 throughput samples, got %d: %+v", len(got.Throughput), got.Throughput)
+	}
+	if got.Throughput[0].BytesPerSecond != 100 || got.Throughput[1].BytesPerSecond != 200 {
+		t.Errorf("throughput not oldest-first: %+v", got.Throughput)
+	}
+}
+
+// TestChartsEndpointThroughputEmitsEmptyArrayNotNull asserts a nil
+// ThroughputFunc, or one returning nothing, serves "throughput":[] rather
+// than a null/absent field.
+func TestChartsEndpointThroughputEmitsEmptyArrayNotNull(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
+	h := newChartsTestHandlerWithThroughput(reg, charts, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/charts", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"throughput":[]`) {
+		t.Errorf("expected \"throughput\":[] in body, got %s", body)
+	}
+}
+
+// TestChartsEndpointServesPassesWhenThroughputErrors asserts a ThroughputFunc
+// error degrades to an empty throughput series without failing the request —
+// passes/completedByHour are still served (issue #157: a native-backend-only
+// data source failing must not blank the whole Overview view).
+func TestChartsEndpointServesPassesWhenThroughputErrors(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	passes := []core.SearchPass{{StartedAt: time.Now(), FinishedAt: time.Now(), Searched: 1, Matched: 1}}
+	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{Passes: passes}, nil }
+	throughput := func(ctx context.Context) ([]core.ThroughputSample, error) {
+		return nil, errors.New("throughput boom")
+	}
+	h := newChartsTestHandlerWithThroughput(reg, charts, throughput)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/charts", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200 (best-effort degrade), body = %s", rec.Code, rec.Body.String())
+	}
+	var got chartsDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Passes) != 1 {
+		t.Errorf("expected passes still served, got %+v", got.Passes)
+	}
+	if len(got.Throughput) != 0 {
+		t.Errorf("expected empty throughput on error, got %+v", got.Throughput)
+	}
+}
+
 // TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst asserts the bucket
 // math and pass-ordering logic directly against a fixed now, rather than
 // through the HTTP handler (which stamps time.Now()): calling toChartsDTO
