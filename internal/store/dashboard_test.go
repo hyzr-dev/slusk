@@ -473,6 +473,51 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	}
 }
 
+// TestRetryFailedJobRevivesOrphanedJob mirrors
+// TestRetryFailedJobRevivesFailedJob for the other retryable terminal-ish
+// state: a job parked ORPHANED by Downloading's reconcile (issue #158) must
+// also come back to WANTED with a clean slate via the same dashboard button.
+func TestRetryFailedJobRevivesOrphanedJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 22, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateOrphaned, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := s.RetryFailedJob(ctx, job.ID, later)
+	if err != nil {
+		t.Fatalf("RetryFailedJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected RetryFailedJob to return true for an ORPHANED job")
+	}
+
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, later.Add(time.Hour), 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("RunnableJobsInState: %v %+v", err, jobs)
+	}
+	if got := jobs[0]; got.State != core.StateWanted {
+		t.Errorf("State = %q, want WANTED", got.State)
+	}
+	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
+		t.Fatalf("expected zero candidates after RetryFailedJob, found=%v (%v)", found, err)
+	}
+}
+
 // TestRetryFailedJobNoopWhenNotFailed guards the race the dashboard button
 // can lose: if a module moved the job out of FAILED between the dashboard
 // fetching its state and the retry click landing, RetryFailedJob must not

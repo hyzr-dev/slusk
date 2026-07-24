@@ -1,13 +1,13 @@
 // Hand-written mirrors of the Go DTOs in internal/observ. Kept in one file so
 // drift has a single place to be caught. See spec 2026-07-20.
 
-// dashboardStatus() in internal/observ/status.go only ever returns these five
-// values for a job's own status; "orphaned" exists solely as an aggregate
-// count on StatusReport, never as an individual job's status.
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed';
+// dashboardStatus() in internal/observ/status.go returns these six values for
+// a job's own status. "orphaned" is also aggregated as a count on
+// StatusReport (issue #158).
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'orphaned';
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 
 // JobSource distinguishes a Lidarr wanted-sync job from one created manually

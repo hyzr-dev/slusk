@@ -20,6 +20,7 @@ export const t = {
     stalled: 'Stalled',
     done: 'Done',
     failed: 'Failed',
+    orphaned: 'Orphaned',
   },
   state: {
     WANTED: 'Wanted',
@@ -29,6 +30,7 @@ export const t = {
     DONE: 'Done',
     FAILED: 'Failed',
     CANCELLED: 'Cancelled',
+    ORPHANED: 'Orphaned',
   },
   candidateState: {
     NEW: 'Not tried',

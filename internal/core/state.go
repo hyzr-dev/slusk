@@ -21,6 +21,17 @@ const (
 	StateWanted AlbumJobState = "WANTED"
 	// StateDone replaces COMPLETED in the pipeline rewrite.
 	StateDone AlbumJobState = "DONE"
+	// StateOrphaned is a parked state for a DOWNLOADING job whose active
+	// transfer kept vanishing from slskd's live list until its retry budget
+	// (Downloading.reconcile's "lost" path) was exhausted: rather than a
+	// silent per-candidate failure, the job is left visible to an operator for
+	// manual retry or deletion. Deliberately excluded from RunnableJobsInState
+	// (nothing selects ORPHANED jobs automatically) and from Terminal()/
+	// PipelineTerminal(). It is left either via a manual retry (see
+	// store.RetryFailedJob, which accepts FAILED or ORPHANED) or, like any
+	// other non-pipeline-terminal state, auto-cancelled by WantedSync
+	// (store.SyncWantedJobs) if the job's album stops being wanted.
+	StateOrphaned AlbumJobState = "ORPHANED"
 )
 
 // Terminal reports whether the state is an end state that needs no further work

@@ -138,8 +138,8 @@ type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 // errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
 type CancelFunc func(ctx context.Context, jobID int64) error
 
-// RetryFunc manually revives one FAILED job by id (typically backed by
-// app.Jobs.Retry). Errors are mapped to a status code by the
+// RetryFunc manually revives one FAILED or ORPHANED job by id (typically
+// backed by app.Jobs.Retry). Errors are mapped to a status code by the
 // /api/jobs/{id}/retry handler: errors.Is(err, app.ErrJobNotFound) -> 404,
 // errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
 type RetryFunc func(ctx context.Context, jobID int64) error
@@ -343,7 +343,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		case errors.Is(err, app.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobNotRetryable):
-			http.Error(w, "job is not FAILED", http.StatusConflict)
+			http.Error(w, "job is not FAILED or ORPHANED", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

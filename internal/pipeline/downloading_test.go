@@ -272,8 +272,8 @@ func TestDownloadingReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if stats.Retried != 1 || stats.Lost != 0 {
-		t.Errorf("Retried=%d Lost=%d, want 1/0", stats.Retried, stats.Lost)
+	if stats.Retried != 1 || stats.Orphaned != 0 {
+		t.Errorf("Retried=%d Orphaned=%d, want 1/0", stats.Retried, stats.Orphaned)
 	}
 	states := transferStatesFor(t, st, candID)
 	if states["a.flac"].State != core.TransferPending {
@@ -284,8 +284,43 @@ func TestDownloadingReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	}
 }
 
-// Once a lost transfer's retry budget is exhausted, it is finally ERRORED.
-func TestDownloadingReconcileMarksLostWhenRetriesExhausted(t *testing.T) {
+// Once a lost transfer's retry budget is exhausted, the owning job is parked
+// ORPHANED for manual operator action (issue #158) rather than silently
+// erroring the transfer.
+func TestDownloadingReconcileOrphansJobWhenRetriesExhausted(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: nil}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+
+	d := NewDownloading(p)
+	stats, err := d.reconcile(ctx, now)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if stats.Orphaned != 1 || stats.Retried != 0 {
+		t.Errorf("Orphaned=%d Retried=%d, want 1/0", stats.Orphaned, stats.Retried)
+	}
+	job, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if job.Job.State != core.StateOrphaned {
+		t.Errorf("job state = %q, want ORPHANED", job.Job.State)
+	}
+	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferErrored {
+		t.Errorf("orphaned job's transfer should be driven terminal (ERRORED) so it stops re-triggering reconcile, got %v", states["a.flac"].State)
+	}
+}
+
+// A second reconcile tick after a job has been orphaned must be a quiet
+// no-op: the transfer was driven ERRORED (terminal) on the first tick, so
+// ActiveTransfers no longer returns it and the "lost" branch never re-runs.
+// Without this, an ORPHANED job would produce a false orphaned=1 heartbeat on
+// every subsequent tick for the remainder of TransferDeadline.
+func TestDownloadingReconcileSecondTickAfterOrphanIsQuiet(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{downloads: nil}
@@ -294,15 +329,16 @@ func TestDownloadingReconcileMarksLostWhenRetriesExhausted(t *testing.T) {
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)
-	stats, err := d.reconcile(ctx, now)
+	if _, err := d.reconcile(ctx, now); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	stats, err := d.reconcile(ctx, now.Add(time.Minute))
 	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+		t.Fatalf("second reconcile: %v", err)
 	}
-	if stats.Lost != 1 || stats.Retried != 0 {
-		t.Errorf("Lost=%d Retried=%d, want 1/0", stats.Lost, stats.Retried)
-	}
-	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferErrored {
-		t.Errorf("exhausted lost transfer should be ERRORED, got %v", states["a.flac"].State)
+	if stats.Orphaned != 0 {
+		t.Errorf("Orphaned = %d on second tick, want 0 (quiet no-op, transfer already terminal)", stats.Orphaned)
 	}
 }
 
@@ -745,7 +781,7 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 
 			stats, err := d.reconcile(ctx, now)
 			requireMutationContext(t, err, injected, tid, candID, "g1")
-			if stats.Completed != 0 || stats.Cancelled != 0 || stats.Lost != 0 || stats.Stalled != 0 || stats.Adopted != 0 {
+			if stats.Completed != 0 || stats.Cancelled != 0 || stats.Orphaned != 0 || stats.Stalled != 0 || stats.Adopted != 0 {
 				t.Errorf("stats changed before persistence: %+v", stats)
 			}
 			if len(net.removed) != 0 {

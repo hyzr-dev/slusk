@@ -400,3 +400,60 @@ func TestSetJobTrackBand(t *testing.T) {
 		t.Errorf("band = (%d,%d), want (10,12)", jobs[0].MinTrackCount, jobs[0].MaxTrackCount)
 	}
 }
+
+// TestOrphanJobForCandidate covers Downloading.reconcile's retry-budget-
+// exhausted path (issue #158): a DOWNLOADING job whose candidate's transfer
+// keeps vanishing from slskd is parked ORPHANED, and the flip is a no-op when
+// the job has already left DOWNLOADING (guards a race with another
+// transition landing first).
+func TestOrphanJobForCandidate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 500, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	changed, err := s.OrphanJobForCandidate(ctx, cand.ID, now)
+	if err != nil {
+		t.Fatalf("OrphanJobForCandidate: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected OrphanJobForCandidate to return true for a DOWNLOADING job")
+	}
+	jobs, err := s.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected job to leave DOWNLOADING, got %+v", jobs)
+	}
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Job.State != core.StateOrphaned {
+		t.Errorf("State = %q, want ORPHANED", view.Job.State)
+	}
+
+	// Already ORPHANED (not DOWNLOADING): the guard bounces, no-op.
+	changed, err = s.OrphanJobForCandidate(ctx, cand.ID, now)
+	if err != nil {
+		t.Fatalf("OrphanJobForCandidate (already orphaned): %v", err)
+	}
+	if changed {
+		t.Error("expected OrphanJobForCandidate to no-op when the job is not DOWNLOADING")
+	}
+}
