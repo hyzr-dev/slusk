@@ -122,6 +122,8 @@ func TestStreamUploadConnAbortsSlowPeer(t *testing.T) {
 		}
 	}()
 	rs := &readSeeker{r: bytes.NewReader(payload)}
+	// threshold = minThroughput * sampleInterval.Seconds() = 100000 * 0.02 = 2000 bytes/window,
+	// far above the 10 bytes/20ms (~500 bytes/s) the fake peer above trickles at.
 	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 100000, 20*time.Millisecond)
 	if !errors.Is(err, errUploadTooSlow) {
 		t.Fatalf("streamUploadConn err = %v, want errUploadTooSlow", err)
@@ -155,6 +157,8 @@ func TestStreamUploadConnAllowsSteadySlowPeer(t *testing.T) {
 		_ = remote.Close() // the downloader owns successful completion
 	}()
 	rs := &readSeeker{r: bytes.NewReader(payload)}
+	// threshold = minThroughput * sampleInterval.Seconds() = 1000 * 0.02 = 20 bytes/window;
+	// the unthrottled reader below drains the whole 300-byte payload well within that.
 	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 1000, 20*time.Millisecond)
 	if err != nil {
 		t.Fatalf("streamUploadConn: %v", err)

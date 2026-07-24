@@ -194,7 +194,7 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 
 // streamUploadBody copies the remaining n bytes from shared to conn. When
 // minThroughput and sampleInterval are both positive it also runs a
-// throughput sampler (see throttleUploadSampler) for the duration of the
+// throughput sampler (see uploadThroughputSampler) for the duration of the
 // copy only - never during the post-transfer wait for the downloader to
 // close the connection - aborting the connection and returning
 // errUploadTooSlow if the peer sustains a throughput below minThroughput
@@ -206,7 +206,7 @@ func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout tim
 	if minThroughput > 0 && sampleInterval > 0 {
 		done := make(chan struct{})
 		defer close(done)
-		go throttleUploadSampler(writer, conn, minThroughput, sampleInterval, &abortedSlow, done)
+		go uploadThroughputSampler(writer, conn, minThroughput, sampleInterval, &abortedSlow, done)
 	}
 
 	written, err := io.CopyN(writer, shared, int64(n))
@@ -219,14 +219,14 @@ func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout tim
 	return nil
 }
 
-// throttleUploadSampler polls writer's cumulative byte count once per
+// uploadThroughputSampler polls writer's cumulative byte count once per
 // sampleInterval and, once it has seen two consecutive intervals whose
 // delta falls below minThroughput * sampleInterval, sets abortedSlow and
 // closes conn to unblock the upload's blocked Write (#108). The very first
 // interval is always skipped as grace, since it may include time spent
 // before the peer starts reading in earnest. It returns as soon as done is
 // closed, so it never outlives the transfer it is watching.
-func throttleUploadSampler(writer *progressWriter, conn net.Conn, minThroughput int, sampleInterval time.Duration, abortedSlow *atomic.Bool, done <-chan struct{}) {
+func uploadThroughputSampler(writer *progressWriter, conn net.Conn, minThroughput int, sampleInterval time.Duration, abortedSlow *atomic.Bool, done <-chan struct{}) {
 	ticker := time.NewTicker(sampleInterval)
 	defer ticker.Stop()
 
@@ -239,6 +239,22 @@ func throttleUploadSampler(writer *progressWriter, conn net.Conn, minThroughput 
 		case <-done:
 			return
 		case <-ticker.C:
+			// select picks randomly among ready cases, so a buffered tick
+			// can still win here even after streamUploadBody's copy has
+			// finished and defer close(done) has run - right as the caller
+			// enters the post-transfer wait-for-downloader-close Read. On a
+			// real net.TCPConn that stray conn.Close() turns a successful
+			// upload into a "wait for downloader to close" error, wrongly
+			// reporting a fully-delivered transfer as failed (net.Pipe
+			// masks this: it returns io.ErrClosedPipe there, which is
+			// treated as success, so pipe-based tests can't catch it).
+			// Re-check done here, non-blocking, so once done is closed this
+			// branch can never call conn.Close() again.
+			select {
+			case <-done:
+				return
+			default:
+			}
 			cur := writer.written.Load()
 			if !first && cur-last < threshold {
 				strikes++
