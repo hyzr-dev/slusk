@@ -36,6 +36,10 @@ type AlbumJob struct {
 	// the live AlbumStatus total.
 	MinTrackCount int
 	MaxTrackCount int
+	// Source distinguishes a Lidarr wanted-sync job from a manually created one
+	// (POST /api/jobs, issue #155). Manual jobs have no LidarrAlbumID and are
+	// invisible to WantedSync's cancel/revive/refresh logic.
+	Source JobSource
 }
 
 // CandidateFile is one file of a cached search result, persisted as JSONB on

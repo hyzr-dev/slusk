@@ -17,7 +17,7 @@ import (
 // columns. Callers append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
-		j.id, j.lidarr_album_id, j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at,
+		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at
 	FROM album_jobs j
@@ -30,7 +30,7 @@ const jobViewSelect = `
 
 func scanJobView(r rowScanner) (core.JobView, error) {
 	var v core.JobView
-	var jState string
+	var jState, jSource string
 	var tID sql.NullInt64
 	var tCandidateID sql.NullInt64
 	var tSlskdID, tUsername, tFilename, tState sql.NullString
@@ -42,7 +42,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var aCreatedAt, aUpdatedAt sql.NullTime
 
 	err := r.Scan(
-		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt,
+		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt,
 	)
@@ -50,6 +50,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 		return core.JobView{}, err
 	}
 	v.Job.State = core.AlbumJobState(jState)
+	v.Job.Source = core.JobSource(jSource)
 
 	if tID.Valid {
 		tr := &core.Transfer{
@@ -132,10 +133,10 @@ func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView,
 // rather than a bespoke wide query.
 func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 	var job core.AlbumJob
-	var state string
+	var state, source string
 	err := s.db.QueryRowContext(ctx,
 		jobSelect+` WHERE id = $1`, jobID).
-		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount)
+		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount, &source)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.JobDetail{}, false, nil
 	}
@@ -143,6 +144,7 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 		return core.JobDetail{}, false, fmt.Errorf("job detail: read job: %w", err)
 	}
 	job.State = core.AlbumJobState(state)
+	job.Source = core.JobSource(source)
 
 	candidates, err := s.CandidatesForJob(ctx, jobID) // oldest first
 	if err != nil {

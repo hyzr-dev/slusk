@@ -10,6 +10,10 @@ export type JobState =
   | 'DONE' | 'FAILED' | 'CANCELLED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 
+// JobSource distinguishes a Lidarr wanted-sync job from one created manually
+// via POST /api/jobs (issue #155).
+export type JobSource = 'lidarr' | 'manual';
+
 /** GET /api/jobs — internal/observ/observ.go jobDTO */
 export interface Job {
   id: number;
@@ -27,6 +31,7 @@ export interface Job {
   nextAttemptAt: string;
   retries: number;
   notBefore: string;
+  source: JobSource;
 }
 
 /** internal/observ/jobdetail.go transferDetailDTO */

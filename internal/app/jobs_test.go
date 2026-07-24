@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
 // fakeJobStore is a JobStore fake. jobs, when set, is looked up by
 // JobWithTransfer; a missing id reports not-found. advanceErr/retryErr, when
 // set, fail the corresponding call. advancedTo/retryCalled record what was
-// actually invoked so tests can assert on it.
+// actually invoked so tests can assert on it. createErr/createJob configure
+// CreateManualJob's result; createCalled records its args for assertions.
 type fakeJobStore struct {
 	jobs map[int64]core.JobView
 
@@ -20,9 +22,15 @@ type fakeJobStore struct {
 	advanceErr error
 	retryErr   error
 	retryOK    bool
+	createErr  error
+	createJob  core.AlbumJob
 
-	advancedTo  core.AlbumJobState
-	retryCalled bool
+	advancedTo   core.AlbumJobState
+	retryCalled  bool
+	createCalled struct {
+		title, artistName, peer string
+		files                   []store.ManualJobFile
+	}
 }
 
 func (f *fakeJobStore) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
@@ -47,6 +55,14 @@ func (f *fakeJobStore) RetryFailedJob(ctx context.Context, jobID int64, now time
 		return false, f.retryErr
 	}
 	return f.retryOK, nil
+}
+
+func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error) {
+	f.createCalled.title, f.createCalled.artistName, f.createCalled.peer, f.createCalled.files = title, artistName, peer, files
+	if f.createErr != nil {
+		return core.AlbumJob{}, f.createErr
+	}
+	return f.createJob, nil
 }
 
 // fakePeerCanceller is a TransferCanceller fake. cancelErr, when set, fails

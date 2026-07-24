@@ -265,6 +265,16 @@ func main() {
 		return st.Peers(ctx)
 	}
 	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
+	// createJobFn converts observ's core.CandidateFile request shape into
+	// store.ManualJobFile: observ deliberately does not import internal/store,
+	// so the conversion happens here at the wiring boundary instead.
+	createJobFn := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
+		manualFiles := make([]store.ManualJobFile, len(files))
+		for i, f := range files {
+			manualFiles[i] = store.ManualJobFile{Filename: f.Filename, Size: f.Size}
+		}
+		return jobs.Create(ctx, title, artist, peer, manualFiles)
+	}
 	// Liveness only requires modules to keep attempting work. Readiness also
 	// requires successful work and fails after sustained errors.
 	liveFn := func() bool { return runner.Live() }
@@ -366,7 +376,7 @@ func main() {
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn,
-		configWriter, restartFn)
+		configWriter, restartFn, createJobFn)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
