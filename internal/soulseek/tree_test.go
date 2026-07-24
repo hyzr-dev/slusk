@@ -61,6 +61,7 @@ func serverFrameCode(frame []byte) uint32 {
 func startTreeClient(t *testing.T) (*Client, *treeServerConn, uint64) {
 	t.Helper()
 	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 	startSessionLifecycle(t, c)
 	conn := newTreeServerConn()
 	const generation = 1

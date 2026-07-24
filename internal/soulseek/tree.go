@@ -322,6 +322,13 @@ func (t *distributedTree) runCandidates(ctx context.Context, generation, epoch u
 }
 
 func (t *distributedTree) runCandidate(ctx context.Context, generation, epoch uint64, parent server.Parent) {
+	if err := t.c.validateDialAddr(parent.IP, parent.Port); err != nil {
+		if t.c.logger != nil {
+			t.c.logger.Warn("refusing distributed parent dial to blocked address", "username", parent.Username, "ip", parent.IP, "port", parent.Port, "err", err)
+		}
+		return
+	}
+
 	attemptCtx, cancel := context.WithTimeout(ctx, t.c.cfg.parentCandidateTimeout)
 	defer cancel()
 	target := sessionTarget{

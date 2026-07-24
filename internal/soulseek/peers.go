@@ -297,33 +297,58 @@ func (c *Client) ConnectPeer(ctx context.Context, username string, ct soul.Conne
 // directly; if that fails (e.g. the peer is behind a NAT/firewall with no port
 // forwarding), it falls back to asking the server to relay a connection request
 // to the peer, who then dials us back and completes the handshake with
-// PierceFirewall. It returns the connected socket and, for the indirect path
-// where the peer dialed us back through our listener, the inbound lease that
-// socket holds (nil for the direct path); the caller owns both and must wrap
-// them (as a PeerConn or a peerSession) or close and release them. The whole
-// attempt is bounded by the ctx the caller supplies (ConnectPeer and
-// getOrConnectPeerSession each apply establishTimeout).
+// PierceFirewall. If the server-supplied address is present but blocked by
+// validateDialAddr (threat T12: loopback/link-local/private), the direct dial
+// is skipped without ever touching the address, and the same indirect
+// fallback is used - only a nil/unspecified address or non-positive port,
+// which leaves no fallback target either, is a hard failure. It returns the
+// connected socket and, for the indirect path where the peer dialed us back
+// through our listener, the inbound lease that socket holds (nil for the
+// direct path); the caller owns both and must wrap them (as a PeerConn or a
+// peerSession) or close and release them. The whole attempt is bounded by the
+// ctx the caller supplies (ConnectPeer and getOrConnectPeerSession each apply
+// establishTimeout).
 func (c *Client) dialPeer(ctx context.Context, username string, ct soul.ConnectionType) (net.Conn, *inboundLease, error) {
 	addr, err := c.resolvePeerAddress(ctx, username)
 	if err != nil {
 		return nil, nil, err
 	}
-	if addr.IP == nil || addr.IP.IsUnspecified() || addr.Port == 0 {
-		return nil, nil, fmt.Errorf("peer %s is offline (server reported no reachable address)", username)
+
+	validateErr := c.validateDialAddr(addr.IP, addr.Port)
+	var blocked *blockedAddrError
+	if validateErr != nil && !errors.As(validateErr, &blocked) {
+		// No reachable address at all (nil/unspecified IP or non-positive
+		// port) - there is nothing to fall back to either, so this is a hard
+		// failure.
+		return nil, nil, fmt.Errorf("peer %s: %w", username, validateErr)
 	}
 
 	directAddr := net.JoinHostPort(addr.IP.String(), strconv.Itoa(addr.Port))
-	dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
-	directConn, directErr := dialer.DialContext(ctx, "tcp", directAddr)
-	if directErr == nil {
-		if _, err := peer.Write(directConn, &peer.PeerInit{Username: c.cfg.Username, ConnectionType: ct}, false); err != nil {
-			_ = directConn.Close()
-			return nil, nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
-		}
+	var directErr error
+	if validateErr != nil {
+		// The address is present but policy-blocked (threat T12). Skip the
+		// direct dial entirely - never touch the suspect address - and fall
+		// through to the indirect NAT-traversal path exactly as if a direct
+		// dial attempt had failed: the indirect path never dials the server-
+		// supplied address itself, since the peer connects back to us.
 		if c.logger != nil {
-			c.logger.Debug("peer connection established", "username", username, "type", ct, "path", "direct")
+			c.logger.Debug("skipping direct dial to blocked peer address", "username", username, "addr", directAddr, "err", validateErr)
 		}
-		return directConn, nil, nil
+		directErr = validateErr
+	} else {
+		dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
+		directConn, dErr := dialer.DialContext(ctx, "tcp", directAddr)
+		if dErr == nil {
+			if _, err := peer.Write(directConn, &peer.PeerInit{Username: c.cfg.Username, ConnectionType: ct}, false); err != nil {
+				_ = directConn.Close()
+				return nil, nil, fmt.Errorf("write peer init to %s at %s: %w", username, directAddr, err)
+			}
+			if c.logger != nil {
+				c.logger.Debug("peer connection established", "username", username, "type", ct, "path", "direct")
+			}
+			return directConn, nil, nil
+		}
+		directErr = dErr
 	}
 
 	// Indirect (NAT-traversal) fallback: ask the server to relay a
@@ -405,6 +430,16 @@ func (c *Client) connectPeerSession(ctx context.Context, username string) (*peer
 // belong to the exact central-server session that supplied the request.
 func (c *Client) handleConnectToPeer(ctx context.Context, generation uint64, msg server.ConnectToPeer) {
 	c.startTracked(func() {
+		if err := c.validateDialAddr(msg.IP, msg.Port); err != nil {
+			if c.logger != nil {
+				c.logger.Warn("refusing connect-to-peer dial to blocked address", "username", msg.Username, "ip", msg.IP, "port", msg.Port, "err", err)
+			}
+			if sendErr := sendToServerGeneration(c, generation, &server.CantConnectToPeer{Token: msg.Token, Username: msg.Username}); sendErr != nil && c.logger != nil {
+				c.logger.Debug("write cant connect to peer", "username", msg.Username, "token", msg.Token, "err", sendErr)
+			}
+			return
+		}
+
 		addr := net.JoinHostPort(msg.IP.String(), strconv.Itoa(msg.Port))
 		dialer := net.Dialer{Timeout: c.cfg.peerDialTimeout}
 		conn, err := dialer.DialContext(ctx, "tcp", addr)

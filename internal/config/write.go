@@ -100,7 +100,11 @@ type SoulseekSettings struct {
 	Password      *string
 	ListenAddr    string
 	UploadSlots   int
-	Gluetun       GluetunSettings
+	// AllowPrivatePeerAddresses permits dialing server-supplied peer
+	// addresses in RFC 1918 / ULA private ranges (threat T12); see
+	// SoulseekConfig.AllowPrivatePeerAddresses.
+	AllowPrivatePeerAddresses bool
+	Gluetun                   GluetunSettings
 	// SharedFolders replaces the on-disk list wholesale when it differs from
 	// the currently parsed one (see applySharedFolders); it is not merged
 	// element-by-element.
@@ -220,6 +224,7 @@ const (
 	fieldString fieldKind = iota
 	fieldInt
 	fieldFloat
+	fieldBool
 	fieldDuration
 	fieldSecret
 )
@@ -236,6 +241,7 @@ type fieldSpec struct {
 	str    string        // fieldString
 	i      int           // fieldInt
 	f      float64       // fieldFloat
+	b      bool          // fieldBool
 	d      time.Duration // fieldDuration
 	secret *string       // fieldSecret; nil means keep the current value
 }
@@ -250,6 +256,8 @@ func (fs fieldSpec) apply(doc *tomledit.Document) error {
 		return applyIntField(doc, fs.table, fs.key, fs.i)
 	case fieldFloat:
 		return applyFloatField(doc, fs.table, fs.key, fs.f)
+	case fieldBool:
+		return applyBoolField(doc, fs.table, fs.key, fs.b)
 	case fieldDuration:
 		return applyDurationField(doc, fs.table, fs.key, fs.d)
 	case fieldSecret:
@@ -319,6 +327,7 @@ func settingsFields(s Settings) []fieldSpec {
 		{table: soulseek, key: "password", kind: fieldSecret, secret: s.Soulseek.Password},
 		{table: soulseek, key: "listen_addr", kind: fieldString, str: s.Soulseek.ListenAddr},
 		{table: soulseek, key: "upload_slots", kind: fieldInt, i: s.Soulseek.UploadSlots},
+		{table: soulseek, key: "allow_private_peer_addresses", kind: fieldBool, b: s.Soulseek.AllowPrivatePeerAddresses},
 
 		{table: gluetun, key: "control_url", kind: fieldString, str: s.Soulseek.Gluetun.ControlURL},
 		{table: gluetun, key: "api_key", kind: fieldSecret, secret: s.Soulseek.Gluetun.APIKey},
@@ -362,6 +371,19 @@ func applyIntField(doc *tomledit.Document, table []string, key string, value int
 		return nil
 	}
 	return upsert(doc, table, key, strconv.Itoa(value))
+}
+
+// applyBoolField is applyStringField's counterpart for booleans; see its
+// comment for the absent-and-zero (here, absent-and-false) skip rule.
+func applyBoolField(doc *tomledit.Document, table []string, key string, value bool) error {
+	cur, ok := boolValue(doc, table, key)
+	if !ok && !value {
+		return nil
+	}
+	if ok && cur == value {
+		return nil
+	}
+	return upsert(doc, table, key, strconv.FormatBool(value))
 }
 
 // applyFloatField is applyStringField's counterpart for the matcher weights;
@@ -515,6 +537,20 @@ func intValue(doc *tomledit.Document, table []string, key string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// boolValue decodes table.key's current value as a bool. TOML booleans lex
+// as bare words ("true"/"false"), like any other unquoted identifier.
+func boolValue(doc *tomledit.Document, table []string, key string) (bool, bool) {
+	tok, ok := entryToken(doc, table, key)
+	if !ok || tok.Type != scanner.Word {
+		return false, false
+	}
+	b, err := strconv.ParseBool(tok.String())
+	if err != nil {
+		return false, false
+	}
+	return b, true
 }
 
 // floatValue decodes table.key's current value as a float. A plain integer
