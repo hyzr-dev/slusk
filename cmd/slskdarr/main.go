@@ -172,6 +172,7 @@ func main() {
 		Music:         lidarrClient,
 		Ranker:        scorer,
 		WantedSource:  wantedSync,
+		Metrics:       metrics,
 		SearchTimeout: cfg.Pipeline.SearchTimeout.Duration,
 		MaxCandidates: cfg.Pipeline.MaxCandidatesPerAlbum,
 		MaxRetries:    cfg.Pipeline.MaxRetries,

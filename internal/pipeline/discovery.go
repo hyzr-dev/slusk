@@ -41,6 +41,13 @@ type DiscoveryStore interface {
 	RecordSearchPass(ctx context.Context, p core.SearchPass) error
 }
 
+// DiscoveryMetrics receives discovery metrics. A nil sink is a no-op, so
+// Discovery never depends on the observ package directly (same pattern as
+// Downloading's MetricsSink).
+type DiscoveryMetrics interface {
+	IncAlbumReleasesError()
+}
+
 // DiscoveryParams configures a Discovery.
 type DiscoveryParams struct {
 	Store        DiscoveryStore
@@ -48,6 +55,9 @@ type DiscoveryParams struct {
 	Music        MusicSource
 	Ranker       Ranker
 	WantedSource WantedSource
+	// Metrics receives discovery stats each tick. nil → metrics are not fed
+	// (no-op), so Discovery never panics without an observ sink wired.
+	Metrics DiscoveryMetrics
 
 	SearchTimeout time.Duration
 	MaxCandidates int
@@ -143,8 +153,9 @@ func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time
 // off (still WANTED) when nothing survives. completed reports whether the
 // search cycle ran to one of its two normal conclusions (backed off or
 // matched) rather than aborting early (album missing from the wanted
-// snapshot, a search error, or an AlbumReleases error) - Tick only records a
-// search pass when completed is true. matched is true only when the job
+// snapshot, an AlbumReleases error - checked before any Soulseek search is
+// issued, see below - or a search error) - Tick only records a search pass
+// when completed is true. matched is true only when the job
 // actually advanced to SELECTING: InsertCandidates cached surviving
 // candidates AND AdvanceJobStateFrom confirms the job was still WANTED to
 // advance from (it can report advanced=false if the job concurrently left
@@ -160,6 +171,35 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		d.log().Info("album missing from wanted snapshot, skipping",
 			"album_job", job.ID, "lidarr_album", job.LidarrAlbumID)
 		return false, false, nil
+	}
+
+	// Fetch the album's releases once per searchJob call to compute the valid
+	// track-count band [min, max] across all editions — a candidate matching
+	// any real edition's track count is viable, since manual import runs with
+	// release switching enabled and Lidarr picks the matching edition itself.
+	// A (0,0) band means Lidarr has no usable release data right now, so the
+	// filter is skipped entirely rather than risk rejecting a legitimate
+	// candidate on bad data. An error here is not counted against the job's
+	// retry budget: it aborts this search pass early - log and return nil so
+	// the job stays WANTED, untouched, and is retried on a later tick. This
+	// cheap local Lidarr call is deliberately fetched before the Soulseek
+	// search below (issue #92): a permanently failing Lidarr call aborts the
+	// pass here, before any expensive P2P search traffic whose results would
+	// only be discarded.
+	releases, err := d.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
+	if err != nil {
+		if d.p.Metrics != nil {
+			d.p.Metrics.IncAlbumReleasesError()
+		}
+		d.log().Error("album releases failed", "album_job", job.ID, "err", err)
+		return false, false, nil
+	}
+	minTracks, maxTracks := trackBand(releases)
+	// Persisted (not just used inline) because Importing's coverage gate needs
+	// MinTrackCount long after this search: a candidate covering the smallest
+	// valid edition must not be rejected against the canonical (larger) count.
+	if err := d.p.Store.SetJobTrackBand(ctx, job.ID, minTracks, maxTracks); err != nil {
+		return false, false, err
 	}
 
 	query := album.ArtistName + " " + album.Title
@@ -197,28 +237,6 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	d.log().Info(searchDetail, "album_job", job.ID, "query", query,
 		"results", len(results), "candidates", len(ranked))
 	d.recordEvent(ctx, job.ID, core.EventSearch, searchDetail, now)
-
-	// Fetch the album's releases once per searchJob call to compute the valid
-	// track-count band [min, max] across all editions — a candidate matching
-	// any real edition's track count is viable, since manual import runs with
-	// release switching enabled and Lidarr picks the matching edition itself.
-	// A (0,0) band means Lidarr has no usable release data right now, so the
-	// filter is skipped entirely rather than risk rejecting a legitimate
-	// candidate on bad data. An error here is not counted against the job's
-	// retry budget: it aborts this search pass early - log and return nil so
-	// the job stays WANTED, untouched, and is retried on a later tick.
-	releases, err := d.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
-	if err != nil {
-		d.log().Error("album releases failed", "album_job", job.ID, "err", err)
-		return false, false, nil
-	}
-	minTracks, maxTracks := trackBand(releases)
-	// Persisted (not just used inline) because Importing's coverage gate needs
-	// MinTrackCount long after this search: a candidate covering the smallest
-	// valid edition must not be rejected against the canonical (larger) count.
-	if err := d.p.Store.SetJobTrackBand(ctx, job.ID, minTracks, maxTracks); err != nil {
-		return false, false, err
-	}
 
 	// Candidates are cached per search cycle - the previously-tried-username
 	// filter the legacy engine applied at enqueue time is deliberately absent
