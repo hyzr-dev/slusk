@@ -10,17 +10,18 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at, min_track_count, max_track_count FROM album_jobs`
+const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at, min_track_count, max_track_count, source FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
-		var state string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount); err != nil {
+		var state, source string
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount, &source); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)
+		j.Source = core.JobSource(source)
 		out = append(out, j)
 	}
 	return out, rows.Err()
@@ -226,12 +227,14 @@ func (s *Store) AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to c
 	return n > 0, nil
 }
 
-// CancelJobsNotWanted cancels every non-pipeline-terminal job whose album is
-// absent from wantedIDs. Returns count.
+// CancelJobsNotWanted cancels every non-pipeline-terminal Lidarr job whose
+// album is absent from wantedIDs. Returns count. The source = 'lidarr'
+// predicate is explicit so an empty wantedIDs never cancels manual jobs (whose
+// lidarr_album_id is NULL, making `<> ALL($6)` true for any array).
 func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, updated_at = $2
-		 WHERE state NOT IN ($3, $4, $5) AND lidarr_album_id <> ALL($6)`,
+		 WHERE state NOT IN ($3, $4, $5) AND source = 'lidarr' AND lidarr_album_id <> ALL($6)`,
 		string(core.StateCancelled), now,
 		string(core.StateDone), string(core.StateCancelled), string(core.StateFailed),
 		wantedIDs)
@@ -311,7 +314,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 	if _, err := tx.ExecContext(ctx, `WITH wanted AS (`+wantedInput+`)
 		INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at, title, artist_name, release_date, artist_id)
 		SELECT lidarr_album_id, $6, $7, $7, title, artist_name, release_date, artist_id FROM wanted
-		ON CONFLICT (lidarr_album_id) DO NOTHING`, append(inputArgs, string(core.StateWanted), now)...); err != nil {
+		ON CONFLICT (lidarr_album_id) WHERE source = 'lidarr' DO NOTHING`, append(inputArgs, string(core.StateWanted), now)...); err != nil {
 		return 0, 0, fmt.Errorf("sync wanted jobs: insert: %w", err)
 	}
 
@@ -370,7 +373,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 
 	res, err := tx.ExecContext(ctx, `UPDATE album_jobs
 		SET state = $1, updated_at = $2
-		WHERE state NOT IN ($3, $4, $5) AND lidarr_album_id <> ALL($6::bigint[])`,
+		WHERE state NOT IN ($3, $4, $5) AND source = 'lidarr' AND lidarr_album_id <> ALL($6::bigint[])`,
 		string(core.StateCancelled), now, string(core.StateDone), string(core.StateCancelled), string(core.StateFailed), ids)
 	if err != nil {
 		return 0, 0, fmt.Errorf("sync wanted jobs: cancel: %w", err)
@@ -427,7 +430,7 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT(lidarr_album_id) DO NOTHING`,
+		 ON CONFLICT(lidarr_album_id) WHERE source = 'lidarr' DO NOTHING`,
 		lidarrAlbumID, string(core.StateWanted), now, now); err != nil {
 		return core.AlbumJob{}, fmt.Errorf("insert job: %w", err)
 	}
@@ -460,11 +463,11 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	}
 
 	var j core.AlbumJob
-	var state string
+	var state, source string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, not_before, failed_at
+		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, not_before, failed_at, source
 		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt)
+		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &source)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
 	}
@@ -472,6 +475,7 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 		return core.AlbumJob{}, fmt.Errorf("upsert wanted job: commit: %w", err)
 	}
 	j.State = core.AlbumJobState(state)
+	j.Source = core.JobSource(source)
 	return j, nil
 }
 

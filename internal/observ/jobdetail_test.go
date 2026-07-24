@@ -72,7 +72,7 @@ func TestJobDetailEnrichesTransfersWithLiveQueueAndSpeed(t *testing.T) {
 		}, nil
 	}
 	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers,
-		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart)
+		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
 	rec := httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	}
 	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers,
-		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart)
+		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
 	rec := httptest.NewRecorder()

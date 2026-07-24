@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -89,6 +91,7 @@ type jobDTO struct {
 	NextAttemptAt   string `json:"nextAttemptAt"`
 	Retries         int    `json:"retries"`
 	NotBefore       string `json:"notBefore"`
+	Source          string `json:"source"`
 }
 
 // toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
@@ -106,6 +109,7 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int)
 		CandidatesTried: v.Job.CandidatesTried,
 		MaxCandidates:   maxCandidates,
 		Retries:         v.Job.Retries,
+		Source:          string(v.Job.Source),
 	}
 	if v.Transfer != nil {
 		d.BytesDone = v.Transfer.BytesDone
@@ -140,6 +144,12 @@ type CancelFunc func(ctx context.Context, jobID int64) error
 // errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
 type RetryFunc func(ctx context.Context, jobID int64) error
 
+// CreateJobFunc manually creates a job that downloads a known peer's files
+// directly (typically backed by app.Jobs.Create; see issue #155). Errors are
+// mapped to a status code by the POST /api/jobs handler:
+// errors.Is(err, app.ErrRemoteFileBusy) -> 409, anything else -> 500.
+type CreateJobFunc func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error)
+
 // HealthyFunc reports either liveness or readiness. /healthz uses liveness
 // (modules continue attempting work), while /readyz additionally requires
 // successful work and tolerates only a short run of consecutive failures.
@@ -168,9 +178,9 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
 	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func()) http.Handler {
+	configWriter ConfigWriter, restart func(), create CreateJobFunc) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts, configWriter, restart)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts, configWriter, restart, create)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
@@ -186,7 +196,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
 	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func()) http.Handler {
+	configWriter ConfigWriter, restart func(), create CreateJobFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
@@ -276,17 +286,25 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
-		views, err := jobs(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			views, err := jobs(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			dtos := make([]jobDTO, len(views))
+			for i, v := range views {
+				dtos[i] = toJobDTO(v, failedRetryAfter, maxCandidates)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dtos)
+		case http.MethodPost:
+			serveCreateJob(w, r, create, failedRetryAfter, maxCandidates)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		dtos := make([]jobDTO, len(views))
-		for i, v := range views {
-			dtos[i] = toJobDTO(v, failedRetryAfter, maxCandidates)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dtos)
 	})
 	mux.HandleFunc("/api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -406,4 +424,83 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	registerCharts(mux, charts)
 	mux.Handle("/", newAssetHandler())
 	return mux
+}
+
+// createJobFileRequest is one file of a POST /api/jobs request body.
+type createJobFileRequest struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+// createJobRequest is the POST /api/jobs request body: a manual job download
+// directly from a known peer (issue #155). Title/Artist are optional
+// free-text display fields; Peer and at least one File are required.
+type createJobRequest struct {
+	Title  string                 `json:"title"`
+	Artist string                 `json:"artist"`
+	Peer   string                 `json:"peer"`
+	Files  []createJobFileRequest `json:"files"`
+}
+
+// validateCreateJobRequest checks a decoded createJobRequest, returning field
+// errors keyed the same way as validateConfigUpdate (see errorResponse):
+// peer must be non-blank, at least one file is required, and every file must
+// have a non-blank, unique filename and a non-negative size.
+func validateCreateJobRequest(req createJobRequest) (peer string, files []core.CandidateFile, fieldErrors map[string]string) {
+	fieldErrors = make(map[string]string)
+	if strings.TrimSpace(req.Peer) == "" {
+		fieldErrors["peer"] = "is required"
+	}
+	if len(req.Files) == 0 {
+		fieldErrors["files"] = "at least one file is required"
+		return req.Peer, nil, fieldErrors
+	}
+	seen := make(map[string]struct{}, len(req.Files))
+	files = make([]core.CandidateFile, len(req.Files))
+	for i, f := range req.Files {
+		key := fmt.Sprintf("files[%d]", i)
+		if strings.TrimSpace(f.Filename) == "" {
+			fieldErrors[key+".filename"] = "is required"
+		} else if _, dup := seen[f.Filename]; dup {
+			fieldErrors[key+".filename"] = "duplicate filename"
+		} else {
+			seen[f.Filename] = struct{}{}
+		}
+		if f.Size < 0 {
+			fieldErrors[key+".size"] = "must be >= 0"
+		}
+		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
+	}
+	return req.Peer, files, fieldErrors
+}
+
+// serveCreateJob decodes, validates, and creates a manual job (POST
+// /api/jobs, issue #155): 400 on malformed JSON, 422 on validation failure,
+// 409 if create reports the peer's files are already claimed by another live
+// candidate, 500 on any other error, 201 with the created job on success.
+func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc, failedRetryAfter time.Duration, maxCandidates int) {
+	var req createJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeConfigError(w, http.StatusBadRequest, "invalid request body", nil)
+		return
+	}
+
+	peer, files, fieldErrors := validateCreateJobRequest(req)
+	if len(fieldErrors) > 0 {
+		writeConfigError(w, http.StatusUnprocessableEntity, "validation failed", fieldErrors)
+		return
+	}
+
+	job, err := create(r.Context(), req.Title, req.Artist, peer, files)
+	switch {
+	case err == nil:
+		v := core.JobView{Job: job, Peer: peer}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates))
+	case errors.Is(err, app.ErrRemoteFileBusy):
+		writeConfigError(w, http.StatusConflict, err.Error(), nil)
+	default:
+		writeConfigError(w, http.StatusInternalServerError, "failed to create job", nil)
+	}
 }

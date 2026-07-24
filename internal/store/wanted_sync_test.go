@@ -173,6 +173,79 @@ func TestSyncWantedJobsEmptyInputChangesNothing(t *testing.T) {
 	assertWantedSyncState(t, s, failed.ID, core.StateFailed)
 }
 
+// A manual job (NULL lidarr_album_id, source='manual') must be invisible to
+// SyncWantedJobs: it is never cancelled by a snapshot that omits it, never
+// revived (it can't be FAILED-and-in-wantedIDs since it was never wanted),
+// and never metadata-refreshed. This is the key correctness guarantee behind
+// bypassing WantedSync for manually created jobs (issue #155): every
+// SQL predicate here compares lidarr_album_id with `= ANY`/`<> ALL`, both of
+// which are NULL (never TRUE) for a NULL lidarr_album_id, so the row is
+// structurally excluded rather than needing an explicit guard.
+func TestSyncWantedJobsIgnoresManualJobs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+
+	// A snapshot that mentions a completely different Lidarr album: if the
+	// manual job were caught by the cancel predicate, it would be CANCELLED
+	// here since its (nonexistent) lidarr_album_id is absent from wantedIDs.
+	cancelled, revived, err := s.SyncWantedJobs(ctx,
+		[]core.WantedRelease{{ID: 999, Title: "unrelated", ArtistName: "artist", ReleaseDate: "2026-01-01", ArtistID: 1}},
+		now.Add(-30*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	if cancelled != 0 || revived != 0 {
+		t.Fatalf("counts = cancelled %d, revived %d; want 0, 0 (manual job must not be touched)", cancelled, revived)
+	}
+
+	assertWantedSyncState(t, s, manual.ID, core.StateDownloading)
+	var gotTitle, gotArtist string
+	var gotUpdated time.Time
+	if err := s.db.QueryRow(`SELECT title, artist_name, updated_at FROM album_jobs WHERE id=$1`, manual.ID).
+		Scan(&gotTitle, &gotArtist, &gotUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if gotTitle != "Manual Album" || gotArtist != "Manual Artist" {
+		t.Errorf("manual job metadata changed: title=%q artist=%q", gotTitle, gotArtist)
+	}
+	if !gotUpdated.Equal(now) {
+		t.Errorf("manual job updated_at = %v, want unchanged %v", gotUpdated, now)
+	}
+}
+
+// An empty wanted snapshot is non-authoritative (see SyncWantedJobs' doc
+// comment) and returns before running any SQL, so a manual job is left
+// completely untouched — this pins that guarantee alongside the
+// cancel-predicate defense-in-depth added for issue #155.
+func TestSyncWantedJobsEmptySnapshotIgnoresManualJobs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+
+	cancelled, revived, err := s.SyncWantedJobs(ctx, nil, now.Add(-30*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	if cancelled != 0 || revived != 0 {
+		t.Fatalf("counts = cancelled %d, revived %d; want 0, 0 (manual job must not be touched)", cancelled, revived)
+	}
+
+	assertWantedSyncState(t, s, manual.ID, core.StateDownloading)
+}
+
 func TestSyncWantedJobsRollsBackWholeReconciliation(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

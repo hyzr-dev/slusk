@@ -86,3 +86,12 @@ const (
 	CandidateSucceeded CandidateState = "SUCCEEDED"
 	CandidateFailed    CandidateState = "FAILED"
 )
+
+// JobSource identifies where an AlbumJob came from: the Lidarr wanted-sync
+// (the default pipeline) or a manual POST /api/jobs request (issue #155).
+type JobSource string
+
+const (
+	SourceLidarr JobSource = "lidarr"
+	SourceManual JobSource = "manual"
+)
