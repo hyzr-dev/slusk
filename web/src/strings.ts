@@ -311,6 +311,8 @@ export const t = {
       password: 'Password for the Soulseek account the native client logs in with.',
       soulseekListenAddr:
         'Address slskdarr listens on for incoming peer connections; its port is advertised to the server after login, so peers must be able to reach it directly. With Docker, the published host port must equal the container port, or use host networking instead.',
+      allowPrivatePeerAddresses:
+        'Allow direct peer connections to private, loopback, and link-local addresses advertised by the Soulseek server. Keep this blocked unless trusted peers are intentionally reachable on those networks.',
       uploadSlots:
         'Number of upload slots; negotiation and streaming both occupy a slot, and additional requests wait in a bounded global queue.',
       gluetunControlUrl: 'URL of the gluetun control server, used at startup to fetch the forwarded port.',

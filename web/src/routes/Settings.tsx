@@ -897,9 +897,10 @@ function ConfigForm({ config }: { config: AppConfig }) {
     { value: 'true', label: t.settings.allowPrivatePeerAddressesAllowed },
   ];
 
+  // Basic: credentials, shared folders (rendered separately, see below) and
+  // upload slots — what a native-backend install needs to get running.
   const soulseekBasicFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
-    { key: 'serverAddress', label: t.settings.serverAddress, configKey: t.settings.configKeys.serverAddress, kind: 'text', errorKey: 'soulseek.serverAddress' },
-    { key: 'username', label: t.settings.username, configKey: t.settings.configKeys.username, kind: 'text', errorKey: 'soulseek.username' },
+    { key: 'username', label: t.settings.username, configKey: t.settings.configKeys.username, kind: 'text', errorKey: 'soulseek.username', help: t.settings.help.username },
     {
       key: 'password',
       label: t.settings.password,
@@ -916,7 +917,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
   const soulseekAdvancedFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
     { key: 'serverAddress', label: t.settings.serverAddress, configKey: t.settings.configKeys.serverAddress, kind: 'text', errorKey: 'soulseek.serverAddress', advanced: true, help: t.settings.help.serverAddress },
     { key: 'listenAddr', label: t.settings.listenAddr, configKey: t.settings.configKeys.soulseekListenAddr, kind: 'text', errorKey: 'soulseek.listenAddr', advanced: true, help: t.settings.help.soulseekListenAddr },
-    { key: 'allowPrivatePeerAddresses', label: t.settings.allowPrivatePeerAddresses, configKey: t.settings.configKeys.allowPrivatePeerAddresses, kind: 'select', options: allowPrivatePeerAddressesOptions, errorKey: 'soulseek.allowPrivatePeerAddresses' },
+    { key: 'allowPrivatePeerAddresses', label: t.settings.allowPrivatePeerAddresses, configKey: t.settings.configKeys.allowPrivatePeerAddresses, kind: 'select', options: allowPrivatePeerAddressesOptions, errorKey: 'soulseek.allowPrivatePeerAddresses', advanced: true, help: t.settings.help.allowPrivatePeerAddresses },
   ];
 
   const gluetunFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
