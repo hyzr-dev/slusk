@@ -170,11 +170,11 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 	return tx.Commit()
 }
 
-// RetryFailedJob manually revives one FAILED job: retries 0, not_before/failed_at
-// cleared, candidates deleted, state WANTED. Returns false when the job is not
-// FAILED (the dashboard button raced a state change) or does not exist.
-// Candidates/transfers must go with the reset for the same ownership/FK and
-// clean-slate reason as ResetJobToWanted.
+// RetryFailedJob manually revives one FAILED or ORPHANED job: retries 0,
+// not_before/failed_at cleared, candidates deleted, state WANTED. Returns
+// false when the job is not FAILED/ORPHANED (the dashboard button raced a
+// state change) or does not exist. Candidates/transfers must go with the
+// reset for the same ownership/FK and clean-slate reason as ResetJobToWanted.
 func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -184,8 +184,8 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
-		 WHERE id = $3 AND state = $4`,
-		string(core.StateWanted), now, jobID, string(core.StateFailed))
+		 WHERE id = $3 AND state IN ($4, $5)`,
+		string(core.StateWanted), now, jobID, string(core.StateFailed), string(core.StateOrphaned))
 	if err != nil {
 		return false, fmt.Errorf("retry failed job: update: %w", err)
 	}
@@ -208,6 +208,26 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 		return false, fmt.Errorf("retry failed job: commit: %w", err)
 	}
 	return true, nil
+}
+
+// OrphanJobForCandidate marks a candidate's owning job ORPHANED (issue #158),
+// but only if it is still DOWNLOADING - guarding against a race with another
+// transition (e.g. WantedSync cancelling it, or resolve advancing it on a
+// concurrent tick) - so the UPDATE never clobbers a job that already moved on.
+// Returns whether a row changed.
+func (s *Store) OrphanJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, updated_at = $2
+		 WHERE id = (SELECT album_job_id FROM candidates WHERE id = $3) AND state = $4`,
+		string(core.StateOrphaned), now, candidateID, string(core.StateDownloading))
+	if err != nil {
+		return false, fmt.Errorf("orphan job for candidate: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orphan job for candidate: rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
 // AdvanceJobStateFrom is the conditional transition every module uses:
