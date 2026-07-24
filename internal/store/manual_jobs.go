@@ -37,6 +37,10 @@ type ManualJobFile struct {
 //
 // Returns ErrRemoteFileBusy if another live candidate already owns a (peer,
 // filename) pair among files.
+//
+// Callers are expected to pre-validate files before calling: non-empty,
+// unique non-blank filenames, and non-negative sizes. The HTTP handler
+// (validateCreateJobRequest in internal/observ) does this.
 func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer string, files []ManualJobFile, now time.Time) (core.AlbumJob, error) {
 	candidateFiles := make([]core.CandidateFile, len(files))
 	for i, f := range files {
@@ -71,6 +75,8 @@ func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer str
 		return core.AlbumJob{}, fmt.Errorf("insert manual candidate: %w", err)
 	}
 
+	// Mirrors the pending-transfer insert in ActivateCandidateWithTransfers
+	// (candidates.go) — keep the two in sync.
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transfers
 		   (candidate_id, username, filename, state, bytes_total, deadline, updated_at)

@@ -220,6 +220,32 @@ func TestSyncWantedJobsIgnoresManualJobs(t *testing.T) {
 	}
 }
 
+// An empty wanted snapshot is non-authoritative (see SyncWantedJobs' doc
+// comment) and returns before running any SQL, so a manual job is left
+// completely untouched — this pins that guarantee alongside the
+// cancel-predicate defense-in-depth added for issue #155.
+func TestSyncWantedJobsEmptySnapshotIgnoresManualJobs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+
+	cancelled, revived, err := s.SyncWantedJobs(ctx, nil, now.Add(-30*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	if cancelled != 0 || revived != 0 {
+		t.Fatalf("counts = cancelled %d, revived %d; want 0, 0 (manual job must not be touched)", cancelled, revived)
+	}
+
+	assertWantedSyncState(t, s, manual.ID, core.StateDownloading)
+}
+
 func TestSyncWantedJobsRollsBackWholeReconciliation(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

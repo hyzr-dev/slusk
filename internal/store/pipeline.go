@@ -227,12 +227,14 @@ func (s *Store) AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to c
 	return n > 0, nil
 }
 
-// CancelJobsNotWanted cancels every non-pipeline-terminal job whose album is
-// absent from wantedIDs. Returns count.
+// CancelJobsNotWanted cancels every non-pipeline-terminal Lidarr job whose
+// album is absent from wantedIDs. Returns count. The source = 'lidarr'
+// predicate is explicit so an empty wantedIDs never cancels manual jobs (whose
+// lidarr_album_id is NULL, making `<> ALL($6)` true for any array).
 func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, updated_at = $2
-		 WHERE state NOT IN ($3, $4, $5) AND lidarr_album_id <> ALL($6)`,
+		 WHERE state NOT IN ($3, $4, $5) AND source = 'lidarr' AND lidarr_album_id <> ALL($6)`,
 		string(core.StateCancelled), now,
 		string(core.StateDone), string(core.StateCancelled), string(core.StateFailed),
 		wantedIDs)
@@ -371,7 +373,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 
 	res, err := tx.ExecContext(ctx, `UPDATE album_jobs
 		SET state = $1, updated_at = $2
-		WHERE state NOT IN ($3, $4, $5) AND lidarr_album_id <> ALL($6::bigint[])`,
+		WHERE state NOT IN ($3, $4, $5) AND source = 'lidarr' AND lidarr_album_id <> ALL($6::bigint[])`,
 		string(core.StateCancelled), now, string(core.StateDone), string(core.StateCancelled), string(core.StateFailed), ids)
 	if err != nil {
 		return 0, 0, fmt.Errorf("sync wanted jobs: cancel: %w", err)

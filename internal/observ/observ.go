@@ -432,21 +432,21 @@ type createJobFileRequest struct {
 	Size     int64  `json:"size"`
 }
 
-// CreateJobRequest is the POST /api/jobs request body: a manual job download
+// createJobRequest is the POST /api/jobs request body: a manual job download
 // directly from a known peer (issue #155). Title/Artist are optional
 // free-text display fields; Peer and at least one File are required.
-type CreateJobRequest struct {
+type createJobRequest struct {
 	Title  string                 `json:"title"`
 	Artist string                 `json:"artist"`
 	Peer   string                 `json:"peer"`
 	Files  []createJobFileRequest `json:"files"`
 }
 
-// validateCreateJobRequest checks a decoded CreateJobRequest, returning field
+// validateCreateJobRequest checks a decoded createJobRequest, returning field
 // errors keyed the same way as validateConfigUpdate (see errorResponse):
 // peer must be non-blank, at least one file is required, and every file must
 // have a non-blank, unique filename and a non-negative size.
-func validateCreateJobRequest(req CreateJobRequest) (peer string, files []core.CandidateFile, fieldErrors map[string]string) {
+func validateCreateJobRequest(req createJobRequest) (peer string, files []core.CandidateFile, fieldErrors map[string]string) {
 	fieldErrors = make(map[string]string)
 	if strings.TrimSpace(req.Peer) == "" {
 		fieldErrors["peer"] = "is required"
@@ -479,7 +479,7 @@ func validateCreateJobRequest(req CreateJobRequest) (peer string, files []core.C
 // 409 if create reports the peer's files are already claimed by another live
 // candidate, 500 on any other error, 201 with the created job on success.
 func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc, failedRetryAfter time.Duration, maxCandidates int) {
-	var req CreateJobRequest
+	var req createJobRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeConfigError(w, http.StatusBadRequest, "invalid request body", nil)
 		return
