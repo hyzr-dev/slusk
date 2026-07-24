@@ -11,8 +11,9 @@ import (
 func TestThroughputMeterRingKeepsLastNOldestFirst(t *testing.T) {
 	m := newThroughputMeter()
 	base := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	// Record more than throughputWindow samples, one per second, each within
-	// the same minute so no minute roll interferes with the ring assertion.
+	// Record more than throughputWindow samples, one per millisecond, each
+	// within the same minute so no minute roll interferes with the ring
+	// assertion.
 	for i := 0; i < throughputWindow+10; i++ {
 		m.record(base.Add(time.Duration(i)*time.Millisecond), int64(i), 1)
 	}

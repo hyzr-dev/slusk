@@ -126,13 +126,13 @@ func (m *throughputMeter) closeMinute() {
 	m.sumBytes, m.peakBytes, m.maxActive, m.samples = 0, 0, 0, 0
 }
 
-// enqueuePending appends min to pending, dropping the oldest entry first if
-// that would exceed throughputPendingCap. Must be called with mu held.
-func (m *throughputMeter) enqueuePending(min core.ThroughputMinute) {
+// enqueuePending appends minute to pending, dropping the oldest entry first
+// if that would exceed throughputPendingCap. Must be called with mu held.
+func (m *throughputMeter) enqueuePending(minute core.ThroughputMinute) {
 	if len(m.pending) >= throughputPendingCap {
 		m.pending = m.pending[1:]
 	}
-	m.pending = append(m.pending, min)
+	m.pending = append(m.pending, minute)
 }
 
 // Samples returns a copy of every sample currently in the ring, oldest

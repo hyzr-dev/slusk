@@ -133,7 +133,12 @@ func TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
 	sparseHour := now.Truncate(time.Hour).Add(-3 * time.Hour)
 	counts := []core.HourCount{{Hour: sparseHour, Count: 7}}
 
-	got := toChartsDTO(ChartsData{Passes: passes, CompletedByHour: counts}, now)
+	throughput := []core.ThroughputSample{{At: now, BytesPerSecond: 500, ActiveTransfers: 1}}
+	got := toChartsDTO(ChartsData{Passes: passes, CompletedByHour: counts}, throughput, now)
+
+	if len(got.Throughput) != 1 || got.Throughput[0].BytesPerSecond != 500 {
+		t.Errorf("throughput = %+v, want the one injected sample (500 bps) — toChartsDTO must assemble it, not registerCharts mutating the DTO afterward", got.Throughput)
+	}
 
 	if len(got.Passes) != 2 {
 		t.Fatalf("expected 2 passes, got %d: %+v", len(got.Passes), got.Passes)

@@ -41,7 +41,12 @@ func (s *Store) RecordThroughputMinute(ctx context.Context, m core.ThroughputMin
 }
 
 // ThroughputMinutes returns every throughput_minutes row at or after since,
-// oldest first.
+// oldest first. This is the read side of the persisted per-minute throughput
+// history (RecordThroughputMinute is the write side); unlike RecentSearchPasses
+// and CompletedByHour, no production caller wires this up yet — GET
+// /api/charts serves only the in-memory live sparkline (see
+// soulseek.Client.ThroughputSamples), not this table's history. It exists so
+// history survives a restart, ready for a future caller to read.
 func (s *Store) ThroughputMinutes(ctx context.Context, since time.Time) ([]core.ThroughputMinute, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT minute, avg_bytes_per_sec, max_bytes_per_sec, max_active, samples

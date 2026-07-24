@@ -82,7 +82,7 @@ func toThroughputDTO(samples []core.ThroughputSample) []throughputSampleDTO {
 	return out
 }
 
-func toChartsDTO(data ChartsData, now time.Time) chartsDTO {
+func toChartsDTO(data ChartsData, throughput []core.ThroughputSample, now time.Time) chartsDTO {
 	// Passes arrive newest-first from the store; the chart draws oldest-first
 	// (left to right, newest at the right edge).
 	passes := make([]passDTO, len(data.Passes))
@@ -106,7 +106,7 @@ func toChartsDTO(data ChartsData, now time.Time) chartsDTO {
 		buckets[i] = hourCountDTO{Hour: hour.Format(timeFormat), Count: counts[hour]}
 	}
 
-	return chartsDTO{Passes: passes, CompletedByHour: buckets}
+	return chartsDTO{Passes: passes, CompletedByHour: buckets, Throughput: toThroughputDTO(throughput)}
 }
 
 // registerCharts wires GET /api/charts onto mux. throughput is best-effort
@@ -122,14 +122,13 @@ func registerCharts(mux *http.ServeMux, charts ChartsFunc, throughput Throughput
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		dto := toChartsDTO(data, time.Now())
 		var samples []core.ThroughputSample
 		if throughput != nil {
 			if s, tErr := throughput(r.Context()); tErr == nil {
 				samples = s
 			}
 		}
-		dto.Throughput = toThroughputDTO(samples)
+		dto := toChartsDTO(data, samples, time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dto)
 	})
