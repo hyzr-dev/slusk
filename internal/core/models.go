@@ -40,6 +40,15 @@ type AlbumJob struct {
 	// (POST /api/jobs, issue #155). Manual jobs have no LidarrAlbumID and are
 	// invisible to WantedSync's cancel/revive/refresh logic.
 	Source JobSource
+	// Year, Tracks and Format are candidate metadata captured at the
+	// SELECTING -> DOWNLOADING transition (ActivateCandidateWithTransfers),
+	// for display only. All three are nil until that transition runs — and
+	// stay nil for manual jobs, which are created directly in DOWNLOADING and
+	// never pass through SELECTING. Year is additionally nil when the job's
+	// release_date is unparseable. See issue #156.
+	Year   *int
+	Tracks *int
+	Format *string
 }
 
 // CandidateFile is one file of a cached search result, persisted as JSONB on

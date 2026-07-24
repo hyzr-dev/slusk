@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +73,60 @@ func TestCandidateLifecycle(t *testing.T) {
 	}
 	if next.Username != "bob" || next.Score != 2.0 {
 		t.Fatalf("expected bob (score 2.0) next, got %+v", next)
+	}
+}
+
+// TestActivateCandidateWithTransfersSetsCandidateMetadata verifies that
+// activating a candidate stamps the job's year/tracks/format columns (issue
+// #156), derived from the winning candidate's files and the job's cached
+// release_date.
+func TestActivateCandidateWithTransfersSetsCandidateMetadata(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 200, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.UpdateJobMetadata(ctx, job.ID, "Title", "Artist", "2024-03-15T00:00:00Z", 1, now); err != nil {
+		t.Fatalf("UpdateJobMetadata: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	cands := []NewCandidate{
+		{Username: "dana", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: "01 track.flac", Size: 111},
+			{Filename: "02 track.flac", Size: 222},
+		}},
+	}
+	if err := s.InsertCandidates(ctx, job.ID, cands, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.Tracks == nil || *view.Job.Tracks != 2 {
+		t.Errorf("Tracks = %v, want 2", view.Job.Tracks)
+	}
+	if view.Job.Format == nil || *view.Job.Format != "FLAC" {
+		t.Errorf("Format = %v, want FLAC", view.Job.Format)
+	}
+	if view.Job.Year == nil || *view.Job.Year != 2024 {
+		t.Errorf("Year = %v, want 2024", view.Job.Year)
 	}
 }
 
@@ -908,5 +963,115 @@ func TestUpsertWantedJobDoesNotDisturbActiveJob(t *testing.T) {
 	}
 	if again.Retries != 2 {
 		t.Errorf("active job retries = %d, want 2 (untouched)", again.Retries)
+	}
+}
+
+func TestDeriveYear(t *testing.T) {
+	cases := []struct {
+		name        string
+		releaseDate string
+		want        *int
+	}{
+		{"rfc3339", "2024-03-15T00:00:00Z", intPtr(2024)},
+		{"date-only", "2024-01-01", intPtr(2024)},
+		{"empty", "", nil},
+		{"non-numeric", "abc", nil},
+		{"non-numeric-notadate", "notadate", nil},
+		{"too-short", "202", nil},
+		{"implausible-year", "0999-01-01", nil},
+		{"year-alone", "2024", intPtr(2024)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deriveYear(tc.releaseDate)
+			if (got == nil) != (tc.want == nil) {
+				t.Fatalf("deriveYear(%q) = %v, want %v", tc.releaseDate, ptrStr(got), ptrStr(tc.want))
+			}
+			if got != nil && *got != *tc.want {
+				t.Errorf("deriveYear(%q) = %d, want %d", tc.releaseDate, *got, *tc.want)
+			}
+		})
+	}
+}
+
+func TestDominantFormat(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []core.CandidateFile
+		want  *string
+	}{
+		{
+			name: "two-flac",
+			files: []core.CandidateFile{
+				{Filename: "a.flac"}, {Filename: "b.flac"},
+			},
+			want: strPtr("FLAC"),
+		},
+		{
+			name: "mixed-majority-flac",
+			files: []core.CandidateFile{
+				{Filename: "a.flac"}, {Filename: "b.flac"}, {Filename: "c.mp3"},
+			},
+			want: strPtr("FLAC"),
+		},
+		{
+			name: "no-extension",
+			files: []core.CandidateFile{
+				{Filename: "a"}, {Filename: "b"},
+			},
+			want: nil,
+		},
+		{
+			name:  "empty",
+			files: nil,
+			want:  nil,
+		},
+		{
+			// Tie between FLAC and MP3: dominantFormat breaks ties by picking
+			// the alphabetically-first extension (ext < best), so FLAC wins.
+			name: "tie-alphabetical",
+			files: []core.CandidateFile{
+				{Filename: "a.flac"}, {Filename: "b.mp3"},
+			},
+			want: strPtr("FLAC"),
+		},
+		{
+			name: "case-insensitive",
+			files: []core.CandidateFile{
+				{Filename: "a.FLAC"}, {Filename: "b.flac"},
+			},
+			want: strPtr("FLAC"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dominantFormat(tc.files)
+			if (got == nil) != (tc.want == nil) {
+				t.Fatalf("dominantFormat(%v) = %v, want %v", tc.files, ptrStr(got), ptrStr(tc.want))
+			}
+			if got != nil && *got != *tc.want {
+				t.Errorf("dominantFormat(%v) = %q, want %q", tc.files, *got, *tc.want)
+			}
+		})
+	}
+}
+
+func intPtr(v int) *int       { return &v }
+func strPtr(v string) *string { return &v }
+
+func ptrStr(v any) string {
+	switch p := v.(type) {
+	case *int:
+		if p == nil {
+			return "nil"
+		}
+		return fmt.Sprintf("%d", *p)
+	case *string:
+		if p == nil {
+			return "nil"
+		}
+		return fmt.Sprintf("%q", *p)
+	default:
+		return fmt.Sprintf("%v", v)
 	}
 }

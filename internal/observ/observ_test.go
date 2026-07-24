@@ -253,6 +253,59 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 	}
 }
 
+// TestJobsEndpointReturnsCandidateMetadata verifies year/tracks/format
+// serialize when set (a job past selection) and as JSON null when unset (a
+// job with no candidate yet), see issue #156.
+func TestJobsEndpointReturnsCandidateMetadata(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	year := 2024
+	tracks := 12
+	format := "FLAC"
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job: core.AlbumJob{
+					ID: 9, Title: "With Metadata", ArtistName: "Someone", State: core.StateDownloading,
+					Year: &year, Tracks: &tracks, Format: &format,
+				},
+			},
+			{
+				Job: core.AlbumJob{ID: 10, Title: "No Candidate Yet", ArtistName: "Nobody", State: core.StateWanted},
+			},
+		}, nil
+	}
+	cancel := func(ctx context.Context, jobID int64) error { return nil }
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(got))
+	}
+	if got[0].Year == nil || *got[0].Year != 2024 {
+		t.Errorf("Year = %v, want 2024", got[0].Year)
+	}
+	if got[0].Tracks == nil || *got[0].Tracks != 12 {
+		t.Errorf("Tracks = %v, want 12", got[0].Tracks)
+	}
+	if got[0].Format == nil || *got[0].Format != "FLAC" {
+		t.Errorf("Format = %v, want FLAC", got[0].Format)
+	}
+	if got[1].Year != nil || got[1].Tracks != nil || got[1].Format != nil {
+		t.Errorf("expected nil year/tracks/format for job without candidate, got %+v", got[1])
+	}
+}
+
 func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }

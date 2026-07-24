@@ -17,7 +17,7 @@ import (
 // columns. Callers append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
-		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source,
+		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at
 	FROM album_jobs j
@@ -40,9 +40,11 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var aUsername, aState, aFailReason sql.NullString
 	var aScore sql.NullFloat64
 	var aCreatedAt, aUpdatedAt sql.NullTime
+	var jYear, jTracks sql.NullInt64
+	var jFormat sql.NullString
 
 	err := r.Scan(
-		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource,
+		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt,
 	)
@@ -51,6 +53,18 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	}
 	v.Job.State = core.AlbumJobState(jState)
 	v.Job.Source = core.JobSource(jSource)
+	if jYear.Valid {
+		y := int(jYear.Int64)
+		v.Job.Year = &y
+	}
+	if jTracks.Valid {
+		t := int(jTracks.Int64)
+		v.Job.Tracks = &t
+	}
+	if jFormat.Valid {
+		f := jFormat.String
+		v.Job.Format = &f
+	}
 
 	if tID.Valid {
 		tr := &core.Transfer{

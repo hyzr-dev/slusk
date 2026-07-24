@@ -76,22 +76,25 @@ type StatusFunc func(ctx context.Context) (StatusReport, error)
 // view of core.JobView so the frontend never needs to know about the
 // engine's internal state machine.
 type jobDTO struct {
-	ID              int64  `json:"id"`
-	Title           string `json:"title"`
-	Artist          string `json:"artist"`
-	Status          string `json:"status"`
-	Peer            string `json:"peer"`
-	BytesDone       int64  `json:"bytesDone"`
-	BytesTotal      int64  `json:"bytesTotal"`
-	UpdatedAt       string `json:"updatedAt"`
-	State           string `json:"state"`
-	CandidatesTried int    `json:"candidatesTried"`
-	MaxCandidates   int    `json:"maxCandidates"`
-	FailReason      string `json:"failReason"`
-	NextAttemptAt   string `json:"nextAttemptAt"`
-	Retries         int    `json:"retries"`
-	NotBefore       string `json:"notBefore"`
-	Source          string `json:"source"`
+	ID              int64   `json:"id"`
+	Title           string  `json:"title"`
+	Artist          string  `json:"artist"`
+	Status          string  `json:"status"`
+	Peer            string  `json:"peer"`
+	BytesDone       int64   `json:"bytesDone"`
+	BytesTotal      int64   `json:"bytesTotal"`
+	UpdatedAt       string  `json:"updatedAt"`
+	State           string  `json:"state"`
+	CandidatesTried int     `json:"candidatesTried"`
+	MaxCandidates   int     `json:"maxCandidates"`
+	FailReason      string  `json:"failReason"`
+	NextAttemptAt   string  `json:"nextAttemptAt"`
+	Retries         int     `json:"retries"`
+	NotBefore       string  `json:"notBefore"`
+	Source          string  `json:"source"`
+	Year            *int    `json:"year"`
+	Tracks          *int    `json:"tracks"`
+	Format          *string `json:"format"`
 }
 
 // toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
@@ -110,6 +113,9 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int)
 		MaxCandidates:   maxCandidates,
 		Retries:         v.Job.Retries,
 		Source:          string(v.Job.Source),
+		Year:            v.Job.Year,
+		Tracks:          v.Job.Tracks,
+		Format:          v.Job.Format,
 	}
 	if v.Transfer != nil {
 		d.BytesDone = v.Transfer.BytesDone

@@ -26,6 +26,10 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     nextAttemptAt: '',
     retries: 0,
     notBefore: '',
+    source: 'lidarr',
+    year: null,
+    tracks: null,
+    format: null,
     ...overrides,
   };
 }
