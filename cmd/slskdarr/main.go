@@ -407,13 +407,13 @@ func main() {
 			}
 		}
 		rescanSharesFn = func() error {
-			if err := soulClient.TriggerRescanShares(); err != nil {
-				if errors.Is(err, soulseek.ErrShareScanInProgress) {
-					return observ.ErrShareScanInProgress
-				}
+			err := soulClient.TriggerRescanShares()
+			switch {
+			case errors.Is(err, soulseek.ErrShareScanInProgress):
+				return observ.ErrShareScanInProgress
+			default:
 				return err
 			}
-			return nil
 		}
 	}
 	handler := observ.NewServer(observ.ServerDeps{

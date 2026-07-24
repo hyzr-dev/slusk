@@ -268,7 +268,7 @@ type Client struct {
 	// shareScanSem is the share-scan lock, as a capacity-1 semaphore rather
 	// than a plain mutex: TriggerRescanShares needs to claim it without
 	// blocking (tryAcquireShareScan) and ShareReport needs to read whether it
-	// is currently held (len(shareScanSem) == 1), neither of which a
+	// is currently held (len(shareScanSem) > 0), neither of which a
 	// sync.Mutex supports.
 	shareScanSem chan struct{}
 	// announceMu serializes every SharedFoldersFiles announcement to the

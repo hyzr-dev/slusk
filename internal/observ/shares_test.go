@@ -128,7 +128,8 @@ func TestSharesEndpointNilSharesReportsDisabled(t *testing.T) {
 	}
 }
 
-// TestSharesEndpointRejectsNonGET asserts GET-only, matching registerCharts.
+// TestSharesEndpointRejectsNonGET asserts GET-only, matching the GET-branch
+// method check in newConfigHandler (config.go).
 func TestSharesEndpointRejectsNonGET(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	h := newSharesTestHandler(reg, func() ShareStatsReport { return ShareStatsReport{} }, noopRescanShares)

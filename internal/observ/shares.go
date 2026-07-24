@@ -14,13 +14,16 @@ import (
 )
 
 // ShareFolderStats is one configured share's contribution to the published
-// index, served as one entry of ShareStatsReport.Folders.
+// index, served as one entry of ShareStatsReport.Folders. Its json tags are
+// the wire shape of one entry of sharesDTO.Folders - unlike sharesDTO itself,
+// this needs no reformatting (no time.Time, no duration), so it is served
+// directly rather than through an intermediate DTO.
 type ShareFolderStats struct {
-	Name        string
-	Path        string
-	Directories int
-	Files       int
-	TotalBytes  uint64
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Directories int    `json:"directories"`
+	Files       int    `json:"files"`
+	TotalBytes  uint64 `json:"totalBytes"`
 }
 
 // ShareStatsReport is the current native Soulseek share index: aggregate
@@ -50,44 +53,28 @@ type RescanSharesFunc func() error
 // is already running; POST /api/shares/rescan maps this to 409.
 var ErrShareScanInProgress = errors.New("share scan already in progress")
 
-// shareFolderStatsDTO is the JSON shape of one folder entry served at GET
-// /api/shares.
-type shareFolderStatsDTO struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Directories int    `json:"directories"`
-	Files       int    `json:"files"`
-	TotalBytes  uint64 `json:"totalBytes"`
-}
-
 // sharesDTO is the JSON shape served at GET /api/shares.
 type sharesDTO struct {
-	Enabled        bool                  `json:"enabled"`
-	Scanning       bool                  `json:"scanning"`
-	IndexedAt      string                `json:"indexedAt"`
-	ScanDurationMs int64                 `json:"scanDurationMs"`
-	Directories    int                   `json:"directories"`
-	Files          int                   `json:"files"`
-	TotalBytes     uint64                `json:"totalBytes"`
-	Folders        []shareFolderStatsDTO `json:"folders"`
+	Enabled        bool               `json:"enabled"`
+	Scanning       bool               `json:"scanning"`
+	IndexedAt      string             `json:"indexedAt"`
+	ScanDurationMs int64              `json:"scanDurationMs"`
+	Directories    int                `json:"directories"`
+	Files          int                `json:"files"`
+	TotalBytes     uint64             `json:"totalBytes"`
+	Folders        []ShareFolderStats `json:"folders"`
 }
 
-// disabledSharesDTO is the shape served at GET /api/shares when native
+// disabledSharesDTO returns the shape served at GET /api/shares when native
 // Soulseek sharing is not enabled (Shares is nil).
 func disabledSharesDTO() sharesDTO {
-	return sharesDTO{Folders: make([]shareFolderStatsDTO, 0)}
+	return sharesDTO{Folders: make([]ShareFolderStats, 0)}
 }
 
 func toSharesDTO(report ShareStatsReport) sharesDTO {
-	folders := make([]shareFolderStatsDTO, len(report.Folders))
-	for i, f := range report.Folders {
-		folders[i] = shareFolderStatsDTO{
-			Name:        f.Name,
-			Path:        f.Path,
-			Directories: f.Directories,
-			Files:       f.Files,
-			TotalBytes:  f.TotalBytes,
-		}
+	folders := report.Folders
+	if folders == nil {
+		folders = make([]ShareFolderStats, 0)
 	}
 	dto := sharesDTO{
 		Enabled:        true,
@@ -142,8 +129,11 @@ func registerShares(mux *http.ServeMux, shares SharesFunc, rescan RescanSharesFu
 			writeConfigError(w, http.StatusConflict, "a share scan is already in progress", nil)
 		default:
 			// Do not echo err.Error(): it may carry local filesystem paths
-			// (see serveConfigPost's identical reasoning).
-			writeConfigError(w, http.StatusServiceUnavailable, "soulseek client is not running", nil)
+			// (see serveConfigPost's identical reasoning). Also do not guess at
+			// a cause: observ deliberately does not import internal/soulseek, so
+			// it cannot know which errors exist on the other side of that
+			// boundary beyond the ErrShareScanInProgress sentinel above.
+			writeConfigError(w, http.StatusServiceUnavailable, "failed to start share rescan", nil)
 		}
 	})
 }

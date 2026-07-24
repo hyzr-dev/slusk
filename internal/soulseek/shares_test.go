@@ -506,6 +506,79 @@ func waitForShareWorkers(t *testing.T, c *Client) {
 	}
 }
 
+// startShareScanLifecycle starts c's lifecycle for share-scan tests that
+// never open a peer listener (so stopLifecycle's net.Listener argument does
+// not apply), and registers a cleanup that cancels it. Cancellation alone is
+// enough here: it makes any shareScanHook blocked in a background scan
+// observe ctx.Done() and return, which frees the share-scan slot via
+// scanAndPublish's deferred releaseShareScan - so no goroutine started by a
+// test using this helper can be left blocked past the test, even on an early
+// t.Fatal.
+func startShareScanLifecycle(t *testing.T, c *Client) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := c.beginLifecycle(ctx); err != nil {
+		t.Fatalf("beginLifecycle: %v", err)
+	}
+	t.Cleanup(cancel)
+}
+
+// blockShareScan installs a shareScanHook on c that blocks until release is
+// called (or ctx is done), reporting on entered once the hook has started.
+// release is idempotent and registered as a cleanup, so a scan left blocked
+// by a test that fails before calling it itself is still released.
+func blockShareScan(t *testing.T, c *Client) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	releaseCh := make(chan struct{})
+	enteredCh := make(chan struct{}, 1)
+	var once sync.Once
+	releaseFn := func() { once.Do(func() { close(releaseCh) }) }
+	c.cfg.shareScanHook = func(ctx context.Context) error {
+		select {
+		case enteredCh <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseCh:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(releaseFn)
+	return enteredCh, releaseFn
+}
+
+// waitForShareScanSlotFree polls until the share-scan slot can be claimed,
+// then immediately releases it again - proving the slot was free rather than
+// merely leaving it held for the caller.
+func waitForShareScanSlotFree(t *testing.T, c *Client, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !c.tryAcquireShareScan() {
+		if time.Now().After(deadline) {
+			t.Fatalf("share-scan slot never freed within %v, len(shareScanSem) = %d", timeout, len(c.shareScanSem))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.releaseShareScan()
+}
+
+// waitForScanning polls c.ShareReport().Scanning until it equals want.
+func waitForScanning(t *testing.T, c *Client, want bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if got := c.ShareReport().Scanning; got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for Scanning = %v, last ShareReport = %+v", want, c.ShareReport())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func mustFolderRequestWire(t *testing.T, token soul.Token, folder string) []byte {
 	t.Helper()
 	msg := &peer.FolderContentsRequest{Token: token, Folder: folder}
@@ -1009,24 +1082,8 @@ func TestRescanSharesRecordsIndexTimeAndDuration(t *testing.T) {
 func TestTriggerRescanSharesRejectsConcurrentScan(t *testing.T) {
 	root := t.TempDir()
 	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
-	if _, err := c.beginLifecycle(context.Background()); err != nil {
-		t.Fatalf("beginLifecycle: %v", err)
-	}
-
-	release := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	c.cfg.shareScanHook = func(ctx context.Context) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
+	startShareScanLifecycle(t, c)
+	entered, release := blockShareScan(t, c)
 
 	if err := c.TriggerRescanShares(); err != nil {
 		t.Fatalf("first TriggerRescanShares: %v", err)
@@ -1042,17 +1099,30 @@ func TestTriggerRescanSharesRejectsConcurrentScan(t *testing.T) {
 		t.Fatalf("second TriggerRescanShares err = %v, want ErrShareScanInProgress", err)
 	}
 
-	close(release)
+	release()
 	// Draining: the slot must eventually free up once the background scan
 	// finishes, proving the first call's slot was not leaked.
-	deadline := time.Now().Add(2 * time.Second)
-	for !c.tryAcquireShareScan() {
-		if time.Now().After(deadline) {
-			t.Fatal("share-scan slot never freed after scan completed")
-		}
-		time.Sleep(5 * time.Millisecond)
+	waitForShareScanSlotFree(t, c, 2*time.Second)
+}
+
+// TestAcquireShareScanReturnsCtxErrWhenCancelled locks new-with-#160
+// behaviour: acquireShareScan (and therefore scanAndPublish/RescanShares) can
+// now return ctx.Err() while waiting for the share-scan slot, instead of
+// blocking indefinitely, when the caller's ctx is done first.
+func TestAcquireShareScanReturnsCtxErrWhenCancelled(t *testing.T) {
+	root := t.TempDir()
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	if !c.tryAcquireShareScan() {
+		t.Fatal("tryAcquireShareScan: slot unexpectedly held")
 	}
-	c.releaseShareScan()
+	t.Cleanup(c.releaseShareScan)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := c.RescanShares(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RescanShares err = %v, want context.Canceled", err)
+	}
 }
 
 // TestTriggerRescanSharesWhenNotRunning locks issue #160's contract for a
@@ -1089,9 +1159,7 @@ func TestTriggerRescanSharesHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
-	if _, err := c.beginLifecycle(context.Background()); err != nil {
-		t.Fatalf("beginLifecycle: %v", err)
-	}
+	startShareScanLifecycle(t, c)
 
 	if err := c.TriggerRescanShares(); err != nil {
 		t.Fatalf("TriggerRescanShares: %v", err)
@@ -1139,14 +1207,21 @@ func TestAnnounceSkipsDuplicateStatsAcrossRescans(t *testing.T) {
 		t.Fatal("timed out waiting for first announcement")
 	}
 
+	// The extra reader is started before the second rescan (rather than
+	// after) so that if the dedup fix regresses, the duplicate announcement's
+	// write is drained immediately: with an unbuffered net.Pipe, starting the
+	// reader only after RescanShares returns would instead have the write
+	// block inside RescanShares until this test's outer timeout, reporting a
+	// slow, off-message failure instead of the assertion below.
+	extra := make(chan error, 1)
+	go func() { extra <- readUntilSharedFoldersFiles(b, 1, 1) }()
+
 	// Second rescan produces identical counts (same single file); IndexedAt
 	// and ScanDuration necessarily differ, but the announce must still dedup.
 	if _, err := c.RescanShares(context.Background()); err != nil {
 		t.Fatalf("second RescanShares: %v", err)
 	}
 
-	extra := make(chan error, 1)
-	go func() { extra <- readUntilSharedFoldersFiles(b, 1, 1) }()
 	select {
 	case err := <-extra:
 		if err == nil {
@@ -1162,24 +1237,8 @@ func TestAnnounceSkipsDuplicateStatsAcrossRescans(t *testing.T) {
 func TestShareReportScanningReflectsInProgressScan(t *testing.T) {
 	root := t.TempDir()
 	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
-	if _, err := c.beginLifecycle(context.Background()); err != nil {
-		t.Fatalf("beginLifecycle: %v", err)
-	}
-
-	release := make(chan struct{})
-	entered := make(chan struct{}, 1)
-	c.cfg.shareScanHook = func(ctx context.Context) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
+	startShareScanLifecycle(t, c)
+	entered, release := blockShareScan(t, c)
 
 	if report := c.ShareReport(); report.Scanning {
 		t.Fatal("Scanning = true before any scan started")
@@ -1198,12 +1257,6 @@ func TestShareReportScanningReflectsInProgressScan(t *testing.T) {
 		t.Fatal("Scanning = false while scan hook is blocked")
 	}
 
-	close(release)
-	deadline := time.Now().Add(2 * time.Second)
-	for c.ShareReport().Scanning {
-		if time.Now().After(deadline) {
-			t.Fatal("Scanning stayed true after scan completed")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	release()
+	waitForScanning(t, c, false, 2*time.Second)
 }

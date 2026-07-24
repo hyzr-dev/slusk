@@ -35,6 +35,14 @@ const (
 	searchResponseTTL = 2 * time.Minute
 )
 
+// ErrShareScanInProgress is returned by TriggerRescanShares when a share scan
+// is already running; the caller should not queue a second one.
+var ErrShareScanInProgress = errors.New("soulseek: share scan already in progress")
+
+// ErrClientStopped is returned when the client is not running (or is
+// shutting down) and cannot start background work.
+var ErrClientStopped = errors.New("soulseek: client is not running")
+
 // SharedFolder maps a private local directory to one explicitly named public
 // virtual root. Local paths are never placed on the wire.
 type SharedFolder struct {
@@ -42,9 +50,9 @@ type SharedFolder struct {
 	Path string
 }
 
-// ShareStats is the published index size. It is kept comparable (no slices,
-// no pointers) because announceCurrentShares compares it field-by-field for
-// its dedup check.
+// ShareStats is the published index size. It is a plain value type because
+// it is stored by value in announcedStats and returned by value from
+// RescanShares.
 type ShareStats struct {
 	Directories int
 	Files       int
@@ -170,14 +178,6 @@ func (c *Client) scanAndPublishLocked(ctx context.Context) (ShareStats, error) {
 	return snapshot.stats, nil
 }
 
-// ErrShareScanInProgress is returned by TriggerRescanShares when a share scan
-// is already running; the caller should not queue a second one.
-var ErrShareScanInProgress = errors.New("share scan already in progress")
-
-// ErrClientStopped is returned when the client is not running (or is
-// shutting down) and cannot start background work.
-var ErrClientStopped = errors.New("soulseek client is not running")
-
 // TriggerRescanShares claims the share-scan slot and runs a rescan plus
 // announcement in the background, returning as soon as the scan is claimed
 // rather than waiting for the filesystem walk to finish. It never blocks on
@@ -218,6 +218,10 @@ func (c *Client) TriggerRescanShares() error {
 // acquireShareScan claims the share-scan slot, blocking until it is free or
 // ctx is done.
 func (c *Client) acquireShareScan(ctx context.Context) error {
+	// This first, non-blocking select only matters when the slot and
+	// ctx.Done() are both ready at once, where a single select below would
+	// pick between them at random; trying the slot alone first makes
+	// acquiring it deterministically preferred over an already-cancelled ctx.
 	select {
 	case c.shareScanSem <- struct{}{}:
 		return nil
@@ -243,9 +247,15 @@ func (c *Client) tryAcquireShareScan() bool {
 }
 
 // releaseShareScan frees the share-scan slot claimed by acquireShareScan or
-// tryAcquireShareScan.
+// tryAcquireShareScan. The semaphore channel trades away sync.Mutex's loud
+// misuse detection (Unlock panics if not held), so this panics instead of
+// silently blocking forever if the slot is not actually held.
 func (c *Client) releaseShareScan() {
-	<-c.shareScanSem
+	select {
+	case <-c.shareScanSem:
+	default:
+		panic("releaseShareScan: share scan slot not held")
+	}
 }
 
 // ShareReport returns the currently published index's aggregate stats,
@@ -261,7 +271,7 @@ func (c *Client) ShareReport() ShareReport {
 	return ShareReport{
 		ShareStats: s.stats,
 		Folders:    folders,
-		Scanning:   len(c.shareScanSem) == 1,
+		Scanning:   len(c.shareScanSem) > 0,
 	}
 }
 
