@@ -877,3 +877,333 @@ func TestRunInitialShareScanRetriesThenPublishes(t *testing.T) {
 		t.Fatalf("virtual file missing after scan: %#v", snapshot.files)
 	}
 }
+
+// TestRescanSharesReportsPerFolderStats locks issue #160's per-folder
+// breakdown: two shares with known file sizes, plus an escaping symlink that
+// must contribute neither files nor bytes to either total.
+func TestRescanSharesReportsPerFolderStats(t *testing.T) {
+	musicRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(musicRoot, "Album"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(musicRoot, "Album", "track.flac"), []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(musicRoot, "README"), []byte("abcde"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.mp3")
+	if err := os.WriteFile(outside, []byte("this must not count"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(musicRoot, "escape.mp3")); err != nil {
+		t.Fatal(err)
+	}
+
+	booksRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(booksRoot, "novel.epub"), []byte("0123456789012345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(Config{SharedFolders: []SharedFolder{
+		{Name: "Music", Path: musicRoot},
+		{Name: "Books", Path: booksRoot},
+	}}, testLogger())
+	stats, err := c.RescanShares(context.Background())
+	if err != nil {
+		t.Fatalf("RescanShares: %v", err)
+	}
+
+	snapshot := c.shareSnapshot()
+	if len(snapshot.folders) != 2 {
+		t.Fatalf("folders = %#v, want 2", snapshot.folders)
+	}
+	byName := make(map[string]ShareFolderStats, len(snapshot.folders))
+	for _, f := range snapshot.folders {
+		byName[f.Name] = f
+	}
+
+	music, ok := byName["Music"]
+	if !ok {
+		t.Fatalf("missing Music folder stats: %#v", byName)
+	}
+	if music.Path != musicRoot {
+		t.Errorf("Music.Path = %q, want %q", music.Path, musicRoot)
+	}
+	// root dir + Album dir = 2 directories; track.flac + README = 2 files,
+	// 10 + 5 = 15 bytes. escape.mp3 (symlink) contributes nothing.
+	if music.Directories != 2 || music.Files != 2 || music.TotalBytes != 15 {
+		t.Fatalf("Music stats = %#v, want directories=2 files=2 totalBytes=15", music)
+	}
+
+	books, ok := byName["Books"]
+	if !ok {
+		t.Fatalf("missing Books folder stats: %#v", byName)
+	}
+	if books.Path != booksRoot {
+		t.Errorf("Books.Path = %q, want %q", books.Path, booksRoot)
+	}
+	if books.Directories != 1 || books.Files != 1 || books.TotalBytes != 16 {
+		t.Fatalf("Books stats = %#v, want directories=1 files=1 totalBytes=16", books)
+	}
+
+	var sumDirs, sumFiles int
+	var sumBytes uint64
+	for _, f := range snapshot.folders {
+		sumDirs += f.Directories
+		sumFiles += f.Files
+		sumBytes += f.TotalBytes
+	}
+	if sumDirs != len(snapshot.directories) {
+		t.Errorf("sum(folders.Directories) = %d, want %d (len(snapshot.directories))", sumDirs, len(snapshot.directories))
+	}
+	if sumFiles != len(snapshot.search) {
+		t.Errorf("sum(folders.Files) = %d, want %d (len(snapshot.search))", sumFiles, len(snapshot.search))
+	}
+	if sumBytes != stats.TotalBytes {
+		t.Errorf("sum(folders.TotalBytes) = %d, want %d (stats.TotalBytes)", sumBytes, stats.TotalBytes)
+	}
+	if stats.TotalBytes != 31 {
+		t.Errorf("stats.TotalBytes = %d, want 31", stats.TotalBytes)
+	}
+}
+
+// TestRescanSharesRecordsIndexTimeAndDuration locks issue #160's timing
+// fields: IndexedAt falls within the scan's wall-clock window, ScanDuration
+// is positive, and a second rescan advances IndexedAt.
+func TestRescanSharesRecordsIndexTimeAndDuration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+
+	before := time.Now()
+	stats, err := c.RescanShares(context.Background())
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("RescanShares: %v", err)
+	}
+	if stats.IndexedAt.Before(before) || stats.IndexedAt.After(after) {
+		t.Fatalf("IndexedAt = %v, want between %v and %v", stats.IndexedAt, before, after)
+	}
+	if stats.ScanDuration <= 0 {
+		t.Fatalf("ScanDuration = %v, want > 0", stats.ScanDuration)
+	}
+
+	time.Sleep(time.Millisecond)
+	stats2, err := c.RescanShares(context.Background())
+	if err != nil {
+		t.Fatalf("second RescanShares: %v", err)
+	}
+	if !stats2.IndexedAt.After(stats.IndexedAt) {
+		t.Fatalf("second IndexedAt = %v, want after first %v", stats2.IndexedAt, stats.IndexedAt)
+	}
+}
+
+// TestTriggerRescanSharesRejectsConcurrentScan locks issue #160's try-lock
+// semantics: while a scan is blocked in shareScanHook, a second
+// TriggerRescanShares call must not queue behind it - it must fail fast with
+// ErrShareScanInProgress.
+func TestTriggerRescanSharesRejectsConcurrentScan(t *testing.T) {
+	root := t.TempDir()
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	if _, err := c.beginLifecycle(context.Background()); err != nil {
+		t.Fatalf("beginLifecycle: %v", err)
+	}
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	c.cfg.shareScanHook = func(ctx context.Context) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if err := c.TriggerRescanShares(); err != nil {
+		t.Fatalf("first TriggerRescanShares: %v", err)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scan to start")
+	}
+
+	if err := c.TriggerRescanShares(); !errors.Is(err, ErrShareScanInProgress) {
+		t.Fatalf("second TriggerRescanShares err = %v, want ErrShareScanInProgress", err)
+	}
+
+	close(release)
+	// Draining: the slot must eventually free up once the background scan
+	// finishes, proving the first call's slot was not leaked.
+	deadline := time.Now().Add(2 * time.Second)
+	for !c.tryAcquireShareScan() {
+		if time.Now().After(deadline) {
+			t.Fatal("share-scan slot never freed after scan completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.releaseShareScan()
+}
+
+// TestTriggerRescanSharesWhenNotRunning locks issue #160's contract for a
+// client whose lifecycle was never started: TriggerRescanShares must report
+// ErrClientStopped, and - critically - must release the share-scan slot it
+// claimed rather than leaking it, or a subsequent blocking RescanShares would
+// deadlock forever.
+func TestTriggerRescanSharesWhenNotRunning(t *testing.T) {
+	root := t.TempDir()
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+
+	if err := c.TriggerRescanShares(); !errors.Is(err, ErrClientStopped) {
+		t.Fatalf("TriggerRescanShares err = %v, want ErrClientStopped", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { _, err := c.RescanShares(context.Background()); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RescanShares after leaked TriggerRescanShares: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RescanShares deadlocked: TriggerRescanShares leaked the share-scan slot")
+	}
+}
+
+// TestTriggerRescanSharesHappyPath locks the success path end to end: the
+// background scan publishes a new snapshot and TriggerRescanShares itself
+// returns immediately (well before the scan hook completes).
+func TestTriggerRescanSharesHappyPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	if _, err := c.beginLifecycle(context.Background()); err != nil {
+		t.Fatalf("beginLifecycle: %v", err)
+	}
+
+	if err := c.TriggerRescanShares(); err != nil {
+		t.Fatalf("TriggerRescanShares: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for c.shareSnapshot().stats.Files != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("background scan never published; snapshot = %#v", c.shareSnapshot().stats)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestAnnounceSkipsDuplicateStatsAcrossRescans guards the mandatory dedup fix
+// alongside issue #160: two rescans that produce identical Directories/Files
+// counts (only IndexedAt/ScanDuration differ) must still result in exactly
+// one SharedFoldersFiles announcement.
+func TestAnnounceSkipsDuplicateStatsAcrossRescans(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p",
+		SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c.serverConn = a
+	c.serverGeneration = 1
+	c.announcedGeneration = 1 // simulate login-time announcement already sent
+
+	announced := make(chan error, 1)
+	go func() { announced <- readUntilSharedFoldersFiles(b, 1, 1) }()
+
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatalf("first RescanShares: %v", err)
+	}
+	select {
+	case err := <-announced:
+		if err != nil {
+			t.Fatalf("first announcement: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first announcement")
+	}
+
+	// Second rescan produces identical counts (same single file); IndexedAt
+	// and ScanDuration necessarily differ, but the announce must still dedup.
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatalf("second RescanShares: %v", err)
+	}
+
+	extra := make(chan error, 1)
+	go func() { extra <- readUntilSharedFoldersFiles(b, 1, 1) }()
+	select {
+	case err := <-extra:
+		if err == nil {
+			t.Fatal("second rescan sent a duplicate announcement, want dedup")
+		}
+	case <-time.After(200 * time.Millisecond):
+		// No further frame arrived - the dedup held.
+	}
+}
+
+// TestShareReportScanningReflectsInProgressScan locks ShareReport.Scanning:
+// true while a triggered scan's hook blocks, false once it completes.
+func TestShareReportScanningReflectsInProgressScan(t *testing.T) {
+	root := t.TempDir()
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	if _, err := c.beginLifecycle(context.Background()); err != nil {
+		t.Fatalf("beginLifecycle: %v", err)
+	}
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	c.cfg.shareScanHook = func(ctx context.Context) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if report := c.ShareReport(); report.Scanning {
+		t.Fatal("Scanning = true before any scan started")
+	}
+
+	if err := c.TriggerRescanShares(); err != nil {
+		t.Fatalf("TriggerRescanShares: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scan to start")
+	}
+
+	if report := c.ShareReport(); !report.Scanning {
+		t.Fatal("Scanning = false while scan hook is blocked")
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for c.ShareReport().Scanning {
+		if time.Now().After(deadline) {
+			t.Fatal("Scanning stayed true after scan completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

@@ -42,10 +42,43 @@ type SharedFolder struct {
 	Path string
 }
 
-// ShareStats is the published index size.
+// ShareStats is the published index size. It is kept comparable (no slices,
+// no pointers) because announceCurrentShares compares it field-by-field for
+// its dedup check.
 type ShareStats struct {
 	Directories int
 	Files       int
+	// TotalBytes is the sum of every indexed file's advertised size. Content
+	// that is hardlinked or otherwise duplicated on disk is counted once per
+	// index entry, not once per inode - it reflects what is advertised to the
+	// network, not deduplicated disk usage.
+	TotalBytes uint64
+	// IndexedAt is when this index finished scanning. Zero until the first
+	// successful scan.
+	IndexedAt time.Time
+	// ScanDuration is how long the filesystem walk that produced this index
+	// took, measured from after any test shareScanHook.
+	ScanDuration time.Duration
+}
+
+// ShareFolderStats is one configured SharedFolder's contribution to the
+// published index. Name and Path mirror the configured share (Path is the
+// private local directory, never placed on the wire).
+type ShareFolderStats struct {
+	Name        string
+	Path        string
+	Directories int
+	Files       int
+	TotalBytes  uint64
+}
+
+// ShareReport is the full read-only view of the published share index: the
+// aggregate stats, the per-folder breakdown, and whether a scan is currently
+// running.
+type ShareReport struct {
+	ShareStats
+	Folders  []ShareFolderStats
+	Scanning bool
 }
 
 type indexedFile struct {
@@ -61,6 +94,7 @@ type shareTrigram uint32
 
 type shareSnapshot struct {
 	stats       ShareStats
+	folders     []ShareFolderStats
 	files       map[string]*indexedFile
 	search      []*indexedFile
 	trigrams    map[shareTrigram][]uint32
@@ -100,12 +134,25 @@ func (c *Client) RescanShares(ctx context.Context) (ShareStats, error) {
 
 // scanAndPublish builds a complete immutable index and publishes it
 // atomically to c.shares, without announcing it to the server. If any
-// configured root cannot be scanned, the prior snapshot remains live.
+// configured root cannot be scanned, the prior snapshot remains live. It
+// blocks until the share-scan slot is free or ctx is done - unlike before
+// issue #160, this can now return ctx.Err() while waiting for a concurrent
+// scan, rather than blocking indefinitely; both callers (the SIGHUP path via
+// RescanShares, and runInitialShareScan) already handle errors and pass a
+// cancellable ctx. Callers that must not block behind a running scan should
+// use TriggerRescanShares instead.
 func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
-	c.shareScanMu.Lock()
-	defer c.shareScanMu.Unlock()
+	if err := c.acquireShareScan(ctx); err != nil {
+		return ShareStats{}, err
+	}
+	defer c.releaseShareScan()
+	return c.scanAndPublishLocked(ctx)
+}
 
-	start := time.Now()
+// scanAndPublishLocked is scanAndPublish's body, run while already holding
+// the share-scan slot. Callers must claim the slot themselves first, via
+// acquireShareScan or tryAcquireShareScan.
+func (c *Client) scanAndPublishLocked(ctx context.Context) (ShareStats, error) {
 	snapshot, err := c.scanShares(ctx)
 	if err != nil {
 		return ShareStats{}, err
@@ -116,10 +163,106 @@ func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
 		c.logger.Info("shares scanned",
 			"directories", snapshot.stats.Directories,
 			"files", snapshot.stats.Files,
-			"duration", time.Since(start))
+			"bytes", snapshot.stats.TotalBytes,
+			"duration", snapshot.stats.ScanDuration)
 	}
 
 	return snapshot.stats, nil
+}
+
+// ErrShareScanInProgress is returned by TriggerRescanShares when a share scan
+// is already running; the caller should not queue a second one.
+var ErrShareScanInProgress = errors.New("share scan already in progress")
+
+// ErrClientStopped is returned when the client is not running (or is
+// shutting down) and cannot start background work.
+var ErrClientStopped = errors.New("soulseek client is not running")
+
+// TriggerRescanShares claims the share-scan slot and runs a rescan plus
+// announcement in the background, returning as soon as the scan is claimed
+// rather than waiting for the filesystem walk to finish. It never blocks on
+// the scan itself, so an HTTP caller cannot be held open for the duration of
+// a share rescan. Returns ErrShareScanInProgress if a scan is already
+// running, or ErrClientStopped if the client's lifecycle is not active.
+func (c *Client) TriggerRescanShares() error {
+	if !c.tryAcquireShareScan() {
+		return ErrShareScanInProgress
+	}
+	started := c.startTracked(func() {
+		defer c.releaseShareScan()
+		if _, err := c.scanAndPublishLocked(c.lifecycleContext()); err != nil {
+			if c.logger != nil {
+				c.logger.Error("background share rescan failed", "err", err)
+			}
+			return
+		}
+		// announceShares reads the currently published stats at send time and
+		// skips the send when this server generation was already told
+		// identical counts; a failed announce here is not fatal, since
+		// serveConnected re-announces on every server login.
+		if err := c.announceShares(); err != nil {
+			if c.logger != nil {
+				c.logger.Debug("share stats will be announced on next server login", "err", err)
+			}
+		}
+	})
+	if !started {
+		// Release-on-failure is load-bearing: a leaked slot here would
+		// deadlock every future blocking RescanShares/scanAndPublish call.
+		c.releaseShareScan()
+		return ErrClientStopped
+	}
+	return nil
+}
+
+// acquireShareScan claims the share-scan slot, blocking until it is free or
+// ctx is done.
+func (c *Client) acquireShareScan(ctx context.Context) error {
+	select {
+	case c.shareScanSem <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case c.shareScanSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// tryAcquireShareScan claims the share-scan slot without blocking, reporting
+// whether the claim succeeded.
+func (c *Client) tryAcquireShareScan() bool {
+	select {
+	case c.shareScanSem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseShareScan frees the share-scan slot claimed by acquireShareScan or
+// tryAcquireShareScan.
+func (c *Client) releaseShareScan() {
+	<-c.shareScanSem
+}
+
+// ShareReport returns the currently published index's aggregate stats,
+// per-folder breakdown, and whether a scan is running right now. It reads
+// the published snapshot directly rather than the share-scan slot's owner,
+// so it never blocks behind an in-progress scan; Scanning is therefore a UI
+// hint that can race the read that follows it; TriggerRescanShares's 409 is
+// the authoritative concurrency signal.
+func (c *Client) ShareReport() ShareReport {
+	s := c.shareSnapshot()
+	folders := make([]ShareFolderStats, len(s.folders))
+	copy(folders, s.folders)
+	return ShareReport{
+		ShareStats: s.stats,
+		Folders:    folders,
+		Scanning:   len(c.shareScanSem) == 1,
+	}
 }
 
 // announceShares sends the currently published index size to the server, if
@@ -142,6 +285,12 @@ func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
 // before it is ever lost. It is generation-guarded via
 // sendToServerGeneration and a no-op (returns nil) when there is no active
 // connection.
+//
+// The dedup comparison is on ShareStats.Directories/Files only - the counts
+// that actually go on the wire - not the whole ShareStats value: IndexedAt
+// and ScanDuration make every scan's stats value distinct, so comparing the
+// full struct would defeat the dedup and re-send SharedFoldersFiles on every
+// rescan even when the counts did not change.
 func (c *Client) announceShares() error {
 	return c.announceCurrentShares(false)
 }
@@ -167,7 +316,9 @@ func (c *Client) announceCurrentShares(loginTime bool) error {
 		return nil
 	}
 	stats := c.shareSnapshot().stats
-	if c.announcedGeneration == generation && c.announcedStats == stats {
+	if c.announcedGeneration == generation &&
+		c.announcedStats.Directories == stats.Directories &&
+		c.announcedStats.Files == stats.Files {
 		return nil
 	}
 	if err := sendToServerGeneration(c, generation, &server.SharedFoldersFiles{
@@ -272,6 +423,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			return nil, fmt.Errorf("share %q path is not a directory", configured.Name)
 		}
 
+		folder := ShareFolderStats{Name: configured.Name, Path: configured.Path}
 		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				if path != root && errors.Is(walkErr, os.ErrNotExist) {
@@ -313,6 +465,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			if entry.IsDir() {
 				if _, exists := s.byDirectory[virtual]; !exists {
 					s.byDirectory[virtual] = peer.Directory{Name: virtual}
+					folder.Directories++
 				}
 				return nil
 			}
@@ -366,6 +519,8 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			}
 			s.files[virtual] = indexed
 			s.search = append(s.search, indexed)
+			folder.Files++
+			folder.TotalBytes += wire.Size
 			directory := s.byDirectory[dirVirtual]
 			directory.Name = dirVirtual
 			fileInDirectory := wire
@@ -377,6 +532,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("scan share %q: %w", configured.Name, err)
 		}
+		s.folders = append(s.folders, folder)
 	}
 
 	for _, directory := range s.byDirectory {
@@ -396,7 +552,17 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		return nil, fmt.Errorf("build share search index: %w", err)
 	}
 	s.trigrams = trigrams
-	s.stats = ShareStats{Directories: len(s.directories), Files: len(s.search)}
+	var totalBytes uint64
+	for _, folder := range s.folders {
+		totalBytes += folder.TotalBytes
+	}
+	s.stats = ShareStats{
+		Directories:  len(s.directories),
+		Files:        len(s.search),
+		TotalBytes:   totalBytes,
+		IndexedAt:    time.Now(),
+		ScanDuration: time.Since(start),
+	}
 	msg := &peer.SharedFileListResponse{Directories: s.directories}
 	frame, err := msg.Serialize(msg)
 	if err != nil {

@@ -39,7 +39,7 @@ func runShareRescanLoop(ctx context.Context, signals <-chan os.Signal, client sh
 				logger.Error("soulseek share rescan or advertisement failed", "err", err)
 				continue
 			}
-			logger.Info("soulseek shares rescanned", "directories", stats.Directories, "files", stats.Files)
+			logger.Info("soulseek shares rescanned", "directories", stats.Directories, "files", stats.Files, "bytes", stats.TotalBytes)
 		}
 	}
 }
