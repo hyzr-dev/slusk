@@ -2,17 +2,25 @@ package soulseek
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/file"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
+
+// errUploadTooSlow is returned by streamUploadConn when a peer sustains a
+// throughput below Config.uploadMinThroughput for two consecutive sample
+// windows, so a trickle-reading peer cannot occupy an upload slot
+// indefinitely (see #108).
+var errUploadTooSlow = errors.New("soulseek: upload aborted, peer below minimum throughput")
 
 func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 	indexed := c.shareSnapshot().files[job.key.filename]
@@ -58,7 +66,11 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 	if err := c.streamUpload(ctx, job.key.username, reservation.token, shared, indexed.wire.Size); err != nil {
 		_ = sendUploadPeerMessage(session, &peer.UploadFailed{Filename: job.key.filename})
 		if c.logger != nil {
-			c.logger.Debug("soulseek upload failed", "username", job.key.username, "filename", job.key.filename, "err", err)
+			if errors.Is(err, errUploadTooSlow) {
+				c.logger.Info("soulseek upload aborted: below minimum throughput", "username", job.key.username, "filename", job.key.filename)
+			} else {
+				c.logger.Debug("soulseek upload failed", "username", job.key.username, "filename", job.key.filename, "err", err)
+			}
 		}
 	}
 }
@@ -126,10 +138,16 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 		}
 	}()
 
-	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout)
+	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval)
 }
 
-func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration) error {
+// uploadThroughputStrikeLimit is how many consecutive sub-floor sample
+// windows a streaming upload tolerates before it is aborted as too slow
+// (see #108). The first window is always skipped as grace so a peer's
+// initial read latency never counts against it.
+const uploadThroughputStrikeLimit = 2
+
+func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration) error {
 	if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
 		return err
 	}
@@ -150,10 +168,8 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 		if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
 			return err
 		}
-		writer := &progressWriter{conn: conn, idleTimeout: idleTimeout}
-		written, err := io.CopyN(writer, shared, int64(size-offset.Offset))
-		if err != nil {
-			return fmt.Errorf("stream upload (sent %d of %d): %w", written, size-offset.Offset, err)
+		if err := streamUploadBody(conn, shared, size-offset.Offset, idleTimeout, minThroughput, sampleInterval); err != nil {
+			return err
 		}
 	}
 	// The downloader owns successful F-connection completion. Keep the socket
@@ -176,14 +192,81 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 	return fmt.Errorf("unexpected data after completed upload")
 }
 
+// streamUploadBody copies the remaining n bytes from shared to conn. When
+// minThroughput and sampleInterval are both positive it also runs a
+// throughput sampler (see throttleUploadSampler) for the duration of the
+// copy only - never during the post-transfer wait for the downloader to
+// close the connection - aborting the connection and returning
+// errUploadTooSlow if the peer sustains a throughput below minThroughput
+// for two consecutive sample windows (#108).
+func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration) error {
+	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout}
+
+	var abortedSlow atomic.Bool
+	if minThroughput > 0 && sampleInterval > 0 {
+		done := make(chan struct{})
+		defer close(done)
+		go throttleUploadSampler(writer, conn, minThroughput, sampleInterval, &abortedSlow, done)
+	}
+
+	written, err := io.CopyN(writer, shared, int64(n))
+	if err != nil {
+		if abortedSlow.Load() {
+			return fmt.Errorf("stream upload (sent %d of %d): %w", written, n, errUploadTooSlow)
+		}
+		return fmt.Errorf("stream upload (sent %d of %d): %w", written, n, err)
+	}
+	return nil
+}
+
+// throttleUploadSampler polls writer's cumulative byte count once per
+// sampleInterval and, once it has seen two consecutive intervals whose
+// delta falls below minThroughput * sampleInterval, sets abortedSlow and
+// closes conn to unblock the upload's blocked Write (#108). The very first
+// interval is always skipped as grace, since it may include time spent
+// before the peer starts reading in earnest. It returns as soon as done is
+// closed, so it never outlives the transfer it is watching.
+func throttleUploadSampler(writer *progressWriter, conn net.Conn, minThroughput int, sampleInterval time.Duration, abortedSlow *atomic.Bool, done <-chan struct{}) {
+	ticker := time.NewTicker(sampleInterval)
+	defer ticker.Stop()
+
+	threshold := uint64(float64(minThroughput) * sampleInterval.Seconds())
+	var last uint64
+	strikes := 0
+	first := true
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			cur := writer.written.Load()
+			if !first && cur-last < threshold {
+				strikes++
+			} else {
+				strikes = 0
+			}
+			first = false
+			last = cur
+			if strikes >= uploadThroughputStrikeLimit {
+				abortedSlow.Store(true)
+				_ = conn.Close()
+				return
+			}
+		}
+	}
+}
+
 type progressWriter struct {
 	conn        net.Conn
 	idleTimeout time.Duration
+	written     atomic.Uint64
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
 	if err := w.conn.SetWriteDeadline(time.Now().Add(w.idleTimeout)); err != nil {
 		return 0, err
 	}
-	return w.conn.Write(p)
+	n, err := w.conn.Write(p)
+	w.written.Add(uint64(n))
+	return n, err
 }
