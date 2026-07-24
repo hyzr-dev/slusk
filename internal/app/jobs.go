@@ -31,12 +31,24 @@ var ErrJobNotRetryable = errors.New("job is not in a retryable state")
 // store.ErrRemoteFileBusy so observ never needs to import internal/store.
 var ErrRemoteFileBusy = errors.New("remote file already claimed by another live candidate")
 
+// ErrJobActive is returned by ForceSearch when the job exists but is
+// currently DOWNLOADING or IMPORTING - re-queuing it for search would race
+// (and discard) an in-flight transfer or import.
+var ErrJobActive = errors.New("job is actively transferring")
+
+// ErrJobImporting is returned by Delete when the job exists but is currently
+// IMPORTING. Mirrors store.ErrJobImporting so observ never needs to import
+// internal/store.
+var ErrJobImporting = errors.New("job is importing")
+
 // JobStore is the slice of the store Jobs needs.
 type JobStore interface {
 	JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error)
 	AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJobState, now time.Time) error
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
+	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
+	DeleteJob(ctx context.Context, jobID int64) (bool, error)
 }
 
 // TransferCanceller is the slice of the slskd client Jobs needs to cancel a
@@ -117,4 +129,64 @@ func (j *Jobs) Create(ctx context.Context, title, artistName, peer string, files
 		return core.AlbumJob{}, ErrRemoteFileBusy
 	}
 	return job, err
+}
+
+// ForceSearch manually re-queues one job (issue #159) for an immediate
+// re-search, bypassing any current backoff: ErrJobNotFound if no such job
+// exists, ErrJobActive if it is currently DOWNLOADING or IMPORTING (either
+// found on the initial lookup, or discovered by the store's guard when the
+// caller raced a state change).
+func (j *Jobs) ForceSearch(ctx context.Context, jobID int64) error {
+	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrJobNotFound
+	}
+	if view.Job.State == core.StateDownloading || view.Job.State == core.StateImporting {
+		return ErrJobActive
+	}
+	ok, err := j.Store.ForceSearchJob(ctx, jobID, time.Now())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrJobActive
+	}
+	return nil
+}
+
+// Delete permanently removes one job and its children (issue #159):
+// ErrJobNotFound if no such job exists, ErrJobImporting if it is currently
+// IMPORTING. Any live remote transfer is cancelled best-effort first, the
+// same as Cancel - a failed remote cancel must not block the delete, since
+// any stale slskd-side entry is left for the next reconcile pass to clean up.
+func (j *Jobs) Delete(ctx context.Context, jobID int64) error {
+	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrJobNotFound
+	}
+	if view.Job.State == core.StateImporting {
+		return ErrJobImporting
+	}
+	if view.Transfer != nil && view.Transfer.SlskdID != "" {
+		if err := j.Peers.Cancel(ctx, view.Transfer.Username, view.Transfer.SlskdID); err != nil {
+			j.log().Warn("slskd cancel failed, still deleting job", "job_id", jobID, "err", err)
+		}
+	}
+	ok, err := j.Store.DeleteJob(ctx, jobID)
+	if errors.Is(err, store.ErrJobImporting) {
+		return ErrJobImporting
+	}
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrJobNotFound
+	}
+	return nil
 }

@@ -380,7 +380,7 @@ func main() {
 	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
 		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
 		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn,
-		configWriter, restartFn, createJobFn)
+		configWriter, restartFn, createJobFn, jobs.ForceSearch, jobs.Delete)
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)

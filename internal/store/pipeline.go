@@ -3,12 +3,19 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
+
+// ErrJobImporting is returned by DeleteJob when the job is currently
+// IMPORTING: deleting it out from under an in-flight Lidarr import could
+// leave orphaned files or a half-applied import, so the caller must wait for
+// it to settle (or fail) first.
+var ErrJobImporting = errors.New("job is importing")
 
 const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at, min_track_count, max_track_count, source FROM album_jobs`
 
@@ -512,4 +519,91 @@ func (s *Store) SetJobTrackBand(ctx context.Context, jobID int64, minTracks, max
 		return fmt.Errorf("set job track band: %w", err)
 	}
 	return nil
+}
+
+// ForceSearchJob manually re-queues one job (issue #159) for an immediate
+// re-search: retries/not_before/candidates are wiped clean-slate, same as
+// RetryFailedJob, and the state is forced to WANTED so the next Discovery
+// tick picks it up. Guarded on state NOT IN (DOWNLOADING, IMPORTING) instead
+// of RetryFailedJob's FAILED/ORPHANED allowlist, since a force-search is
+// valid from almost any non-active state (WANTED, SELECTING, FAILED,
+// ORPHANED, CANCELLED, ...). Returns false when the job is actively
+// transferring (the dashboard button raced a state change) or does not exist.
+func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, updated_at = $2
+		 WHERE id = $3 AND state NOT IN ($4, $5)`,
+		string(core.StateWanted), now, jobID, string(core.StateDownloading), string(core.StateImporting))
+	if err != nil {
+		return false, fmt.Errorf("force search job: update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("force search job: rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		return false, fmt.Errorf("force search job: delete candidate transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("force search job: delete candidates: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("force search job: commit: %w", err)
+	}
+	return true, nil
+}
+
+// DeleteJob permanently removes one job and its children (issue #159): the
+// job row is locked with FOR UPDATE first so a concurrent transition cannot
+// race the IMPORTING check, then transfers/candidates/job_events/album_jobs
+// are deleted in FK-safe order. Returns (false, nil) if no such job exists,
+// ErrJobImporting if it is currently IMPORTING (deleting mid-import risks
+// orphaned files or a half-applied Lidarr import), and (true, nil) on success.
+func (s *Store) DeleteJob(ctx context.Context, jobID int64) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM album_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("delete job: select for update: %w", err)
+	}
+	if core.AlbumJobState(state) == core.StateImporting {
+		return false, ErrJobImporting
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		return false, fmt.Errorf("delete job: delete transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("delete job: delete candidates: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_events WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("delete job: delete job events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM album_jobs WHERE id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("delete job: delete job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("delete job: commit: %w", err)
+	}
+	return true, nil
 }

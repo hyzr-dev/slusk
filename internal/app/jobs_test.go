@@ -10,6 +10,12 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
+// storeErrJobImporting aliases store.ErrJobImporting at package scope: most
+// test funcs below shadow the store package name with a local `store :=
+// &fakeJobStore{...}` variable, so store.ErrJobImporting is unreachable
+// inside them.
+var storeErrJobImporting = store.ErrJobImporting
+
 // fakeJobStore is a JobStore fake. jobs, when set, is looked up by
 // JobWithTransfer; a missing id reports not-found. advanceErr/retryErr, when
 // set, fail the corresponding call. advancedTo/retryCalled record what was
@@ -18,16 +24,22 @@ import (
 type fakeJobStore struct {
 	jobs map[int64]core.JobView
 
-	jobErr     error
-	advanceErr error
-	retryErr   error
-	retryOK    bool
-	createErr  error
-	createJob  core.AlbumJob
+	jobErr         error
+	advanceErr     error
+	retryErr       error
+	retryOK        bool
+	createErr      error
+	createJob      core.AlbumJob
+	forceSearchErr error
+	forceSearchOK  bool
+	deleteErr      error
+	deleteOK       bool
 
-	advancedTo   core.AlbumJobState
-	retryCalled  bool
-	createCalled struct {
+	advancedTo        core.AlbumJobState
+	retryCalled       bool
+	forceSearchCalled bool
+	deleteCalled      bool
+	createCalled      struct {
 		title, artistName, peer string
 		files                   []store.ManualJobFile
 	}
@@ -63,6 +75,22 @@ func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, p
 		return core.AlbumJob{}, f.createErr
 	}
 	return f.createJob, nil
+}
+
+func (f *fakeJobStore) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	f.forceSearchCalled = true
+	if f.forceSearchErr != nil {
+		return false, f.forceSearchErr
+	}
+	return f.forceSearchOK, nil
+}
+
+func (f *fakeJobStore) DeleteJob(ctx context.Context, jobID int64) (bool, error) {
+	f.deleteCalled = true
+	if f.deleteErr != nil {
+		return false, f.deleteErr
+	}
+	return f.deleteOK, nil
 }
 
 // fakePeerCanceller is a TransferCanceller fake. cancelErr, when set, fails
@@ -231,5 +259,225 @@ func TestJobsRetryStoreError(t *testing.T) {
 	err := j.Retry(context.Background(), 1)
 	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobNotRetryable) {
 		t.Fatalf("Retry() = %v, want the wrapped store error", err)
+	}
+}
+
+func TestJobsForceSearchNotFound(t *testing.T) {
+	store := &fakeJobStore{jobs: map[int64]core.JobView{}}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 99); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("ForceSearch() = %v, want ErrJobNotFound", err)
+	}
+	if store.forceSearchCalled {
+		t.Errorf("ForceSearchJob must not be called for a job that doesn't exist")
+	}
+}
+
+// TestJobsForceSearchActiveState covers the fast path: the initial lookup
+// already shows DOWNLOADING/IMPORTING, so the store is never called.
+func TestJobsForceSearchActiveState(t *testing.T) {
+	for _, state := range []core.AlbumJobState{core.StateDownloading, core.StateImporting} {
+		t.Run(string(state), func(t *testing.T) {
+			store := &fakeJobStore{jobs: map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: state}}}}
+			j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+			if err := j.ForceSearch(context.Background(), 1); !errors.Is(err, ErrJobActive) {
+				t.Fatalf("ForceSearch() = %v, want ErrJobActive", err)
+			}
+			if store.forceSearchCalled {
+				t.Errorf("ForceSearchJob must not be called when the job is already known to be active")
+			}
+		})
+	}
+}
+
+// TestJobsForceSearchRacedIntoActive covers the slow path: the initial lookup
+// showed an inactive state, but the store's guarded UPDATE lost the race to a
+// concurrent transition into DOWNLOADING/IMPORTING.
+func TestJobsForceSearchRacedIntoActive(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:          map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: core.StateFailed}}},
+		forceSearchOK: false,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); !errors.Is(err, ErrJobActive) {
+		t.Fatalf("ForceSearch() = %v, want ErrJobActive", err)
+	}
+	if !store.forceSearchCalled {
+		t.Errorf("expected ForceSearchJob to have been called")
+	}
+}
+
+func TestJobsForceSearchSuccess(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:          map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: core.StateFailed}}},
+		forceSearchOK: true,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); err != nil {
+		t.Fatalf("ForceSearch() = %v, want nil", err)
+	}
+}
+
+func TestJobsForceSearchLookupError(t *testing.T) {
+	store := &fakeJobStore{jobErr: errors.New("db down")}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	err := j.ForceSearch(context.Background(), 1)
+	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobActive) {
+		t.Fatalf("ForceSearch() = %v, want the underlying store error", err)
+	}
+}
+
+func TestJobsForceSearchStoreError(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:           map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: core.StateFailed}}},
+		forceSearchErr: errors.New("db exploded"),
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	err := j.ForceSearch(context.Background(), 1)
+	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobActive) {
+		t.Fatalf("ForceSearch() = %v, want the wrapped store error", err)
+	}
+}
+
+func TestJobsDeleteNotFound(t *testing.T) {
+	store := &fakeJobStore{jobs: map[int64]core.JobView{}}
+	peers := &fakePeerCanceller{}
+	j := &Jobs{Store: store, Peers: peers}
+
+	if err := j.Delete(context.Background(), 42); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Delete() = %v, want ErrJobNotFound", err)
+	}
+	if peers.called {
+		t.Errorf("Delete must not touch the remote peer for a job that doesn't exist")
+	}
+	if store.deleteCalled {
+		t.Errorf("DeleteJob must not be called for a job that doesn't exist")
+	}
+}
+
+func TestJobsDeleteImporting(t *testing.T) {
+	store := &fakeJobStore{jobs: map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: core.StateImporting}}}}
+	peers := &fakePeerCanceller{}
+	j := &Jobs{Store: store, Peers: peers}
+
+	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobImporting) {
+		t.Fatalf("Delete() = %v, want ErrJobImporting", err)
+	}
+	if store.deleteCalled {
+		t.Errorf("DeleteJob must not be called once the fast-path IMPORTING check already refused")
+	}
+}
+
+// TestJobsDeleteRemoteCancelBestEffort ensures a failed remote cancel does
+// not block the delete: the job is still removed locally, matching Cancel's
+// best-effort semantics.
+func TestJobsDeleteRemoteCancelBestEffort(t *testing.T) {
+	store := &fakeJobStore{
+		jobs: map[int64]core.JobView{
+			7: {
+				Job:      core.AlbumJob{ID: 7, State: core.StateDownloading},
+				Transfer: &core.Transfer{Username: "bob", SlskdID: "g1"},
+			},
+		},
+		deleteOK: true,
+	}
+	peers := &fakePeerCanceller{cancelErr: errors.New("slskd unreachable")}
+	j := &Jobs{Store: store, Peers: peers}
+
+	if err := j.Delete(context.Background(), 7); err != nil {
+		t.Fatalf("Delete() = %v, want nil (remote failure must not block delete)", err)
+	}
+	if !peers.called {
+		t.Errorf("expected the remote cancel to have been attempted")
+	}
+	if !store.deleteCalled {
+		t.Errorf("expected DeleteJob to have been called")
+	}
+}
+
+func TestJobsDeleteSkipsRemoteWhenNoLiveTransfer(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
+		deleteOK: true,
+	}
+	peers := &fakePeerCanceller{}
+	j := &Jobs{Store: store, Peers: peers}
+
+	if err := j.Delete(context.Background(), 1); err != nil {
+		t.Fatalf("Delete() = %v, want nil", err)
+	}
+	if peers.called {
+		t.Errorf("Delete must skip the remote call when there is no live SlskdID")
+	}
+}
+
+func TestJobsDeleteSuccess(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
+		deleteOK: true,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.Delete(context.Background(), 1); err != nil {
+		t.Fatalf("Delete() = %v, want nil", err)
+	}
+}
+
+// TestJobsDeleteRacedIntoNotFound covers the store's FOR UPDATE re-check
+// returning (false, nil) - the job was deleted or vanished between the app's
+// lookup and the store's atomic delete.
+func TestJobsDeleteRacedIntoNotFound(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
+		deleteOK: false,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Delete() = %v, want ErrJobNotFound", err)
+	}
+}
+
+// TestJobsDeleteRacedIntoImporting covers the store's FOR UPDATE re-check
+// discovering IMPORTING after the app's fast-path check already passed (the
+// job transitioned in between).
+func TestJobsDeleteRacedIntoImporting(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:      map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
+		deleteErr: storeErrJobImporting,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobImporting) {
+		t.Fatalf("Delete() = %v, want ErrJobImporting", err)
+	}
+}
+
+func TestJobsDeleteLookupError(t *testing.T) {
+	store := &fakeJobStore{jobErr: errors.New("db down")}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	err := j.Delete(context.Background(), 1)
+	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobImporting) {
+		t.Fatalf("Delete() = %v, want the underlying store error", err)
+	}
+}
+
+func TestJobsDeleteStoreError(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:      map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
+		deleteErr: errors.New("db exploded"),
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	err := j.Delete(context.Background(), 1)
+	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobImporting) {
+		t.Fatalf("Delete() = %v, want the wrapped store error", err)
 	}
 }
