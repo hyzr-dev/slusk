@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -724,6 +725,99 @@ func TestShareSearchAndFolderLookup(t *testing.T) {
 	for _, unsafe := range []string{`../secret`, `Music\..\secret`, `\Music`} {
 		if got := s.folderResponse(1, unsafe); len(got.Folders) != 0 {
 			t.Fatalf("unsafe lookup %q returned folders", unsafe)
+		}
+	}
+}
+
+func TestFolderResponsePrefixBoundaries(t *testing.T) {
+	names := []string{`Music`, `Music (Live)`, `Music!`, `Music\A`, `Music\A\B`, `MusicVideos`, `Other`}
+	// Sort exactly as scanShares does.
+	sort.Slice(names, func(i, j int) bool { return strings.ToLower(names[i]) < strings.ToLower(names[j]) })
+	s := &shareSnapshot{}
+	for _, name := range names {
+		s.directories = append(s.directories, peer.Directory{Name: name})
+	}
+
+	tests := []struct {
+		request string
+		want    []string
+	}{
+		{request: "Music", want: []string{`Music`, `Music\A`, `Music\A\B`}},
+		{request: "MUSIC", want: nil},
+		{request: "Zzz", want: nil},
+		{request: "", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.request, func(t *testing.T) {
+			response := s.folderResponse(1, tt.request)
+			var got []string
+			for _, directory := range response.Folders {
+				got = append(got, directory.Name)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Fatalf("folderResponse(%q) folders = %v, want %v", tt.request, got, tt.want)
+			}
+		})
+	}
+}
+
+func linearFolderResponse(s *shareSnapshot, token soul.Token, requested string) *peer.FolderContentsResponse {
+	response := &peer.FolderContentsResponse{Token: token, Folder: requested}
+	normalized, ok := normalizeVirtualPath(requested)
+	if !ok {
+		return response
+	}
+	prefix := normalized + `\`
+	for _, directory := range s.directories {
+		if directory.Name == normalized || strings.HasPrefix(directory.Name, prefix) {
+			response.Folders = append(response.Folders, directory)
+		}
+	}
+	return response
+}
+
+func TestFolderResponseEquivalentToLinearScan(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	segments := []string{"Music", "music", "MUSIC", "Artist", "artist", "Live", "A", "B", "Videos", "Other", "z"}
+	randomSegment := func() string { return segments[rng.Intn(len(segments))] }
+
+	s := &shareSnapshot{}
+	seen := map[string]bool{}
+	for len(s.directories) < 200 {
+		depth := 1 + rng.Intn(3)
+		parts := make([]string, depth)
+		for i := range parts {
+			parts[i] = randomSegment()
+		}
+		name := strings.Join(parts, `\`)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		s.directories = append(s.directories, peer.Directory{Name: name})
+	}
+	sort.Slice(s.directories, func(i, j int) bool {
+		return strings.ToLower(s.directories[i].Name) < strings.ToLower(s.directories[j].Name)
+	})
+
+	probes := make([]string, 0, len(s.directories)+20)
+	for _, directory := range s.directories {
+		probes = append(probes, directory.Name)
+	}
+	for range 20 {
+		depth := 1 + rng.Intn(3)
+		parts := make([]string, depth)
+		for i := range parts {
+			parts[i] = randomSegment()
+		}
+		probes = append(probes, strings.Join(parts, `\`))
+	}
+
+	for _, probe := range probes {
+		got := s.folderResponse(1, probe)
+		want := linearFolderResponse(s, 1, probe)
+		if fmt.Sprint(got.Folders) != fmt.Sprint(want.Folders) {
+			t.Fatalf("folderResponse(%q) = %#v, want %#v (linear)", probe, got.Folders, want.Folders)
 		}
 	}
 }
