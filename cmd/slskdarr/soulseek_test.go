@@ -219,13 +219,15 @@ func TestRunThroughputRecorderFlushesPartialMinuteOnCancelWithFreshContext(t *te
 
 // TestShutdownSoulseekJoinsThroughputRecorderFlushBeforeReturning asserts
 // shutdownSoulseek does not return until the throughput recorder's shutdown
-// flush has actually written its partial minute to the sink — proving
-// main.go's shutdown sequence joins throughputDone (and therefore cannot race
-// a subsequent st.Close() with the flush's write) rather than merely firing
-// runThroughputRecorder and moving on. Before the #157 F1 fix, main.go never
-// waited on the recorder at all, so this scenario — a slow shutdown flush —
-// would let the caller proceed while the write was still in flight; this
+// flush has actually written its partial minute to the sink. Before the #157
+// F1 fix nothing waited on the recorder, so a slow shutdown flush let the
+// caller proceed while the write was still in flight, racing st.Close(); this
 // test fails if shutdownSoulseek returns before that write lands.
+//
+// Scope: this exercises shutdownSoulseek directly. That main() calls it
+// before closeStoreAfterRuntime — the other half of the guarantee — is not
+// covered here, since main() is not testable; it is enforced by the ordering
+// comment at that call site.
 func TestShutdownSoulseekJoinsThroughputRecorderFlushBeforeReturning(t *testing.T) {
 	minute := time.Date(2026, 7, 25, 12, 5, 0, 0, time.UTC)
 	src := &fakeThroughputSource{

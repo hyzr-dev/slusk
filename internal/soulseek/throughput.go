@@ -49,7 +49,7 @@ type throughputMeter struct {
 	pending []core.ThroughputMinute
 
 	// subs holds every live subscriber registered via Subscribe, keyed by an
-	// id private to this meter so Unsubscribe (the returned cancel func) can
+	// id private to this meter so the cancel func Subscribe returns can
 	// remove exactly one subscriber without disturbing the others. A map
 	// rather than a slice because the intended consumer is an SSE stream
 	// where clients connect and disconnect constantly (issue #157 F6): an
@@ -157,15 +157,15 @@ func (m *throughputMeter) Samples() []core.ThroughputSample {
 // so a partial minute's samples are not silently lost when the process stops
 // mid-minute.
 //
-// Invariant: minuteSet is true only while the accumulator genuinely holds
-// live data for m.minute. A partial close reports and zeroes that
-// accumulator, so minuteSet is cleared here too — otherwise a later record()
-// landing in the same still-open wall-clock minute (includePartial is only
-// ever true today at final shutdown, right before the process exits, but
-// nothing enforces that a future caller won't invoke this mid-run) would
-// silently resume accumulating under a minute the caller already believes it
-// has drained, and a subsequent close of that minute would upsert over the
-// already-reported row rather than genuinely extending it (issue #157 F5).
+// Invariant: minuteSet claims the accumulator holds live data for m.minute,
+// so it is cleared after a partial close, which zeroes that data. This is
+// state hygiene, not a behavioural guard: record() resumes accumulating under
+// the same wall-clock minute either way, since the cleared branch re-derives
+// the identical m.minute. includePartial is passed only from the recorder's
+// ctx.Done branch, which returns immediately after, so a resumed minute is
+// unreachable today; were a future caller to drain mid-run, the resumed row's
+// lower Samples makes RecordThroughputMinute's upsert discard it rather than
+// overwrite the already-reported one (see store/throughput.go).
 func (m *throughputMeter) TakeThroughputMinutes(includePartial bool) []core.ThroughputMinute {
 	m.mu.Lock()
 	defer m.mu.Unlock()

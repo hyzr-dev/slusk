@@ -111,14 +111,15 @@ func TestThroughputMeterPartialMinuteTakeOnShutdownThenEmptyOnSecondCall(t *test
 	}
 }
 
-// TestThroughputMeterPartialCloseClearsMinuteSetForLaterSamples is issue
-// #157 F5: a partial close reports and zeroes the in-flight accumulator, so
-// minuteSet must be cleared too. If it weren't, a record() call landing in
-// the same still-open wall-clock minute right after a partial close would
-// silently resume accumulating samples the caller already believes were
-// drained, and those samples alone (not the earlier-reported ones) would be
-// all that a later close of that same minute reports.
-func TestThroughputMeterPartialCloseClearsMinuteSetForLaterSamples(t *testing.T) {
+// TestThroughputMeterResumesSameMinuteAfterPartialDrainWithoutDoubleCounting
+// pins what a partial drain leaves behind: the reported samples are gone from
+// the accumulator, so a record() landing in the same still-open wall-clock
+// minute afterwards starts a fresh count under that same label rather than
+// re-reporting what was already drained. Note this holds whether or not
+// TakeThroughputMinutes clears minuteSet — closeMinute zeroes the counters
+// either way, and record() re-derives the identical minute label — so this
+// test documents the semantics, it does not guard the minuteSet assignment.
+func TestThroughputMeterResumesSameMinuteAfterPartialDrainWithoutDoubleCounting(t *testing.T) {
 	m := newThroughputMeter()
 	minute1 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	m.record(minute1.Add(1*time.Second), 100, 1)
