@@ -15,12 +15,9 @@ import (
 )
 
 func newChartsTestHandler(reg *prometheus.Registry, charts ChartsFunc) http.Handler {
-	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
-	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) error { return nil }
-	return NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers,
-		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers,
-		ConnectionTester{}, charts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, noopDeleteJob)
+	deps := testServerDeps(reg)
+	deps.Charts = charts
+	return NewServer(deps)
 }
 
 // TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst asserts the bucket
