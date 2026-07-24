@@ -43,12 +43,12 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 		},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400, QueuePosition: 3},
-		{Username: "alice", Filename: "02.flac", Speed: 50, SpeedAverage: 40, Size: 2000, BytesDone: 500},
-		{Username: "alice", Filename: "not-this-albums-file.flac", Speed: 999, SpeedAverage: 999, Size: 100, BytesDone: 0},
-		{Username: "bob", Filename: "01.flac", Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 0},
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400, QueuePosition: 3},
+		{Username: "alice", Filename: "02.flac", State: core.TransferQueued, Speed: 50, SpeedAverage: 40, Size: 2000, BytesDone: 500},
+		{Username: "alice", Filename: "not-this-albums-file.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999, Size: 100, BytesDone: 0},
+		{Username: "bob", Filename: "01.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 0},
 	}
-	idx := newLiveAlbumIndex(live)
+	idx := newLiveTransferIndex(live)
 
 	speed, speedAvg, remaining, queuePos, hasQueue := aggregateLiveAlbum(candidate, idx)
 	if speed != 150 {
@@ -69,7 +69,7 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 // TestAggregateLiveAlbumNilCandidateYieldsZero covers a job with no candidate
 // yet.
 func TestAggregateLiveAlbumNilCandidateYieldsZero(t *testing.T) {
-	idx := newLiveAlbumIndex([]core.RemoteTransfer{{Username: "alice", Filename: "x", Speed: 100}})
+	idx := newLiveTransferIndex([]core.RemoteTransfer{{Username: "alice", Filename: "x", State: core.TransferInProgress, Speed: 100}})
 	speed, speedAvg, remaining, queuePos, hasQueue := aggregateLiveAlbum(nil, idx)
 	if speed != 0 || speedAvg != 0 || remaining != 0 || queuePos != 0 || hasQueue {
 		t.Errorf("nil candidate aggregate = (%d, %d, %d, %d, %v), want all zero/false", speed, speedAvg, remaining, queuePos, hasQueue)
@@ -90,10 +90,10 @@ func TestAggregateLiveAlbumTwoAlbumsSamePeerDoNotContaminate(t *testing.T) {
 		Files:    []core.CandidateFile{{Filename: "albumB/01.flac", Size: 3000}},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "sharedpeer", Filename: "albumA/01.flac", Speed: 111, SpeedAverage: 100, Size: 1000, BytesDone: 200},
-		{Username: "sharedpeer", Filename: "albumB/01.flac", Speed: 222, SpeedAverage: 200, Size: 3000, BytesDone: 300},
+		{Username: "sharedpeer", Filename: "albumA/01.flac", State: core.TransferInProgress, Speed: 111, SpeedAverage: 100, Size: 1000, BytesDone: 200},
+		{Username: "sharedpeer", Filename: "albumB/01.flac", State: core.TransferInProgress, Speed: 222, SpeedAverage: 200, Size: 3000, BytesDone: 300},
 	}
-	idx := newLiveAlbumIndex(live)
+	idx := newLiveTransferIndex(live)
 
 	speedA, avgA, remA, _, _ := aggregateLiveAlbum(albumA, idx)
 	speedB, avgB, remB, _, _ := aggregateLiveAlbum(albumB, idx)
@@ -118,9 +118,9 @@ func TestAggregateLiveAlbumUnmatchedFilesNotCounted(t *testing.T) {
 		},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400},
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400},
 	}
-	idx := newLiveAlbumIndex(live)
+	idx := newLiveTransferIndex(live)
 
 	speed, speedAvg, remaining, _, hasQueue := aggregateLiveAlbum(candidate, idx)
 	if speed != 100 || speedAvg != 90 || remaining != 600 {
@@ -128,5 +128,39 @@ func TestAggregateLiveAlbumUnmatchedFilesNotCounted(t *testing.T) {
 	}
 	if hasQueue {
 		t.Errorf("hasQueue = true, want false (no matched transfer reports a queue position)")
+	}
+}
+
+// TestAggregateLiveAlbumIgnoresTerminalTransfers is issue #157 F3: a
+// terminal-but-not-yet-reconciled transfer (errored, cancelled, completed)
+// lingers in ListDownloads until the pipeline's next reconcile pass. Its
+// remaining bytes must not inflate the album's ETA, and its (possibly still
+// fresh, not-yet-stale) speed reading must not contribute either — only
+// transfers still able to make progress (queued, in-progress) count.
+func TestAggregateLiveAlbumIgnoresTerminalTransfers(t *testing.T) {
+	candidate := &core.Candidate{
+		Username: "alice",
+		Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000}, // errored at 50%, will never finish
+			{Filename: "02.flac", Size: 1000}, // cancelled
+			{Filename: "03.flac", Size: 1000}, // completed, not yet reconciled away
+			{Filename: "04.flac", Size: 1000}, // the only one still actually downloading
+		},
+	}
+	live := []core.RemoteTransfer{
+		{Username: "alice", Filename: "01.flac", State: core.TransferErrored, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 500},
+		{Username: "alice", Filename: "02.flac", State: core.TransferCancelled, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 300},
+		{Username: "alice", Filename: "03.flac", State: core.TransferCompleted, Speed: 0, SpeedAverage: 0, Size: 1000, BytesDone: 1000},
+		{Username: "alice", Filename: "04.flac", State: core.TransferInProgress, Speed: 1000, SpeedAverage: 1000, Size: 1000, BytesDone: 200},
+	}
+	idx := newLiveTransferIndex(live)
+
+	speed, speedAvg, remaining, _, _ := aggregateLiveAlbum(candidate, idx)
+	if speed != 1000 || speedAvg != 1000 {
+		t.Errorf("speed/avg = (%d, %d), want (1000, 1000) — only file 04's still-progressing transfer counted", speed, speedAvg)
+	}
+	wantRemaining := int64(1000 - 200) // only file 04's remaining bytes
+	if remaining != wantRemaining {
+		t.Errorf("remaining = %d, want %d (terminal transfers' bytes excluded)", remaining, wantRemaining)
 	}
 }

@@ -439,6 +439,7 @@ func main() {
 	cancelStartup()
 
 	var soulDone chan error
+	var throughputDone chan struct{}
 	soulCtx, soulCancel := context.WithCancel(restartCtx)
 	defer soulCancel()
 	if soulClient != nil {
@@ -450,7 +451,11 @@ func main() {
 			// Deliberately not a pipeline.Runner module: Runner modules feed
 			// Live()/Ready(), and a failed throughput write must never make the
 			// daemon unready.
-			go runThroughputRecorder(soulCtx, soulClient, st, throughputRecorderInterval, logger)
+			throughputDone = make(chan struct{})
+			go func() {
+				runThroughputRecorder(soulCtx, soulClient, st, throughputRecorderInterval, logger)
+				close(throughputDone)
+			}()
 		}
 		soulDone = make(chan error, 1)
 		go func() {
@@ -469,14 +474,14 @@ func main() {
 	// otherwise leave the soulseek client reconnecting indefinitely and
 	// force this join to burn the full shutdown timeout. Cancel its
 	// context explicitly so the join below is prompt in that case too.
-	soulCancel()
-	if soulDone != nil {
-		select {
-		case <-soulDone:
-		case <-time.After(lifecycleShutdownTimeout):
-			logger.Error("soulseek connection did not stop within the shutdown timeout")
-		}
-	}
+	//
+	// Both soulDone and throughputDone MUST be joined here, before
+	// closeStoreAfterRuntime below: the throughput recorder's shutdown flush
+	// (see runThroughputRecorder's ctx.Done branch) writes to st, so closing
+	// st before that flush completes races it — the write either hits a
+	// closed DB or the final partial minute is silently dropped (issue #157
+	// F1).
+	shutdownSoulseek(logger, soulCancel, soulDone, throughputDone, lifecycleShutdownTimeout)
 	closeErr := closeStoreAfterRuntime(outcome, st.Close)
 	if outcome.err != nil || closeErr != nil {
 		logger.Error("slskdarr stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,
@@ -637,6 +642,32 @@ func listenHTTP(ctx context.Context, addr string) (net.Listener, error) {
 
 type runtimeRunner interface {
 	Run(context.Context) error
+}
+
+// shutdownSoulseek cancels the soulseek client's context and waits for both
+// the soulseek connection goroutine (soulDone) and the throughput recorder
+// (throughputDone) to stop, each bounded by shutdownTimeout, before
+// returning. Extracted from main's run body so the ordering it guarantees —
+// both goroutines joined before the caller closes the store, see issue #157
+// F1 — is independently testable. Either channel may be nil (soulClient ==
+// nil, or the pipeline backend isn't soulseek), in which case that wait is
+// skipped.
+func shutdownSoulseek(logger *slog.Logger, soulCancel context.CancelFunc, soulDone chan error, throughputDone chan struct{}, shutdownTimeout time.Duration) {
+	soulCancel()
+	if soulDone != nil {
+		select {
+		case <-soulDone:
+		case <-time.After(shutdownTimeout):
+			logger.Error("soulseek connection did not stop within the shutdown timeout")
+		}
+	}
+	if throughputDone != nil {
+		select {
+		case <-throughputDone:
+		case <-time.After(shutdownTimeout):
+			logger.Error("throughput recorder did not stop within the shutdown timeout")
+		}
+	}
 }
 
 type runtimeOutcome struct {

@@ -444,7 +444,7 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	}
 	live := func(ctx context.Context) ([]core.RemoteTransfer, error) {
 		return []core.RemoteTransfer{
-			{Username: "alice", Filename: "01.flac", Speed: 200, SpeedAverage: 100, Size: 1000, BytesDone: 500, QueuePosition: 4},
+			{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 200, SpeedAverage: 100, Size: 1000, BytesDone: 500, QueuePosition: 4},
 		}, nil
 	}
 	deps := testServerDeps(reg)

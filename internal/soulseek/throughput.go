@@ -48,7 +48,15 @@ type throughputMeter struct {
 
 	pending []core.ThroughputMinute
 
-	subs []func(core.ThroughputSample)
+	// subs holds every live subscriber registered via Subscribe, keyed by an
+	// id private to this meter so Unsubscribe (the returned cancel func) can
+	// remove exactly one subscriber without disturbing the others. A map
+	// rather than a slice because the intended consumer is an SSE stream
+	// where clients connect and disconnect constantly (issue #157 F6): an
+	// append-only slice would leave every disconnected client's closure
+	// invoked every second forever, in a daemon that runs for months.
+	subs      map[uint64]func(core.ThroughputSample)
+	nextSubID uint64
 }
 
 // newThroughputMeter constructs an empty throughputMeter.
@@ -147,14 +155,24 @@ func (m *throughputMeter) Samples() []core.ThroughputSample {
 // minute accumulator is also closed and appended first — the shutdown path
 // (see the throughput recorder's ctx.Done branch in cmd/slskdarr/soulseek.go)
 // so a partial minute's samples are not silently lost when the process stops
-// mid-minute. now is unused when includePartial is false; it exists so the
-// caller does not need a separate no-op branch.
-func (m *throughputMeter) TakeThroughputMinutes(now time.Time, includePartial bool) []core.ThroughputMinute {
+// mid-minute.
+//
+// Invariant: minuteSet is true only while the accumulator genuinely holds
+// live data for m.minute. A partial close reports and zeroes that
+// accumulator, so minuteSet is cleared here too — otherwise a later record()
+// landing in the same still-open wall-clock minute (includePartial is only
+// ever true today at final shutdown, right before the process exits, but
+// nothing enforces that a future caller won't invoke this mid-run) would
+// silently resume accumulating under a minute the caller already believes it
+// has drained, and a subsequent close of that minute would upsert over the
+// already-reported row rather than genuinely extending it (issue #157 F5).
+func (m *throughputMeter) TakeThroughputMinutes(includePartial bool) []core.ThroughputMinute {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if includePartial && m.minuteSet {
 		m.closeMinute()
+		m.minuteSet = false
 	}
 	out := m.pending
 	m.pending = nil
@@ -162,34 +180,62 @@ func (m *throughputMeter) TakeThroughputMinutes(now time.Time, includePartial bo
 }
 
 // Subscribe registers fn to be called, under the lock, with every future
-// sample record() takes. This is the seam for a future SSE live-throughput
-// stream (issue #157 lays the groundwork but wires no production caller
-// yet — see throughput_test.go for the pinning test that keeps it from
-// rotting unused). fn MUST NOT block: it runs synchronously inside record(),
-// so a slow or blocking subscriber would stall every future sample.
-func (m *throughputMeter) Subscribe(fn func(core.ThroughputSample)) {
+// sample record() takes, and returns a cancel func that removes it. This is
+// the seam for a future SSE live-throughput stream (issue #157 lays the
+// groundwork but wires no production caller yet — see throughput_test.go for
+// the pinning test that keeps it from rotting unused): SSE clients connect
+// and disconnect constantly, so every subscriber must be individually
+// removable rather than accumulating forever (F6).
+//
+// fn MUST NOT block: it runs synchronously inside record(), so a slow or
+// blocking subscriber would stall every future sample. For the same reason,
+// fn MUST NOT call cancel() (its own or any other subscriber's) or any other
+// throughputMeter method that takes m.mu — record() holds m.mu for the
+// entire fan-out, so calling back into the meter from within fn deadlocks.
+//
+// cancel is safe to call more than once (the second and later calls are
+// no-ops) and safe to call concurrently with record()'s fan-out.
+func (m *throughputMeter) Subscribe(fn func(core.ThroughputSample)) (cancel func()) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.subs = append(m.subs, fn)
+	id := m.nextSubID
+	m.nextSubID++
+	if m.subs == nil {
+		m.subs = make(map[uint64]func(core.ThroughputSample))
+	}
+	m.subs[id] = fn
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.subs, id)
+			m.mu.Unlock()
+		})
+	}
 }
 
 // sampleThroughput owns the ticker that periodically aggregates every
 // tracked download's byte-throughput into the client's throughputMeter
 // (issue #157). It runs for the lifetime of the client's Run context (see
 // the fourth startTracked call in Run) and returns promptly once ctx is
-// cancelled.
+// cancelled. prevAt tracks the wall-clock time of the previous tick so
+// throughputTick can divide by the real elapsed interval rather than the
+// ticker's configured one — see throughputTick's doc comment.
 func (c *Client) sampleThroughput(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.throughputInterval)
 	defer ticker.Stop()
 
 	last := make(map[string]int64)
+	var prevAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			bps, active := c.throughputTick(now, last)
+			bps, active := c.throughputTick(now, prevAt, last)
 			c.throughput.record(now, bps, active)
+			prevAt = now
 		}
 	}
 }
@@ -207,7 +253,16 @@ func (c *Client) sampleThroughput(ctx context.Context) {
 // longer present in the current snapshot are evicted so the map cannot grow
 // unbounded as downloads complete and are Remove()d over a long-running
 // process.
-func (c *Client) throughputTick(now time.Time, last map[string]int64) (bps int64, active int) {
+//
+// prevAt is the previous tick's timestamp (the zero Time on the very first
+// tick, which has no baseline to measure from and so reports bps 0). The
+// rate is total bytes moved divided by now.Sub(prevAt) — the MEASURED
+// elapsed time, not c.cfg.throughputInterval: time.Ticker drops ticks under
+// scheduling delay rather than queueing them (a real condition in the
+// CPU-limited container this runs in, see issues #138/#139), so dividing by
+// the nominal interval instead of the real one would inflate the reported
+// rate by however many ticks were dropped.
+func (c *Client) throughputTick(now, prevAt time.Time, last map[string]int64) (bps int64, active int) {
 	snapshot := c.downloads.snapshot()
 
 	seen := make(map[string]struct{}, len(snapshot))
@@ -236,7 +291,10 @@ func (c *Client) throughputTick(now time.Time, last map[string]int64) (bps int64
 		}
 	}
 
-	elapsed := c.cfg.throughputInterval.Seconds()
+	if prevAt.IsZero() {
+		return 0, active
+	}
+	elapsed := now.Sub(prevAt).Seconds()
 	if elapsed <= 0 {
 		return 0, active
 	}
@@ -254,6 +312,6 @@ func (c *Client) ThroughputSamples() []core.ThroughputSample {
 // throughput rollup accumulated since the last call, oldest first (issue
 // #157). See throughputMeter.TakeThroughputMinutes for includePartial's
 // shutdown-flush semantics.
-func (c *Client) TakeThroughputMinutes(now time.Time, includePartial bool) []core.ThroughputMinute {
-	return c.throughput.TakeThroughputMinutes(now, includePartial)
+func (c *Client) TakeThroughputMinutes(includePartial bool) []core.ThroughputMinute {
+	return c.throughput.TakeThroughputMinutes(includePartial)
 }

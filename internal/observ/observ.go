@@ -114,8 +114,9 @@ type jobDTO struct {
 // NewServer, needed to compute nextAttemptAt for FAILED jobs and maxCandidates.
 // live supplies the peer backend's current ListDownloads snapshot, indexed
 // for album-level aggregation (see aggregateLiveAlbum); its zero value
-// (liveAlbumIndex{}) is a valid "no live data" index for callers with none.
-func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveAlbumIndex) jobDTO {
+// (liveTransferIndex{}) is a valid "no live data" index for callers with
+// none.
+func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveTransferIndex) jobDTO {
 	d := jobDTO{
 		ID:              v.Job.ID,
 		Title:           v.Job.Title,
@@ -387,7 +388,7 @@ func NewServer(deps ServerDeps) http.Handler {
 			if lt, liveErr := deps.LiveTransfers(r.Context()); liveErr == nil {
 				live = lt
 			}
-			liveIdx := newLiveAlbumIndex(live)
+			liveIdx := newLiveTransferIndex(live)
 			dtos := make([]jobDTO, len(views))
 			for i, v := range views {
 				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx)
@@ -633,9 +634,9 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		// A freshly created manual job has no candidate yet (Attempt is nil),
-		// so there is nothing live to aggregate: the zero-value liveAlbumIndex
+		// so there is nothing live to aggregate: the zero-value liveTransferIndex
 		// is exactly right here.
-		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates, liveAlbumIndex{}))
+		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates, liveTransferIndex{}))
 	case errors.Is(err, app.ErrRemoteFileBusy):
 		writeConfigError(w, http.StatusConflict, err.Error(), nil)
 	default:

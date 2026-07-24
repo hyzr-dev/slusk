@@ -50,13 +50,13 @@ func runShareRescanLoop(ctx context.Context, signals <-chan os.Signal, client sh
 // runThroughputRecorder performs on shutdown (see below).
 const throughputRecorderShutdownFlushTimeout = 5 * time.Second
 
-// throughputSource is the slice of *soulseek.Client runThroughputRecorder
+// throughputSource is the subset of *soulseek.Client runThroughputRecorder
 // drains completed per-minute throughput rollups from (issue #157).
 type throughputSource interface {
-	TakeThroughputMinutes(now time.Time, includePartial bool) []core.ThroughputMinute
+	TakeThroughputMinutes(includePartial bool) []core.ThroughputMinute
 }
 
-// throughputSink is the slice of the store runThroughputRecorder writes
+// throughputSink is the subset of the store runThroughputRecorder writes
 // drained rollups to.
 type throughputSink interface {
 	RecordThroughputMinute(ctx context.Context, m core.ThroughputMinute) error
@@ -80,8 +80,8 @@ func runThroughputRecorder(ctx context.Context, src throughputSource, sink throu
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	drain := func(ctx context.Context, now time.Time, includePartial bool) {
-		for _, m := range src.TakeThroughputMinutes(now, includePartial) {
+	drain := func(ctx context.Context, includePartial bool) {
+		for _, m := range src.TakeThroughputMinutes(includePartial) {
 			if err := sink.RecordThroughputMinute(ctx, m); err != nil {
 				logger.Error("record throughput minute failed", "minute", m.Minute, "err", err)
 			}
@@ -92,11 +92,11 @@ func runThroughputRecorder(ctx context.Context, src throughputSource, sink throu
 		select {
 		case <-ctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), throughputRecorderShutdownFlushTimeout)
-			drain(shutdownCtx, time.Now(), true)
+			drain(shutdownCtx, true)
 			cancel()
 			return
-		case now := <-ticker.C:
-			drain(ctx, now, false)
+		case <-ticker.C:
+			drain(ctx, false)
 		}
 	}
 }

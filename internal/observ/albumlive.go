@@ -31,46 +31,34 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 	return eta
 }
 
-// liveAlbumIndex groups a ListDownloads snapshot by peer username, so
-// aggregateLiveAlbum can look up one candidate's live transfers without
-// rescanning the whole snapshot for every job in the list. The zero value
-// (nil map) is a valid "no live data" index: a map lookup on a nil map
-// simply reports no match.
-type liveAlbumIndex struct {
-	byUsername map[string][]core.RemoteTransfer
-}
-
-// newLiveAlbumIndex builds a liveAlbumIndex from a ListDownloads snapshot.
-func newLiveAlbumIndex(live []core.RemoteTransfer) liveAlbumIndex {
-	idx := liveAlbumIndex{byUsername: make(map[string][]core.RemoteTransfer, len(live))}
-	for _, t := range live {
-		idx.byUsername[t.Username] = append(idx.byUsername[t.Username], t)
-	}
-	return idx
-}
-
 // aggregateLiveAlbum sums the live transfers belonging to candidate's own
-// files — matched exactly on (username, filename ∈ candidate.Files), never
-// on username alone, since a peer serving files for two different albums at
-// once would otherwise have both counted on both album rows. Returns the
-// summed instantaneous speed and EWMA-smoothed average speed (for ETA),
-// total remaining bytes across matched transfers, and the minimum queue
-// position among matched transfers that report one (the album's download
-// effectively starts once its first file starts). Files not yet enqueued
-// (the per-peer in-flight throttle, see issue #20) have no live entry and so
-// are simply not counted: the result describes only work currently in
-// flight, not the album's full remaining size. candidate == nil (a job with
-// no candidate yet) yields all zeros / hasQueuePosition false.
-func aggregateLiveAlbum(candidate *core.Candidate, idx liveAlbumIndex) (speed, speedAvg, remaining int64, queuePosition uint32, hasQueuePosition bool) {
+// files — matched exactly on (username, filename ∈ candidate.Files), via
+// idx.byFallback (see liveTransferIndex in jobdetail.go), never on username
+// alone, since a peer serving files for two different albums at once would
+// otherwise have both counted on both album rows. Only transfers in a state
+// that can still make progress (core.TransferQueued, core.TransferInProgress)
+// are counted: a terminal-but-not-yet-reconciled transfer (errored,
+// cancelled, completed) lingers in ListDownloads until the pipeline's next
+// reconcile pass, and counting its remaining bytes would inflate the album's
+// ETA with bytes that will never transfer (issue #157 F3). Returns the summed
+// instantaneous speed and EWMA-smoothed average speed (for ETA), total
+// remaining bytes across matched transfers, and the minimum queue position
+// among matched transfers that report one (the album's download effectively
+// starts once its first file starts). Files not yet enqueued (the per-peer
+// in-flight throttle, see issue #20) have no live entry and so are simply not
+// counted: the result describes only work currently in flight, not the
+// album's full remaining size. candidate == nil (a job with no candidate
+// yet) yields all zeros / hasQueuePosition false.
+func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg, remaining int64, queuePosition uint32, hasQueuePosition bool) {
 	if candidate == nil {
 		return 0, 0, 0, 0, false
 	}
-	files := make(map[string]struct{}, len(candidate.Files))
 	for _, f := range candidate.Files {
-		files[f.Filename] = struct{}{}
-	}
-	for _, lt := range idx.byUsername[candidate.Username] {
-		if _, ok := files[lt.Filename]; !ok {
+		lt, ok := idx.byFallback[candidate.Username+"\x00"+f.Filename]
+		if !ok {
+			continue
+		}
+		if lt.State != core.TransferQueued && lt.State != core.TransferInProgress {
 			continue
 		}
 		speed += lt.Speed

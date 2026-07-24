@@ -73,7 +73,7 @@ type fakeThroughputSource struct {
 	calls           []bool // includePartial value of every call, in order
 }
 
-func (f *fakeThroughputSource) TakeThroughputMinutes(now time.Time, includePartial bool) []core.ThroughputMinute {
+func (f *fakeThroughputSource) TakeThroughputMinutes(includePartial bool) []core.ThroughputMinute {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, includePartial)
@@ -107,9 +107,16 @@ type fakeThroughputSink struct {
 	recorded      []core.ThroughputMinute
 	ctxDoneAtCall []bool
 	failNext      int // number of remaining calls to fail with an error
+	// delay, if nonzero, is slept before recording — used to simulate a slow
+	// store write so tests can assert callers actually wait for it rather
+	// than racing ahead (issue #157 F1).
+	delay time.Duration
 }
 
 func (f *fakeThroughputSink) RecordThroughputMinute(ctx context.Context, m core.ThroughputMinute) error {
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ctxDoneAtCall = append(f.ctxDoneAtCall, ctx.Err() != nil)
@@ -207,6 +214,42 @@ func TestRunThroughputRecorderFlushesPartialMinuteOnCancelWithFreshContext(t *te
 	sink.mu.Unlock()
 	if len(ctxDone) != 1 || ctxDone[0] {
 		t.Fatalf("sink observed ctx.Err() != nil on the shutdown flush call = %v, want a fresh (not-done) context", ctxDone)
+	}
+}
+
+// TestShutdownSoulseekJoinsThroughputRecorderFlushBeforeReturning asserts
+// shutdownSoulseek does not return until the throughput recorder's shutdown
+// flush has actually written its partial minute to the sink — proving
+// main.go's shutdown sequence joins throughputDone (and therefore cannot race
+// a subsequent st.Close() with the flush's write) rather than merely firing
+// runThroughputRecorder and moving on. Before the #157 F1 fix, main.go never
+// waited on the recorder at all, so this scenario — a slow shutdown flush —
+// would let the caller proceed while the write was still in flight; this
+// test fails if shutdownSoulseek returns before that write lands.
+func TestShutdownSoulseekJoinsThroughputRecorderFlushBeforeReturning(t *testing.T) {
+	minute := time.Date(2026, 7, 25, 12, 5, 0, 0, time.UTC)
+	src := &fakeThroughputSource{
+		partialMinutes: []core.ThroughputMinute{{Minute: minute, AvgBytesPerSecond: 50, Samples: 12}},
+	}
+	// A deliberately slow sink write simulates a real store flush taking
+	// noticeable time; if shutdownSoulseek raced ahead instead of joining
+	// throughputDone, the assertion below would observe zero recorded
+	// minutes.
+	sink := &fakeThroughputSink{delay: 50 * time.Millisecond}
+
+	soulCtx, soulCancel := context.WithCancel(context.Background())
+	throughputDone := make(chan struct{})
+	go func() {
+		// A long interval so only the shutdown drain ever fires.
+		runThroughputRecorder(soulCtx, src, sink, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(throughputDone)
+	}()
+
+	shutdownSoulseek(slog.New(slog.NewTextHandler(io.Discard, nil)), soulCancel, nil, throughputDone, time.Second)
+
+	got := sink.snapshot()
+	if len(got) != 1 || !got[0].Minute.Equal(minute) {
+		t.Fatalf("shutdownSoulseek returned before the throughput recorder's shutdown flush completed: recorded = %+v, want exactly the partial minute %v", got, minute)
 	}
 }
 
