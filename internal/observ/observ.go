@@ -150,6 +150,20 @@ type CancelFunc func(ctx context.Context, jobID int64) error
 // errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
 type RetryFunc func(ctx context.Context, jobID int64) error
 
+// SearchJobFunc manually re-queues one job for an immediate re-search
+// (typically backed by app.Jobs.ForceSearch; see issue #159). Errors are
+// mapped to a status code by the POST /api/jobs/{id}/search handler:
+// errors.Is(err, app.ErrJobNotFound) -> 404, errors.Is(err, app.ErrJobActive)
+// -> 409, anything else -> 500.
+type SearchJobFunc func(ctx context.Context, jobID int64) error
+
+// DeleteJobFunc permanently removes one job and its children (typically
+// backed by app.Jobs.Delete; see issue #159). Errors are mapped to a status
+// code by the DELETE /api/jobs/{id} handler: errors.Is(err,
+// app.ErrJobNotFound) -> 404, errors.Is(err, app.ErrJobImporting) -> 409,
+// anything else -> 500.
+type DeleteJobFunc func(ctx context.Context, jobID int64) error
+
 // CreateJobFunc manually creates a job that downloads a known peer's files
 // directly (typically backed by app.Jobs.Create; see issue #155). Errors are
 // mapped to a status code by the POST /api/jobs handler:
@@ -184,9 +198,9 @@ func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cance
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
 	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func(), create CreateJobFunc) http.Handler {
+	configWriter ConfigWriter, restart func(), create CreateJobFunc, search SearchJobFunc, del DeleteJobFunc) http.Handler {
 	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts, configWriter, restart, create)
+		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts, configWriter, restart, create, search, del)
 }
 
 // NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
@@ -202,7 +216,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
 	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
 	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func(), create CreateJobFunc) http.Handler {
+	configWriter ConfigWriter, restart func(), create CreateJobFunc, search SearchJobFunc, del DeleteJobFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +364,46 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobNotRetryable):
 			http.Error(w, "job is not FAILED or ORPHANED", http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("/api/jobs/{id}/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		err = search(r.Context(), jobID)
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrJobNotFound):
+			http.Error(w, "job not found", http.StatusNotFound)
+		case errors.Is(err, app.ErrJobActive):
+			http.Error(w, "job is actively transferring", http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("DELETE /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid job id", http.StatusBadRequest)
+			return
+		}
+		err = del(r.Context(), jobID)
+		switch {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrJobNotFound):
+			http.Error(w, "job not found", http.StatusNotFound)
+		case errors.Is(err, app.ErrJobImporting):
+			http.Error(w, "job is importing", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

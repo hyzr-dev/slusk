@@ -22,7 +22,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	if cancel == nil {
 		cancel = func(context.Context, int64) error { return nil }
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob)
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, noopDeleteJob)
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 
@@ -207,6 +207,65 @@ func TestPrivateEndpointsRejectUnauthorizedAndMalformedCredentials(t *testing.T)
 			h.ServeHTTP(rec, req)
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+		})
+	}
+}
+
+func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
+	calls := 0
+	del := func(context.Context, int64) error {
+		calls++
+		return nil
+	}
+	reg := prometheus.NewRegistry()
+	NewMetrics(reg)
+	status := func(context.Context) (StatusReport, error) { return StatusReport{}, nil }
+	jobs := func(context.Context) ([]core.JobView, error) { return nil, nil }
+	cancel := func(context.Context, int64) error { return nil }
+	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, del)
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
+
+	tests := []struct {
+		name       string
+		auth       string
+		origin     string
+		wantStatus int
+		wantCalls  int
+	}{
+		{name: "anonymous", wantStatus: http.StatusUnauthorized},
+		{name: "wrong token", auth: "Bearer wrong", wantStatus: http.StatusUnauthorized},
+		{name: "basic without origin", auth: "basic", wantStatus: http.StatusForbidden},
+		{name: "basic malformed origin", auth: "basic", origin: "not a URL", wantStatus: http.StatusForbidden},
+		{name: "basic cross origin", auth: "basic", origin: "http://evil.example", wantStatus: http.StatusForbidden},
+		{name: "bearer cross origin", auth: "bearer", origin: "http://evil.example", wantStatus: http.StatusForbidden},
+		{name: "basic same origin", auth: "basic", origin: "http://example.com", wantStatus: http.StatusNoContent, wantCalls: 1},
+		{name: "bearer cli without origin", auth: "bearer", wantStatus: http.StatusNoContent, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls = 0
+			req := httptest.NewRequest(http.MethodDelete, "http://example.com/api/jobs/42", nil)
+			switch tt.auth {
+			case "basic":
+				req.SetBasicAuth("slskdarr", testAuthToken)
+			case "bearer":
+				req.Header.Set("Authorization", "Bearer "+testAuthToken)
+			default:
+				if tt.auth != "" {
+					req.Header.Set("Authorization", tt.auth)
+				}
+			}
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("mutation calls = %d, want %d", calls, tt.wantCalls)
 			}
 		})
 	}

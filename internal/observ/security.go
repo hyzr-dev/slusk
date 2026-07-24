@@ -49,8 +49,8 @@ func requestToken(r *http.Request) (string, bool) {
 }
 
 // ProtectPrivateEndpoints leaves only the /healthz and /readyz probes public.
-// Every other UI, API, and metrics request must pass auth. Browser POSTs
-// additionally need a valid same-origin Origin header; bearer-authenticated
+// Every other UI, API, and metrics request must pass auth. Browser POSTs and
+// DELETEs additionally need a valid same-origin Origin header; bearer-authenticated
 // non-browser clients may omit Origin, but cannot override a conflicting one.
 func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler {
 	if auth == nil {
@@ -67,7 +67,7 @@ func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if r.Method == http.MethodPost && !sameOriginMutation(r) {
+		if (r.Method == http.MethodPost || r.Method == http.MethodDelete) && !sameOriginMutation(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

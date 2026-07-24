@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -555,5 +556,199 @@ func TestRetryFailedJobUnknownID(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected RetryFailedJob to return false for an unknown job id")
+	}
+}
+
+// TestForceSearchJobResetsAndReturnsToWanted covers issue #159's force-search
+// button: a FAILED job with backoff, failed_at, and stale candidates/transfers
+// is reset to a clean WANTED slate.
+func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 30, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("SetJobBackoff: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := s.ForceSearchJob(ctx, job.ID, later)
+	if err != nil {
+		t.Fatalf("ForceSearchJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ForceSearchJob to return true for a FAILED job")
+	}
+
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, later.Add(time.Hour), 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("RunnableJobsInState: %v %+v", err, jobs)
+	}
+	got := jobs[0]
+	if got.State != core.StateWanted {
+		t.Errorf("State = %q, want WANTED", got.State)
+	}
+	if got.Retries != 0 {
+		t.Errorf("Retries = %d, want 0", got.Retries)
+	}
+	if got.NotBefore != nil {
+		t.Errorf("NotBefore = %v, want nil", got.NotBefore)
+	}
+	if got.FailedAt != nil {
+		t.Errorf("FailedAt = %v, want nil", got.FailedAt)
+	}
+
+	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
+		t.Fatalf("expected zero candidates after ForceSearchJob, found=%v (%v)", found, err)
+	}
+	if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+		t.Fatalf("expected zero transfers after ForceSearchJob, got %d (%v)", len(trs), err)
+	}
+}
+
+// TestForceSearchJobRefusedWhileDownloading guards the active-transfer race:
+// a DOWNLOADING job must not be force-searched out from under a live transfer.
+func TestForceSearchJobRefusedWhileDownloading(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 31, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState to SELECTING: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState to DOWNLOADING: %v", err)
+	}
+
+	ok, err := s.ForceSearchJob(ctx, job.ID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ForceSearchJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ForceSearchJob to return false for a DOWNLOADING job")
+	}
+}
+
+func TestForceSearchJobUnknownID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	ok, err := s.ForceSearchJob(ctx, 99999, time.Now())
+	if err != nil {
+		t.Fatalf("ForceSearchJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ForceSearchJob to return false for an unknown job id")
+	}
+}
+
+// TestDeleteJobRemovesAllChildren covers issue #159's hard-delete button: the
+// job's candidates, transfers, and job_events all go with it.
+func TestDeleteJobRemovesAllChildren(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 40, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "", now); err != nil {
+		t.Fatalf("AddJobEvent: %v", err)
+	}
+
+	ok, err := s.DeleteJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected DeleteJob to return true")
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 0 {
+		t.Fatalf("expected the job to be gone, got %+v", views)
+	}
+	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
+		t.Fatalf("expected zero candidates after DeleteJob, found=%v (%v)", found, err)
+	}
+	if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+		t.Fatalf("expected zero transfers after DeleteJob, got %d (%v)", len(trs), err)
+	}
+	if events, err := s.JobEvents(ctx, job.ID); err != nil || len(events) != 0 {
+		t.Fatalf("expected zero job_events after DeleteJob, got %d (%v)", len(events), err)
+	}
+}
+
+func TestDeleteJobUnknownID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	ok, err := s.DeleteJob(ctx, 99999)
+	if err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected DeleteJob to return false for an unknown job id")
+	}
+}
+
+// TestDeleteJobRefusedWhileImporting guards against deleting a job out from
+// under an in-flight Lidarr import.
+func TestDeleteJobRefusedWhileImporting(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 41, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState to SELECTING: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
+		t.Fatalf("AdvanceJobState to DOWNLOADING: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
+		t.Fatalf("AdvanceJobState to IMPORTING: %v", err)
+	}
+
+	ok, err := s.DeleteJob(ctx, job.ID)
+	if !errors.Is(err, ErrJobImporting) {
+		t.Fatalf("DeleteJob err = %v, want ErrJobImporting", err)
+	}
+	if ok {
+		t.Fatal("expected DeleteJob to return false when refused")
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected the IMPORTING job to survive the refused delete, got %+v", views)
 	}
 }
