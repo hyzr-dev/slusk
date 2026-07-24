@@ -451,7 +451,19 @@ func (s *shareSnapshot) folderResponse(token soul.Token, requested string) *peer
 		return response
 	}
 	prefix := normalized + `\`
-	for _, directory := range s.directories {
+	// s.directories is sorted case-insensitively (see scanShares), so every directory
+	// whose name matches or is nested under normalized (case-sensitively) falls within
+	// the case-insensitive range [normalized, normalized+"]"). ']' (0x5D) is the first
+	// byte above '\' (0x5C) and is unaffected by ToLower, so the upper bound is exact:
+	// any lowered name >= lowered+"]" cannot equal normalized or start with prefix.
+	lowered := strings.ToLower(normalized)
+	lo := sort.Search(len(s.directories), func(i int) bool {
+		return strings.ToLower(s.directories[i].Name) >= lowered
+	})
+	hi := sort.Search(len(s.directories), func(i int) bool {
+		return strings.ToLower(s.directories[i].Name) >= lowered+"]"
+	})
+	for _, directory := range s.directories[lo:hi] {
 		if directory.Name == normalized || strings.HasPrefix(directory.Name, prefix) {
 			response.Folders = append(response.Folders, directory)
 		}
@@ -493,6 +505,10 @@ func (h *sharingSessionHooks) frame(session *peerSession, frame sessionFrame) er
 		}
 		if !h.c.startTracked(func() {
 			defer func() { <-h.c.shareWorkers }()
+			// The serialized frame cannot be precomputed/cached per folder: the request
+			// token is embedded inside the zlib-compressed body (see
+			// soul/peer/foldercontentsresponse.go Serialize), so it must be built fresh
+			// for every request.
 			msg := h.c.shareSnapshot().folderResponse(request.Token, request.Folder)
 			response, err := msg.Serialize(msg)
 			if err != nil || !session.TrySend(response) {
