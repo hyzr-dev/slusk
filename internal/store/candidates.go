@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -240,14 +243,15 @@ func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID,
 
 	var username string
 	var files []byte
+	var releaseDate string
 	if err := tx.QueryRowContext(ctx,
-		`SELECT c.username, c.files
+		`SELECT c.username, c.files, j.release_date
 		   FROM candidates c
 		   JOIN album_jobs j ON j.id = c.album_job_id
 		  WHERE c.id = $1 AND c.album_job_id = $2
 		    AND c.state = $3 AND j.state = $4
 		  FOR UPDATE OF c, j`,
-		candidateID, jobID, string(core.CandidateNew), string(core.StateSelecting)).Scan(&username, &files); err != nil {
+		candidateID, jobID, string(core.CandidateNew), string(core.StateSelecting)).Scan(&username, &files, &releaseDate); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, false, nil
 		}
@@ -271,6 +275,10 @@ func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID,
 		}
 		seen[file.Filename] = struct{}{}
 	}
+
+	tracks := len(candidateFiles)
+	format := dominantFormat(candidateFiles)
+	year := deriveYear(releaseDate)
 
 	var active int
 	if err := tx.QueryRowContext(ctx,
@@ -317,8 +325,8 @@ func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID,
 	}
 
 	res, err = tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
-		string(core.StateDownloading), now, jobID, string(core.StateSelecting))
+		`UPDATE album_jobs SET state = $1, updated_at = $2, year = $3, tracks = $4, format = $5 WHERE id = $6 AND state = $7`,
+		string(core.StateDownloading), now, year, tracks, format, jobID, string(core.StateSelecting))
 	if err != nil {
 		return false, false, fmt.Errorf("advance job to downloading: %w", err)
 	}
@@ -356,4 +364,51 @@ func (s *Store) TransfersForCandidate(ctx context.Context, candidateID int64) ([
 	}
 	defer rows.Close()
 	return scanTransfers(rows)
+}
+
+// dominantFormat returns the most common uppercased file extension across the
+// candidate's files (e.g. "FLAC", "MP3"), or nil if none have a recognisable
+// extension. Ties break by count then alphabetically for determinism.
+func dominantFormat(files []core.CandidateFile) *string {
+	counts := make(map[string]int)
+	for _, f := range files {
+		ext := strings.TrimPrefix(filepath.Ext(f.Filename), ".")
+		if ext == "" {
+			continue
+		}
+		counts[strings.ToUpper(ext)]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+
+	var best string
+	for ext, count := range counts {
+		switch {
+		case best == "":
+			best = ext
+		case count > counts[best]:
+			best = ext
+		case count == counts[best] && ext < best:
+			best = ext
+		}
+	}
+	return &best
+}
+
+// deriveYear extracts a 4-digit leading year from a release_date string
+// (handles both "2024-03-15T00:00:00Z" and "2024-01-01" forms), or nil if
+// unparseable or implausible.
+func deriveYear(releaseDate string) *int {
+	if len(releaseDate) < 4 {
+		return nil
+	}
+	year, err := strconv.Atoi(releaseDate[:4])
+	if err != nil {
+		return nil
+	}
+	if year < 1000 || year > 9999 {
+		return nil
+	}
+	return &year
 }

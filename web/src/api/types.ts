@@ -32,6 +32,9 @@ export interface Job {
   retries: number;
   notBefore: string;
   source: JobSource;
+  year: number | null;
+  tracks: number | null;
+  format: string | null;
 }
 
 /** internal/observ/jobdetail.go transferDetailDTO */

@@ -23,6 +23,10 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
     nextAttemptAt: '',
     retries: 0,
     notBefore: '',
+    source: 'lidarr',
+    year: null,
+    tracks: null,
+    format: null,
   };
 }
 
