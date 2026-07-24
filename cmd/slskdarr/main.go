@@ -377,10 +377,31 @@ func main() {
 			}
 		}
 	}
-	handler := observ.NewServerWithReadiness(reg, statusFn, jobsFn, jobs.Cancel,
-		jobDetailFn, jobEventsFn, recentEventsFn, peersFn, liveFn, readyFn, modulesFn, jobs.Retry,
-		cfg.Pipeline.FailedReviveAfter.Duration, cfg.Pipeline.MaxCandidatesPerAlbum, configFn, liveTransfersFn, connectionTester, chartsFn,
-		configWriter, restartFn, createJobFn, jobs.ForceSearch, jobs.Delete)
+	handler := observ.NewServer(observ.ServerDeps{
+		Registry:         reg,
+		Status:           statusFn,
+		Jobs:             jobsFn,
+		Cancel:           jobs.Cancel,
+		Retry:            jobs.Retry,
+		SearchJob:        jobs.ForceSearch,
+		DeleteJob:        jobs.Delete,
+		CreateJob:        createJobFn,
+		JobDetail:        jobDetailFn,
+		JobEvents:        jobEventsFn,
+		RecentEvents:     recentEventsFn,
+		Peers:            peersFn,
+		Live:             liveFn,
+		Ready:            readyFn,
+		Modules:          modulesFn,
+		FailedRetryAfter: cfg.Pipeline.FailedReviveAfter.Duration,
+		MaxCandidates:    cfg.Pipeline.MaxCandidatesPerAlbum,
+		Config:           configFn,
+		ConfigWriter:     configWriter,
+		Restart:          restartFn,
+		ConnectionTester: connectionTester,
+		LiveTransfers:    liveTransfersFn,
+		Charts:           chartsFn,
+	})
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
 		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)

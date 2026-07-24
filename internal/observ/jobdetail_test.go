@@ -53,9 +53,6 @@ func decodeTransferMaps(t *testing.T, body []byte) []map[string]json.RawMessage 
 // live entry omits both.
 func TestJobDetailEnrichesTransfersWithLiveQueueAndSpeed(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
-	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) error { return nil }
 
 	jobDetail := detailWithTransfers([]core.Transfer{
 		// Matched by remote id; actively downloading (speed set, queue 0).
@@ -71,8 +68,10 @@ func TestJobDetailEnrichesTransfersWithLiveQueueAndSpeed(t *testing.T) {
 			{ID: "g2", Username: "peer_one", Filename: "02.flac", QueuePosition: 5},
 		}, nil
 	}
-	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers,
-		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, noopDeleteJob)
+	deps := testServerDeps(reg)
+	deps.JobDetail = jobDetail
+	deps.LiveTransfers = live
+	h := NewServer(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
 	rec := httptest.NewRecorder()
@@ -115,9 +114,6 @@ func TestJobDetailEnrichesTransfersWithLiveQueueAndSpeed(t *testing.T) {
 // whole detail request, only drop the queue/speed columns.
 func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	status := func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil }
-	jobs := func(ctx context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(ctx context.Context, jobID int64) error { return nil }
 
 	jobDetail := detailWithTransfers([]core.Transfer{
 		{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress},
@@ -125,8 +121,10 @@ func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 	live := func(ctx context.Context) ([]core.RemoteTransfer, error) {
 		return nil, context.DeadlineExceeded
 	}
-	h := NewServer(reg, status, jobs, cancel, jobDetail, noopJobEvents, noopRecentEvents, noopPeers,
-		noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, live, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, noopDeleteJob)
+	deps := testServerDeps(reg)
+	deps.JobDetail = jobDetail
+	deps.LiveTransfers = live
+	h := NewServer(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
 	rec := httptest.NewRecorder()

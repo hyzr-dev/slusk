@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
 const testAuthToken = "correct-horse-battery-staple"
@@ -17,12 +16,11 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	NewMetrics(reg)
-	status := func(context.Context) (StatusReport, error) { return StatusReport{}, nil }
-	jobs := func(context.Context) ([]core.JobView, error) { return nil, nil }
-	if cancel == nil {
-		cancel = func(context.Context, int64) error { return nil }
+	deps := testServerDeps(reg)
+	if cancel != nil {
+		deps.Cancel = cancel
 	}
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, noopDeleteJob)
+	h := NewServer(deps)
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 
@@ -220,10 +218,9 @@ func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	}
 	reg := prometheus.NewRegistry()
 	NewMetrics(reg)
-	status := func(context.Context) (StatusReport, error) { return StatusReport{}, nil }
-	jobs := func(context.Context) ([]core.JobView, error) { return nil, nil }
-	cancel := func(context.Context, int64) error { return nil }
-	h := NewServer(reg, status, jobs, cancel, noopJobDetail, noopJobEvents, noopRecentEvents, noopPeers, noopHealthy, noopModules, noopRetry, testFailedRetryAfter, testMaxCandidates, noopConfig, noopLiveTransfers, ConnectionTester{}, noopCharts, noopConfigWriter, noopRestart, noopCreateJob, noopSearchJob, del)
+	deps := testServerDeps(reg)
+	deps.DeleteJob = del
+	h := NewServer(deps)
 	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 
 	tests := []struct {

@@ -191,34 +191,75 @@ type ModuleStatus struct {
 // ModulesFunc reports each pipeline module's runtime state for /status.
 type ModulesFunc func() map[string]ModuleStatus
 
-// NewServer returns the observability handler with the same function used for
-// both health checks. Call NewServerWithReadiness when liveness and readiness
-// have distinct semantics. See that function for the config parameter.
-func NewServer(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
-	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	live HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func(), create CreateJobFunc, search SearchJobFunc, del DeleteJobFunc) http.Handler {
-	return NewServerWithReadiness(reg, status, jobs, cancel, jobDetail, jobEvents, recentEvents, peers,
-		live, live, modules, retry, failedRetryAfter, maxCandidates, config, liveTransfers, tester, charts, configWriter, restart, create, search, del)
+// ServerDeps carries everything NewServer needs to wire up the observability
+// and dashboard endpoints. Fields are named so a new endpoint adds one line
+// here and one line at the call site instead of shifting a positional argument
+// list — see issue #169 for why that mattered.
+//
+// All function fields are required unless documented otherwise; a nil field
+// panics on the first request that reaches its handler rather than at
+// construction time.
+type ServerDeps struct {
+	// Registry backs /metrics.
+	Registry *prometheus.Registry
+	// Status reports the pipeline snapshot served at /status.
+	Status StatusFunc
+	// Jobs lists the job views served at GET /api/jobs.
+	Jobs JobsFunc
+	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
+	// /api/jobs/{id}.
+	Cancel    CancelFunc
+	Retry     RetryFunc
+	SearchJob SearchJobFunc
+	DeleteJob DeleteJobFunc
+	// CreateJob backs POST /api/jobs (manual jobs, see issue #155).
+	CreateJob CreateJobFunc
+	// JobDetail, JobEvents and RecentEvents back /api/jobs/{id}/detail,
+	// /api/jobs/{id}/events and /api/events.
+	JobDetail    JobDetailFunc
+	JobEvents    JobEventsFunc
+	RecentEvents RecentEventsFunc
+	// Peers backs /api/peers.
+	Peers PeersFunc
+	// Live reports liveness for /healthz. Ready reports readiness for
+	// /readyz; when nil, Live answers both checks.
+	Live  HealthyFunc
+	Ready HealthyFunc
+	// Modules reports each pipeline module's runtime state for /status.
+	Modules ModulesFunc
+	// FailedRetryAfter and MaxCandidates are engine values surfaced by the job
+	// API: the former computes nextAttemptAt for FAILED jobs, the latter is
+	// echoed as maxCandidates.
+	FailedRetryAfter time.Duration
+	MaxCandidates    int
+	// Config supplies the display view of the running configuration served at
+	// GET /api/config; it never carries secrets — see AppConfig. ConfigWriter
+	// applies a validated settings update from the same path's POST, and
+	// Restart is invoked afterward to reload the process with the new config
+	// (see cmd/slskdarr/main.go). ConnectionTester backs the settings view's
+	// connection checks.
+	Config           ConfigFunc
+	ConfigWriter     ConfigWriter
+	Restart          func()
+	ConnectionTester ConnectionTester
+	// LiveTransfers enriches /api/jobs/{id}/detail with queue position and
+	// speed; failures there degrade to unenriched detail, never an error.
+	LiveTransfers LiveTransfersFunc
+	// Charts supplies the Overview view's chart data served at /api/charts
+	// (see ChartsData).
+	Charts ChartsFunc
 }
 
-// NewServerWithReadiness returns an http.Handler exposing /metrics, /status,
-// /healthz, /readyz, the dashboard APIs, and the dashboard UI. failedRetryAfter
-// and maxCandidates are engine values surfaced by the existing job API. config
-// supplies the display view of the running configuration served at
-// /api/config; it never carries secrets — see AppConfig. charts supplies the
-// Overview view's chart data served at /api/charts (see ChartsData).
-// configWriter applies a validated settings update from /api/config's POST,
-// and restart is invoked afterward to reload the process with the new config
-// (see cmd/slskdarr/main.go).
-func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs JobsFunc, cancel CancelFunc,
-	jobDetail JobDetailFunc, jobEvents JobEventsFunc, recentEvents RecentEventsFunc, peers PeersFunc,
-	live HealthyFunc, ready HealthyFunc, modules ModulesFunc, retry RetryFunc, failedRetryAfter time.Duration, maxCandidates int,
-	config ConfigFunc, liveTransfers LiveTransfersFunc, tester ConnectionTester, charts ChartsFunc,
-	configWriter ConfigWriter, restart func(), create CreateJobFunc, search SearchJobFunc, del DeleteJobFunc) http.Handler {
+// NewServer returns an http.Handler exposing /metrics, /status, /healthz,
+// /readyz, the dashboard APIs, and the dashboard UI. See ServerDeps for what
+// each dependency serves.
+func NewServer(deps ServerDeps) http.Handler {
+	live, ready := deps.Live, deps.Ready
+	if ready == nil {
+		ready = live
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/debug/pprof/", http.StatusTemporaryRedirect)
 	})
@@ -252,7 +293,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		report, err := status(r.Context())
+		report, err := deps.Status(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -270,7 +311,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		}
 		moduleTicks := make(map[string]string)
 		moduleDetails := make(map[string]moduleStatusDTO)
-		for name, module := range modules() {
+		for name, module := range deps.Modules() {
 			formatted := moduleStatusDTO{
 				LastError:           module.LastError,
 				ConsecutiveFailures: module.ConsecutiveFailures,
@@ -308,19 +349,19 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			views, err := jobs(r.Context())
+			views, err := deps.Jobs(r.Context())
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			dtos := make([]jobDTO, len(views))
 			for i, v := range views {
-				dtos[i] = toJobDTO(v, failedRetryAfter, maxCandidates)
+				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(dtos)
 		case http.MethodPost:
-			serveCreateJob(w, r, create, failedRetryAfter, maxCandidates)
+			serveCreateJob(w, r, deps.CreateJob, deps.FailedRetryAfter, deps.MaxCandidates)
 		default:
 			w.Header().Set("Allow", "GET, POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -336,7 +377,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		err = cancel(r.Context(), jobID)
+		err = deps.Cancel(r.Context(), jobID)
 		switch {
 		case err == nil:
 			w.WriteHeader(http.StatusNoContent)
@@ -356,7 +397,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		err = retry(r.Context(), jobID)
+		err = deps.Retry(r.Context(), jobID)
 		switch {
 		case err == nil:
 			w.WriteHeader(http.StatusNoContent)
@@ -378,7 +419,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		err = search(r.Context(), jobID)
+		err = deps.SearchJob(r.Context(), jobID)
 		switch {
 		case err == nil:
 			w.WriteHeader(http.StatusNoContent)
@@ -396,7 +437,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		err = del(r.Context(), jobID)
+		err = deps.DeleteJob(r.Context(), jobID)
 		switch {
 		case err == nil:
 			w.WriteHeader(http.StatusNoContent)
@@ -414,7 +455,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		d, found, err := jobDetail(r.Context(), jobID)
+		d, found, err := deps.JobDetail(r.Context(), jobID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -428,7 +469,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		// failing the whole request. Fetched only after the job is found so a 404
 		// costs no backend call.
 		var live []core.RemoteTransfer
-		if lt, liveErr := liveTransfers(r.Context()); liveErr == nil {
+		if lt, liveErr := deps.LiveTransfers(r.Context()); liveErr == nil {
 			live = lt
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -440,7 +481,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 			http.Error(w, "invalid job id", http.StatusBadRequest)
 			return
 		}
-		events, err := jobEvents(r.Context(), jobID)
+		events, err := deps.JobEvents(r.Context(), jobID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -458,7 +499,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		if limit > eventsLimitMax {
 			limit = eventsLimitMax
 		}
-		events, err := recentEvents(r.Context(), limit)
+		events, err := deps.RecentEvents(r.Context(), limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -467,7 +508,7 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		_ = json.NewEncoder(w).Encode(toEventDTOs(events))
 	})
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := peers(r.Context())
+		rows, err := deps.Peers(r.Context())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -480,8 +521,8 @@ func NewServerWithReadiness(reg *prometheus.Registry, status StatusFunc, jobs Jo
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)
 	})
-	registerConfig(mux, config, tester, configWriter, restart)
-	registerCharts(mux, charts)
+	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
+	registerCharts(mux, deps.Charts)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
