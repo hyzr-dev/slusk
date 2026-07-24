@@ -60,6 +60,13 @@ const (
 	// defaultShareScanLogInterval is how often scanShares logs progress
 	// during a share rescan.
 	defaultShareScanLogInterval = 30 * time.Second
+	// defaultUploadMinThroughput is the minimum sustained upload throughput,
+	// in bytes/second, an upload slot's peer must maintain (see #108).
+	defaultUploadMinThroughput = 1024
+	// defaultUploadThroughputSampleInterval is how often an in-flight
+	// upload's cumulative throughput is sampled against
+	// uploadMinThroughput (see #108).
+	defaultUploadThroughputSampleInterval = 15 * time.Second
 )
 
 // errRelogged is returned by Run when the server reports that the account
@@ -147,6 +154,16 @@ type Config struct {
 	// connection has to send its TransferInit frame. Default equals
 	// peerInitTimeout (10s).
 	fileInitTimeout time.Duration
+	// uploadMinThroughput is the minimum sustained throughput, in
+	// bytes/second, a peer must maintain while draining an upload slot's F
+	// connection; a slower peer has its connection closed so it can no
+	// longer occupy the slot indefinitely (slow-loris DoS, see #108).
+	// Default 1024 B/s.
+	uploadMinThroughput int
+	// uploadThroughputSampleInterval is how often an in-flight upload's
+	// cumulative throughput is sampled against uploadMinThroughput (#108).
+	// Default 15s.
+	uploadThroughputSampleInterval time.Duration
 	// peerDialTimeout bounds a single outbound peer TCP dial attempt (both
 	// the direct path in ConnectPeer and the mirror dial-back in
 	// handleConnectToPeer). Default 10s.
@@ -321,6 +338,12 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.fileInitTimeout <= 0 {
 		cfg.fileInitTimeout = cfg.peerInitTimeout
+	}
+	if cfg.uploadMinThroughput <= 0 {
+		cfg.uploadMinThroughput = defaultUploadMinThroughput
+	}
+	if cfg.uploadThroughputSampleInterval <= 0 {
+		cfg.uploadThroughputSampleInterval = defaultUploadThroughputSampleInterval
 	}
 	if cfg.peerDialTimeout <= 0 {
 		cfg.peerDialTimeout = defaultPeerDialTimeout
