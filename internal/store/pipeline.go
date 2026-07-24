@@ -537,7 +537,7 @@ func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) 
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE id = $3 AND state NOT IN ($4, $5)`,
 		string(core.StateWanted), now, jobID, string(core.StateDownloading), string(core.StateImporting))
 	if err != nil {

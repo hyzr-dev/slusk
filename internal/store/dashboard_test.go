@@ -560,8 +560,8 @@ func TestRetryFailedJobUnknownID(t *testing.T) {
 }
 
 // TestForceSearchJobResetsAndReturnsToWanted covers issue #159's force-search
-// button: a job with backoff and stale candidates/transfers is reset to a
-// clean WANTED slate.
+// button: a FAILED job with backoff, failed_at, and stale candidates/transfers
+// is reset to a clean WANTED slate.
 func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -581,8 +581,8 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
 		t.Fatalf("SetJobBackoff: %v", err)
 	}
-	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
-		t.Fatalf("AdvanceJobState: %v", err)
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
 	}
 
 	later := now.Add(time.Minute)
@@ -591,7 +591,7 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 		t.Fatalf("ForceSearchJob: %v", err)
 	}
 	if !ok {
-		t.Fatal("expected ForceSearchJob to return true for a SELECTING job")
+		t.Fatal("expected ForceSearchJob to return true for a FAILED job")
 	}
 
 	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, later.Add(time.Hour), 10)
@@ -607,6 +607,9 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	}
 	if got.NotBefore != nil {
 		t.Errorf("NotBefore = %v, want nil", got.NotBefore)
+	}
+	if got.FailedAt != nil {
+		t.Errorf("FailedAt = %v, want nil", got.FailedAt)
 	}
 
 	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
