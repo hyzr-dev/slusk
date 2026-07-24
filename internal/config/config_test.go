@@ -54,6 +54,7 @@ func TestLoadSoulseekSharesAndUploadSlots(t *testing.T) {
 username = "me"
 password = "secret"
 upload_slots = 3
+allow_private_peer_addresses = true
 [[soulseek.shared_folders]]
 name = "Music"
 path = "/shares/music"
@@ -67,6 +68,9 @@ path = "/shares/music"
 	}
 	if cfg.Soulseek.UploadSlots != 3 || len(cfg.Soulseek.SharedFolders) != 1 || cfg.Soulseek.SharedFolders[0].Name != "Music" {
 		t.Fatalf("Soulseek config = %+v", cfg.Soulseek)
+	}
+	if !cfg.Soulseek.AllowPrivatePeerAddresses {
+		t.Fatalf("AllowPrivatePeerAddresses = false, want true")
 	}
 
 	for _, invalid := range []string{

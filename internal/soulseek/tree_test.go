@@ -61,6 +61,7 @@ func serverFrameCode(frame []byte) uint32 {
 func startTreeClient(t *testing.T) (*Client, *treeServerConn, uint64) {
 	t.Helper()
 	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 	startSessionLifecycle(t, c)
 	conn := newTreeServerConn()
 	const generation = 1
@@ -1028,5 +1029,66 @@ func TestDistributedValidationSlowChildAndReset(t *testing.T) {
 	}
 	if err := c.tree.handleServerEmbedded(generation, server.EmbeddedMessage{Code: distributed.CodeBranchRoot}); err != nil {
 		t.Fatalf("unsupported embedded code should be ignored: %v", err)
+	}
+}
+
+func TestDeactivateClosesDiscardedSessions(t *testing.T) {
+	c, _, generation := startTreeClient(t)
+	parent := treePeer(t, c, generation, "parent")
+	child := treePeer(t, c, generation, "child")
+	candidate := treePeer(t, c, generation, "candidate")
+
+	c.tree.mu.Lock()
+	c.tree.parent = parent
+	c.tree.children[child] = struct{}{}
+	c.tree.candidates[candidate] = &parentCandidateState{session: candidate, epoch: c.tree.epoch, signal: make(chan struct{}, 1)}
+	c.tree.inboundBuckets[parent] = &inboundFrameBucket{}
+	c.tree.inboundBuckets[child] = &inboundFrameBucket{}
+	c.tree.inboundBuckets[candidate] = &inboundFrameBucket{}
+	c.tree.mu.Unlock()
+
+	// A stale generation must not tear anything down.
+	c.tree.deactivate(generation - 1)
+	select {
+	case <-parent.done:
+		t.Fatal("stale-generation deactivate closed parent")
+	default:
+	}
+	select {
+	case <-child.done:
+		t.Fatal("stale-generation deactivate closed child")
+	default:
+	}
+	select {
+	case <-candidate.done:
+		t.Fatal("stale-generation deactivate closed candidate")
+	default:
+	}
+
+	// The matching generation, with no CloseGeneration call, must close every
+	// discarded session on its own.
+	c.tree.deactivate(generation)
+
+	for _, session := range []*peerSession{parent, child, candidate} {
+		select {
+		case <-session.done:
+		case <-time.After(time.Second):
+			t.Fatalf("deactivate did not close session %q", session.key.username)
+		}
+	}
+
+	c.tree.mu.Lock()
+	defer c.tree.mu.Unlock()
+	if c.tree.parent != nil {
+		t.Fatal("deactivate did not clear parent")
+	}
+	if len(c.tree.children) != 0 {
+		t.Fatalf("deactivate left %d children", len(c.tree.children))
+	}
+	if len(c.tree.candidates) != 0 {
+		t.Fatalf("deactivate left %d candidates", len(c.tree.candidates))
+	}
+	if len(c.tree.inboundBuckets) != 0 {
+		t.Fatalf("deactivate left %d inbound buckets", len(c.tree.inboundBuckets))
 	}
 }

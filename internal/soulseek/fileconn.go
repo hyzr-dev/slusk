@@ -37,6 +37,22 @@ type readerFunc func([]byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
+// writerFunc adapts a plain function to io.Writer, used by streamFile to tag
+// destination-file write errors as diskError without a second buffer copy.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// diskError marks a failure caused by the local filesystem (permissions, disk
+// full, mkdir/rename trouble) rather than by the peer or the network. The
+// download orchestration reports these as non-retryable: they need operator
+// intervention, and retrying — against this candidate or the next — cannot
+// succeed until the local condition is fixed (see issue #103).
+type diskError struct{ err error }
+
+func (e *diskError) Error() string { return e.err.Error() }
+func (e *diskError) Unwrap() error { return e.err }
+
 // handleInboundFileConn completes the handshake on a freshly accepted
 // (listener.go handlePeerConn) or mirror-dialed (peers.go handleConnectToPeer)
 // F connection: read the peer's TransferInit - a raw 4-byte token, with none
@@ -129,14 +145,14 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 		// interrupted here previously. It cannot be resumed from; discard it
 		// and start over from 0.
 		if rmErr := os.Remove(partPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			return 0, fmt.Errorf("discard oversized partial download %s: %w", partPath, rmErr)
+			return 0, &diskError{fmt.Errorf("discard oversized partial download %s: %w", partPath, rmErr)}
 		}
 		resumeOffset = 0
 		partExists = false
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return 0, fmt.Errorf("create destination directory for %s: %w", destPath, err)
+		return 0, &diskError{fmt.Errorf("create destination directory for %s: %w", destPath, err)}
 	}
 
 	if partExists && resumeOffset == size {
@@ -146,7 +162,7 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 		// partial too. A fresh zero-byte download has no partial, so it must
 		// instead perform the Offset(0) handshake below.
 		if renameErr := os.Rename(partPath, destPath); renameErr != nil {
-			return 0, fmt.Errorf("rename completed partial download %s: %w", partPath, renameErr)
+			return 0, &diskError{fmt.Errorf("rename completed partial download %s: %w", partPath, renameErr)}
 		}
 		return size, nil
 	}
@@ -157,7 +173,7 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 
 	part, err := os.OpenFile(partPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return 0, fmt.Errorf("open partial download %s: %w", partPath, err)
+		return 0, &diskError{fmt.Errorf("open partial download %s: %w", partPath, err)}
 	}
 
 	reader := &progressReader{conn: conn, idleTimeout: idleTimeout}
@@ -173,7 +189,18 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 		return n, rerr
 	})
 
-	n, copyErr := io.CopyN(part, tee, size-resumeOffset)
+	// The copy can fail on either side: a read error is the peer/network's
+	// fault (retryable), a write error is the local disk's (not). Tag write
+	// errors here — io.CopyN returns the writer's error unwrapped, so the tag
+	// survives the %w below and errors.As can classify the combined failure.
+	dst := writerFunc(func(p []byte) (int, error) {
+		n, werr := part.Write(p)
+		if werr != nil {
+			werr = &diskError{werr}
+		}
+		return n, werr
+	})
+	n, copyErr := io.CopyN(dst, tee, size-resumeOffset)
 	written = resumeOffset + n
 	if copyErr != nil {
 		_ = part.Close()
@@ -182,13 +209,13 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 
 	if err := part.Sync(); err != nil {
 		_ = part.Close()
-		return written, fmt.Errorf("sync partial download %s: %w", partPath, err)
+		return written, &diskError{fmt.Errorf("sync partial download %s: %w", partPath, err)}
 	}
 	if err := part.Close(); err != nil {
-		return written, fmt.Errorf("close partial download %s: %w", partPath, err)
+		return written, &diskError{fmt.Errorf("close partial download %s: %w", partPath, err)}
 	}
 	if err := os.Rename(partPath, destPath); err != nil {
-		return written, fmt.Errorf("rename completed download %s: %w", partPath, err)
+		return written, &diskError{fmt.Errorf("rename completed download %s: %w", partPath, err)}
 	}
 	return written, nil
 }
@@ -202,7 +229,7 @@ func partialFileSize(path string) (size int64, exists bool, err error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return 0, false, nil
 		}
-		return 0, false, fmt.Errorf("stat partial download %s: %w", path, err)
+		return 0, false, &diskError{fmt.Errorf("stat partial download %s: %w", path, err)}
 	}
 	return info.Size(), true, nil
 }

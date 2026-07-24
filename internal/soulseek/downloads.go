@@ -891,6 +891,14 @@ queueWait:
 	defer handoff.conn.Close()
 
 	tr.mu.Lock()
+	if tr.state == core.TransferCancelled {
+		// Cancel won the race against the F-connection handoff (the select
+		// above picks arbitrarily among ready cases): do not resurrect the
+		// transfer to IN_PROGRESS. The deferred conn.Close and lease.Release
+		// clean up the handoff.
+		tr.mu.Unlock()
+		return
+	}
 	tr.state = core.TransferInProgress
 	tr.mu.Unlock()
 
@@ -902,6 +910,20 @@ queueWait:
 		setTransferErrored(tr, err.Error(), false)
 		return
 	}
+	// streamFile blocks in conn reads and file writes that no context can
+	// interrupt; closing the F connection is what unblocks them. Watch ctx for
+	// the duration of the stream so Cancel/Remove (via tr.cancel) and
+	// lifecycle shutdown abort an in-flight stream immediately - freeing the
+	// socket and its inbound lease - instead of streaming on until completion
+	// or the idle timeout.
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = handoff.conn.Close()
+		case <-watchDone:
+		}
+	}()
 	lastBytes, lastTime := int64(0), time.Now()
 	written, err := streamFile(handoff.conn, destPath, streamSize, c.cfg.fileIdleTimeout, func(n int64) {
 		tr.bytesDone.Store(n)
@@ -914,13 +936,29 @@ queueWait:
 			lastBytes, lastTime = n, now
 		}
 	})
+	close(watchDone)
 	if err != nil {
-		setTransferErrored(tr, err.Error(), true)
+		if ctx.Err() != nil {
+			// The watcher closed the connection under the stream: report
+			// through the same path as the other ctx.Done branches, which
+			// leaves a Cancel-set TransferCancelled state alone.
+			finishInterrupted(tr, ctx.Err())
+			return
+		}
+		// Peer/network failures are worth retrying; local filesystem failures
+		// (diskError) are not — they persist until the operator fixes them.
+		var de *diskError
+		setTransferErrored(tr, err.Error(), !errors.As(err, &de))
 		return
 	}
 
 	tr.bytesDone.Store(written)
 	tr.mu.Lock()
-	tr.state = core.TransferCompleted
+	if tr.state != core.TransferCancelled {
+		// A Cancel that arrived in the stream's final instants keeps its
+		// terminal state: Cancel's contract is that the first terminal write
+		// wins, even though the fully streamed file was renamed into place.
+		tr.state = core.TransferCompleted
+	}
 	tr.mu.Unlock()
 }

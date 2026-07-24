@@ -150,6 +150,7 @@ func startConnectedClient(t *testing.T, handle func(conn net.Conn)) (*Client, st
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
 	c.cfg.peerDialTimeout = 200 * time.Millisecond
 	c.cfg.establishTimeout = 2 * time.Second
+	c.cfg.allowLoopbackPeerDial = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -616,6 +617,7 @@ func TestHandleConnectToPeerMirrorSuccess(t *testing.T) {
 	})
 
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	c.cfg.allowLoopbackPeerDial = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
@@ -711,6 +713,7 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
 	c.cfg.peerDialTimeout = 200 * time.Millisecond
+	c.cfg.allowLoopbackPeerDial = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = c.Run(ctx) }()
@@ -726,6 +729,174 @@ func TestHandleConnectToPeerMirrorDialFailureSendsCantConnect(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server never saw a CantConnectToPeer frame")
+	}
+}
+
+// TestHandleConnectToPeerBlockedAddressSendsCantConnect is a regression test
+// for threat T12: the server may relay a ConnectToPeer with a link-local or
+// other blocked address (see validatePeerDialAddr in addrguard.go).
+// handleConnectToPeer must refuse to dial it and report CantConnectToPeer
+// back to the server, exactly like a real dial failure, without ever
+// attempting the connection. This uses a link-local address rather than
+// loopback because (*Client).validateDialAddr carves out loopback for the
+// test suite's own fake TCP peers (see its comment) - link-local has no such
+// carve-out, so it still exercises the real block.
+func TestHandleConnectToPeerBlockedAddressSendsCantConnect(t *testing.T) {
+	cantConnectSeen := make(chan struct {
+		token    uint32
+		username string
+	}, 1)
+
+	srv := newFakeServer(t)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginRequest(conn); err != nil {
+			return
+		}
+		if _, err := conn.Write(loginSuccessFrame(t)); err != nil {
+			return
+		}
+		if _, _, err := readRawFrame(conn); err != nil { // SetListenPort
+			return
+		}
+		if err := drainInitialTreeAdvertisements(conn); err != nil {
+			return
+		}
+
+		payload := new(bytes.Buffer)
+		mustWrite(t, writeUint32(payload, uint32(server.CodeConnectToPeer)))
+		mustWrite(t, writeString(payload, "friend"))
+		mustWrite(t, writeString(payload, string(peer.ConnectionType)))
+		payload.Write(wireIPBytes(net.ParseIP("169.254.1.1")))
+		mustWrite(t, writeUint32(payload, 12345)) // port
+		mustWrite(t, writeUint32(payload, 9999))  // token
+		mustWrite(t, writeBool(payload, false))
+		mustWrite(t, writeUint32(payload, 0))
+		if _, err := conn.Write(packFrame(payload.Bytes())); err != nil {
+			t.Logf("write connect to peer: %v", err)
+			return
+		}
+
+		code, body, err := readRawFrame(conn)
+		if err != nil {
+			t.Logf("read cant connect to peer: %v", err)
+			return
+		}
+		if code != uint32(server.CodeCantConnectToPeer) {
+			t.Errorf("code = %d, want CodeCantConnectToPeer", code)
+			return
+		}
+		token, username, err := parseCantConnectToPeerRequest(body)
+		if err != nil {
+			t.Errorf("parse cant connect to peer: %v", err)
+			return
+		}
+		cantConnectSeen <- struct {
+			token    uint32
+			username string
+		}{token, username}
+		_, _ = io.Copy(io.Discard, conn)
+	})
+
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", ListenAddr: "127.0.0.1:0"}, testLogger())
+	c.cfg.peerDialTimeout = 200 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+	waitForState(t, c, StateConnected, 2*time.Second)
+
+	select {
+	case got := <-cantConnectSeen:
+		if got.token != 9999 {
+			t.Errorf("token = %d, want 9999", got.token)
+		}
+		if got.username != "friend" {
+			t.Errorf("username = %q, want friend", got.username)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never saw a CantConnectToPeer frame for the blocked address")
+	}
+
+	// The blocked address must never have been retained as a session (no
+	// dial was ever attempted).
+	key := sessionKey{username: "friend", connType: peer.ConnectionType}
+	if session := c.sessions.Get(key); session != nil {
+		t.Fatalf("blocked address should not have produced a session, got %+v", session)
+	}
+}
+
+// TestConnectPeerBlockedAddressFallsBackToIndirect is a regression test for
+// threat T12: dialPeer must refuse to dial a server-supplied blocked address
+// directly (via validatePeerDialAddr), but - unlike a server-supplied address
+// with no reachable target at all - it must still fall back to the indirect
+// NAT-traversal path exactly as it would for a failed direct dial, since the
+// indirect path never dials the suspect address itself (the peer dials us
+// back instead). This uses a link-local address rather than loopback because
+// (*Client).validateDialAddr carves out loopback for the test suite's own
+// fake TCP peers (see its comment) - link-local has no such carve-out, so it
+// still exercises the real block. The direct dial to the blocked address must
+// be skipped rather than attempted, so the whole call is asserted to
+// complete well under peerDialTimeout.
+func TestConnectPeerBlockedAddressFallsBackToIndirect(t *testing.T) {
+	var listenAddr string
+	c, addr := startConnectedClient(t, func(conn net.Conn) {
+		code, body, err := readRawFrame(conn)
+		if err != nil || code != uint32(server.CodeGetPeerAddress) {
+			t.Logf("read get peer address request: code=%d err=%v", code, err)
+			return
+		}
+		username, err := parseGetPeerAddressRequest(body)
+		if err != nil {
+			t.Errorf("parse get peer address request: %v", err)
+			return
+		}
+		// Answer with a link-local address: the client must refuse to dial it
+		// directly and fall back to the indirect dance instead.
+		writeGetPeerAddressResponse(t, conn, username, net.ParseIP("169.254.1.1"), 12345, 0)
+
+		code, body, err = readRawFrame(conn)
+		if err != nil {
+			t.Logf("read connect to peer request: %v", err)
+			return
+		}
+		if code != uint32(server.CodeConnectToPeer) {
+			t.Errorf("code = %d, want CodeConnectToPeer", code)
+			return
+		}
+		token, _, _, err := parseConnectToPeerRequest(body)
+		if err != nil {
+			t.Errorf("parse connect to peer request: %v", err)
+			return
+		}
+
+		// Play the peer's part: dial the client's own listener back and
+		// complete with PierceFirewall carrying the relayed token.
+		peerConn, err := net.Dial("tcp", listenAddr)
+		if err != nil {
+			t.Errorf("mock peer dial back: %v", err)
+			return
+		}
+		defer peerConn.Close()
+		if _, err := peer.Write(peerConn, &peer.PierceFirewall{Token: soul.Token(token)}, false); err != nil {
+			t.Errorf("mock peer write pierce firewall: %v", err)
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	})
+	listenAddr = addr
+
+	start := time.Now()
+	conn, err := c.ConnectPeer(context.Background(), "friend", peer.ConnectionType)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("ConnectPeer: %v", err)
+	}
+	defer conn.Close()
+	if conn.Username != "friend" {
+		t.Errorf("Username = %q, want friend", conn.Username)
+	}
+	if elapsed >= c.cfg.peerDialTimeout {
+		t.Errorf("ConnectPeer took %v, want well under peerDialTimeout %v - the direct dial to the blocked address should have been skipped, not attempted and timed out", elapsed, c.cfg.peerDialTimeout)
 	}
 }
 

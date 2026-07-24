@@ -98,14 +98,15 @@ type SharedFolderView struct {
 // mirrors SoulseekConfig.Enabled() — it is derived from the other fields, not
 // an independent setting, and is therefore GET-only (POST does not carry it).
 type SoulseekView struct {
-	Enabled            bool               `json:"enabled"`
-	ServerAddress      string             `json:"serverAddress"`
-	Username           string             `json:"username"`
-	PasswordConfigured bool               `json:"passwordConfigured"`
-	ListenAddr         string             `json:"listenAddr"`
-	UploadSlots        int                `json:"uploadSlots"`
-	Gluetun            GluetunView        `json:"gluetun"`
-	SharedFolders      []SharedFolderView `json:"sharedFolders"`
+	Enabled                   bool               `json:"enabled"`
+	ServerAddress             string             `json:"serverAddress"`
+	Username                  string             `json:"username"`
+	PasswordConfigured        bool               `json:"passwordConfigured"`
+	ListenAddr                string             `json:"listenAddr"`
+	UploadSlots               int                `json:"uploadSlots"`
+	AllowPrivatePeerAddresses bool               `json:"allowPrivatePeerAddresses"`
+	Gluetun                   GluetunView        `json:"gluetun"`
+	SharedFolders             []SharedFolderView `json:"sharedFolders"`
 }
 
 // StoreView is the settings view's rendering of StoreConfig.
@@ -212,13 +213,14 @@ type SharedFolderUpdate struct {
 // SoulseekUpdate is the writable subset of SoulseekView. Enabled is
 // deliberately absent — it is derived, not submitted.
 type SoulseekUpdate struct {
-	ServerAddress string
-	Username      string
-	Password      *string
-	ListenAddr    string
-	UploadSlots   int
-	Gluetun       GluetunUpdate
-	SharedFolders []SharedFolderUpdate
+	ServerAddress             string
+	Username                  string
+	Password                  *string
+	ListenAddr                string
+	UploadSlots               int
+	AllowPrivatePeerAddresses bool
+	Gluetun                   GluetunUpdate
+	SharedFolders             []SharedFolderUpdate
 }
 
 type StoreUpdate struct {
@@ -385,13 +387,14 @@ type sharedFolderUpdateRequest struct {
 }
 
 type soulseekUpdateRequest struct {
-	ServerAddress string                      `json:"serverAddress"`
-	Username      string                      `json:"username"`
-	Password      *string                     `json:"password"`
-	ListenAddr    string                      `json:"listenAddr"`
-	UploadSlots   int                         `json:"uploadSlots"`
-	Gluetun       gluetunUpdateRequest        `json:"gluetun"`
-	SharedFolders []sharedFolderUpdateRequest `json:"sharedFolders"`
+	ServerAddress             string                      `json:"serverAddress"`
+	Username                  string                      `json:"username"`
+	Password                  *string                     `json:"password"`
+	ListenAddr                string                      `json:"listenAddr"`
+	UploadSlots               int                         `json:"uploadSlots"`
+	AllowPrivatePeerAddresses bool                        `json:"allowPrivatePeerAddresses"`
+	Gluetun                   gluetunUpdateRequest        `json:"gluetun"`
+	SharedFolders             []sharedFolderUpdateRequest `json:"sharedFolders"`
 }
 
 type storeUpdateRequest struct {
@@ -664,6 +667,7 @@ func validateSoulseek(req soulseekUpdateRequest, update *SoulseekUpdate, fieldEr
 	} else {
 		update.UploadSlots = req.UploadSlots
 	}
+	update.AllowPrivatePeerAddresses = req.AllowPrivatePeerAddresses
 
 	if req.Gluetun.ControlURL != "" {
 		if u, err := url.Parse(req.Gluetun.ControlURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

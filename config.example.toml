@@ -146,6 +146,12 @@ slskd_complete_dir = "/music/slskd-downloads"
 # a slot; additional requests wait in a bounded global FIFO queue.
 # upload_slots = 2
 #
+# The central server supplies the raw IP:port slskdarr dials for each peer,
+# so it is treated as untrusted input. Loopback and link-local addresses are
+# always refused. RFC 1918 / ULA private addresses are refused too, unless
+# you set this - needed if you actually have Soulseek peers on your own LAN.
+# allow_private_peer_addresses = false
+#
 # Optional: run behind gluetun with VPN port forwarding. At startup slskdarr
 # asks gluetun's control server for the currently forwarded port and listens
 # on it instead - the port part of listen_addr above is ignored (its host is

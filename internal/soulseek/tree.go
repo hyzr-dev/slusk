@@ -176,6 +176,19 @@ func (t *distributedTree) deactivate(generation uint64) {
 	if t.candidateCancel != nil {
 		t.candidateCancel()
 	}
+	var closing []*peerSession
+	if t.parent != nil {
+		closing = append(closing, t.parent)
+	}
+	for session := range t.candidates {
+		closing = append(closing, session)
+	}
+	for session := range t.children {
+		closing = append(closing, session)
+	}
+	for session := range t.inboundBuckets {
+		closing = append(closing, session)
+	}
 	t.active = false
 	t.epoch++
 	t.candidateCancel = nil
@@ -188,6 +201,14 @@ func (t *distributedTree) deactivate(generation uint64) {
 	t.inboundBuckets = make(map[*peerSession]*inboundFrameBucket)
 	t.acceptSent = nil
 	t.mu.Unlock()
+
+	// Close discarded sessions after unlocking: peerSession.Close's closed hook
+	// re-enters the tree and takes t.mu, so closing while holding it would deadlock.
+	// Duplicates (e.g. a candidate also present as a child) are harmless since
+	// peerSession.Close is idempotent via sync.Once.
+	for _, session := range closing {
+		session.Close(errors.New("distributed tree deactivated"))
+	}
 }
 
 func (t *distributedTree) advertiseNoParent(generation uint64) error {
@@ -322,6 +343,13 @@ func (t *distributedTree) runCandidates(ctx context.Context, generation, epoch u
 }
 
 func (t *distributedTree) runCandidate(ctx context.Context, generation, epoch uint64, parent server.Parent) {
+	if err := t.c.validateDialAddr(parent.IP, parent.Port); err != nil {
+		if t.c.logger != nil {
+			t.c.logger.Warn("refusing distributed parent dial to blocked address", "username", parent.Username, "ip", parent.IP, "port", parent.Port, "err", err)
+		}
+		return
+	}
+
 	attemptCtx, cancel := context.WithTimeout(ctx, t.c.cfg.parentCandidateTimeout)
 	defer cancel()
 	target := sessionTarget{

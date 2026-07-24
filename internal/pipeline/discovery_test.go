@@ -492,9 +492,17 @@ func TestDiscoveryTrackBandUnknownSkipsFilter(t *testing.T) {
 	}
 }
 
+// fakeDiscoveryMetrics is a local DiscoveryMetrics fake counting
+// IncAlbumReleasesError calls, mirroring the fakeSink pattern used for
+// Downloading's MetricsSink.
+type fakeDiscoveryMetrics struct{ albumReleasesErrors int }
+
+func (f *fakeDiscoveryMetrics) IncAlbumReleasesError() { f.albumReleasesErrors++ }
+
 // TestDiscoveryAlbumReleasesErrorLeavesJobUntouched: an AlbumReleases error
 // aborts the pass without spending retry budget (same as the old AlbumStatus
-// error handling).
+// error handling), before any Soulseek search is issued (issue #92), and
+// increments the AlbumReleasesErrors metric.
 func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
@@ -505,6 +513,8 @@ func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	m := &fakeDiscoveryMetrics{}
+	p.Metrics = m
 
 	job, err := st.UpsertWantedJob(ctx, 1, now)
 	if err != nil {
@@ -534,10 +544,18 @@ func TestDiscoveryAlbumReleasesErrorLeavesJobUntouched(t *testing.T) {
 	if len(cands) != 0 {
 		t.Errorf("expected no candidates cached, got %+v", cands)
 	}
+	if len(searcher.queries) != 0 {
+		t.Errorf("expected no Soulseek search when AlbumReleases fails, got %v", searcher.queries)
+	}
+	if m.albumReleasesErrors != 1 {
+		t.Errorf("expected AlbumReleasesErrors metric incremented once, got %d", m.albumReleasesErrors)
+	}
 }
 
 // TestDiscoveryNoSearchPassOnAlbumReleasesError asserts a job whose
-// AlbumReleases call fails (an abort path) records nothing (issue #88).
+// AlbumReleases call fails (an abort path) records nothing (issue #88) and
+// never reaches the Soulseek search (issue #92). No metrics sink is wired
+// here to exercise the nil-guard.
 func TestDiscoveryNoSearchPassOnAlbumReleasesError(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -564,6 +582,9 @@ func TestDiscoveryNoSearchPassOnAlbumReleasesError(t *testing.T) {
 	}
 	if len(passes) != 0 {
 		t.Errorf("expected no search pass when AlbumReleases fails, got %+v", passes)
+	}
+	if len(searcher.queries) != 0 {
+		t.Errorf("expected no Soulseek search when AlbumReleases fails, got %v", searcher.queries)
 	}
 }
 
@@ -592,6 +613,8 @@ func TestDiscoveryRecordsSearchPassMatchedOnCandidatesPath(t *testing.T) {
 		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	m := &fakeDiscoveryMetrics{}
+	p.Metrics = m
 
 	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
 		t.Fatalf("UpsertWantedJob: %v", err)
@@ -611,6 +634,9 @@ func TestDiscoveryRecordsSearchPassMatchedOnCandidatesPath(t *testing.T) {
 	}
 	if passes[0].Searched != 1 || passes[0].Matched != 1 {
 		t.Errorf("pass = %+v, want Searched=1 Matched=1", passes[0])
+	}
+	if m.albumReleasesErrors != 0 {
+		t.Errorf("expected AlbumReleasesErrors metric untouched on success path, got %d", m.albumReleasesErrors)
 	}
 }
 

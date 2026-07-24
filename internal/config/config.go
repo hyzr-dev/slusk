@@ -297,6 +297,12 @@ type SoulseekConfig struct {
 	SharedFolders []SharedFolderConfig `toml:"shared_folders"`
 	// UploadSlots limits concurrent upload negotiation and streaming. Default 2.
 	UploadSlots int `toml:"upload_slots"`
+	// AllowPrivatePeerAddresses permits dialing server-supplied peer
+	// addresses in RFC 1918 / ULA private ranges (threat T12). Loopback and
+	// link-local addresses are always refused regardless of this flag.
+	// Defaults to false (private addresses blocked); set true to reach
+	// peers on your own LAN.
+	AllowPrivatePeerAddresses bool `toml:"allow_private_peer_addresses"`
 }
 
 // Enabled reports whether any field of the section was set, meaning the

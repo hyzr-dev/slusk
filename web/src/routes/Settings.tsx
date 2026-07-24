@@ -438,6 +438,7 @@ type SoulseekFieldKey =
   | 'password'
   | 'listenAddr'
   | 'uploadSlots'
+  | 'allowPrivatePeerAddresses'
   | 'gluetunControlUrl'
   | 'gluetunApiKey';
 type SoulseekFormState = Record<SoulseekFieldKey, string>;
@@ -504,6 +505,7 @@ function soulseekToForm(s: AppConfig['soulseek']): SoulseekFormState {
     password: '',
     listenAddr: s.listenAddr,
     uploadSlots: String(s.uploadSlots),
+    allowPrivatePeerAddresses: String(s.allowPrivatePeerAddresses),
     gluetunControlUrl: s.gluetun.controlUrl,
     gluetunApiKey: '',
   };
@@ -747,6 +749,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
         username: soulseek.username,
         listenAddr: soulseek.listenAddr,
         uploadSlots: Number(soulseek.uploadSlots),
+        allowPrivatePeerAddresses: soulseek.allowPrivatePeerAddresses === 'true',
         gluetun: { controlUrl: soulseek.gluetunControlUrl },
         sharedFolders,
       },
@@ -889,10 +892,14 @@ function ConfigForm({ config }: { config: AppConfig }) {
     { key: 'knownUser', label: t.settings.weightKnownUser, configKey: t.settings.configKeys.weightKnownUser, kind: 'float', errorKey: 'pipeline.weights.knownUser', advanced: true, help: t.settings.help.weightKnownUser },
   ];
 
-  // Basic: credentials, shared folders (rendered separately, see below) and
-  // upload slots — what a native-backend install needs to get running.
+  const allowPrivatePeerAddressesOptions: readonly SelectOption[] = [
+    { value: 'false', label: t.settings.allowPrivatePeerAddressesBlocked },
+    { value: 'true', label: t.settings.allowPrivatePeerAddressesAllowed },
+  ];
+
   const soulseekBasicFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
-    { key: 'username', label: t.settings.username, configKey: t.settings.configKeys.username, kind: 'text', errorKey: 'soulseek.username', help: t.settings.help.username },
+    { key: 'serverAddress', label: t.settings.serverAddress, configKey: t.settings.configKeys.serverAddress, kind: 'text', errorKey: 'soulseek.serverAddress' },
+    { key: 'username', label: t.settings.username, configKey: t.settings.configKeys.username, kind: 'text', errorKey: 'soulseek.username' },
     {
       key: 'password',
       label: t.settings.password,
@@ -909,6 +916,7 @@ function ConfigForm({ config }: { config: AppConfig }) {
   const soulseekAdvancedFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [
     { key: 'serverAddress', label: t.settings.serverAddress, configKey: t.settings.configKeys.serverAddress, kind: 'text', errorKey: 'soulseek.serverAddress', advanced: true, help: t.settings.help.serverAddress },
     { key: 'listenAddr', label: t.settings.listenAddr, configKey: t.settings.configKeys.soulseekListenAddr, kind: 'text', errorKey: 'soulseek.listenAddr', advanced: true, help: t.settings.help.soulseekListenAddr },
+    { key: 'allowPrivatePeerAddresses', label: t.settings.allowPrivatePeerAddresses, configKey: t.settings.configKeys.allowPrivatePeerAddresses, kind: 'select', options: allowPrivatePeerAddressesOptions, errorKey: 'soulseek.allowPrivatePeerAddresses' },
   ];
 
   const gluetunFields: readonly FieldDescriptor<SoulseekFieldKey>[] = [

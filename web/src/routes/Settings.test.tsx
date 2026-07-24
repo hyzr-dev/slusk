@@ -24,6 +24,7 @@ const soulseekBase: SoulseekConfigDTO = {
   passwordConfigured: true,
   listenAddr: '0.0.0.0:2234',
   uploadSlots: 2,
+  allowPrivatePeerAddresses: false,
   gluetun: { controlUrl: 'http://127.0.0.1:8000', apiKeyConfigured: false },
   sharedFolders: [{ name: 'Music', path: '/shares/music' }],
 };
@@ -327,6 +328,7 @@ describe('saving settings', () => {
         username: 'slskuser',
         listenAddr: '0.0.0.0:2234',
         uploadSlots: 2,
+        allowPrivatePeerAddresses: false,
         gluetun: { controlUrl: 'http://127.0.0.1:8000' },
         sharedFolders: [{ name: 'Music', path: '/shares/music' }],
       },

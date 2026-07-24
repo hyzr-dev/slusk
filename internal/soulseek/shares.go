@@ -57,10 +57,13 @@ type indexedFile struct {
 	info         os.FileInfo
 }
 
+type shareTrigram uint32
+
 type shareSnapshot struct {
 	stats       ShareStats
 	files       map[string]*indexedFile
 	search      []*indexedFile
+	trigrams    map[shareTrigram][]uint32
 	directories []peer.Directory
 	byDirectory map[string]peer.Directory
 	sharedFrame []byte
@@ -69,7 +72,12 @@ type shareSnapshot struct {
 func emptyShareSnapshot() *shareSnapshot {
 	msg := &peer.SharedFileListResponse{}
 	frame, _ := msg.Serialize(msg)
-	return &shareSnapshot{files: map[string]*indexedFile{}, byDirectory: map[string]peer.Directory{}, sharedFrame: frame}
+	return &shareSnapshot{
+		files:       map[string]*indexedFile{},
+		trigrams:    map[shareTrigram][]uint32{},
+		byDirectory: map[string]peer.Directory{},
+		sharedFrame: frame,
+	}
 }
 
 type searchDeliveryKey struct {
@@ -381,8 +389,13 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		return strings.ToLower(s.directories[i].Name) < strings.ToLower(s.directories[j].Name)
 	})
 	sort.Slice(s.search, func(i, j int) bool {
-		return strings.ToLower(s.search[i].virtual) < strings.ToLower(s.search[j].virtual)
+		return s.search[i].virtualLower < s.search[j].virtualLower
 	})
+	trigrams, err := buildShareTrigramIndex(ctx, s.search)
+	if err != nil {
+		return nil, fmt.Errorf("build share search index: %w", err)
+	}
+	s.trigrams = trigrams
 	s.stats = ShareStats{Directories: len(s.directories), Files: len(s.search)}
 	msg := &peer.SharedFileListResponse{Directories: s.directories}
 	frame, err := msg.Serialize(msg)
@@ -438,7 +451,19 @@ func (s *shareSnapshot) folderResponse(token soul.Token, requested string) *peer
 		return response
 	}
 	prefix := normalized + `\`
-	for _, directory := range s.directories {
+	// s.directories is sorted case-insensitively (see scanShares), so every directory
+	// whose name matches or is nested under normalized (case-sensitively) falls within
+	// the case-insensitive range [normalized, normalized+"]"). ']' (0x5D) is the first
+	// byte above '\' (0x5C) and is unaffected by ToLower, so the upper bound is exact:
+	// any lowered name >= lowered+"]" cannot equal normalized or start with prefix.
+	lowered := strings.ToLower(normalized)
+	lo := sort.Search(len(s.directories), func(i int) bool {
+		return strings.ToLower(s.directories[i].Name) >= lowered
+	})
+	hi := sort.Search(len(s.directories), func(i int) bool {
+		return strings.ToLower(s.directories[i].Name) >= lowered+"]"
+	})
+	for _, directory := range s.directories[lo:hi] {
 		if directory.Name == normalized || strings.HasPrefix(directory.Name, prefix) {
 			response.Folders = append(response.Folders, directory)
 		}
@@ -480,6 +505,10 @@ func (h *sharingSessionHooks) frame(session *peerSession, frame sessionFrame) er
 		}
 		if !h.c.startTracked(func() {
 			defer func() { <-h.c.shareWorkers }()
+			// The serialized frame cannot be precomputed/cached per folder: the request
+			// token is embedded inside the zlib-compressed body (see
+			// soul/peer/foldercontentsresponse.go Serialize), so it must be built fresh
+			// for every request.
 			msg := h.c.shareSnapshot().folderResponse(request.Token, request.Folder)
 			response, err := msg.Serialize(msg)
 			if err != nil || !session.TrySend(response) {
@@ -558,37 +587,213 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 	}
 }
 
-func (s *shareSnapshot) match(query string, limit int) []peer.File {
-	var include, exclude []string
-	for _, term := range strings.Fields(strings.ToLower(strings.ReplaceAll(query, "/", `\`))) {
-		if strings.HasPrefix(term, "-") && len(term) > 1 {
-			exclude = append(exclude, term[1:])
-		} else if term != "" {
-			include = append(include, term)
+func packShareTrigram(value string, offset int) shareTrigram {
+	return shareTrigram(uint32(value[offset])<<16 | uint32(value[offset+1])<<8 | uint32(value[offset+2]))
+}
+
+func buildShareTrigramIndex(ctx context.Context, search []*indexedFile) (map[shareTrigram][]uint32, error) {
+	if uint64(len(search)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("too many shared files: %d", len(search))
+	}
+	type buildState struct {
+		start uint64
+		count uint32
+		next  uint32
+		last  uint32
+	}
+	states := make(map[shareTrigram]buildState)
+	for position, indexed := range search {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		marker := uint32(position) + 1
+		path := indexed.virtualLower
+		for offset := 0; offset+3 <= len(path); offset++ {
+			if offset&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			gram := packShareTrigram(path, offset)
+			state := states[gram]
+			if state.last != marker {
+				if state.count == ^uint32(0) {
+					return nil, fmt.Errorf("too many postings for trigram %06x", uint32(gram))
+				}
+				state.count++
+				state.last = marker
+				states[gram] = state
+			}
 		}
 	}
+
+	var postingCount uint64
+	stateNumber := 0
+	for gram, state := range states {
+		if stateNumber&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		stateNumber++
+		state.start = postingCount
+		state.last = 0
+		states[gram] = state
+		postingCount += uint64(state.count)
+	}
+	maxInt := uint64(^uint(0) >> 1)
+	if postingCount > maxInt {
+		return nil, fmt.Errorf("share search index has too many postings: %d", postingCount)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	payload := make([]uint32, int(postingCount))
+	for position, indexed := range search {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id := uint32(position)
+		marker := id + 1
+		path := indexed.virtualLower
+		for offset := 0; offset+3 <= len(path); offset++ {
+			if offset&4095 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+			gram := packShareTrigram(path, offset)
+			state := states[gram]
+			if state.last == marker {
+				continue
+			}
+			payload[int(state.start)+int(state.next)] = id
+			state.next++
+			state.last = marker
+			states[gram] = state
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	index := make(map[shareTrigram][]uint32, len(states))
+	stateNumber = 0
+	for gram, state := range states {
+		if stateNumber&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		stateNumber++
+		start := int(state.start)
+		index[gram] = payload[start : start+int(state.count) : start+int(state.count)]
+	}
+	return index, nil
+}
+
+func parseShareSearchQuery(query string) (include, exclude []string) {
+	includeSeen := make(map[string]struct{})
+	excludeSeen := make(map[string]struct{})
+	for _, term := range strings.Fields(strings.ToLower(strings.ReplaceAll(query, "/", `\`))) {
+		if strings.HasPrefix(term, "-") && len(term) > 1 {
+			term = term[1:]
+			if _, exists := excludeSeen[term]; !exists {
+				excludeSeen[term] = struct{}{}
+				exclude = append(exclude, term)
+			}
+		} else if term != "" {
+			if _, exists := includeSeen[term]; !exists {
+				includeSeen[term] = struct{}{}
+				include = append(include, term)
+			}
+		}
+	}
+	return include, exclude
+}
+
+func matchesShareSearch(indexed *indexedFile, include, exclude []string) bool {
+	for _, term := range include {
+		if !strings.Contains(indexed.virtualLower, term) {
+			return false
+		}
+	}
+	for _, term := range exclude {
+		if strings.Contains(indexed.virtualLower, term) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *shareSnapshot) match(query string, limit int) []peer.File {
+	if limit <= 0 {
+		return nil
+	}
+	include, exclude := parseShareSearchQuery(query)
 	if len(include) == 0 {
 		return nil
 	}
+
+	seen := make(map[shareTrigram]struct{})
+	var postings [][]uint32
+	for _, term := range include {
+		var rarest []uint32
+		var rarestGram shareTrigram
+		for offset := 0; offset+3 <= len(term); offset++ {
+			gram := packShareTrigram(term, offset)
+			posting := s.trigrams[gram]
+			if len(posting) == 0 {
+				return nil
+			}
+			if rarest == nil || len(posting) < len(rarest) {
+				rarest = posting
+				rarestGram = gram
+			}
+		}
+		if rarest != nil {
+			if _, exists := seen[rarestGram]; !exists {
+				seen[rarestGram] = struct{}{}
+				postings = append(postings, rarest)
+			}
+		}
+	}
+
 	results := make([]peer.File, 0, min(limit, len(s.search)))
-	for _, indexed := range s.search {
-		matched := true
-		for _, term := range include {
-			if !strings.Contains(indexed.virtualLower, term) {
-				matched = false
+	if len(postings) == 0 {
+		for _, indexed := range s.search {
+			if matchesShareSearch(indexed, include, exclude) {
+				results = append(results, indexed.wire)
+				if len(results) == limit {
+					break
+				}
+			}
+		}
+		return results
+	}
+
+	sort.Slice(postings, func(i, j int) bool { return len(postings[i]) < len(postings[j]) })
+	cursors := make([]int, len(postings)-1)
+	for _, id := range postings[0] {
+		candidate := true
+		for postingIndex := 1; postingIndex < len(postings); postingIndex++ {
+			posting := postings[postingIndex]
+			cursor := &cursors[postingIndex-1]
+			for *cursor < len(posting) && posting[*cursor] < id {
+				*cursor++
+			}
+			if *cursor == len(posting) || posting[*cursor] != id {
+				candidate = false
 				break
 			}
 		}
-		for _, term := range exclude {
-			if strings.Contains(indexed.virtualLower, term) {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			results = append(results, indexed.wire)
-			if len(results) == limit {
-				break
+		if candidate && int(id) < len(s.search) {
+			indexed := s.search[id]
+			if matchesShareSearch(indexed, include, exclude) {
+				results = append(results, indexed.wire)
+				if len(results) == limit {
+					break
+				}
 			}
 		}
 	}
