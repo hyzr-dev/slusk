@@ -40,14 +40,11 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview) and '/jobs' are asserted separately below: the TUI reskin
-  // (#198) gives neither an <h1> — PageHeading is gone from both routes
-  // already, ahead of the other routes below losing theirs in their own
-  // tasks.
+  // '/' (Overview), '/jobs' and '/jobs/:id' are asserted separately below:
+  // the TUI reskin (#198) gives none of them an <h1> — PageHeading is gone
+  // from all three routes already, ahead of the other routes below losing
+  // theirs in their own tasks.
   it.each([
-    // JobDetail with no seeded query data falls through all three header
-    // tiers (no live job, no cached detail) to the loading heading.
-    ['/jobs/42', t.jobs.loading],
     ['/events', t.nav.events],
     ['/peers', t.nav.peers],
     // No seeded query data, so Shares renders its heading-only loading state.
@@ -67,6 +64,15 @@ describe('route tree', () => {
   it('renders /jobs without crashing', () => {
     renderAt('/jobs');
     expect(screen.getByText(t.jobs.gridHead.album)).toBeInTheDocument();
+  });
+
+  it('renders /jobs/42 without crashing', () => {
+    // With no seeded query data, JobDetail falls through all three header
+    // tiers (no live job, no cached detail) to its loading placeholder — the
+    // same text also appears in the attempt-history and events placeholders
+    // below it, so assert at least one match rather than a unique heading.
+    renderAt('/jobs/42');
+    expect(screen.getAllByText(t.jobs.loading).length).toBeGreaterThan(0);
   });
 
   it('marks the matching nav item active', () => {

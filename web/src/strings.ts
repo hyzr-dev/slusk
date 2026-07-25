@@ -140,6 +140,10 @@ export const t = {
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
+    // The attempt header's file count (job detail page) and a transfer's own
+    // retry count — both were inline template strings before this reskin.
+    fileCount: (n: number) => `${n} files`,
+    transferRetries: (n: number) => `${n} retries`,
     verifying: 'verifying',
     showDetails: 'Show details',
     hideDetails: 'Hide details',
