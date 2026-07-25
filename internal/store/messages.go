@@ -12,6 +12,13 @@ import (
 
 const privateMessageSelect = `SELECT id, username, direction, body, server_message_id, is_admin, sent_at, received_at, read_at FROM private_messages`
 
+// maxConversations caps how many peers Conversations returns. Without it a peer with an
+// unbounded number of distinct correspondents (or a hostile one opportunistically
+// messaging from many usernames) would make GET /api/messages return the entire table,
+// each row carrying a full message body. Chosen to comfortably exceed any real dashboard
+// use while still bounding worst-case response size, consistent with Thread's cap.
+const maxConversations = 500
+
 func scanPrivateMessage(r rowScanner) (core.PrivateMessage, error) {
 	var m core.PrivateMessage
 	var direction string
@@ -77,13 +84,14 @@ func (s *Store) RecordIncomingMessage(ctx context.Context, m core.PrivateMessage
 
 // RecordOutgoingMessage persists one private message this client sent, always
 // marked already-read (ReadAt tracking only ever applies to incoming
-// messages). It is send-then-persist — see cmd/slskdarr's sendMessageFn for
-// why that ordering, not the reverse, is correct here.
+// messages, and a message we sent is read by definition). It is
+// send-then-persist — see cmd/slskdarr's sendMessageFn for why that
+// ordering, not the reverse, is correct here.
 func (s *Store) RecordOutgoingMessage(ctx context.Context, username, body string, now time.Time) (core.PrivateMessage, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO private_messages (username, direction, body, server_message_id, is_admin, sent_at, received_at)
-		 VALUES ($1, $2, $3, NULL, 0, $4, $4)
+		`INSERT INTO private_messages (username, direction, body, server_message_id, is_admin, sent_at, received_at, read_at)
+		 VALUES ($1, $2, $3, NULL, 0, $4, $4, $4)
 		 RETURNING id`,
 		username, string(core.MessageOutgoing), body, now,
 	).Scan(&id)
@@ -97,6 +105,7 @@ func (s *Store) RecordOutgoingMessage(ctx context.Context, username, body string
 		Body:       body,
 		SentAt:     now,
 		ReceivedAt: now,
+		ReadAt:     &now,
 	}, nil
 }
 
@@ -104,10 +113,13 @@ func (s *Store) RecordOutgoingMessage(ctx context.Context, username, body string
 // activity first, with per-peer unread and total counts for the dashboard's
 // conversation list (GET /api/messages).
 func (s *Store) Conversations(ctx context.Context) ([]core.Conversation, error) {
+	// Ranked by id, not sent_at, for the same reason as Thread's ORDER BY: sent_at is
+	// peer-supplied wire input and can be out of order with arrival, so using it here
+	// could pick a stale message as "last" or misorder the conversation list itself.
 	rows, err := s.db.QueryContext(ctx, `
 		WITH ranked AS (
-		  SELECT username, body, direction, sent_at,
-		         ROW_NUMBER() OVER (PARTITION BY username ORDER BY sent_at DESC, id DESC) AS rn
+		  SELECT id, username, body, direction, sent_at,
+		         ROW_NUMBER() OVER (PARTITION BY username ORDER BY id DESC) AS rn
 		  FROM private_messages
 		), agg AS (
 		  SELECT username, COUNT(*) AS total,
@@ -116,7 +128,8 @@ func (s *Store) Conversations(ctx context.Context) ([]core.Conversation, error) 
 		)
 		SELECT a.username, r.body, r.direction, r.sent_at, a.unread, a.total
 		FROM agg a JOIN ranked r ON r.username = a.username AND r.rn = 1
-		ORDER BY r.sent_at DESC, a.username`)
+		ORDER BY r.id DESC, a.username
+		LIMIT $1`, maxConversations)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -144,7 +157,11 @@ func (s *Store) Thread(ctx context.Context, username string, limit int, beforeID
 		query += ` AND id < $2`
 		args = append(args, beforeID)
 	}
-	query += fmt.Sprintf(` ORDER BY sent_at DESC, id DESC LIMIT $%d`, len(args)+1)
+	// id DESC alone, not sent_at: sent_at is the peer-supplied wire timestamp (see
+	// idx_private_messages_thread's comment in the migration), so ordering or paging by
+	// it can skip or duplicate rows across pages. id is assigned on insert and therefore
+	// monotonic with arrival order, which is what beforeID's keyset pagination requires.
+	query += fmt.Sprintf(` ORDER BY id DESC LIMIT $%d`, len(args)+1)
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS private_messages (
     direction         TEXT NOT NULL,
     body              TEXT NOT NULL,
     server_message_id BIGINT,
+    -- BIGINT, not BOOLEAN: this is the schema's first boolean-valued column, and BIGINT
+    -- (0/1, via boolToInt/scanPrivateMessage) keeps it portable across Postgres and
+    -- SQLite without a driver-specific bool mapping. Sets the precedent for any future
+    -- boolean column here.
     is_admin          BIGINT NOT NULL DEFAULT 0,
     sent_at           TIMESTAMPTZ NOT NULL,
     received_at       TIMESTAMPTZ NOT NULL,
@@ -25,8 +29,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_private_messages_server_id
     ON private_messages (server_message_id)
     WHERE server_message_id IS NOT NULL;
 
+-- Ordered by id, not sent_at: sent_at is the peer-supplied wire timestamp, so a
+-- redelivered offline message or a peer with a skewed clock can insert a row whose
+-- sent_at does not increase with id. id is assigned by us on insert and is therefore
+-- monotonic with arrival order, which is what Thread's keyset pagination requires to
+-- never skip or duplicate a row across pages (see Store.Thread).
 CREATE INDEX IF NOT EXISTS idx_private_messages_thread
-    ON private_messages (username, sent_at DESC, id DESC);
+    ON private_messages (username, id DESC);
 
 CREATE INDEX IF NOT EXISTS idx_private_messages_unread
     ON private_messages (username)

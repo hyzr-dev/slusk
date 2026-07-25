@@ -15,13 +15,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
 
 // maxPrivateMessageBytes caps an outgoing private message. Enforced before any wire
 // contact so malformed input can never reach sendToServerGeneration, whose write path
-// tears the server session down on failure.
-const maxPrivateMessageBytes = 8192
+// tears the server session down on failure. Shared with internal/observ's identical
+// limit via core.MaxPrivateMessageBytes — see that constant's doc comment for why it
+// lives in core rather than being declared independently in each package.
+const maxPrivateMessageBytes = core.MaxPrivateMessageBytes
 
 // maxIncomingMessageBytes caps a stored incoming body. The frame decoder only bounds a
 // field at internal.MaxMessageSize (64 MiB), so without this an unfriendly peer could
@@ -29,6 +32,16 @@ const maxPrivateMessageBytes = 8192
 // dropped, and still acked — dropping it unacked would make the server redeliver it at
 // every login forever.
 const maxIncomingMessageBytes = 64 << 10
+
+// maxIncomingUsernameBytes caps a peer's username as read off the wire. A Soulseek
+// username is registered at a few dozen characters at most, but the frame decoder only
+// bounds the field at internal.MaxMessageSize (64 MiB) — the same untrusted-frame
+// concern as maxIncomingMessageBytes, and username is additionally used as the
+// Conversations partition key and a URL path segment (GET/POST
+// /api/messages/{username}), so an oversize value is worth rejecting cheaply rather
+// than letting it flow further. 256 bytes is generous headroom over any real username
+// while still bounding worst case.
+const maxIncomingUsernameBytes = 256
 
 // messageSinkTimeout bounds a single sink write. It runs on the message worker, not on
 // readLoop, so exceeding it costs one unacked message (redelivered at the next login)
@@ -107,10 +120,6 @@ func (c *Client) handleIncomingPrivateMessage(reader io.Reader) error {
 		return fmt.Errorf("deserialize message user: %w", err)
 	}
 
-	body := msg.Message
-	if len(body) > maxIncomingMessageBytes {
-		body = body[:maxIncomingMessageBytes]
-	}
 	pm := PrivateMessage{
 		// server.MessageUser.UserID is misnamed: on the wire, code 22 (Message
 		// user) is `uint32 id, uint32 timestamp, string username, string
@@ -120,10 +129,18 @@ func (c *Client) handleIncomingPrivateMessage(reader io.Reader) error {
 		// either wrong and either the server never stops redelivering
 		// (MessageID) or the admin flag is silently swapped (New).
 		ServerMessageID: int64(msg.UserID),
-		Username:        msg.Username,
-		Body:            body,
-		SentAt:          time.Unix(int64(msg.Timestamp), 0).UTC(),
-		Admin:           msg.New,
+		// Both Username and Message are peer-controlled fields off the same frame,
+		// bounded on the wire only by internal.MaxMessageSize (64 MiB) — truncate both
+		// to a sane limit, and to a valid UTF-8 boundary, so neither can grow a database
+		// row unbounded or leave the body ending mid-rune (see maxIncomingMessageBytes
+		// and truncateValidUTF8's doc comments for why an invalid tail is not merely
+		// cosmetic: Postgres TEXT in a UTF8 database rejects it outright, which would
+		// fail the insert, leave the message unacked, and redeliver it at every login
+		// forever).
+		Username: truncateValidUTF8(msg.Username, maxIncomingUsernameBytes),
+		Body:     truncateValidUTF8(msg.Message, maxIncomingMessageBytes),
+		SentAt:   time.Unix(int64(msg.Timestamp), 0).UTC(),
+		Admin:    msg.New,
 	}
 
 	if c.cfg.MessageSink == nil {
@@ -134,7 +151,21 @@ func (c *Client) handleIncomingPrivateMessage(reader io.Reader) error {
 		return nil
 	}
 
+	// generation 0 means "no active server connection" (see currentServerGeneration),
+	// which sendToServerGeneration otherwise treats as "any generation, don't check" —
+	// exactly the check an ack for this message must NOT skip. Enqueuing it anyway would
+	// let a later, unrelated session ack a message it never received. There is no
+	// reachable path to this branch today (handleIncomingPrivateMessage only runs while
+	// a server message is being dispatched, which implies a live connection), but the
+	// guard is cheap and the alternative failure mode is silent.
 	generation := c.currentServerGeneration()
+	if generation == 0 {
+		if c.logger != nil {
+			c.logger.Warn("private message arrived with no active server generation; dropping unacked", "username", pm.Username)
+		}
+		return nil
+	}
+
 	select {
 	case c.incoming <- incomingMessage{msg: pm, generation: generation}:
 	default:
@@ -143,6 +174,18 @@ func (c *Client) handleIncomingPrivateMessage(reader io.Reader) error {
 		}
 	}
 	return nil
+}
+
+// truncateValidUTF8 truncates s to at most maxBytes bytes, then drops any trailing
+// invalid UTF-8 introduced by cutting mid-rune. len() and slicing count bytes, not
+// runes, so truncating a multibyte body or username at a byte boundary can leave an
+// incomplete sequence at the end; strings.ToValidUTF8 with an empty replacement removes
+// exactly that incomplete tail rather than the whole final rune's worth of valid data.
+func truncateValidUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxBytes], "")
 }
 
 // runMessageWorker persists received private messages and acks them. It is deliberately
@@ -156,7 +199,11 @@ func (c *Client) runMessageWorker(ctx context.Context) {
 			return
 		case entry := <-c.incoming:
 			// WithoutCancel so a reconnect racing this write does not abort a
-			// persist we could otherwise have completed and acked.
+			// persist we could otherwise have completed and acked. Deliberate
+			// trade-off: it also means ctx.Done() (process shutdown) does not
+			// abort an in-flight persist either, so a hung database can delay
+			// this worker's exit by up to messageSinkTimeout even when the
+			// caller wants to shut down immediately.
 			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), messageSinkTimeout)
 			err := c.cfg.MessageSink.HandlePrivateMessage(persistCtx, entry.msg)
 			cancel()

@@ -26,7 +26,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 
 func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser"} {
+	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser", "/api/messages/someuser/read"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()
@@ -263,6 +263,69 @@ func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 			}
 			if calls != tt.wantCalls {
 				t.Fatalf("mutation calls = %d, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// TestMarkReadAuthenticationAndSameOriginProtection mirrors
+// TestMutationAuthenticationAndSameOriginProtection for POST
+// /api/messages/{username}/read: same-origin-mutation protection in
+// ProtectPrivateEndpoints applies to any POST/DELETE regardless of path, but
+// this endpoint had no dedicated test exercising that (see security_test.go's
+// prior GET-only coverage of /api/messages/*).
+func TestMarkReadAuthenticationAndSameOriginProtection(t *testing.T) {
+	calls := 0
+	markRead := func(ctx context.Context, username string) (int, error) {
+		calls++
+		return 1, nil
+	}
+	reg := prometheus.NewRegistry()
+	NewMetrics(reg)
+	deps := testServerDeps(reg)
+	deps.MarkRead = markRead
+	h := NewServer(deps)
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
+
+	tests := []struct {
+		name       string
+		auth       string
+		origin     string
+		wantStatus int
+		wantCalls  int
+	}{
+		{name: "anonymous", wantStatus: http.StatusUnauthorized},
+		{name: "wrong token", auth: "Bearer wrong", wantStatus: http.StatusUnauthorized},
+		{name: "basic without origin", auth: "basic", wantStatus: http.StatusForbidden},
+		{name: "basic cross origin", auth: "basic", origin: "http://evil.example", wantStatus: http.StatusForbidden},
+		{name: "bearer cross origin", auth: "bearer", origin: "http://evil.example", wantStatus: http.StatusForbidden},
+		{name: "basic same origin", auth: "basic", origin: "http://example.com", wantStatus: http.StatusOK, wantCalls: 1},
+		{name: "bearer cli without origin", auth: "bearer", wantStatus: http.StatusOK, wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls = 0
+			req := httptest.NewRequest(http.MethodPost, "http://example.com/api/messages/someuser/read", nil)
+			switch tt.auth {
+			case "basic":
+				req.SetBasicAuth("slskdarr", testAuthToken)
+			case "bearer":
+				req.Header.Set("Authorization", "Bearer "+testAuthToken)
+			default:
+				if tt.auth != "" {
+					req.Header.Set("Authorization", tt.auth)
+				}
+			}
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("markRead calls = %d, want %d", calls, tt.wantCalls)
 			}
 		})
 	}

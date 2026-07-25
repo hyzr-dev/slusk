@@ -27,9 +27,19 @@ const defaultThreadLimit = 100
 
 // maxMessageBodyBytes caps an outgoing message body before it ever reaches
 // SendMessageFunc. observ cannot import internal/soulseek to reuse its
-// maxPrivateMessageBytes (see the package comment), so this mirrors that
-// limit — both must move together if the wire limit ever changes.
-const maxMessageBodyBytes = 8192
+// maxPrivateMessageBytes (see the package comment), so this uses the shared
+// core.MaxPrivateMessageBytes instead of a second, independently maintained
+// copy of the same number.
+const maxMessageBodyBytes = core.MaxPrivateMessageBytes
+
+// maxSendMessageRequestBytes bounds the raw POST /api/messages/{username} request body
+// http.MaxBytesReader is allowed to read, before json.Decode ever runs. It is larger
+// than maxMessageBodyBytes, not equal to it, to leave room for the JSON envelope
+// (`{"body":"..."}`) and for ordinary escaping (quotes, backslashes, newlines) without
+// every legitimate maxMessageBodyBytes-sized message tipping over the limit — the goal
+// here is only to stop an unbounded decode of a hostile multi-gigabyte body, not to
+// duplicate the exact-length check the handler already does on the decoded value.
+const maxSendMessageRequestBytes = maxMessageBodyBytes*2 + 256
 
 // ConversationsFunc lists every private-message conversation, newest activity
 // first, for GET /api/messages.
@@ -132,6 +142,10 @@ func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, threa
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if conversations == nil {
+			writeConfigError(w, http.StatusServiceUnavailable, "private messaging is not enabled in the configuration", nil)
+			return
+		}
 		convs, err := conversations(r.Context())
 		if err != nil {
 			writeConfigError(w, http.StatusInternalServerError, "failed to list conversations", nil)
@@ -173,6 +187,10 @@ func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, threa
 			http.NotFound(w, r)
 			return
 		}
+		if markRead == nil {
+			writeConfigError(w, http.StatusServiceUnavailable, "private messaging is not enabled in the configuration", nil)
+			return
+		}
 		marked, err := markRead(r.Context(), username)
 		if err != nil {
 			writeConfigError(w, http.StatusInternalServerError, "failed to mark conversation read", nil)
@@ -184,6 +202,10 @@ func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, threa
 }
 
 func serveThread(w http.ResponseWriter, r *http.Request, thread ThreadFunc, username string) {
+	if thread == nil {
+		writeConfigError(w, http.StatusServiceUnavailable, "private messaging is not enabled in the configuration", nil)
+		return
+	}
 	limit := parseThreadLimit(r.URL.Query().Get("limit"))
 	var beforeID int64
 	if raw := r.URL.Query().Get("before"); raw != "" {
@@ -232,6 +254,7 @@ func serveSendMessage(w http.ResponseWriter, r *http.Request, send SendMessageFu
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxSendMessageRequestBytes)
 	var req sendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeConfigError(w, http.StatusBadRequest, "invalid request body", nil)

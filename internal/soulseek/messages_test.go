@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
 )
@@ -137,6 +138,15 @@ func (s *fakeSink) waitForStart(t *testing.T, timeout time.Duration) PrivateMess
 	}
 }
 
+// TestIncomingPrivateMessagePersistsBeforeAck asserts the ack literally cannot reach the
+// server until HandlePrivateMessage has returned: it holds the sink open with the block
+// gate and checks, deterministically (not by racing a timing window), that no ack has
+// arrived at the server while HandlePrivateMessage is still blocked inside the sink -
+// only runMessageWorker calls sendToServerGeneration for the ack, and only after
+// HandlePrivateMessage returns (see messages.go), so if the sink hasn't returned yet the
+// ack cannot have been written to the wire yet either. A fake sink that returns
+// immediately (as in other tests in this file) cannot exercise this: the call has always
+// completed by the time the test observes anything, regardless of the real ordering.
 func TestIncomingPrivateMessagePersistsBeforeAck(t *testing.T) {
 	srv := newFakeServer(t)
 	result := make(chan error, 1)
@@ -151,21 +161,21 @@ func TestIncomingPrivateMessagePersistsBeforeAck(t *testing.T) {
 			result <- err
 			return
 		}
+		result <- nil
 		for {
 			payload, err := readFramePayload(conn)
 			if err != nil {
-				result <- err
 				return
 			}
 			if binary.LittleEndian.Uint32(payload[:4]) == uint32(server.CodeMessageAcked) {
 				ackPayload <- payload
-				result <- nil
 				return
 			}
 		}
 	})
 
 	sink := newFakeSink()
+	sink.block = make(chan struct{})
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", MessageSink: sink}, testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
@@ -177,29 +187,43 @@ func TestIncomingPrivateMessagePersistsBeforeAck(t *testing.T) {
 			t.Fatalf("server exchange: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for ack")
+		t.Fatal("timed out writing message frame")
 	}
 
-	payload := <-ackPayload
-	if len(payload) != 8 {
-		t.Fatalf("ack payload length = %d, want 8", len(payload))
-	}
-	if gotID := binary.LittleEndian.Uint32(payload[4:8]); gotID != 42 {
-		t.Fatalf("ack message id = %d, want 42", gotID)
+	msg := sink.waitForStart(t, 2*time.Second) // sink is now blocked inside HandlePrivateMessage
+	if msg.ServerMessageID != 42 || msg.Username != "alice" || msg.Body != "hello" {
+		t.Fatalf("sink entered with %+v, want id=42 username=alice body=hello", msg)
 	}
 
-	// The ack is only ever sent from runMessageWorker after
-	// HandlePrivateMessage has already returned nil (see messages.go), so by
-	// the time the ack frame was observed above the call must already be
-	// recorded here - a non-blocking receive proves it, rather than assuming
-	// the ordering.
+	// While HandlePrivateMessage is still blocked, the ack cannot yet exist on the wire
+	// under the correct (persist-then-ack) implementation - that half of this check is a
+	// causal guarantee from the code path, not a timing assumption. But catching the
+	// opposite bug (ack-then-persist) needs a brief wait: a wrongly-early ack is written
+	// to the loopback socket before HandlePrivateMessage is even entered, and needs a
+	// moment to be read and parsed on the server side before it would show up here -
+	// without the wait, a non-blocking receive can race ahead of that delivery and pass
+	// even against a broken implementation (observed empirically while verifying this
+	// test: see the code review this guards against).
+	time.Sleep(100 * time.Millisecond)
 	select {
-	case msg := <-sink.calls:
-		if msg.ServerMessageID != 42 || msg.Username != "alice" || msg.Body != "hello" {
-			t.Fatalf("sink received %+v, want id=42 username=alice body=hello", msg)
-		}
+	case payload := <-ackPayload:
+		t.Fatalf("ack (id=%d) reached the server before HandlePrivateMessage returned",
+			binary.LittleEndian.Uint32(payload[4:8]))
 	default:
-		t.Fatal("sink was not called before the ack was observed at the server")
+	}
+
+	close(sink.block)
+
+	select {
+	case payload := <-ackPayload:
+		if len(payload) != 8 {
+			t.Fatalf("ack payload length = %d, want 8", len(payload))
+		}
+		if gotID := binary.LittleEndian.Uint32(payload[4:8]); gotID != 42 {
+			t.Fatalf("ack message id = %d, want 42", gotID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ack after releasing the sink")
 	}
 
 	cancel()
@@ -398,13 +422,17 @@ func TestIncomingPrivateMessageTruncatesOversizeBody(t *testing.T) {
 	}
 }
 
-// TestSlowSinkDoesNotBlockReadLoop is the regression guard for why
-// runMessageWorker exists as a separate goroutine (see messages.go's package
-// doc comment): if a future change moved the sink call back onto readLoop
-// (e.g. inline in handleMessage's CodeMessageUser case), a slow sink would
-// stall dispatch of every other server message, including the ping ticker's
-// write path racing behind it - and this test would time out.
-func TestSlowSinkDoesNotBlockReadLoop(t *testing.T) {
+// TestIncomingPrivateMessageTruncatesMultibyteBodyToValidUTF8 is the regression guard
+// for truncating on a byte boundary that lands mid-rune: len() and slicing count bytes,
+// not runes, so a naive body[:maxIncomingMessageBytes] can cut a multibyte character in
+// half, producing invalid UTF-8 that Postgres TEXT (in a UTF8 database) rejects on
+// insert. That failure would leave the message unacked forever, so the server would
+// redeliver it, and fail again, at every subsequent login.
+func TestIncomingPrivateMessageTruncatesMultibyteBodyToValidUTF8(t *testing.T) {
+	// "é" is 2 bytes (0xC3 0xA9) in UTF-8. Padding with exactly
+	// maxIncomingMessageBytes-1 ASCII bytes puts the é's first byte at the very last
+	// position kept by a byte-boundary cut, guaranteeing the cut lands mid-rune.
+	oversize := strings.Repeat("a", maxIncomingMessageBytes-1) + "é" + strings.Repeat("b", 100)
 	srv := newFakeServer(t)
 	result := make(chan error, 1)
 	ackPayload := make(chan []byte, 1)
@@ -414,22 +442,175 @@ func TestSlowSinkDoesNotBlockReadLoop(t *testing.T) {
 			result <- err
 			return
 		}
-		if _, err := conn.Write(messageUserFrame(t, 11, 1000, "alice", "hello", false)); err != nil {
+		if _, err := conn.Write(messageUserFrame(t, 6, 1000, "alice", oversize, false)); err != nil {
 			result <- err
 			return
 		}
-		// While the sink is blocked, the read loop must still be dispatching:
-		// the ping ticker keeps firing and its write must still arrive.
-		code, err := readFrameCode(conn)
+		for {
+			payload, err := readFramePayload(conn)
+			if err != nil {
+				result <- err
+				return
+			}
+			if binary.LittleEndian.Uint32(payload[:4]) == uint32(server.CodeMessageAcked) {
+				ackPayload <- payload
+				result <- nil
+				return
+			}
+		}
+	})
+
+	sink := newFakeSink()
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", MessageSink: sink}, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	msg := sink.waitForCall(t, 2*time.Second)
+	if !utf8.ValidString(msg.Body) {
+		t.Fatalf("sink received invalid UTF-8 body (last bytes: %x)", msg.Body[len(msg.Body)-4:])
+	}
+	// The dangling first byte of "é" (0xC3) must have been dropped, not kept as an
+	// invalid trailing byte, and no valid preceding data should have been discarded
+	// along with it.
+	if want := strings.Repeat("a", maxIncomingMessageBytes-1); msg.Body != want {
+		t.Fatalf("sink received body ending %q, want the truncated body to be exactly the leading ASCII run (%d bytes)",
+			msg.Body[max(0, len(msg.Body)-20):], len(want))
+	}
+
+	select {
+	case err := <-result:
 		if err != nil {
+			t.Fatalf("server exchange: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ack of truncated message")
+	}
+	payload := <-ackPayload
+	if gotID := binary.LittleEndian.Uint32(payload[4:8]); gotID != 6 {
+		t.Fatalf("ack message id = %d, want 6", gotID)
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+// TestIncomingPrivateMessageTruncatesOversizeUsername asserts msg.Username gets the same
+// bound-and-valid-UTF-8 treatment as the body (see I1 in the code review this guards
+// against): Username comes off the same frame with the same 64 MiB wire bound, and is
+// used unbounded as the Conversations partition key and as a URL path segment
+// (GET/POST /api/messages/{username}).
+func TestIncomingPrivateMessageTruncatesOversizeUsername(t *testing.T) {
+	oversize := strings.Repeat("u", maxIncomingUsernameBytes+100)
+	srv := newFakeServer(t)
+	result := make(chan error, 1)
+	ackPayload := make(chan []byte, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginAndSteadyState(t, conn); err != nil {
 			result <- err
 			return
 		}
-		if code != uint32(server.CodePing) {
-			result <- fmt.Errorf("first frame after blocked sink: code=%d, want ping", code)
+		if _, err := conn.Write(messageUserFrame(t, 8, 1000, oversize, "hi", false)); err != nil {
+			result <- err
 			return
 		}
-		result <- nil
+		for {
+			payload, err := readFramePayload(conn)
+			if err != nil {
+				result <- err
+				return
+			}
+			if binary.LittleEndian.Uint32(payload[:4]) == uint32(server.CodeMessageAcked) {
+				ackPayload <- payload
+				result <- nil
+				return
+			}
+		}
+	})
+
+	sink := newFakeSink()
+	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", MessageSink: sink}, testLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	msg := sink.waitForCall(t, 2*time.Second)
+	if len(msg.Username) != maxIncomingUsernameBytes {
+		t.Fatalf("sink received username of %d bytes, want %d", len(msg.Username), maxIncomingUsernameBytes)
+	}
+	if msg.Username != oversize[:maxIncomingUsernameBytes] {
+		t.Fatal("truncated username is not a prefix of the original")
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("server exchange: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ack of message with truncated username")
+	}
+	payload := <-ackPayload
+	if gotID := binary.LittleEndian.Uint32(payload[4:8]); gotID != 8 {
+		t.Fatalf("ack message id = %d, want 8", gotID)
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+}
+
+// TestSlowSinkDoesNotBlockReadLoop is the regression guard for why
+// runMessageWorker exists as a separate goroutine (see messages.go's package
+// doc comment): if a future change moved the sink call back onto readLoop
+// (e.g. inline in handleMessage's CodeMessageUser case), a slow sink would
+// stall dispatch of every other server message - and this test would time
+// out.
+//
+// It does NOT use the ping ticker as evidence of that, on purpose: pings are
+// written from serveConnected's own select loop, a goroutine independent of
+// readLoop, so blocking readLoop would never stop pings from arriving - a
+// version of this test that waited on a ping passed even when the
+// implementation was made fully synchronous (verified by temporarily
+// inlining the sink call; see the code review this guards against).
+// Instead it sends a second, unrelated server message (the same
+// getUserStatsResponseFrame sentinel TestIncomingMessageDroppedWhenQueueFull
+// uses) after the private message frame, and polls c.tree.uploadKnown - set
+// only by readLoop actually dispatching that second frame - while the sink
+// is still blocked on the first.
+func TestSlowSinkDoesNotBlockReadLoop(t *testing.T) {
+	srv := newFakeServer(t)
+	writeDone := make(chan error, 1)
+	ackPayload := make(chan []byte, 1)
+	srv.serve(t, func(conn net.Conn) {
+		defer conn.Close()
+		if err := drainLoginAndSteadyState(t, conn); err != nil {
+			writeDone <- err
+			return
+		}
+		if _, err := conn.Write(messageUserFrame(t, 11, 1000, "alice", "hello", false)); err != nil {
+			writeDone <- err
+			return
+		}
+		if _, err := conn.Write(getUserStatsResponseFrame(t, "me", 123)); err != nil {
+			writeDone <- err
+			return
+		}
+		writeDone <- nil
 		for {
 			payload, err := readFramePayload(conn)
 			if err != nil {
@@ -445,20 +626,36 @@ func TestSlowSinkDoesNotBlockReadLoop(t *testing.T) {
 	sink := newFakeSink()
 	sink.block = make(chan struct{})
 	c := New(Config{Address: srv.addr(), Username: "me", Password: "p", MessageSink: sink}, testLogger())
-	c.cfg.pingInterval = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- c.Run(ctx) }()
 
-	sink.waitForStart(t, 2*time.Second) // sink is now blocked inside HandlePrivateMessage
-
 	select {
-	case err := <-result:
+	case err := <-writeDone:
 		if err != nil {
-			t.Fatalf("read loop did not keep dispatching while sink was blocked: %v", err)
+			t.Fatalf("server did not send both frames: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for ping while sink was blocked")
+		t.Fatal("timed out sending frames")
+	}
+
+	sink.waitForStart(t, 2*time.Second) // sink is now blocked inside HandlePrivateMessage
+
+	// The read loop must still be dispatching the sentinel frame that arrived after the
+	// private message, even though the sink has not returned: proof that the sink call
+	// does not run on readLoop.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.tree.mu.Lock()
+		known := c.tree.uploadKnown
+		c.tree.mu.Unlock()
+		if known {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("read loop did not dispatch the sentinel frame while the sink was blocked")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	close(sink.block)

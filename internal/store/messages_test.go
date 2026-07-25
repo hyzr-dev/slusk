@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -164,6 +165,67 @@ func TestThreadOrderingAndKeysetPagination(t *testing.T) {
 	}
 }
 
+// TestThreadOrderingSurvivesOutOfOrderSentAt is the regression guard for a real bug: sent_at
+// is the peer-supplied wire timestamp (see idx_private_messages_thread's comment in the
+// migration), so a redelivered offline message or a peer with a skewed clock can produce a
+// row whose sent_at does not increase with id. Concretely: id 1 arrives with sent_at 13:00,
+// id 2 with sent_at 12:00 (earlier than id 1, despite arriving later), id 3 with sent_at
+// 14:00. Ordering (and paging) by sent_at rather than id made id 2 permanently unreachable
+// with limit=2: page 1 was [id3, id1] (by sent_at DESC) and page 2's "AND id < id1" excluded
+// id2, whose id (2) is greater than id1 (1).
+func TestThreadOrderingSurvivesOutOfOrderSentAt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	type msgSpec struct {
+		sentAt time.Time
+	}
+	specs := []msgSpec{
+		{sentAt: t0.Add(time.Hour)},     // id 1, sent_at 13:00
+		{sentAt: t0},                    // id 2, sent_at 12:00 (out of order: earlier than id 1)
+		{sentAt: t0.Add(2 * time.Hour)}, // id 3, sent_at 14:00
+	}
+
+	var ids []int64
+	for i, spec := range specs {
+		id, inserted, err := s.RecordIncomingMessage(ctx, core.PrivateMessage{
+			Username: "skewed", Body: fmt.Sprintf("msg-%d", i), SentAt: spec.sentAt, ReceivedAt: t0,
+		})
+		if err != nil || !inserted {
+			t.Fatalf("RecordIncomingMessage %d: id=%d inserted=%v err=%v", i, id, inserted, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Page through with limit=2, collecting every id seen, and assert none is lost or
+	// duplicated - regardless of the (out-of-order) sent_at values.
+	seen := make(map[int64]int)
+	var beforeID int64
+	for {
+		page, err := s.Thread(ctx, "skewed", 2, beforeID)
+		if err != nil {
+			t.Fatalf("Thread(before=%d): %v", beforeID, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, m := range page {
+			seen[m.ID]++
+		}
+		beforeID = page[len(page)-1].ID
+	}
+
+	if len(seen) != len(ids) {
+		t.Fatalf("paged through %d distinct ids, want %d (ids=%v, seen=%v)", len(seen), len(ids), ids, seen)
+	}
+	for _, id := range ids {
+		if seen[id] != 1 {
+			t.Errorf("id %d was seen %d times across pages, want exactly 1", id, seen[id])
+		}
+	}
+}
+
 func TestMarkConversationReadOnlyTouchesIncomingUnread(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -220,8 +282,8 @@ func TestRecordOutgoingMessageAppearsInThread(t *testing.T) {
 	if sent.Direction != core.MessageOutgoing {
 		t.Errorf("Direction = %q, want OUT", sent.Direction)
 	}
-	if sent.ReadAt != nil {
-		t.Errorf("ReadAt = %v, want nil", sent.ReadAt)
+	if sent.ReadAt == nil || !sent.ReadAt.Equal(now) {
+		t.Errorf("ReadAt = %v, want %v (outgoing messages are read by definition)", sent.ReadAt, now)
 	}
 
 	thread, err := s.Thread(ctx, "frank", 10, 0)
@@ -231,8 +293,8 @@ func TestRecordOutgoingMessageAppearsInThread(t *testing.T) {
 	if len(thread) != 1 {
 		t.Fatalf("thread has %d messages, want 1", len(thread))
 	}
-	if thread[0].Direction != core.MessageOutgoing || thread[0].ReadAt != nil {
-		t.Errorf("thread[0] direction/readAt = %q/%v, want OUT/nil", thread[0].Direction, thread[0].ReadAt)
+	if thread[0].Direction != core.MessageOutgoing || thread[0].ReadAt == nil || !thread[0].ReadAt.Equal(now) {
+		t.Errorf("thread[0] direction/readAt = %q/%v, want OUT/%v", thread[0].Direction, thread[0].ReadAt, now)
 	}
 
 	unread, err := s.UnreadMessageCount(ctx)
