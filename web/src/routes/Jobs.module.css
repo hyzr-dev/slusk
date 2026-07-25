@@ -31,6 +31,12 @@
 
 .filterSlash { color: var(--dim); font-size: 12px; }
 
+.chipGroup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Separates the status chips from the source chips on the same row, so two
+   independent filter axes don't read as one longer list of statuses. */
+.chipDivider { width: 1px; align-self: stretch; background: var(--line2); margin: 0 2px; }
+
 .filterInput {
   flex: 1;
   background: transparent;

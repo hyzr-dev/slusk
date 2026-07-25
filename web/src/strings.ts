@@ -185,6 +185,14 @@ export const t = {
       orphaned: 'ORPHAN',
       done: 'DONE',
     },
+    // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
+    // the mock, but jobFilter.ts's SourceFilter needs a UI to reach it from;
+    // see Jobs.tsx's SOURCE_CHIP_ORDER.
+    sourceChipLabel: {
+      all: 'ALL',
+      manual: 'MANUAL',
+      lidarr: 'LIDARR',
+    },
     // Compact peer-queue position for the dense PROGRESS cell, where "queue
     // #4" (queuePosition above) would overflow the column.
     queueShort: (n: number) => `P${n}`,

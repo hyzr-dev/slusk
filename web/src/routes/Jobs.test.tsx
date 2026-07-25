@@ -49,6 +49,16 @@ function statusChipName(label: string): RegExp {
   return new RegExp(`^${label} \\d+$`);
 }
 
+// The status chips and the source chips are two independent axes rendered as
+// two ARIA groups on the same row — both have an ALL button, so an unscoped
+// query would be ambiguous. Scope to the group that owns the chip you mean.
+function statusGroup() {
+  return within(screen.getByRole('group', { name: t.columns.status }));
+}
+function sourceGroup() {
+  return within(screen.getByRole('group', { name: t.jobs.sourceLabel }));
+}
+
 function renderJobs(jobs: Job[], client?: QueryClient) {
   const qc = client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(queryKeys.jobs, jobs);
@@ -150,25 +160,41 @@ describe('chip filtering', () => {
       makeJob({ id: 2, title: 'Rounds', status: 'failed', state: 'FAILED' }),
     ]);
 
-    fireEvent.click(screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
 
     expect(screen.getByText('Rounds')).toBeInTheDocument();
     expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
     // The ACTIVE chip's own counter still reads 1 even though it's not selected.
-    const activeChip = screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) });
+    const activeChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) });
     expect(within(activeChip).getByText('1')).toBeInTheDocument();
+  });
+
+  // The source axis (Manual vs Lidarr) is a second, independent chip group —
+  // not drawn in the mock, but jobFilter.ts's SourceFilter is still live code
+  // that must stay reachable from this view (see Jobs.tsx's SOURCE_CHIP_ORDER).
+  it('filters by source chip', () => {
+    stubFetchIndefinitely();
+    renderJobs([
+      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' }),
+      makeJob({ id: 2, title: 'Rounds', source: 'manual' }),
+    ]);
+
+    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
+
+    expect(screen.getByText('Rounds')).toBeInTheDocument();
+    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
   });
 
   it('shows the empty state when no job matches the filter', () => {
     stubFetchIndefinitely();
-    renderJobs([makeJob({ id: 1, title: 'Kind of Blue', status: 'active' })]);
+    renderJobs([makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' })]);
 
-    fireEvent.click(screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.done) }));
+    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
 
     expect(screen.getByText(new RegExp(t.jobs.noMatch))).toBeInTheDocument();
   });
 
-  it("the ALL chip's count reflects the search filter, not the unfiltered job list", () => {
+  it("the status ALL chip's count reflects the search filter, not the unfiltered job list", () => {
     stubFetchIndefinitely();
     renderJobs([
       makeJob({ id: 1, title: 'Kind of Blue', artist: 'Miles Davis', status: 'active' }),
@@ -178,13 +204,34 @@ describe('chip filtering', () => {
 
     fireEvent.change(screen.getByPlaceholderText(t.jobs.searchPlaceholder), { target: { value: 'Tet' } });
 
-    // Only "Rounds" (Four Tet) matches the search text — the ALL chip's own
-    // counter must already read 1, not 3 (jobs.length).
-    const allChip = screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
+    // Only "Rounds" (Four Tet) matches the search text — the status ALL
+    // chip's own counter must already read 1, not 3 (jobs.length).
+    const allChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
     expect(within(allChip).getByText('1')).toBeInTheDocument();
 
     fireEvent.click(allChip);
     expect(screen.getByText('Rounds')).toBeInTheDocument();
+    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
+  });
+
+  it("the status ALL chip's count reflects the source filter too, not the unfiltered job list", () => {
+    stubFetchIndefinitely();
+    renderJobs([
+      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
+      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'failed' }),
+      makeJob({ id: 3, title: 'Sound of Silver', source: 'manual', status: 'done' }),
+    ]);
+
+    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
+
+    // Clicking MANUAL leaves 2 jobs — the status ALL chip's own counter must
+    // already read 2, not 3 (jobs.length).
+    const allChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
+    expect(within(allChip).getByText('2')).toBeInTheDocument();
+
+    fireEvent.click(allChip);
+    expect(screen.getByText('Rounds')).toBeInTheDocument();
+    expect(screen.getByText('Sound of Silver')).toBeInTheDocument();
     expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
   });
 });

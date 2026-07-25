@@ -8,7 +8,7 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatSpeed, percent } from '../format';
 import { t } from '../strings';
-import { countByStatus, matchesFilters, type StatusFilter } from './jobFilter';
+import { countByStatus, matchesFilters, type SourceFilter, type StatusFilter } from './jobFilter';
 import JobExpansion from './JobExpansion';
 import styles from './Jobs.module.css';
 
@@ -19,6 +19,16 @@ import styles from './Jobs.module.css';
 // tests) is simply never selected here.
 type ChipKey = Exclude<StatusFilter, 'importing'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'orphaned', 'done'];
+
+// A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
+// mock doesn't draw this control — its designer was working against a data
+// model that predates the source axis, though the mock does know the
+// concept (the small "●" dot on manual rows) — jobFilter.ts's SourceFilter
+// machinery would otherwise be unreachable from this view, silently
+// regressing a shipped feature. Kept in the same TUI chip idiom as the
+// status row, just visually separated by a divider so it reads as a second
+// axis rather than more status values.
+const SOURCE_CHIP_ORDER: SourceFilter[] = ['all', 'manual', 'lidarr'];
 
 // Per-row tick resolution in the jobs grid, matching the mock exactly.
 const ROW_TICKS = 26;
@@ -167,15 +177,25 @@ export default function Jobs() {
   const { data: jobs = [] } = useJobs();
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
+  const [source, setSource] = useState<SourceFilter>('all');
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const filtered = jobs.filter((j) => matchesFilters(j, search, status));
-  const counts = countByStatus(jobs, search);
-  // What the ALL chip would show if clicked: every job matching the search
-  // regardless of status, i.e. the sum of every bucket above — not
-  // jobs.length, which ignores the search text and so can disagree with what
-  // actually renders when the chip is clicked.
+  const filtered = jobs.filter((j) => matchesFilters(j, search, status, source));
+  const counts = countByStatus(jobs, search, source);
+  // What the ALL status chip would show if clicked: every job matching the
+  // search and source regardless of status, i.e. the sum of every bucket
+  // above — not jobs.length, which ignores those two filters and so can
+  // disagree with what actually renders when the chip is clicked.
   const allCount = Object.values(counts).reduce((sum, n) => sum + n, 0);
+
+  // Source counts mirror the same "what would this chip show" contract, but
+  // jobFilter.ts has no dedicated helper for this axis — reusing
+  // matchesFilters directly here is simpler than adding one for three values.
+  const sourceCounts: Record<SourceFilter, number> = {
+    all: allCount,
+    manual: jobs.filter((j) => matchesFilters(j, search, status, 'manual')).length,
+    lidarr: jobs.filter((j) => matchesFilters(j, search, status, 'lidarr')).length,
+  };
 
   // Stable across renders (no deps), so JobRow's memo comparator above is
   // never defeated by a fresh function identity on every Jobs render.
@@ -196,15 +216,29 @@ export default function Jobs() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        {CHIP_ORDER.map((key) => (
-          <Chip
-            key={key}
-            label={t.jobs.chipLabel[key]}
-            count={key === 'all' ? allCount : counts[key]}
-            active={status === key}
-            onClick={() => setStatus(key)}
-          />
-        ))}
+        <div className={styles.chipGroup} role="group" aria-label={t.columns.status}>
+          {CHIP_ORDER.map((key) => (
+            <Chip
+              key={key}
+              label={t.jobs.chipLabel[key]}
+              count={key === 'all' ? allCount : counts[key]}
+              active={status === key}
+              onClick={() => setStatus(key)}
+            />
+          ))}
+        </div>
+        <span aria-hidden className={styles.chipDivider} />
+        <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceLabel}>
+          {SOURCE_CHIP_ORDER.map((key) => (
+            <Chip
+              key={key}
+              label={t.jobs.sourceChipLabel[key]}
+              count={sourceCounts[key]}
+              active={source === key}
+              onClick={() => setSource(key)}
+            />
+          ))}
+        </div>
       </div>
 
       <div className={`${styles.grid} ${styles.head}`}>
