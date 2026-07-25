@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from datetime import date
 import json
 import os
 import sys
@@ -111,54 +110,116 @@ def ensure_artists(quality_profile_id: int, metadata_profile_id: int) -> list[in
             )
             artist = api("POST", "artist", payload)
             print(f"added {name}")
-        if not artist.get("monitored"):
-            artist["monitored"] = True
-            artist["monitorNewItems"] = "none"
-            artist = api("PUT", f"artist/{artist['id']}", artist)
         ids.append(int(artist["id"]))
     return ids
 
 
-def get_released_albums(artist_ids: list[int]) -> list[dict]:
-    albums: list[dict] = []
-    today = date.today().isoformat()
-    for artist_id in artist_ids:
-        for album in api("GET", "album", query={"artistId": artist_id}):
-            release_date = album.get("releaseDate") or "9999-12-31"
-            statistics = album.get("statistics") or {}
-            # trackCount only counts tracks of monitored albums, and everything
-            # starts unmonitored here, so it is always 0 at this point. Use
-            # totalTrackCount, which is monitor-independent and therefore also
-            # correct when reseeding a lab that is already monitored.
-            total_track_count = int(statistics.get("totalTrackCount", 0))
-            track_file_count = int(statistics.get("trackFileCount", 0))
-            if release_date[:10] <= today and total_track_count > track_file_count:
-                albums.append(album)
-    albums.sort(key=lambda item: (item.get("releaseDate") or "9999", item.get("title") or "", item["id"]))
-    return albums
+def wait_for_idle() -> None:
+    """Block until Lidarr has no queued or running artist/album refresh.
 
-
-def wait_for_albums(artist_ids: list[int]) -> list[dict]:
-    deadline = time.monotonic() + 600
-    albums: list[dict] = []
+    POST /artist returns the artist as requested, before the asynchronous
+    RefreshArtist command has run. Reading monitored state from that response —
+    or inferring readiness from how many albums are visible — races the refresh,
+    which re-applies the artist's monitor policy and can undo whatever the seed
+    just set. Ask Lidarr what it is doing instead of guessing from its output.
+    """
+    deadline = time.monotonic() + 900
+    watched = {"RefreshArtist", "RefreshAlbum", "RescanFolders"}
     while time.monotonic() < deadline:
-        albums = get_released_albums(artist_ids)
-        print(f"Lidarr has loaded {len(albums)} released albums", flush=True)
-        if len(albums) >= TARGET:
-            return albums
-        time.sleep(10)
-    raise RuntimeError(f"only {len(albums)} released albums loaded; need {TARGET}")
+        commands = api("GET", "command") or []
+        busy = [
+            command
+            for command in commands
+            if command.get("name") in watched
+            and command.get("status") in {"queued", "started"}
+        ]
+        if not busy:
+            return
+        print(f"waiting for {len(busy)} Lidarr refresh command(s) to finish", flush=True)
+        time.sleep(5)
+    raise RuntimeError("Lidarr refresh commands did not finish within fifteen minutes")
 
 
-def set_monitored(albums: list[dict]) -> None:
-    # This is a dedicated destructive lab: clear every album, including any
-    # manually-added artist, so repeated seeding cannot inflate wanted/missing.
+def ensure_artists_monitored(artist_ids: list[int]) -> None:
+    """Re-read every artist and monitor it if the refresh left it unmonitored.
+
+    wanted/missing requires BOTH the album and its artist to be monitored, so an
+    artist Lidarr quietly left unmonitored silently removes all of its albums
+    from the wanted set. Must run after wait_for_idle, or it reads the same
+    pre-refresh state it is meant to correct.
+    """
+    fixed = 0
+    for artist_id in artist_ids:
+        artist = api("GET", f"artist/{artist_id}")
+        if artist.get("monitored"):
+            continue
+        artist["monitored"] = True
+        artist["monitorNewItems"] = "none"
+        api("PUT", f"artist/{artist_id}", artist)
+        fixed += 1
+    if fixed:
+        print(f"monitored {fixed} artist(s) the refresh had left unmonitored")
+
+
+def set_album_monitored(album_ids: list[int], monitored: bool) -> None:
+    if album_ids:
+        api("PUT", "album/monitor", {"albumIds": album_ids, "monitored": monitored})
+
+
+def fetch_wanted_missing() -> list[dict]:
+    """Page through everything Lidarr itself considers missing."""
+    records: list[dict] = []
+    page = 1
+    while True:
+        result = api(
+            "GET",
+            "wanted/missing",
+            query={
+                "page": page,
+                "pageSize": 1000,
+                "sortKey": "releaseDate",
+                "sortDirection": "ascending",
+            },
+        )
+        batch = result.get("records") or []
+        records.extend(batch)
+        if not batch or len(records) >= int(result.get("totalRecords", 0)):
+            return records
+        page += 1
+
+
+def select_wanted() -> list[int]:
+    """Monitor everything, then keep exactly TARGET of Lidarr's own missing set.
+
+    The seed used to reimplement Lidarr's definition of missing (releaseDate in
+    the past AND totalTrackCount > trackFileCount) and then assert that
+    wanted/missing agreed. It cannot agree in general: an album whose files
+    already sit in the library is missing by the seed's definition and not by
+    Lidarr's, and the assertion demanded an exact count, so the seed failed with
+    no way to converge. Asking wanted/missing which albums qualify — and only
+    then trimming to TARGET — makes the count correct by construction, whatever
+    Lidarr's rules happen to be.
+
+    This is a dedicated destructive lab, so every album is fair game, including
+    those of any manually added artist. Repeated seeding therefore cannot
+    inflate the wanted set.
+    """
     all_ids = [int(album["id"]) for album in api("GET", "album")]
-    selected_ids = [int(album["id"]) for album in albums[:TARGET]]
-    if all_ids:
-        api("PUT", "album/monitor", {"albumIds": all_ids, "monitored": False})
-    api("PUT", "album/monitor", {"albumIds": selected_ids, "monitored": True})
-    print(f"marked exactly {len(selected_ids)} released, missing albums as monitored")
+    set_album_monitored(all_ids, True)
+    wait_for_idle()
+
+    candidates = fetch_wanted_missing()
+    if len(candidates) < TARGET:
+        raise RuntimeError(
+            f"Lidarr reports only {len(candidates)} missing albums; need {TARGET}"
+        )
+    candidates.sort(
+        key=lambda item: (item.get("releaseDate") or "9999", item.get("title") or "", item["id"])
+    )
+    selected = [int(album["id"]) for album in candidates[:TARGET]]
+    set_album_monitored([i for i in all_ids if i not in set(selected)], False)
+    print(f"kept {len(selected)} of Lidarr's {len(candidates)} missing albums monitored")
+    return selected
 
 
 def report_wanted() -> None:
@@ -192,8 +253,12 @@ def main() -> int:
         metadata_profile_id = int(metadata_profiles[0]["id"])
         ensure_root_folder(quality_profile_id, metadata_profile_id)
         artist_ids = ensure_artists(quality_profile_id, metadata_profile_id)
-        albums = wait_for_albums(artist_ids)
-        set_monitored(albums)
+        # Order matters: nothing may read or write monitor state until the
+        # refresh that Lidarr queues on artist add has finished, because that
+        # refresh re-applies addOptions.monitor ("none") and would undo it.
+        wait_for_idle()
+        ensure_artists_monitored(artist_ids)
+        select_wanted()
         report_wanted()
     except (KeyError, OSError, RuntimeError, URLError, ValueError) as exc:
         print(f"seed failed: {exc}", file=sys.stderr)
