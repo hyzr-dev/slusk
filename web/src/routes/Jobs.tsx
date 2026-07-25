@@ -1,5 +1,6 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useId, useState } from 'react';
 import { Link } from 'react-router-dom';
+import type { Job } from '../api/types';
 import { useJobs } from '../api/queries';
 import SourceBadge from '../components/SourceBadge';
 import pill from '../components/StatusPill.module.css';
@@ -7,13 +8,13 @@ import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
 import { formatEta, formatSpeed, percent } from '../format';
 import PageHeading from '../components/PageHeading';
-import { t } from '../strings';
+import { stateLabel, t } from '../strings';
 import { countByStatus, matchesFilters, type SourceFilter, type StatusFilter } from './jobFilter';
 import JobExpansion from './JobExpansion';
 import styles from './Jobs.module.css';
 
 const STATUS_CHIPS: { key: StatusFilter; label: string }[] = [
-  { key: 'all', label: t.jobs.statusAll },
+  { key: 'all', label: t.jobs.all },
   { key: 'active', label: t.status.active },
   { key: 'queued', label: t.status.queued },
   { key: 'importing', label: t.jobs.statusImporting },
@@ -24,10 +25,41 @@ const STATUS_CHIPS: { key: StatusFilter; label: string }[] = [
 ];
 
 const SOURCE_CHIPS: { key: SourceFilter; label: string }[] = [
-  { key: 'all', label: t.jobs.sourceAll },
-  { key: 'manual', label: t.jobs.sourceManual },
-  { key: 'lidarr', label: t.jobs.sourceLidarr },
+  { key: 'all', label: t.jobs.all },
+  { key: 'manual', label: t.source.manual },
+  { key: 'lidarr', label: t.source.lidarr },
 ];
+
+// The progress percentage's colour: done overrides everything else once a
+// job hits 100%, a job waiting in a peer's queue reads with the same accent
+// as its pill, an actively downloading job reads brightest, everything else
+// (queued/stalled/failed/orphaned) is dim. Mirrors the mock's pctColorRaw.
+function pctClass(job: Job, inQueue: boolean, pct: number): string {
+  if (pct >= 100) return styles.pctDone;
+  if (inQueue) return styles.pctQueued;
+  if (job.status === 'active' && job.state !== 'IMPORTING') return styles.pctActive;
+  return styles.pctOther;
+}
+
+// The progress bar fill colour by status, matching the mock's barColor().
+// IMPORTING is a state refinement of the "active" status (see jobFilter.ts),
+// so it's checked before falling through to the status switch.
+function fillClass(job: Job): string {
+  if (job.state === 'IMPORTING') return styles.fillImporting;
+  switch (job.status) {
+    case 'done':
+      return styles.fillDone;
+    case 'active':
+      return styles.fillActive;
+    case 'stalled':
+      return styles.fillStalled;
+    case 'failed':
+    case 'orphaned':
+      return styles.fillFailed;
+    default:
+      return styles.fillQueued;
+  }
+}
 
 export default function Jobs() {
   const { data: jobs = [] } = useJobs();
@@ -35,13 +67,20 @@ export default function Jobs() {
   const [status, setStatus] = useState<StatusFilter>('all');
   const [source, setSource] = useState<SourceFilter>('all');
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const sourceLabelId = useId();
+  const statusLabelId = useId();
 
   const filtered = jobs.filter((j) => matchesFilters(j, search, status, source));
   const counts = countByStatus(jobs, search, source);
+  // What the "All" chip would show if clicked: every job matching source and
+  // search regardless of status, i.e. the sum of every bucket above — not
+  // jobs.length, which ignores source/search and so can disagree with what
+  // actually renders when the chip is clicked.
+  const allCount = Object.values(counts).reduce((sum, n) => sum + n, 0);
 
   const filtersActive = search.trim() !== '' || status !== 'all' || source !== 'all';
   const summaryParts: string[] = [];
-  if (source !== 'all') summaryParts.push(source === 'manual' ? t.jobs.sourceManual : t.jobs.sourceLidarr);
+  if (source !== 'all') summaryParts.push(source === 'manual' ? t.source.manual : t.source.lidarr);
   if (status !== 'all') summaryParts.push(status === 'importing' ? t.jobs.statusImporting : t.status[status]);
   if (search.trim()) summaryParts.push(`"${search.trim()}"`);
 
@@ -67,18 +106,12 @@ export default function Jobs() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <div className={styles.chipGroup}>
-          <span className={styles.chipGroupLabel}>{t.jobs.sourceLabel}</span>
+        <div className={styles.chipGroup} role="group" aria-labelledby={sourceLabelId}>
+          <span id={sourceLabelId} className={styles.chipGroupLabel}>{t.jobs.sourceLabel}</span>
           {SOURCE_CHIPS.map((c) => (
             <button
               key={c.key}
               type="button"
-              // The row itself is also a role="button" whose accessible name
-              // is its full text content, which can start with the same word
-              // as a chip label (e.g. a "Failed" status pill inside a row);
-              // an explicit aria-label keeps each chip's accessible name
-              // exactly its label, not the label plus the count span's text.
-              aria-label={c.label}
               className={`${styles.sourceChip} ${source === c.key ? styles.chipSelected : ''} ${
                 c.key === 'manual' ? styles.chipManual : c.key === 'lidarr' ? styles.chipLidarr : ''
               }`}
@@ -90,21 +123,26 @@ export default function Jobs() {
         </div>
       </div>
 
-      <div className={styles.chipGroup}>
-        <span className={styles.chipGroupLabel}>{t.columns.status}</span>
+      <div className={styles.chipGroup} role="group" aria-labelledby={statusLabelId}>
+        <span id={statusLabelId} className={styles.chipGroupLabel}>{t.columns.status}</span>
         {STATUS_CHIPS.map((c) => (
           <button
             key={c.key}
             type="button"
-            aria-label={c.label}
             className={`${styles.statusChip} ${status === c.key ? styles.chipSelected : ''} ${
               c.key !== 'all' ? styles[`chip_${c.key}`] : ''
             }`}
             onClick={() => setStatus(c.key)}
           >
             {c.label}
+            {/* An explicit space, not just JSX layout, so the accessible
+                name reads "Failed 1" rather than "Failed1" for assistive
+                tech now that this button relies on its text content (no
+                aria-label — see the removed workaround in issue #60's
+                review) rather than an override. */}
+            {' '}
             <span className={styles.chipCount}>
-              {c.key === 'all' ? jobs.length : counts[c.key]}
+              {c.key === 'all' ? allCount : counts[c.key]}
             </span>
           </button>
         ))}
@@ -116,7 +154,7 @@ export default function Jobs() {
       </div>
 
       <div className={styles.tableWrap}>
-        <table className={table.table}>
+        <table className={`${table.table} ${styles.jobsTable}`}>
           <colgroup>
             <col style={{ width: 112 }} />
             <col />
@@ -135,10 +173,10 @@ export default function Jobs() {
               <th className={table.th}>{t.columns.peer}</th>
               <th className={table.th}>{t.columns.format}</th>
               <th className={table.th}>{t.columns.progress}</th>
-              <th className={table.th}>{t.columns.speed}</th>
-              <th className={table.th}>{t.columns.eta}</th>
-              <th className={table.th}>{t.columns.retries}</th>
-              <th className={table.th} aria-hidden />
+              <th className={`${table.th} ${styles.right}`}>{t.columns.speed}</th>
+              <th className={`${table.th} ${styles.right}`}>{t.columns.eta}</th>
+              <th className={`${table.th} ${styles.center}`}>{t.columns.retries}</th>
+              <th className={`${table.th} ${styles.center}`} aria-hidden />
             </tr>
           </thead>
           <tbody>
@@ -149,21 +187,18 @@ export default function Jobs() {
             ) : (
               filtered.map((j) => {
                 const expanded = expandedId === j.id;
-                const inQueue = (j.queuePosition ?? 0) > 0;
+                const expansionId = `job-expansion-${j.id}`;
+                // Only status: 'active' jobs are actually mid-transfer with a
+                // live queue slot — a stalled/failed job can still carry a
+                // stale queuePosition from its last attempt, and must keep
+                // showing its real status instead of "In peer's queue".
+                const inQueue = j.status === 'active' && (j.queuePosition ?? 0) > 0;
+                const pct = percent(j.bytesDone, j.bytesTotal);
                 return (
                   <Fragment key={j.id}>
                     <tr
                       className={table.rowClickable}
-                      tabIndex={0}
-                      role="button"
-                      aria-expanded={expanded}
                       onClick={() => toggleExpanded(j.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          toggleExpanded(j.id);
-                        }
-                      }}
                     >
                       <td className={table.td}>
                         {inQueue ? (
@@ -193,24 +228,22 @@ export default function Jobs() {
                         <div className={styles.progressRow}>
                           <div className={styles.progressBar}>
                             <div
-                              className={`${styles.progressFill} ${inQueue ? styles.progressHatched : ''}`}
-                              style={{ width: inQueue ? '100%' : `${percent(j.bytesDone, j.bytesTotal)}%` }}
+                              className={`${styles.progressFill} ${
+                                inQueue ? styles.progressHatched : fillClass(j)
+                              }`}
+                              style={{ width: `${inQueue ? 100 : Math.max(2, pct)}%` }}
                             />
                           </div>
-                          <span className={table.mono}>
-                            {j.status === 'queued'
-                              ? '—'
-                              : inQueue
-                                ? t.jobs.queuePosition(j.queuePosition!)
-                                : `${percent(j.bytesDone, j.bytesTotal)}%`}
+                          <span className={`${table.mono} ${styles.pct} ${pctClass(j, inQueue, pct)}`}>
+                            {j.status === 'queued' ? '—' : inQueue ? t.jobs.queuePosition(j.queuePosition!) : `${pct}%`}
                           </span>
                         </div>
                         <div className={styles.progressSub}>
                           {inQueue
-                            ? t.jobs.inPeerQueue
+                            ? t.jobs.queuedAtPeer
                             : j.state === 'IMPORTING'
                               ? t.jobs.verifying
-                              : j.state}
+                              : stateLabel(j.state, j.status)}
                         </div>
                       </td>
                       <td className={`${table.td} ${table.mono} ${styles.right}`}>{formatSpeed(j.speed)}</td>
@@ -223,13 +256,24 @@ export default function Jobs() {
                         )}
                       </td>
                       <td className={`${table.td} ${styles.center}`}>
-                        <span className={`${styles.chevron} ${expanded ? styles.chevronExpanded : ''}`}>
-                          ›
-                        </span>
+                        <button
+                          type="button"
+                          className={styles.chevronButton}
+                          aria-expanded={expanded}
+                          aria-controls={expansionId}
+                          aria-label={expanded ? t.jobs.hideDetails : t.jobs.showDetails}
+                        >
+                          <span
+                            aria-hidden
+                            className={`${styles.chevron} ${expanded ? styles.chevronExpanded : ''}`}
+                          >
+                            ›
+                          </span>
+                        </button>
                       </td>
                     </tr>
                     {expanded && (
-                      <tr>
+                      <tr id={expansionId}>
                         <td colSpan={9} className={styles.expansionCell}>
                           <JobExpansion job={j} onCollapse={() => setExpandedId(null)} />
                         </td>

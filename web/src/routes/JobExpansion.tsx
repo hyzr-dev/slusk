@@ -2,7 +2,7 @@ import { useJobDetail } from '../api/queries';
 import type { AttemptDetail, Job } from '../api/types';
 import JobActions from '../components/JobActions';
 import SourceBadge from '../components/SourceBadge';
-import { formatBytes, formatDateTime } from '../format';
+import { basename, formatBytes, formatBytesOrDash, formatDateTime } from '../format';
 import { t } from '../strings';
 import styles from './JobExpansion.module.css';
 
@@ -17,11 +17,6 @@ const TRANSFER_DOT: Record<string, string> = {
   ERRORED: styles.dotFailed ?? '',
   CANCELLED: styles.dotFailed ?? '',
 };
-
-function basename(path: string): string {
-  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  return idx === -1 ? path : path.slice(idx + 1);
-}
 
 // The current candidate is the in-progress attempt, or — once nothing is
 // active (e.g. the job just failed or succeeded) — whichever attempt was
@@ -75,11 +70,11 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
               </div>
               <div className={styles.detailRow}>
                 <span className={styles.detailKey}>{t.jobs.sizeLabel}</span>
-                <span className={styles.detailValue}>{formatBytes(job.bytesTotal)}</span>
+                <span className={styles.detailValue}>{formatBytesOrDash(job.bytesTotal)}</span>
               </div>
               <div className={styles.detailRow}>
                 <span className={styles.detailKey}>{t.jobs.downloadedLabel}</span>
-                <span className={styles.detailValue}>{formatBytes(job.bytesDone)}</span>
+                <span className={styles.detailValue}>{formatBytesOrDash(job.bytesDone)}</span>
               </div>
               <div className={styles.detailRow}>
                 <span className={styles.detailKey}>{t.jobs.jobIdLabel}</span>

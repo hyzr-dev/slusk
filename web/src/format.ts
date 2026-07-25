@@ -8,6 +8,23 @@ export function formatBytes(n: number | null | undefined): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Same scaling as formatBytes, but for spots (the expansion panel's Size and
+// Downloaded rows) where a 0 means "not known yet" rather than "an empty
+// file", so it should read like the row's other placeholders rather than the
+// misleading "0 MB".
+export function formatBytesOrDash(n: number | null | undefined): string {
+  if (!n) return '—';
+  return formatBytes(n);
+}
+
+// Leaf filename from a remote (Soulseek peers commonly use backslashes) or
+// local path, shared by the job detail page and the jobs-list expansion
+// panel so both show the same short name instead of one showing full paths.
+export function basename(path: string): string {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
 export function percent(done: number, total: number): number {
   if (!total) return 0;
   const raw = Math.round((done / total) * 100);
@@ -50,10 +67,15 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
 }
 
 // etaSeconds is a duration, not a timestamp (see api/types.ts Job.etaSeconds).
-// Minutes below an hour, seconds below a minute — this view never needs
-// hour-scale ETAs, so there's no third tier.
+// Hours above 60 minutes, minutes below an hour, seconds below a minute — a
+// slow peer on a large Soulseek album can easily push past an hour.
 export function formatEta(etaSeconds: number | null | undefined): string {
   if (!etaSeconds) return '—';
+  if (etaSeconds >= 3600) {
+    const h = Math.floor(etaSeconds / 3600);
+    const m = Math.round((etaSeconds % 3600) / 60);
+    return m > 0 ? `${h} h ${m} min` : `${h} h`;
+  }
   if (etaSeconds >= 60) return `${Math.round(etaSeconds / 60)} min`;
   return `${Math.round(etaSeconds)} s`;
 }

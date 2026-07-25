@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatSpeed, formatEta, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
+import { basename, formatBytes, formatBytesOrDash, formatSpeed, formatEta, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -50,6 +50,38 @@ describe('formatEta', () => {
   it('shows rounded minutes at or above 60 seconds', () => {
     expect(formatEta(60)).toBe('1 min');
     expect(formatEta(150)).toBe('3 min');
+  });
+
+  it('shows hours and minutes at or above one hour', () => {
+    expect(formatEta(3600)).toBe('1 h');
+    expect(formatEta(5400)).toBe('1 h 30 min');
+    expect(formatEta(7260)).toBe('2 h 1 min');
+  });
+});
+
+describe('formatBytesOrDash', () => {
+  it('returns an em dash for zero and nullish input, unlike formatBytes', () => {
+    expect(formatBytesOrDash(0)).toBe('—');
+    expect(formatBytesOrDash(null)).toBe('—');
+    expect(formatBytesOrDash(undefined)).toBe('—');
+  });
+
+  it('formats non-zero sizes the same as formatBytes', () => {
+    expect(formatBytesOrDash(1024 * 1024)).toBe('1.0 MB');
+  });
+});
+
+describe('basename', () => {
+  it('returns the leaf name for a forward-slash path', () => {
+    expect(basename('music/Album/01 Track.flac')).toBe('01 Track.flac');
+  });
+
+  it('returns the leaf name for a backslash path', () => {
+    expect(basename('music\\Album\\01 Track.flac')).toBe('01 Track.flac');
+  });
+
+  it('returns the input unchanged when there is no separator', () => {
+    expect(basename('01 Track.flac')).toBe('01 Track.flac');
   });
 });
 

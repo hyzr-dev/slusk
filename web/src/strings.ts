@@ -55,7 +55,6 @@ export const t = {
     peer: 'Peer',
     progress: 'Progress',
     status: 'Status',
-    id: 'ID',
     time: 'Time',
     job: 'Job',
     event: 'Event',
@@ -77,8 +76,6 @@ export const t = {
   jobs: {
     detail: 'Job detail',
     searchPlaceholder: 'Search artist, album, peer…',
-    allStatuses: 'All',
-    empty: 'No jobs match the current filter.',
     noMatch: 'No jobs match the filter.',
     back: '← Back',
     cancel: 'Cancel',
@@ -102,13 +99,20 @@ export const t = {
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
     inPeerQueue: "In peer's queue",
+    // Distinct from inPeerQueue: that's the status pill's text, this is the
+    // progress bar's sub-state line right below it — showing the same phrase
+    // twice in adjacent lines reads as a copy-paste rather than two facts.
+    queuedAtPeer: 'queued at peer',
     verifying: 'verifying',
+    showDetails: 'Show details',
+    hideDetails: 'Hide details',
     moreFiles: (n: number) => `+${n} more files`,
-    // Chip filter row labels (Source / Status) and the "clear filters" affordance.
-    sourceAll: 'All',
-    sourceManual: 'Manual',
-    sourceLidarr: 'Lidarr',
-    statusAll: 'All',
+    // Chip filter row labels (Source / Status) and the "clear filters"
+    // affordance. Both chip rows' "all" option and the label for a plain
+    // status/source share this single 'All', rather than three copies of the
+    // same word; source-specific labels reuse t.source instead of
+    // duplicating "Manual"/"Lidarr" here.
+    all: 'All',
     statusImporting: 'Importing',
     clearFilters: (summary: string) => `Clear · ${summary}`,
     peerAndTransfer: 'Peer & transfer',

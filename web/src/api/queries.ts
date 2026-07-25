@@ -72,15 +72,15 @@ export function usePeers() {
 // can never overwrite the current one — this replaces the legacy dashboard's
 // manual `detailJobId === id` guard.
 //
-// `enabled` defaults to true (JobDetail's own usage); the Jobs list expansion
-// panel passes it explicitly so the detail fetch only starts once a row is
-// expanded, rather than for every row up front.
-export function useJobDetail(id: number, options: { enabled?: boolean } = {}) {
+// No `enabled` flag is needed here: the Jobs list expansion panel (issue #60)
+// only mounts JobExpansion — and therefore only calls this hook — once a row
+// is expanded, so the fetch is naturally scoped to expanded rows rather than
+// firing for every row up front.
+export function useJobDetail(id: number) {
   return useQuery({
     queryKey: queryKeys.jobDetail(id),
     queryFn: () => apiGet<JobDetail>(`/api/jobs/${id}/detail`),
     refetchInterval: JOBS_INTERVAL,
-    enabled: options.enabled ?? true,
   });
 }
 

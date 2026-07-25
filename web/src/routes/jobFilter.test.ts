@@ -103,11 +103,15 @@ describe('countByStatus', () => {
     expect(counts.active).toBe(0);
   });
 
-  it('ignores the status filter itself — counts are not zeroed by the selected chip', () => {
-    // countByStatus takes no status argument at all, so selecting the
-    // "queued" chip elsewhere in the UI cannot affect these counts.
-    const counts = countByStatus(jobs, '', 'all');
-    expect(counts.failed).toBe(1);
-    expect(counts.active).toBe(1);
+  it('every bucket sums to the number of jobs matching source and search — the "All" chip invariant', () => {
+    // countByStatus takes no status argument at all, so a caller cannot zero
+    // out other chips' counts by passing the currently-selected status —
+    // and summing every bucket must equal exactly what matchesFilters(..., 'all', source)
+    // would return, which is what the "All" chip's own count needs to show.
+    const counts = countByStatus(jobs, '', 'lidarr');
+    const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    const matchingAll = jobs.filter((j) => matchesFilters(j, '', 'all', 'lidarr')).length;
+    expect(total).toBe(matchingAll);
+    expect(total).toBe(2);
   });
 });

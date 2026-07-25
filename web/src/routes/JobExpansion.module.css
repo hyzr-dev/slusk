@@ -7,9 +7,10 @@
   margin-bottom: 14px;
   background: var(--failed-bg);
   color: var(--failed);
+  border: 1px solid color-mix(in srgb, var(--failed) 20%, transparent);
 }
-.reasonBox.stalled { background: var(--stalled-bg); color: var(--stalled); }
-.reasonBox.orphaned { background: var(--orphaned-bg); color: var(--orphaned); }
+.reasonBox.stalled { background: var(--stalled-bg); color: var(--stalled); border-color: color-mix(in srgb, var(--stalled) 20%, transparent); }
+.reasonBox.orphaned { background: var(--orphaned-bg); color: var(--orphaned); border-color: color-mix(in srgb, var(--orphaned) 20%, transparent); }
 .reasonTitle { font-weight: 600; }
 
 .placeholder { color: var(--text-muted); font-size: 12.5px; padding: 4px 0; }

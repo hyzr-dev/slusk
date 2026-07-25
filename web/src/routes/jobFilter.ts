@@ -40,10 +40,10 @@ function matchesStatus(job: Job, status: StatusFilter): boolean {
 export function matchesFilters(
   job: Job,
   search: string,
-  status: StatusFilter | string,
+  status: StatusFilter,
   source: SourceFilter = 'all',
 ): boolean {
-  if (!matchesStatus(job, status as StatusFilter)) return false;
+  if (!matchesStatus(job, status)) return false;
   if (!matchesSource(job, source)) return false;
   return matchesSearch(job, search);
 }

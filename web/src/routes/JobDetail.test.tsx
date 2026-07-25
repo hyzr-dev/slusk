@@ -142,13 +142,12 @@ describe('delete action', () => {
   });
 
   it('surfaces the server error message on a 409', async () => {
+    // The real backend answers job-action failures with http.Error, which is
+    // plain text, not JSON (internal/observ/observ.go) — stub that shape
+    // rather than JSON so this test actually exercises the text fallback.
     vi.stubGlobal(
       'fetch',
-      vi.fn(() =>
-        Promise.resolve(
-          new Response(JSON.stringify({ error: 'job is importing' }), { status: 409 }),
-        ),
-      ),
+      vi.fn(() => Promise.resolve(new Response('job is importing\n', { status: 409 }))),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(queryKeys.jobs, [makeJob({ state: 'IMPORTING', status: 'active' })]);
@@ -160,7 +159,27 @@ describe('delete action', () => {
     fireEvent.click(screen.getByRole('button', { name: t.jobs.delete }));
     fireEvent.click(screen.getByRole('button', { name: t.jobs.deleteConfirm }));
 
+    await waitFor(() => expect(screen.getByText('job is importing')).toBeInTheDocument());
+    expect(screen.queryByText(t.jobs.deleteFailed)).not.toBeInTheDocument();
+  });
+
+  it('disarms the delete confirm and falls back to the canned message when the server sends no body', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 500 }))));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.delete }));
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.deleteConfirm }));
+
     await waitFor(() => expect(screen.getByText(t.jobs.deleteFailed)).toBeInTheDocument());
+    // The confirm button reverted to its unarmed label instead of staying
+    // primed next to the error.
+    expect(screen.getByRole('button', { name: t.jobs.delete })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.jobs.deleteConfirm })).not.toBeInTheDocument();
   });
 });
 

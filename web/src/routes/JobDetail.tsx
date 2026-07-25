@@ -1,19 +1,14 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
 import type { JobState } from '../api/types';
-import JobActions from '../components/JobActions';
+import JobActions, { isRetryEligible } from '../components/JobActions';
 import PageHeading from '../components/PageHeading';
 import SourceBadge from '../components/SourceBadge';
 import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
-import { formatBytes, formatDateTime, formatShortTime, formatSpeed } from '../format';
+import { basename, formatBytes, formatDateTime, formatShortTime, formatSpeed } from '../format';
 import { candidateStateLabel, eventLabel, t } from '../strings';
 import styles from './JobDetail.module.css';
-
-// FAILED or ORPHANED are the two states JobActions offers Retry for.
-function isRetryEligible(state: JobState | undefined): boolean {
-  return state === 'FAILED' || state === 'ORPHANED';
-}
 
 export default function JobDetail() {
   const id = Number(useParams().id);
@@ -132,7 +127,7 @@ export default function JobDetail() {
             </div>
             {a.transfers.map((tr) => (
               <div key={tr.filename} className={styles.transfer}>
-                {tr.filename} — {tr.state} {formatBytes(tr.bytesDone)} /{' '}
+                {basename(tr.filename)} — {tr.state} {formatBytes(tr.bytesDone)} /{' '}
                 {formatBytes(tr.bytesTotal)}
                 {/* speed and queue position are live-only and mutually exclusive
                     in practice (downloading vs waiting in the peer's queue); each
