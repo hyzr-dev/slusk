@@ -82,6 +82,11 @@ services:
       - ./runtime/slskdarr/config.toml:/config/config.toml:ro
       - downloads:/music/slskd-downloads
       - music:/music/library
+      # Read-only on purpose, and deliberately NOT /music/library: that path is
+      # Lidarr's root folder, so the lab imports test albums into it. Pointing a
+      # real music directory there would let a destructive test environment
+      # write into it. Mounted only on slskdarr, which just needs to read.
+      - ${SLSKDARR_SHARE_DIR:-./share}:/music/share:ro
     depends_on:
       postgres:
         condition: service_healthy

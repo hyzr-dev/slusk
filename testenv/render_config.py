@@ -151,6 +151,14 @@ username = {toml_string(native_user)}
 password = {toml_string(native_password)}
 listen_addr = "0.0.0.0:{listen_port}"
 upload_slots = 2
+
+# Sharing is what makes the lab usable for upload and share testing: without a
+# share the client is a pure leech, /api/shares reports nothing and no peer can
+# ever queue a file from it. The path is the read-only mount of
+# SLSKDARR_SHARE_DIR (see compose.yml), never Lidarr's root folder.
+[[soulseek.shared_folders]]
+name = "Lab"
+path = "/music/share"
 '''
     path.write_text(config)
     path.chmod(0o644)
