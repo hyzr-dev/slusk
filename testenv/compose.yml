@@ -1,0 +1,116 @@
+name: ${COMPOSE_PROJECT_NAME:-slskdarr-pr-lab}
+
+services:
+  volume-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "mkdir -p /music/slskd-downloads /music/library && chmod 0777 /music/slskd-downloads /music/library"]
+    volumes:
+      - downloads:/music/slskd-downloads
+      - music:/music/library
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: slskdarr
+      POSTGRES_PASSWORD: slskdarr-test
+      POSTGRES_DB: slskdarr
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slskdarr -d slskdarr"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  lidarr:
+    image: ${LIDARR_IMAGE:-lscr.io/linuxserver/lidarr:latest}
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    ports:
+      - "127.0.0.1:${LIDARR_PORT:-8686}:8686"
+    volumes:
+      - ./runtime/lidarr:/config
+      - downloads:/music/slskd-downloads
+      - music:/music/library
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  slskd:
+    image: ${SLSKD_IMAGE:-slskd/slskd:latest}
+    environment:
+      SLSKD_REMOTE_CONFIGURATION: "true"
+      SLSKD_REMOTE_FILE_MANAGEMENT: "true"
+      SLSKD_NO_HTTPS: "true"
+      SLSKD_USERNAME: ${SLSKD_WEB_USERNAME:-slskd}
+      SLSKD_PASSWORD: ${SLSKD_WEB_PASSWORD:-slskd}
+      SLSKD_API_KEY: ${SLSKD_API_KEY:-slskd-pr-lab-api-key-00000001}
+      SLSKD_SLSK_USERNAME: ${SLSKD_SOULSEEK_USERNAME:?set SLSKD_SOULSEEK_USERNAME in testenv/.env}
+      SLSKD_SLSK_PASSWORD: ${SLSKD_SOULSEEK_PASSWORD:?set SLSKD_SOULSEEK_PASSWORD in testenv/.env}
+      SLSKD_SLSK_LISTEN_IP_ADDRESS: 0.0.0.0
+      SLSKD_SLSK_LISTEN_PORT: ${SLSKD_LISTEN_PORT:-50300}
+      SLSKD_DOWNLOADS_DIR: /music/slskd-downloads
+      SLSKD_INCOMPLETE_DIR: /music/incomplete
+      SLSKD_UMASK: "000"
+    ports:
+      - "127.0.0.1:${SLSKD_WEB_PORT:-5030}:5030"
+      - "${SLSKD_LISTEN_PORT:-50300}:${SLSKD_LISTEN_PORT:-50300}"
+    volumes:
+      - slskd:/app
+      - downloads:/music/slskd-downloads
+      - incomplete:/music/incomplete
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  slskdarr:
+    build:
+      context: ..
+    environment:
+      TZ: ${TZ:-Etc/UTC}
+    ports:
+      - "127.0.0.1:${SLSKDARR_PORT:-9090}:9090"
+      - "${SLSKDARR_LISTEN_PORT:-50301}:${SLSKDARR_LISTEN_PORT:-50301}"
+    volumes:
+      - ./runtime/slskdarr/config.toml:/config/config.toml:ro
+      - downloads:/music/slskd-downloads
+      - music:/music/library
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+      lidarr:
+        condition: service_started
+      slskd:
+        condition: service_started
+    restart: unless-stopped
+
+  lidarr-seed:
+    image: python:3.13-alpine
+    profiles: ["tools"]
+    environment:
+      LIDARR_URL: http://lidarr:8686
+      LIDARR_API_KEY: ${LIDARR_API_KEY:-lidarr-pr-lab-api-key-00000001}
+      WANTED_ALBUMS: ${WANTED_ALBUMS:-150}
+    volumes:
+      - ./seed_lidarr.py:/seed_lidarr.py:ro
+    command: ["python", "/seed_lidarr.py"]
+    depends_on:
+      lidarr:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  postgres:
+  slskd:
+  downloads:
+  incomplete:
+  music:
