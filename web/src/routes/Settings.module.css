@@ -139,6 +139,14 @@
 /* --- Per-field help popover ----------------------------------------------- */
 
 .labelRow { display: flex; align-items: center; gap: 6px; }
+/* The label column is a fixed 190px, not a half-width cell — a right-anchored
+   panel (see .helpPanel below) would run off past the row's own edge for a
+   short label like "URL". Left-anchor here instead, same fix already used
+   for subsection popovers below. */
+.labelRow .helpPanel {
+  left: 0;
+  right: auto;
+}
 
 .helpWrapper { position: relative; display: inline-flex; }
 
@@ -154,9 +162,9 @@
 .helpButton:hover { color: var(--fg); border-color: var(--dim); }
 .helpButton:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
 
-/* Anchored right rather than left: the wrapper sits at the right end of its
-   label row, so a left-anchored panel would overflow past the row's edge
-   for fields whose label is short. */
+/* right:0 is the base case; both call sites (.labelRow and .subTitleRow,
+   above) override it to left:0 since neither anchors its help button at the
+   right end of anything wide enough for a right-anchored panel to clear. */
 .helpPanel {
   position: absolute;
   top: 100%;
@@ -247,7 +255,7 @@
 
 /* Danger zone: title in the failed accent so it visually reads as
    higher-stakes than the rest of the form. */
-.dangerTitle { color: var(--bad); }
+.dangerTitle { font-size: inherit; font-weight: 400; margin: 0; color: var(--bad); }
 .dangerHint { font-size: 11px; color: var(--dim); margin-top: 12px; }
 
 .saveRow {
