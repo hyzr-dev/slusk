@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
-import Ticks, { tickStates } from './Ticks';
+import Ticks, { tickStates, tickFingerprint } from './Ticks';
 
 describe('tickStates', () => {
   it('marks every tick off at 0 percent', () => {
@@ -25,6 +25,29 @@ describe('tickStates', () => {
   it('clamps out-of-range input rather than drawing extra or negative ticks', () => {
     expect(tickStates(140, 3)).toEqual(['on', 'on', 'on']);
     expect(tickStates(-20, 3)).toEqual(['off', 'off', 'off']);
+  });
+});
+
+describe('tickFingerprint', () => {
+  it('separates a bar with a partial tick from one without', () => {
+    // filled = 3.0 exactly: three lit ticks, nothing trailing.
+    // filled = 3.04: the same three, plus a half-lit fourth.
+    expect(tickFingerprint(37.5, 8)).not.toBe(tickFingerprint(38, 8));
+  });
+
+  it('treats any two partial fractions in the same tick as identical', () => {
+    // A partial tick renders at a fixed opacity, so 3.04 and 3.9 look alike.
+    expect(tickFingerprint(38, 8)).toBe(tickFingerprint(48, 8));
+  });
+
+  it('separates a full tick from a partial one at the same ceiling', () => {
+    expect(tickFingerprint(50, 8)).not.toBe(tickFingerprint(38, 8));
+  });
+
+  it('does not freeze a bar leaving zero', () => {
+    // The failure this replaced: floor stays 0 below one whole tick, so a
+    // transfer that had just started never repainted.
+    expect(tickFingerprint(0, 26)).not.toBe(tickFingerprint(1, 26));
   });
 });
 

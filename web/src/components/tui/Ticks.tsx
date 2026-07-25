@@ -28,6 +28,20 @@ export function tickStates(percent: number, count: number): TickState[] {
   });
 }
 
+/**
+ * The render identity of a tick row.
+ *
+ * Two rows look the same only when they light the same number of full ticks
+ * *and* agree on whether a partial tick trails them — a partial tick is drawn
+ * at a fixed half opacity, so its exact fraction does not matter but its
+ * presence does. floor and ceil together capture both facts.
+ */
+export function tickFingerprint(percent: number, count: number): string {
+  const clamped = Math.min(100, Math.max(0, percent));
+  const filled = (clamped / 100) * count;
+  return `${Math.floor(filled)}:${Math.ceil(filled)}`;
+}
+
 interface Props {
   percent: number;
   count: number;
@@ -52,7 +66,7 @@ function TicksImpl({ percent, count, tone = 'bar', live = false, height = 12 }: 
             key={i}
             data-tick
             data-flare={flare ? 'true' : undefined}
-            className={flare ? styles.flare : undefined}
+            className={flare ? `${styles.tick} ${styles.flare}` : styles.tick}
             style={{
               background: state === 'off' ? 'var(--tick-off)' : color,
               opacity: state === 'partial' ? 0.5 : 1,
@@ -67,15 +81,14 @@ function TicksImpl({ percent, count, tone = 'bar', live = false, height = 12 }: 
 /**
  * A dense bar of uniform ticks that recolour in place as a transfer advances.
  *
- * Memoised on the *integer* number of lit ticks rather than on `percent`: the
+ * Memoised on the fingerprint of lit and partial ticks rather than on raw `percent`: the
  * jobs list polls every 3 s and can hold ~150 rows of 26 ticks each, so a job
  * creeping from 41.2 % to 41.4 % must not repaint ~3900 nodes for a bar that
  * looks identical.
  */
 const Ticks = memo(TicksImpl, (prev, next) => {
-  const lit = (p: Props) => Math.floor((Math.min(100, Math.max(0, p.percent)) / 100) * p.count);
   return (
-    lit(prev) === lit(next) &&
+    tickFingerprint(prev.percent, prev.count) === tickFingerprint(next.percent, next.count) &&
     prev.count === next.count &&
     prev.tone === next.tone &&
     prev.live === next.live &&
