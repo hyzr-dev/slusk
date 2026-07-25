@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { Job, JobDetail as JobDetailDTO, JobEvent } from '../api/types';
+import { FlashProvider } from '../components/chrome/FlashContext';
+import StatusBar from '../components/chrome/StatusBar';
 import { t } from '../strings';
 import Jobs from './Jobs';
 
@@ -39,10 +41,10 @@ function stubFetchIndefinitely() {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
 }
 
-// Status chip buttons carry a count span (e.g. "Failed 1"), so their
-// accessible name is the label plus a trailing count — match with a regex
-// rather than the bare label, and anchor + require the digit suffix so e.g.
-// "All" (the source chip, no count) never satisfies the "All \d+" pattern.
+// Chip buttons carry a count span (e.g. "ACTIVE 1"), so their accessible name
+// is the label plus a trailing count — match with a regex rather than the
+// bare label, and anchor + require the digit suffix so e.g. "ALL" never
+// satisfies some other "ALL \d+" pattern by accident.
 function statusChipName(label: string): RegExp {
   return new RegExp(`^${label} \\d+$`);
 }
@@ -59,24 +61,40 @@ function renderJobs(jobs: Job[], client?: QueryClient) {
   );
 }
 
-describe('source badge', () => {
-  it('renders Manual and Lidarr badges for their respective jobs', () => {
+// FlashContext's message has nowhere to land inside plain renderJobs() —
+// StatusBar is what actually renders it — so the one test asserting on a
+// flash wraps both in FlashProvider and mounts StatusBar alongside Jobs,
+// exactly as Layout does in the real app.
+function renderJobsWithChrome(jobs: Job[]) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  qc.setQueryData(queryKeys.jobs, jobs);
+  return render(
+    <QueryClientProvider client={qc}>
+      <FlashProvider>
+        <MemoryRouter>
+          <Jobs />
+          <StatusBar />
+        </MemoryRouter>
+      </FlashProvider>
+    </QueryClientProvider>,
+  );
+}
+
+describe('source indicator', () => {
+  it('marks a manual job with the source dot and leaves a Lidarr job unmarked', () => {
     stubFetchIndefinitely();
     renderJobs([
       makeJob({ id: 1, source: 'manual', title: 'Rounds' }),
       makeJob({ id: 2, source: 'lidarr', title: 'Dummy' }),
     ]);
 
-    // Scoped to the table: the source filter chips above it use the same
-    // "Manual"/"Lidarr" labels, so an unscoped query would be ambiguous.
-    const table = within(screen.getByRole('table'));
-    expect(table.getByText(t.source.manual)).toBeInTheDocument();
-    expect(table.getByText(t.source.lidarr)).toBeInTheDocument();
+    expect(screen.getByTitle(t.source.manual)).toBeInTheDocument();
+    expect(screen.queryAllByTitle(t.source.manual)).toHaveLength(1);
   });
 });
 
 describe('placeholders for absent fields', () => {
-  it('shows an em dash in the peer, format, speed and ETA cells when those fields are absent', () => {
+  it('shows an em dash for peer, format, speed and eta when those fields are absent', () => {
     stubFetchIndefinitely();
     renderJobs([
       makeJob({
@@ -85,44 +103,27 @@ describe('placeholders for absent fields', () => {
         speed: undefined,
         etaSeconds: undefined,
         format: null,
-        year: null,
       }),
     ]);
 
-    // Row 0 is the header row; row 1 is the one data row.
-    const row = screen.getAllByRole('row')[1];
-    const cells = within(row).getAllByRole('cell');
-    // status, album, peer, format, progress, speed, eta, retries, chevron
-    expect(cells).toHaveLength(9);
-    expect(cells[2]).toHaveTextContent('—'); // peer
-    expect(cells[3]).toHaveTextContent('—'); // format
-    expect(cells[5]).toHaveTextContent('—'); // speed
-    expect(cells[6]).toHaveTextContent('—'); // eta
-  });
-
-  it('shows the artist alone (no dangling separator) when year is null', () => {
-    stubFetchIndefinitely();
-    renderJobs([makeJob({ id: 1, artist: 'Boards of Canada', year: null })]);
-    expect(screen.getByText('Boards of Canada')).toBeInTheDocument();
-    expect(screen.queryByText(/Boards of Canada ·/)).not.toBeInTheDocument();
+    expect(screen.getAllByText('—')).toHaveLength(4);
   });
 });
 
 describe('queue position rendering', () => {
-  it("shows the In peer's queue pill and a distinct sub-state line when queuePosition is set on an active job", () => {
+  it('tags an active job waiting in a peer queue as QU and shows a compact queue position', () => {
     stubFetchIndefinitely();
     renderJobs([makeJob({ id: 1, status: 'active', queuePosition: 4 })]);
 
-    expect(screen.getByText(t.jobs.inPeerQueue)).toBeInTheDocument();
-    expect(screen.getByText(t.jobs.queuedAtPeer)).toBeInTheDocument();
-    expect(screen.getByText(t.jobs.queuePosition(4))).toBeInTheDocument();
+    expect(screen.getByTitle(t.tagTitle.QU)).toHaveTextContent('QU');
+    expect(screen.getByText(t.jobs.queueShort(4))).toBeInTheDocument();
   });
 
   // Regression: queuePosition comes from the live ListDownloads snapshot
   // whenever an attempt exists, regardless of the job's actual status — a
   // stalled job carrying a stale queue slot from its last attempt must still
-  // show its real Stalled pill and real percentage, not "In peer's queue".
-  it('ignores a stale queuePosition on a non-active job and shows its real progress instead', () => {
+  // show its real ST tag and real percentage, not QU.
+  it('ignores a stale queuePosition on a non-active job and shows its real tag and progress', () => {
     stubFetchIndefinitely();
     renderJobs([
       makeJob({
@@ -135,10 +136,8 @@ describe('queue position rendering', () => {
       }),
     ]);
 
-    // Neither the pill nor the progress cell falls into the "In peer's
-    // queue" rendering path just because a stale queuePosition is present.
-    expect(screen.queryByText(t.jobs.inPeerQueue)).not.toBeInTheDocument();
-    expect(screen.queryByText(t.jobs.queuedAtPeer)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(t.tagTitle.QU)).not.toBeInTheDocument();
+    expect(screen.getByTitle(t.tagTitle.ST)).toHaveTextContent('ST');
     expect(screen.getByText('25%')).toBeInTheDocument();
   });
 });
@@ -151,70 +150,41 @@ describe('chip filtering', () => {
       makeJob({ id: 2, title: 'Rounds', status: 'failed', state: 'FAILED' }),
     ]);
 
-    fireEvent.click(screen.getByRole('button', { name: statusChipName(t.status.failed) }));
+    fireEvent.click(screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
 
     expect(screen.getByText('Rounds')).toBeInTheDocument();
     expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
-    // The Active chip's own counter still reads 1 even though it's not selected.
-    const activeChip = screen.getByRole('button', { name: statusChipName(t.status.active) });
+    // The ACTIVE chip's own counter still reads 1 even though it's not selected.
+    const activeChip = screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) });
     expect(within(activeChip).getByText('1')).toBeInTheDocument();
-  });
-
-  it('filters by source chip', () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual' }),
-    ]);
-
-    fireEvent.click(screen.getByRole('button', { name: t.source.manual }));
-
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
   });
 
   it('shows the empty state when no job matches the filter', () => {
     stubFetchIndefinitely();
-    renderJobs([makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' })]);
+    renderJobs([makeJob({ id: 1, title: 'Kind of Blue', status: 'active' })]);
 
-    fireEvent.click(screen.getByRole('button', { name: t.source.manual }));
+    fireEvent.click(screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.done) }));
 
-    expect(screen.getByText(t.jobs.noMatch)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(t.jobs.noMatch))).toBeInTheDocument();
   });
 
-  it('shows a clear-filters button summarising the active filters, and clears them', () => {
+  it("the ALL chip's count reflects the search filter, not the unfiltered job list", () => {
     stubFetchIndefinitely();
     renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'failed' }),
+      makeJob({ id: 1, title: 'Kind of Blue', artist: 'Miles Davis', status: 'active' }),
+      makeJob({ id: 2, title: 'Rounds', artist: 'Four Tet', status: 'failed' }),
+      makeJob({ id: 3, title: 'Sound of Silver', artist: 'LCD Soundsystem', status: 'done' }),
     ]);
 
-    fireEvent.click(screen.getByRole('button', { name: t.source.manual }));
-    const clearButton = screen.getByRole('button', { name: t.jobs.clearFilters(t.source.manual) });
-    fireEvent.click(clearButton);
+    fireEvent.change(screen.getByPlaceholderText(t.jobs.searchPlaceholder), { target: { value: 'Tet' } });
 
-    expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-  });
-
-  it("the All chip's count reflects the source and search filters, not the unfiltered job list", () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'failed' }),
-      makeJob({ id: 3, title: 'Sound of Silver', source: 'manual', status: 'done' }),
-    ]);
-
-    fireEvent.click(screen.getByRole('button', { name: t.source.manual }));
-
-    // Clicking "All" with Manual selected shows exactly the 2 manual jobs —
-    // the chip's own counter must already read 2, not 3 (jobs.length).
-    const allChip = screen.getByRole('button', { name: statusChipName(t.jobs.all) });
-    expect(within(allChip).getByText('2')).toBeInTheDocument();
+    // Only "Rounds" (Four Tet) matches the search text — the ALL chip's own
+    // counter must already read 1, not 3 (jobs.length).
+    const allChip = screen.getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
+    expect(within(allChip).getByText('1')).toBeInTheDocument();
 
     fireEvent.click(allChip);
     expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.getByText('Sound of Silver')).toBeInTheDocument();
     expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
   });
 });
@@ -317,5 +287,69 @@ describe('row expansion', () => {
     await user.keyboard('{Enter}');
 
     expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  // Only the expanded row's detail endpoint should ever be hit — the jobs
+  // list polls every 3s and can hold ~150 rows, so calling useJobDetail for
+  // every one of them (rather than gating on expansion) would mean each poll
+  // fans out into a detail request per row.
+  it('fetches file detail only for the expanded row', async () => {
+    const seen: number[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const m = /^\/api\/jobs\/(\d+)\/detail$/.exec(url);
+        if (m) {
+          seen.push(Number(m[1]));
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ id: Number(m[1]), title: 'x', artist: 'y', state: 'DOWNLOADING', attempts: [] }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+
+    renderJobs([
+      makeJob({ id: 1, title: 'Kind of Blue', peer: 'flac_hoarder' }),
+      makeJob({ id: 2, title: 'Rounds', peer: 'other_peer' }),
+    ]);
+
+    fireEvent.click(screen.getByText('flac_hoarder'));
+
+    await waitFor(() => expect(seen).toEqual([1]));
+  });
+
+  it('flashes a confirmation after cancelling', async () => {
+    const jobsPayload = [makeJob({ id: 1, peer: 'flac_hoarder' })];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/jobs') {
+          return Promise.resolve(new Response(JSON.stringify(jobsPayload), { status: 200 }));
+        }
+        if (url === '/api/jobs/1/detail') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ id: 1, title: 'x', artist: 'y', state: 'DOWNLOADING', attempts: [] }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url === '/api/jobs/1/cancel' && init?.method === 'POST') {
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+
+    renderJobsWithChrome(jobsPayload);
+
+    fireEvent.click(screen.getByText('flac_hoarder'));
+    fireEvent.click(await screen.findByRole('button', { name: t.jobs.cancel }));
+
+    expect(await screen.findByText(/cancelled/i)).toBeInTheDocument();
   });
 });

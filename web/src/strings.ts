@@ -140,32 +140,60 @@ export const t = {
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
-    inPeerQueue: "In peer's queue",
-    // Distinct from inPeerQueue: that's the status pill's text, this is the
-    // progress bar's sub-state line right below it — showing the same phrase
-    // twice in adjacent lines reads as a copy-paste rather than two facts.
-    queuedAtPeer: 'queued at peer',
     verifying: 'verifying',
     showDetails: 'Show details',
     hideDetails: 'Hide details',
     moreFiles: (n: number) => `+${n} more files`,
-    // Chip filter row labels (Source / Status) and the "clear filters"
-    // affordance. Both chip rows' "all" option and the label for a plain
-    // status/source share this single 'All', rather than three copies of the
-    // same word; source-specific labels reuse t.source instead of
-    // duplicating "Manual"/"Lidarr" here.
-    all: 'All',
-    statusImporting: 'Importing',
-    clearFilters: (summary: string) => `Clear · ${summary}`,
-    peerAndTransfer: 'Peer & transfer',
-    files: 'Files',
-    peerLabel: 'Peer',
-    sourceLabel: 'Source',
-    queuePositionLabel: 'Queue position',
-    qualityLabel: 'Quality',
-    sizeLabel: 'Size',
-    downloadedLabel: 'Downloaded',
-    jobIdLabel: 'Job ID',
+    // FILES is the only titled column in the TUI expansion (mock,
+    // docs/design/slskdarr-tui.dc.html:190) — the meta column on the left has
+    // no heading of its own.
+    files: 'FILES',
+    // The expansion's left-column meta tree (mock line ~1069): lowercase,
+    // terminal-style labels rather than the Title Case used elsewhere in the
+    // app, matching that mock's wording exactly.
+    peerLabel: 'peer',
+    sourceLabel: 'source',
+    queuePositionLabel: 'queue pos',
+    // The meta row's value when a job is genuinely waiting in a peer's queue
+    // (mock: '#'+queuePos+' in peer queue').
+    queuePositionMeta: (n: number) => `#${n} in peer queue`,
+    timeInStateLabel: 'time in state',
+    qualityLabel: 'quality',
+    transferredLabel: 'transferred',
+    jobIdLabel: 'job id',
+    // The TUI job grid's column headers (mock line 162) — short forms
+    // distinct from the generic Title Case labels in `columns`, which other
+    // (not yet reskinned) views still use.
+    gridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      peer: 'PEER',
+      format: 'FMT',
+      progress: 'PROGRESS',
+      speed: 'SPEED',
+      eta: 'ETA',
+      tries: 'TRY',
+    },
+    // Filter chip labels (mock line 1089). ORPHAN, not ORPHANED — the chip is
+    // narrower than the status pill it echoes.
+    chipLabel: {
+      all: 'ALL',
+      active: 'ACTIVE',
+      queued: 'QUEUED',
+      stalled: 'STALLED',
+      failed: 'FAILED',
+      orphaned: 'ORPHAN',
+      done: 'DONE',
+    },
+    // Compact peer-queue position for the dense PROGRESS cell, where "queue
+    // #4" (queuePosition above) would overflow the column.
+    queueShort: (n: number) => `P${n}`,
+    // Flash confirmations (see FlashContext) for the three row actions —
+    // mutations the row itself won't visibly reflect before the next poll.
+    retryFlash: (id: number) => `retried #${id}`,
+    cancelFlash: (id: number) => `cancelled #${id}`,
+    forceSearchFlash: (id: number) => `search forced for #${id}`,
+    deleteFlash: (id: number) => `deleted #${id}`,
   },
   events: {
     filterPlaceholder: 'Filter events…',

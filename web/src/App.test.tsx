@@ -40,11 +40,11 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview) is asserted separately below: the TUI reskin (#198) gives
-  // it no <h1> — PageHeading is gone from that route already, ahead of the
-  // other routes below losing theirs in their own tasks.
+  // '/' (Overview) and '/jobs' are asserted separately below: the TUI reskin
+  // (#198) gives neither an <h1> — PageHeading is gone from both routes
+  // already, ahead of the other routes below losing theirs in their own
+  // tasks.
   it.each([
-    ['/jobs', t.nav.jobs],
     // JobDetail with no seeded query data falls through all three header
     // tiers (no live job, no cached detail) to the loading heading.
     ['/jobs/42', t.jobs.loading],
@@ -62,6 +62,11 @@ describe('route tree', () => {
   it('renders / (Overview) without crashing', () => {
     renderAt('/');
     expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
+  });
+
+  it('renders /jobs without crashing', () => {
+    renderAt('/jobs');
+    expect(screen.getByText(t.jobs.gridHead.album)).toBeInTheDocument();
   });
 
   it('marks the matching nav item active', () => {

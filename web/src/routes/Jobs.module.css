@@ -1,204 +1,139 @@
 /* This module is also imported by Events.tsx for its filter box (.controls,
    .input) and its job-id link (.link) rather than duplicating the same look
    in its own module — don't rename or remove those without checking that
-   file too. */
+   file too. Jobs.tsx itself no longer uses them (see .filterBox/.filterInput
+   below for its own TUI-styled equivalent). */
 .controls { display: flex; gap: 8px; margin-bottom: 12px; }
 
 .link { color: var(--active); text-decoration: none; }
 .link:hover { text-decoration: underline; }
 
+.mono { font-family: var(--font-mono); }
+.right { text-align: right; white-space: nowrap; }
+
 .controlsRow {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 12px;
+  gap: 8px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
 
-.input {
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 12.5px;
-  width: 260px;
-}
-
-.chipGroup {
+.filterBox {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-
-.chipGroupLabel {
-  font-size: 11px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-weight: 600;
-  margin-right: 2px;
-}
-
-.statusChip, .sourceChip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 11px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text-muted);
-}
-
-.chipCount {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  opacity: 0.8;
-}
-
-/* Default selected look (the "all" chip): accent-colored. Status-specific
-   chips override with their own status color below. */
-.chipSelected {
-  border-color: color-mix(in srgb, var(--accent) 33%, transparent);
-  background: var(--done-bg);
-  color: var(--accent);
-}
-
-.chip_active.chipSelected { border-color: color-mix(in srgb, var(--active) 33%, transparent); background: var(--active-bg); color: var(--active); }
-.chip_queued.chipSelected { border-color: color-mix(in srgb, var(--queued) 33%, transparent); background: var(--queued-bg); color: var(--queued); }
-.chip_stalled.chipSelected { border-color: color-mix(in srgb, var(--stalled) 33%, transparent); background: var(--stalled-bg); color: var(--stalled); }
-.chip_failed.chipSelected { border-color: color-mix(in srgb, var(--failed) 33%, transparent); background: var(--failed-bg); color: var(--failed); }
-.chip_orphaned.chipSelected { border-color: color-mix(in srgb, var(--orphaned) 33%, transparent); background: var(--orphaned-bg); color: var(--orphaned); }
-.chip_done.chipSelected { border-color: color-mix(in srgb, var(--done) 33%, transparent); background: var(--done-bg); color: var(--done); }
-.chip_importing.chipSelected { border-color: color-mix(in srgb, var(--accent) 33%, transparent); background: var(--done-bg); color: var(--accent); }
-
-.chipManual.chipSelected { border-color: color-mix(in srgb, var(--manual) 33%, transparent); background: var(--manual-bg); color: var(--manual); }
-.chipLidarr.chipSelected { border-color: var(--border); background: rgba(138, 145, 157, 0.12); color: var(--text-muted); }
-
-.clearButton {
-  margin-left: 4px;
+  gap: 8px;
+  border: 1px solid var(--line2);
   padding: 5px 10px;
-  border-radius: 7px;
-  border: 1px dashed var(--border-subtle);
+  flex: 0 0 230px;
+}
+
+.filterSlash { color: var(--dim); font-size: 12px; }
+
+.filterInput {
+  flex: 1;
   background: transparent;
-  color: var(--text-detail);
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  font-family: inherit;
+}
+
+/* Shared by the header row and every job row so their columns always line
+   up (mock, docs/design/slskdarr-tui.dc.html:1050). */
+.grid {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 2fr) 116px 60px 148px 66px 44px 32px;
+  gap: 10px;
+  align-items: center;
+}
+
+.head {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 1.3px;
+  color: var(--text-dim);
+}
+
+.headRight { text-align: right; }
+
+.row {
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
   font-size: 11.5px;
   cursor: pointer;
 }
-.clearButton:hover { color: #c8cdd5; border-color: #3a3f49; }
 
-.tableWrap { overflow-x: auto; }
+.row:hover { background: var(--panel-hover); }
 
-/* table-layout: fixed makes the colgroup widths above (and .ellipsis's
-   max-width: 0 trick) actually take effect, instead of being mere hints;
-   scoped to this table rather than Table.module.css's shared .table so other
-   views' tables aren't affected. */
-.jobsTable { table-layout: fixed; }
+.rowExpanded { background: var(--panel-hover); }
 
-.titleRow { display: flex; align-items: center; gap: 7px; }
+.albumCell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 
-.idLink {
-  color: #e2e5ea;
-  font-weight: 500;
+.caretButton {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+}
+
+.caret { color: var(--text-dim); font-size: 9px; }
+
+.title {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--fg);
   text-decoration: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.idLink:hover { text-decoration: underline; }
+.title:hover { text-decoration: underline; }
 
-.sub { font-size: 11.5px; color: var(--text-detail); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
-
-.right { text-align: right; white-space: nowrap; }
-.center { text-align: center; }
-
-.progressRow { display: flex; align-items: center; gap: 9px; }
-
-.progressBar {
-  flex: 1;
-  height: 5px;
-  border-radius: 3px;
-  background: #22262e;
-  overflow: hidden;
-  position: relative;
-}
-
-.progressFill { height: 100%; border-radius: 3px; }
-.progressFill.fillDone { background: var(--done); }
-.progressFill.fillActive { background: var(--active); }
-.progressFill.fillQueued { background: var(--queued); }
-.progressFill.fillStalled { background: var(--stalled); }
-.progressFill.fillImporting { background: var(--accent); }
-.progressFill.fillFailed { background: var(--failed); }
-
-/* Neutral grey hatch, not --stalled — a job waiting in a peer's queue isn't
-   necessarily stalled, and orange there would wrongly read as that signal. */
-.progressHatched {
-  background: repeating-linear-gradient(
-    45deg,
-    #2a2f39 0 6px,
-    #22262e 6px 12px
-  );
-}
-
-/* Fixed-width, right-aligned so the percentage column lines up regardless of
-   digit count (mock: width:36px; text-align:right). */
-/* min-width, not width: the same span renders "queue #4" for a job waiting in
-   a peer's queue, which is wider than the "NN%" the mock sized this for. */
-.pct {
-  display: inline-block;
-  min-width: 36px;
-  text-align: right;
+.artist {
+  flex: 0 2 auto;
+  min-width: 0;
+  color: var(--faint);
   white-space: nowrap;
-}
-.pct.pctDone { color: var(--done); }
-.pct.pctActive { color: var(--text); }
-.pct.pctQueued { color: var(--stalled); }
-.pct.pctOther { color: var(--text-dim); }
-
-.progressSub {
-  font-size: 10px;
-  color: var(--text-dim);
-  margin-top: 3px;
-  font-family: var(--font-mono);
-  text-transform: lowercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.retryPill {
-  display: inline-block;
-  min-width: 20px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--stalled-bg);
-  color: var(--stalled);
-  font-size: 11.5px;
-  font-family: var(--font-mono);
+/* The one distinct hue for a manual (non-Lidarr) job, in place of the old
+   Manual/Lidarr text badge — SourceBadge is retired along with PageHeading
+   in this reskin (see task-8-report.md). Lidarr jobs render nothing here. */
+.sourceDot { color: var(--dim); font-size: 8px; }
+
+.peerCell, .formatCell {
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.formatCell { color: var(--faint); }
 
-.retryDim { color: var(--text-dim); font-size: 11.5px; font-family: var(--font-mono); }
+.progressCell { display: flex; align-items: center; gap: 8px; }
+.ticksWrap { flex: 1; }
 
-.chevronButton {
-  background: none;
-  border: none;
-  padding: 4px;
-  cursor: pointer;
-  color: inherit;
-  font: inherit;
-}
+.pct { font-size: 11px; width: 34px; text-align: right; }
+.pctOk { color: var(--ok); }
+.pctBad { color: var(--bad); }
+.pctQueued { color: var(--dim); }
+.pctBar { color: var(--bar); }
 
-.chevron {
-  display: inline-block;
-  color: var(--text-dim);
-  transition: transform 0.15s;
-}
-.chevronExpanded { transform: rotate(90deg); }
+.triesActive { color: var(--dim); font-size: 11px; }
+.triesDim { color: var(--text-dim); font-size: 11px; }
 
-.expansionCell { padding: 0; border-bottom: 1px solid var(--border-subtle); }
+.expansionWrap { border-bottom: 1px solid var(--line); }
