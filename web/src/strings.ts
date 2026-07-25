@@ -11,6 +11,7 @@ export const t = {
     jobs: 'Jobs',
     events: 'Events',
     peers: 'Peers',
+    shares: 'Shares',
     health: 'Health',
     settings: 'Settings',
   },
@@ -68,6 +69,10 @@ export const t = {
     speed: 'Speed',
     eta: 'ETA',
     retries: 'Retries',
+    path: 'Path',
+    files: 'Files',
+    size: 'Size',
+    lastIndexed: 'Last indexed',
   },
   source: {
     manual: 'Manual',
@@ -152,6 +157,32 @@ export const t = {
     neverRun: 'Never run',
     consecutiveFailures: (n: number) => `${n} consecutive failures`,
     empty: 'No modules reported.',
+  },
+  shares: {
+    disabledNotice: 'Native Soulseek sharing is not enabled in the configuration.',
+    emptyTitle: 'No shared folders configured',
+    emptyBodyPrefix:
+      'Sharing is the entry ticket to Soulseek. Without shares you are treated as a leech, and peers may throttle or block your downloads. Add at least one folder in',
+    emptyBodySuffix:
+      ', then run a rescan. If the configuration file is mounted read-only, add it there directly instead:',
+    // Both keys are mandatory: internal/config rejects a share whose name is
+    // blank, so a snippet without it would make the container fail to start -
+    // for a user in exactly the state this warning card is shown to. Shown as
+    // the fallback for a read-only config mount; Settings is the primary path.
+    emptyConfigSnippet: '[[soulseek.shared_folders]]\nname = "Library"\npath = "/music/library"',
+    statFiles: 'Shared files',
+    statSize: 'Shared size',
+    statNever: 'Never',
+    panelTitle: 'Shared folders',
+    empty: 'Nothing is being shared.',
+    rescan: 'Rescan',
+    rescanning: 'Scanning…',
+    footerNotePrefix: 'Add or remove shared folders in',
+    footerNoteReadOnlyFallback: 'If the configuration file is mounted read-only, edit',
+    footerNoteConfigFile: 'config.toml',
+    rescanConflict: 'A share scan is already in progress.',
+    rescanUnavailable: 'Soulseek sharing is not enabled, so a rescan cannot be started.',
+    rescanFailed: 'Could not start the share rescan. Please try again.',
   },
   settings: {
     notWritableNotice:

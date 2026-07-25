@@ -7,6 +7,7 @@ const NAV = [
   { to: '/jobs', label: t.nav.jobs, end: false },
   { to: '/events', label: t.nav.events, end: false },
   { to: '/peers', label: t.nav.peers, end: false },
+  { to: '/shares', label: t.nav.shares, end: false },
   { to: '/health', label: t.nav.health, end: false },
   { to: '/settings', label: t.nav.settings, end: false },
 ];

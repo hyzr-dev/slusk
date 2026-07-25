@@ -346,6 +346,40 @@ export interface ConnectionTestResult {
   error?: string;
 }
 
+/** internal/observ/shares.go ShareFolderStats — one configured share folder's contribution to the index, one entry of SharesReport.folders. */
+export interface ShareFolder {
+  name: string;
+  path: string;
+  directories: number;
+  files: number;
+  totalBytes: number;
+}
+
+/**
+ * GET /api/shares — internal/observ/shares.go sharesDTO. The endpoint always
+ * answers 200; enabled (not a failed request) is what distinguishes "native
+ * Soulseek sharing is off in the configuration" from "sharing is on but no
+ * folders are configured yet" — folders is [] and every stat is 0 in both
+ * cases, so enabled is the only reliable signal. indexedAt is "" when no scan
+ * has ever completed.
+ */
+export interface SharesReport {
+  enabled: boolean;
+  scanning: boolean;
+  indexedAt: string;
+  scanDurationMs: number;
+  directories: number;
+  files: number;
+  totalBytes: number;
+  folders: ShareFolder[];
+}
+
+/** POST /api/shares/rescan 202 response body. */
+export interface ShareRescanResult {
+  ok: boolean;
+  scanning: boolean;
+}
+
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
 export interface SearchPass {
   startedAt: string;

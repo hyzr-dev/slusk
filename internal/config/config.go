@@ -80,33 +80,34 @@ type PipelineConfig struct {
 	SearchTimeout Duration `toml:"search_timeout"`
 	// MinBitrate rejects candidate files below this bitrate (kbps).
 	MinBitrate int `toml:"min_bitrate"`
-	// MaxInflightPerPeer bounds how many files are handed to a single peer at
-	// once, so a burst never trips a peer's per-user queued-megabyte limit.
+	// MaxInflightPerPeer bounds how many files from one candidate are handed to
+	// its peer at once. Two jobs using the same peer each get their own budget.
 	MaxInflightPerPeer int `toml:"max_inflight_per_peer"`
 	// MaxTransferRetries caps how many times a transfer rejected for a
 	// transient reason is re-queued before it is given up on.
 	MaxTransferRetries int `toml:"max_transfer_retries"`
 	// Weights are the tunable scoring weights for the matcher.
 	Weights Weights `toml:"weights"`
-	// MaxActive caps jobs simultaneously active across the pipeline
-	// (SELECTING/DOWNLOADING/IMPORTING). Default 30.
+	// MaxActive caps jobs in DOWNLOADING and IMPORTING. SELECTING uses no slot.
+	// Default 30.
 	MaxActive int `toml:"max_active"`
-	// MaxRetries caps how many candidates a job cycles through before it is
-	// given up on. Default 10.
+	// MaxRetries caps failed search cycles: an empty search or exhausted cached
+	// set counts, while candidate failures are free. Default 10.
 	MaxRetries int `toml:"max_retries"`
-	// BackoffBase is the initial wait before retrying a job with no untried
-	// candidate left. Default 15m.
+	// BackoffBase sets exponential search-retry backoff; the first delay is
+	// twice this value. Default 15m.
 	BackoffBase Duration `toml:"backoff_base"`
 	// BackoffCap bounds exponential backoff growth. Default 24h.
 	BackoffCap Duration `toml:"backoff_cap"`
-	// CandidateTTL is how long a discovered candidate stays eligible before
-	// it is dropped and re-discovered. Default 24h.
+	// CandidateTTL expires the whole cached candidate set and resets the job to
+	// WANTED for a fresh search. Default 24h.
 	CandidateTTL Duration `toml:"candidate_ttl"`
 	// FailedReviveAfter is how long a permanently failed job waits before
 	// being revived for another attempt. Default 720h (30 days).
 	FailedReviveAfter Duration `toml:"failed_revive_after"`
-	// StuckAfter is how long a job may sit without progress in an active
-	// phase before it is treated as stuck and reconciled. Default 1h.
+	// StuckAfter is the maximum time an IMPORTING job may remain without progress
+	// in pre-submit verification due to repeated verification failures or anomalies;
+	// after that, the current candidate is failed and the next is tried. Default 1h.
 	StuckAfter Duration `toml:"stuck_after"`
 	// TickTimeout bounds a single pipeline tick's total execution time.
 	// Default 5m.
@@ -220,8 +221,8 @@ const observAuthTokenPlaceholder = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
 // ObservConfig is the observability configuration.
 type ObservConfig struct {
 	ListenAddr string `toml:"listen_addr"`
-	// AuthToken protects every UI, API, and metrics endpoint except /healthz.
-	// It may be omitted only when ListenAddr is strictly loopback-only.
+	// AuthToken protects every UI, API, and metrics endpoint except /healthz
+	// and /readyz. It may be omitted only when ListenAddr is loopback-only.
 	AuthToken string `toml:"auth_token"`
 	// LogLevel is the minimum slog level emitted: "debug", "info" (default),
 	// "warn", or "error". Validate rejects any other non-empty value.

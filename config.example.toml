@@ -30,12 +30,11 @@ transfer_deadline = "30m"
 stall_timeout = "5m"
 search_timeout = "20s"
 min_bitrate = 192
-# Max files handed to a single peer at once. slskdarr records a candidate's whole
-# album up front but only sends this many to slskd at a time, releasing more as
-# each finishes. Enqueuing a whole album at once trips Soulseek peers' per-user
-# queued-megabyte limit, which they answer with "Too many megabytes" rejections
-# on the overflow files (a fully-capable source then looks incomplete). Keep it
-# low (a handful) so the queued total stays under typical peer limits.
+# Max files handed to one candidate's peer at once. The budget is per candidate,
+# so two jobs using the same peer each get their own. slskdarr records a whole
+# album up front but sends only this many files at a time, releasing more as each
+# finishes. Enqueuing a whole album at once can trip peers' per-user queued-
+# megabyte limit and make a complete source look incomplete. Keep it low.
 max_inflight_per_peer = 3
 # How many times a download rejected for a transient reason (e.g. a peer's
 # "Too many megabytes" queue limit) is re-queued before it is given up on.
@@ -44,24 +43,26 @@ max_inflight_per_peer = 3
 # "Banned") are never retried. 0 disables retries (optional; defaults to 0).
 max_transfer_retries = 3
 #
-# Global cap on jobs simultaneously active across the pipeline
-# (SELECTING/DOWNLOADING/IMPORTING), regardless of how many are newly started
-# per tick. Default 30.
+# Global cap on jobs in DOWNLOADING and IMPORTING. SELECTING uses no slot.
+# Default 30.
 max_active = 30
-# How many candidates a job cycles through before it is given up on. Default 10.
+# Failed search cycles allowed before a job is given up on. An empty search or
+# exhausted cached set counts; candidate failures are free. Default 10.
 max_retries = 10
-# Initial wait before retrying a job with no untried candidate left. Default 15m.
+# Base for exponential search-retry backoff. The first delay is twice this
+# value. Default 15m.
 backoff_base = "15m"
 # Upper bound on exponential backoff growth. Default 24h.
 backoff_cap = "24h"
-# How long a discovered candidate stays eligible before it is dropped and
-# re-discovered. Default 24h.
+# How long the whole cached candidate set remains eligible before it expires
+# and the job resets to WANTED for a fresh search. Default 24h.
 candidate_ttl = "24h"
 # How long a permanently failed job waits before being revived for another
 # attempt. Default 720h.
 failed_revive_after = "720h"
-# How long a job may sit without progress in an active phase before it is
-# treated as stuck and reconciled. Default 1h.
+# Maximum time an IMPORTING job may remain without progress in pre-submit
+# verification due to repeated verification failures or anomalies; after that,
+# the current candidate is failed and the next is tried. Default 1h.
 stuck_after = "1h"
 # Upper bound on a single pipeline tick's total execution time. Default 5m.
 tick_timeout = "5m"
@@ -105,9 +106,9 @@ known_user = 1.0
 dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 
 [observ]
-# /healthz is public and contains only liveness. The dashboard, JSON API,
-# /status, and /metrics require this token. A token is mandatory whenever the
-# listener is not loopback-only. Generate one, for example, with:
+# /healthz and /readyz are public liveness and readiness probes. The dashboard,
+# JSON API, /status, and /metrics require this token. A token is mandatory
+# whenever the listener is not loopback-only. Generate one, for example, with:
 #   openssl rand -hex 32
 # API and Prometheus clients send: Authorization: Bearer <token>
 # Browsers use HTTP Basic auth with any username and this token as the password.
@@ -166,8 +167,8 @@ slskd_complete_dir = "/music/slskd-downloads"
 #
 # Shares use explicit public names so local host/container paths never appear
 # in browse/search results. Mount each path read-only. Shares are scanned at
-# startup; send SIGHUP to atomically rescan after adding/removing files (there
-# is deliberately no HTTP rescan endpoint).
+# startup; after adding or removing files, atomically rescan with SIGHUP or
+# POST /api/shares/rescan.
 # [[soulseek.shared_folders]]
 # name = "Music"
 # path = "/shares/music"

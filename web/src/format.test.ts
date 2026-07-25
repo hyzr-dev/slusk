@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { basename, formatBytes, formatBytesOrDash, formatSpeed, formatEta, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
+import {
+  basename,
+  formatBytes,
+  formatBytesOrDash,
+  formatSpeed,
+  formatEta,
+  formatSize,
+  percent,
+  formatDateTime,
+  formatShortTime,
+  formatTime,
+  formatScore,
+} from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -87,6 +99,26 @@ describe('basename', () => {
 
   it('returns the input unchanged when there is no separator', () => {
     expect(basename('01 Track.flac')).toBe('01 Track.flac');
+  });
+});
+
+describe('formatSize', () => {
+  it('returns "0 MB" for zero and nullish input', () => {
+    expect(formatSize(0)).toBe('0 MB');
+    expect(formatSize(null)).toBe('0 MB');
+    expect(formatSize(undefined)).toBe('0 MB');
+  });
+
+  it('formats megabytes with one decimal below 1 GB', () => {
+    expect(formatSize(1536 * 1024)).toBe('1.5 MB');
+  });
+
+  it('scales to GB at or above 1024 MB', () => {
+    expect(formatSize(742 * 1024 * 1024 * 1024)).toBe('742.0 GB');
+  });
+
+  it('scales to TB at or above 1024 GB', () => {
+    expect(formatSize(1.4 * 1024 * 1024 * 1024 * 1024)).toBe('1.4 TB');
   });
 });
 
