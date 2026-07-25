@@ -1,6 +1,7 @@
 # Secrets — must never enter the build context / image layers
 config.toml
 .env
+/testenv/runtime/
 
 # Not needed in the image
 docs/

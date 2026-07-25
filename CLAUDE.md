@@ -38,6 +38,39 @@ which builds and pushes the image and tells the homelab updater to redeploy.
 
 There is no staging step. "Merge it and see" is a production action.
 
+## The local PR lab is the substitute for staging
+
+`testenv/` runs the full stack — this checkout's slskdarr, plus Lidarr, slskd and
+Postgres — against real Soulseek searches, with no production data involved. Use it to
+verify a PR before merging, since merging is the deploy.
+
+```bash
+cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test accounts
+./testenv/lab.sh reset                 # clean run of the current checkout
+./testenv/lab.sh info                  # addresses, accounts, listen ports
+./testenv/lab.sh logs slskdarr
+./testenv/lab.sh down                  # stop, keep state; `destroy` wipes volumes too
+```
+
+`reset` rebuilds from the working tree, wipes all state and seeds Lidarr with exactly
+150 wanted albums from a fixed artist list, so two runs are comparable. `up` keeps state.
+
+- **Two distinct Soulseek accounts are required.** Soulseek permits one login per
+  account and both clients log in regardless of backend. Never use your own account.
+- The lab defaults to `SLSKDARR_BACKEND=soulseek` (the native client), which is the
+  opposite of the app's own default in `config.example.toml`. That is deliberate — the
+  native backend is the experimental one and the lab exists to exercise it.
+- Results are not hermetic: peer availability and transfer speed vary between runs, so
+  a `FAILED` job is evidence to investigate, not proof of a regression.
+- Container logs echo the Soulseek usernames. Don't paste lab output verbatim into
+  issues or PRs.
+- `testenv/.env` and `testenv/runtime/` are gitignored and hold real credentials.
+
+The observable surfaces are the dashboard on `:9090`, `/status`, `/api/events` (SSE) and
+the Postgres database — `album_jobs` is the pipeline's only contact surface between
+modules, so `SELECT state, count(*) FROM album_jobs GROUP BY state` is a literal
+snapshot of the state machine, and `job_events` is the per-job history.
+
 ## Configuration is strict
 
 `internal/config` rejects unknown keys at startup (`unknown config keys: ...`) and has
