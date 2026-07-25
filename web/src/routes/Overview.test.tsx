@@ -117,4 +117,20 @@ describe('Overview', () => {
     expect(screen.getByText('QU')).toBeInTheDocument();
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
+
+  it('flares the tick bar for a genuinely transferring row but not a peer-queued one', () => {
+    // Pinned the same way as Jobs/JobDetail/Shares: a job waiting in a peer's
+    // queue is moving no bytes, so its tick bar must never flare as though
+    // data were arriving — the one failure mode here that actively misinforms.
+    // Scoped per row so one row's state can't be mistaken for the other's.
+    renderOverview([
+      { ...baseJob, id: 1, title: 'Transferring Album', status: 'active', state: 'DOWNLOADING', queuePosition: 0, speed: 1000 },
+      { ...baseJob, id: 2, title: 'Queued Album', status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
+    ]);
+
+    const transferringRow = screen.getByText('Transferring Album').closest('[class*="transferRow"]') as HTMLElement;
+    const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;
+    expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
+    expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
 });

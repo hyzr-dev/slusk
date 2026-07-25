@@ -27,9 +27,7 @@ export const t = {
     updatedAgo: (seconds: number) => `${seconds}s`,
     reconcile: 'RECONCILE',
     reconcileNever: '—',
-    reconcileCountdown: (seconds: number) => `T–${seconds}s`,
     down: 'DOWN',
-    up: 'UP',
     idle: 'idle',
   },
   status: {
@@ -93,35 +91,21 @@ export const t = {
     import_rejected: 'Import rejected',
     job_failed: 'Job failed',
   },
+  // The generic column-label object that predates this reskin. Each reskinned
+  // view now owns its own `gridHead` map matching the mock's column names;
+  // only the labels still shared by not-yet-reskinned views remain here.
   columns: {
-    album: 'Album / Artist',
-    peer: 'Peer',
-    progress: 'Progress',
     status: 'Status',
     time: 'Time',
     job: 'Job',
     event: 'Event',
     detail: 'Detail',
-    module: 'Module',
-    lastRun: 'Last attempt / status',
-    score: 'Score',
-    succeeded: 'Succeeded',
-    failed: 'Failed',
-    format: 'Format',
-    speed: 'Speed',
-    eta: 'ETA',
-    retries: 'Retries',
-    path: 'Path',
-    files: 'Files',
-    size: 'Size',
-    lastIndexed: 'Last indexed',
   },
   source: {
     manual: 'Manual',
     lidarr: 'Lidarr',
   },
   jobs: {
-    detail: 'Job detail',
     searchPlaceholder: 'Search artist, album, peer…',
     noMatch: 'No jobs match the filter.',
     back: '← Back',
@@ -221,8 +205,6 @@ export const t = {
   },
   overview: {
     empty: 'No active downloads.',
-    chartPasses: 'Matched albums per pass · last 20',
-    chartCompleted: 'Completed downloads · last 24 h',
     noChartData: 'No pass history yet',
     chartRangeStart: '−24 h',
     chartRangeEnd: 'now',
