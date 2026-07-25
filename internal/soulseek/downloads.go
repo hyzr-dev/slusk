@@ -23,6 +23,25 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
+// speedStaleAfter bounds how long a transfer's last-sampled speed is trusted
+// once its progress callback goes quiet (see transfer.speedAt): a stalled
+// transfer's most recent sample would otherwise be reported by ListDownloads
+// forever, since nothing else ever overwrites tr.speed/tr.speedAvg (issue
+// #157).
+const speedStaleAfter = 3 * time.Second
+
+// speedEWMAAlpha weights the most recent sample when smoothing tr.speedAvg
+// (issue #157): a higher value tracks recent changes more closely, a lower
+// value smooths out jitter more. 0.3 favors smoothness — speedAvg backs ETA
+// math, which should not swing wildly between two consecutive samples.
+const speedEWMAAlpha = 0.3
+
+// ewma folds sample into prev with weight alpha, the standard exponentially
+// weighted moving average update.
+func ewma(prev, sample int64, alpha float64) int64 {
+	return int64(alpha*float64(sample) + (1-alpha)*float64(prev))
+}
+
 // destLeaf returns the local subdirectory name a downloaded file is written
 // into: the base name of the file's remote directory, with Soulseek's "\"
 // path separators normalized to "/". It returns "" when the file has no
@@ -131,12 +150,24 @@ type transfer struct {
 	// above mu here to keep the wire-correlation fields grouped together.
 	token soul.Token
 
-	mu            sync.Mutex // guards state, failure, retryable, queuePosition, speed, size, token, awaitingFileConn
+	mu            sync.Mutex // guards state, failure, retryable, queuePosition, speed, speedAvg, speedAt, size, token, awaitingFileConn
 	state         core.TransferState
 	failure       string
 	retryable     bool
 	queuePosition uint32
 	speed         int64
+	// speedAvg is an EWMA-smoothed transfer rate in bytes per second, updated
+	// alongside speed by the same progress-callback sample; it backs
+	// core.RemoteTransfer.SpeedAverage (issue #157), which ETA math divides
+	// remaining bytes by rather than the jumpy instantaneous speed.
+	speedAvg int64
+	// speedAt is when speed/speedAvg were last updated. A transfer whose
+	// progress callback has gone quiet (stalled peer, no more reads) keeps
+	// speed frozen at its last value forever unless something notices the
+	// silence — ListDownloads checks speedAt against speedStaleAfter and
+	// reports zero instead of a stale speed once it goes quiet for longer
+	// than that.
+	speedAt time.Time
 	// awaitingFileConn is true only while runDownload is parked in the
 	// negotiation select waiting for the peer's F connection on fileConnCh.
 	// attachFileConn checks it under mu so an F connection that arrives after
@@ -577,10 +608,18 @@ func (c *Client) Enqueue(ctx context.Context, username, filename string, size in
 func (c *Client) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, error) {
 	snapshot := c.downloads.snapshot()
 	out := make([]core.RemoteTransfer, 0, len(snapshot))
+	now := time.Now()
 	for _, tr := range snapshot {
 		tr.mu.Lock()
-		state, failure, retryable, queuePosition, speed, size := tr.state, tr.failure, tr.retryable, tr.queuePosition, tr.speed, tr.size
+		state, failure, retryable, queuePosition, speed, speedAvg, speedAt, size := tr.state, tr.failure, tr.retryable, tr.queuePosition, tr.speed, tr.speedAvg, tr.speedAt, tr.size
 		tr.mu.Unlock()
+		// A transfer whose progress callback has gone quiet keeps its last
+		// sampled speed forever otherwise (nothing else ever overwrites
+		// tr.speed/tr.speedAvg) — report zero instead of a stale reading once
+		// it has been silent longer than speedStaleAfter (issue #157).
+		if speedAt.IsZero() || now.Sub(speedAt) > speedStaleAfter {
+			speed, speedAvg = 0, 0
+		}
 		out = append(out, core.RemoteTransfer{
 			ID:            tr.id,
 			Username:      tr.username,
@@ -592,6 +631,7 @@ func (c *Client) ListDownloads(ctx context.Context) ([]core.RemoteTransfer, erro
 			Retryable:     retryable,
 			QueuePosition: queuePosition,
 			Speed:         speed,
+			SpeedAverage:  speedAvg,
 		})
 	}
 	return out, nil
@@ -925,6 +965,7 @@ queueWait:
 		}
 	}()
 	lastBytes, lastTime := int64(0), time.Now()
+	firstSample := true
 	written, err := streamFile(handoff.conn, destPath, streamSize, c.cfg.fileIdleTimeout, func(n int64) {
 		tr.bytesDone.Store(n)
 		now := time.Now()
@@ -932,7 +973,14 @@ queueWait:
 			speed := int64(float64(n-lastBytes) / d.Seconds())
 			tr.mu.Lock()
 			tr.speed = speed
+			if firstSample {
+				tr.speedAvg = speed
+			} else {
+				tr.speedAvg = ewma(tr.speedAvg, speed, speedEWMAAlpha)
+			}
+			tr.speedAt = now
 			tr.mu.Unlock()
+			firstSample = false
 			lastBytes, lastTime = n, now
 		}
 	})

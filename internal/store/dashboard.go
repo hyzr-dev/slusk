@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -14,12 +15,16 @@ import (
 // jobViewSelect joins each album_job with its most recently created candidate
 // row and that candidate's most recent transfer (by updated_at), if any. A
 // job with no candidates yet still appears, with NULL candidate/transfer
-// columns. Callers append their own WHERE clause.
+// columns. a.files is included (additive; no new JOINs or aggregates) so the
+// observ package can aggregate album-level live speed/ETA across every file
+// of the candidate rather than just the one transfer this view already joins
+// (issue #157) — see core.Candidate.Files. Callers append their own WHERE
+// clause.
 const jobViewSelect = `
 	SELECT
 		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
-		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at
+		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files
 	FROM album_jobs j
 	LEFT JOIN candidates a ON a.id = (
 		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
@@ -40,13 +45,14 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var aUsername, aState, aFailReason sql.NullString
 	var aScore sql.NullFloat64
 	var aCreatedAt, aUpdatedAt sql.NullTime
+	var aFiles []byte
 	var jYear, jTracks sql.NullInt64
 	var jFormat sql.NullString
 
 	err := r.Scan(
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
-		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt,
+		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
 	)
 	if err != nil {
 		return core.JobView{}, err
@@ -88,7 +94,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	}
 
 	if aID.Valid {
-		v.Attempt = &core.Candidate{
+		attempt := &core.Candidate{
 			ID:         aID.Int64,
 			AlbumJobID: aAlbumJobID.Int64,
 			Username:   aUsername.String,
@@ -98,6 +104,12 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 			CreatedAt:  aCreatedAt.Time,
 			UpdatedAt:  aUpdatedAt.Time,
 		}
+		if len(aFiles) > 0 {
+			if err := json.Unmarshal(aFiles, &attempt.Files); err != nil {
+				return core.JobView{}, fmt.Errorf("unmarshal candidate files: %w", err)
+			}
+		}
+		v.Attempt = attempt
 	}
 	return v, nil
 }

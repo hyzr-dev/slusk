@@ -24,6 +24,10 @@ type WantedSyncStore interface {
 	// PruneSearchPasses deletes expired search_passes rows (see
 	// store.PruneSearchPasses), on the same fixed 30-day window as job events.
 	PruneSearchPasses(ctx context.Context, now time.Time) error
+	// PruneThroughputMinutes deletes expired throughput_minutes rows (see
+	// store.PruneThroughputMinutes, issue #157), on the same fixed 30-day
+	// window as job events and search passes.
+	PruneThroughputMinutes(ctx context.Context, now time.Time) error
 }
 
 // WantedSyncParams configures a WantedSync.
@@ -119,6 +123,9 @@ func (w *WantedSync) Tick(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if err := w.p.Store.PruneSearchPasses(ctx, now); err != nil {
+		return err
+	}
+	if err := w.p.Store.PruneThroughputMinutes(ctx, now); err != nil {
 		return err
 	}
 

@@ -41,6 +41,7 @@ const charts: ChartsReport = {
     { startedAt: '2026-07-01T10:00:00Z', finishedAt: '2026-07-01T10:00:01Z', searched: 1, matched: 1 },
   ],
   completedByHour: [{ hour: '2026-07-01T10:00:00Z', count: 2 }],
+  throughput: [],
 };
 
 function renderOverview(chartsData: ChartsReport | undefined = charts) {
@@ -84,7 +85,7 @@ describe('Overview', () => {
     // backend zero-fills it to 24 buckets) so only the pass chart's empty
     // state renders here; an empty completedByHour is CumulativeAreaChart's
     // own, separately-covered empty state.
-    renderOverview({ passes: [], completedByHour: charts.completedByHour });
+    renderOverview({ passes: [], completedByHour: charts.completedByHour, throughput: [] });
     expect(screen.getByText('No pass history yet')).toBeInTheDocument();
   });
 });

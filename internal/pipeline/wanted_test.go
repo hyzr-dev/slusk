@@ -209,6 +209,10 @@ func (s *recordingWantedSyncStore) PruneSearchPasses(context.Context, time.Time)
 	return nil
 }
 
+func (s *recordingWantedSyncStore) PruneThroughputMinutes(context.Context, time.Time) error {
+	return nil
+}
+
 func TestWantedSyncUsesOneBulkCallPublishesLastDuplicateAndLogs(t *testing.T) {
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{wanted: []core.WantedRelease{
