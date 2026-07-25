@@ -304,20 +304,48 @@ func TestScanSharesDoesNotPruneWhenLoadFails(t *testing.T) {
 }
 
 // TestScanSharesDoesNotPruneEmptyScan asserts the zero-files guard: if a scan
-// observes no files at all while the cache held rows, pruning is skipped
-// rather than wiping the entire cache (which would otherwise happen if, say,
-// a mount is transiently empty for one tick).
+// walks a share root that is present but genuinely empty (so the walk indexes
+// zero files) while the cache held rows, pruning is skipped rather than
+// wiping the entire cache (which would otherwise happen if, say, a mount is
+// transiently empty for one tick).
 func TestScanSharesDoesNotPruneEmptyScan(t *testing.T) {
+	root := t.TempDir() // present but empty: the walk indexes zero files
+
 	fake := &fakeShareMetaCache{entries: []ShareFileMeta{
 		{Path: "/music/somewhere.flac", Size: 1, ModTime: time.Now(), Bitrate: 128, Duration: 60},
 	}}
-	c := New(Config{ShareMetaCache: fake}, testLogger()) // no shared folders configured at all
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}, ShareMetaCache: fake}, testLogger())
 
 	if _, err := c.RescanShares(context.Background()); err != nil {
 		t.Fatalf("RescanShares: %v", err)
 	}
 	if len(fake.stale) != 0 {
 		t.Fatalf("stale = %#v, want none (zero-observed-files guard must have skipped pruning)", fake.stale)
+	}
+}
+
+// TestScanSharesPrunesWhenObservedFilesAreAllNonAudio asserts the zero-files
+// guard is measured against every file the walk indexed, not just the
+// audio-only observed set: a share containing files but no mp3/flac still
+// observes nothing audio-related, yet the walk indexed real files, so a
+// genuinely stale cache row must still be pruned rather than mistaken for an
+// empty/dropped mount.
+func TestScanSharesPrunesWhenObservedFilesAreAllNonAudio(t *testing.T) {
+	root := t.TempDir()
+	writeShareFile(t, resolvedLocalPath(t, root, "README"), []byte("hello"))
+	writeShareFile(t, resolvedLocalPath(t, root, "book.epub"), []byte("not really epub"))
+	stalePath := resolvedLocalPath(t, root, "no-longer-here.flac")
+
+	fake := &fakeShareMetaCache{entries: []ShareFileMeta{
+		{Path: stalePath, Size: 1, ModTime: time.Now(), Bitrate: 128, Duration: 60},
+	}}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}, ShareMetaCache: fake}, testLogger())
+
+	if _, err := c.RescanShares(context.Background()); err != nil {
+		t.Fatalf("RescanShares: %v", err)
+	}
+	if len(fake.stale) != 1 || fake.stale[0] != stalePath {
+		t.Fatalf("stale = %#v, want exactly [%q] (non-audio files must not disable pruning)", fake.stale, stalePath)
 	}
 }
 
@@ -401,6 +429,21 @@ func TestScanSharesDeduplicatesOverlappingShares(t *testing.T) {
 			t.Fatalf("expected %q to be indexed", virtual)
 		}
 		assertAudioAttrs(t, indexed.wire.Attributes, 2)
+	}
+
+	// The overlapping shares walk the same local file twice, so it is queued
+	// for upsert twice under the same path - this is exactly the duplicate
+	// input UpsertShareFileMetadata's dedup guards against (see
+	// internal/store/sharemeta.go and
+	// TestShareFileMetadataUpsertDeduplicatesInputPaths).
+	var occurrences int
+	for _, u := range fake.upserts {
+		if u.Path == local {
+			occurrences++
+		}
+	}
+	if occurrences != 2 {
+		t.Fatalf("upserts for %q = %d, want 2 (same local file observed via both shares)", local, occurrences)
 	}
 }
 

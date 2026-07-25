@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -55,8 +56,13 @@ func (s *Store) ShareFileMetadata(ctx context.Context) ([]core.ShareFileMeta, er
 // single statement's ON CONFLICT DO UPDATE touching the same key twice
 // ("command cannot affect row a second time"), and a duplicate path within
 // one scan is otherwise possible (see
-// TestScanSharesDeduplicatesOverlappingShares). A path longer than
-// maxSharePathBytes is silently skipped; every other entry in its batch is
+// TestScanSharesDeduplicatesOverlappingShares). An entry is silently skipped
+// (the file is simply re-read on the next scan) if its path is longer than
+// maxSharePathBytes, or is not valid UTF-8: on Linux a path is an arbitrary
+// byte sequence, and a Latin-1-encoded filename (common in older music
+// libraries) makes Postgres reject the *entire* INSERT statement with
+// "invalid byte sequence for encoding UTF8", silently dropping every other
+// row in the same batch along with it. Every other entry in the batch is
 // still written.
 func (s *Store) UpsertShareFileMetadata(ctx context.Context, entries []core.ShareFileMeta, now time.Time) error {
 	if len(entries) == 0 {
@@ -66,7 +72,7 @@ func (s *Store) UpsertShareFileMetadata(ctx context.Context, entries []core.Shar
 	deduped := make(map[string]core.ShareFileMeta, len(entries))
 	order := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if len(e.Path) > maxSharePathBytes {
+		if len(e.Path) > maxSharePathBytes || !utf8.ValidString(e.Path) {
 			continue
 		}
 		if _, exists := deduped[e.Path]; !exists {

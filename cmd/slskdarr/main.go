@@ -142,7 +142,7 @@ func main() {
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
 		sink := &messageSink{store: st, logger: logger}
-		shareCache := &shareMetaCache{store: st, logger: logger}
+		shareCache := &shareMetaCache{store: st}
 		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, shareCache, logger)
 	}
 

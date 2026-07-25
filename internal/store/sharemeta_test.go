@@ -239,3 +239,33 @@ func TestShareFileMetadataUpsertSkipsOverlongPathButKeepsRest(t *testing.T) {
 		t.Fatalf("rows = %+v, want only the non-overlong path", got)
 	}
 }
+
+// TestShareFileMetadataUpsertSkipsInvalidUTF8PathButKeepsRest is a regression
+// test for a Latin-1-encoded filename (arbitrary bytes are a valid Linux
+// filename, but not valid UTF-8): without a guard, Postgres rejects the
+// *entire* INSERT statement with "invalid byte sequence for encoding UTF8",
+// silently dropping every other row in the same batch along with it. The
+// invalid entry must be skipped without error, and the rest of the batch
+// must still be written.
+func TestShareFileMetadataUpsertSkipsInvalidUTF8PathButKeepsRest(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	invalid := "/music/" + string([]byte{0xff, 0xfe}) + ".flac"
+	entries := []core.ShareFileMeta{
+		shareMeta(invalid, 1, now, 1, 1),
+		shareMeta("/music/ok.flac", 2, now, 2, 2),
+	}
+	if err := s.UpsertShareFileMetadata(ctx, entries, now); err != nil {
+		t.Fatalf("UpsertShareFileMetadata: %v", err)
+	}
+
+	got, err := s.ShareFileMetadata(ctx)
+	if err != nil {
+		t.Fatalf("ShareFileMetadata: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != "/music/ok.flac" {
+		t.Fatalf("rows = %+v, want only the valid-UTF-8 path", got)
+	}
+}

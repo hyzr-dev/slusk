@@ -88,11 +88,11 @@ func TestShareMetaCacheSaveMapsFieldsBothDirections(t *testing.T) {
 	}
 }
 
-// TestShareMetaCacheSaveUpsertsBeforeDelete asserts both steps are invoked
-// (in some order that a call-count check alone cannot distinguish, but the
-// upsert-then-delete guarantee is verified indirectly by the next test:
-// a delete failure must not hide a successful upsert).
-func TestShareMetaCacheSaveUpsertsBeforeDelete(t *testing.T) {
+// TestShareMetaCacheSaveInvokesBothSteps asserts both steps are invoked (in
+// some order that a call-count check alone cannot distinguish - the actual
+// upsert-then-delete guarantee is verified indirectly by the next test: a
+// delete failure must not hide a successful upsert).
+func TestShareMetaCacheSaveInvokesBothSteps(t *testing.T) {
 	store := &fakeShareMetaStore{}
 	cache := &shareMetaCache{store: store}
 

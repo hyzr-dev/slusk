@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -21,8 +20,7 @@ type shareMetaStore interface {
 // translating between the two packages' otherwise-identical ShareFileMeta types
 // so internal/store never has to import internal/soulseek.
 type shareMetaCache struct {
-	store  shareMetaStore // narrow interface, for tests
-	logger *slog.Logger
+	store shareMetaStore // narrow interface, for tests
 }
 
 // LoadShareMeta implements soulseek.ShareMetaCache.

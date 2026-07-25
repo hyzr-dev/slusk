@@ -565,7 +565,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 	// Only reached once every configured root has walked successfully, so a
 	// failed scan never prunes cache rows for a root it did not finish -
 	// they would otherwise be reloaded and re-verified on the next attempt.
-	c.flushShareMetaCache(ctx, cached, observed, pending, cacheActive)
+	c.flushShareMetaCache(ctx, cached, observed, pending, cacheActive, len(s.files))
 
 	for _, directory := range s.byDirectory {
 		sort.Slice(directory.Files, func(i, j int) bool {
@@ -635,22 +635,27 @@ func (c *Client) loadShareMetaCache(ctx context.Context) (map[string]ShareFileMe
 
 // flushShareMetaCache writes back this scan's cache results: pending is every
 // entry freshly computed this scan (a miss or a stale hit), and stale is
-// every path cached loaded but this scan did not observe - which is deleted
-// so the cache never grows unboundedly stale as files are removed or
-// renamed. It is a no-op if the cache was not active for this scan, and
-// never returns an error: a save failure only costs the next scan a re-read,
-// never correctness.
+// every path in cached that this scan did not observe - which is deleted so
+// the cache never grows unboundedly stale as files are removed or renamed.
+// It is a no-op if the cache was not active for this scan, and never returns
+// an error: a save failure only costs the next scan a re-read, never
+// correctness.
 //
-// If observed is empty while cached held rows, the scan almost certainly saw
-// a share root that is present but (transiently) empty - e.g. a mount that
-// dropped mid-walk without erroring. Pruning in that case would delete the
-// entire cache for one bad tick, so it is skipped with a warning instead.
-func (c *Client) flushShareMetaCache(ctx context.Context, cached, observed map[string]ShareFileMeta, pending []ShareFileMeta, cacheActive bool) {
+// totalFiles is the count of every file the walk actually indexed this scan
+// (audio and non-audio alike, i.e. len(shareSnapshot.files)), not len(observed)
+// - observed only ever gains entries for audio files, so a share containing
+// files but no mp3/flac would otherwise look indistinguishable from an empty
+// mount and permanently disable pruning. If totalFiles is zero while cached
+// held rows, the scan almost certainly saw a share root that is present but
+// (transiently) empty - e.g. a mount that dropped mid-walk without erroring.
+// Pruning in that case would delete the entire cache for one bad tick, so it
+// is skipped with a warning instead.
+func (c *Client) flushShareMetaCache(ctx context.Context, cached, observed map[string]ShareFileMeta, pending []ShareFileMeta, cacheActive bool, totalFiles int) {
 	if !cacheActive {
 		return
 	}
 	var stale []string
-	if len(observed) == 0 && len(cached) > 0 {
+	if totalFiles == 0 && len(cached) > 0 {
 		if c.logger != nil {
 			c.logger.Warn("share metadata cache: scan observed zero files while the cache held rows; skipping prune",
 				"cached_rows", len(cached))
