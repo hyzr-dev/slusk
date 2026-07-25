@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
@@ -96,5 +96,32 @@ describe('Setup', () => {
     expect(await screen.findByText(t.setup.stateDisabled)).toBeInTheDocument();
     // Only Lidarr's TEST button remains once Soulseek's is hidden.
     expect(screen.getAllByRole('button', { name: t.setup.test })).toHaveLength(1);
+  });
+
+  it('shows FAILED and the returned error inside the error card when a probe reports ok: false', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/config/test/lidarr') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ ok: false, error: 'lidarr unreachable: connection refused' }), {
+              status: 200,
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    renderSetup(makeConfig(), makeShares());
+
+    // Scope to Lidarr's own step: Soulseek renders a TEST button too, and both
+    // start UNTESTED, so asserting against the whole document would leave the
+    // click ambiguous about which dependency it exercised.
+    const lidarrHeader = screen.getByText(new RegExp(t.setup.stepLidarr)).closest('div');
+    if (!lidarrHeader) throw new Error('lidarr step header not found');
+    fireEvent.click(within(lidarrHeader).getByRole('button', { name: t.setup.test }));
+
+    expect(await screen.findByText(t.setup.stateFailed)).toBeInTheDocument();
+    expect(screen.getByText('lidarr unreachable: connection refused')).toBeInTheDocument();
   });
 });
