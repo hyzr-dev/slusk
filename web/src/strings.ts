@@ -183,6 +183,18 @@ export const t = {
     completedAriaLabel: (total: number) =>
       `${total} completed downloads over the last 24 hours`,
     passTooltip: (time: string, matched: number) => `${time} — ${matched} matched`,
+    // TUI Overview page (#198): the section headers above the TRANSFERS and
+    // THROUGHPUT panels. Uppercase in source, per SectionHeader's contract —
+    // RECONCILE reuses t.chrome.reconcile rather than a third copy of the word.
+    transfersHeading: 'TRANSFERS',
+    throughputHeading: 'THROUGHPUT',
+    activeCountMeta: (n: number) => `${n} active`,
+    // The peer-queue special case: an "active" job with no bytes moving.
+    queuePos: (n: number) => `queue pos ${n}`,
+    noThroughputData: 'No throughput data yet',
+    throughputAriaLabel: (peak: string) => `Peak download throughput ${peak} over the recent samples`,
+    reconcileMatched: (n: number) => `${n} matched`,
+    reconcileNoMatch: 'no match',
   },
   peers: {
     empty: 'No peers recorded yet.',

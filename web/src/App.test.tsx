@@ -40,8 +40,10 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
+  // '/' (Overview) is asserted separately below: the TUI reskin (#198) gives
+  // it no <h1> — PageHeading is gone from that route already, ahead of the
+  // other routes below losing theirs in their own tasks.
   it.each([
-    ['/', t.nav.overview],
     ['/jobs', t.nav.jobs],
     // JobDetail with no seeded query data falls through all three header
     // tiers (no live job, no cached detail) to the loading heading.
@@ -55,6 +57,11 @@ describe('route tree', () => {
   ])('renders %s without crashing', (path, heading) => {
     renderAt(path);
     expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+  });
+
+  it('renders / (Overview) without crashing', () => {
+    renderAt('/');
+    expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
   });
 
   it('marks the matching nav item active', () => {

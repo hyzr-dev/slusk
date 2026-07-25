@@ -1,0 +1,14 @@
+.wrap { display: flex; flex-direction: column; gap: 4px; }
+.peak {
+  align-self: flex-end;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.chart { width: 100%; height: 96px; display: block; }
+.baseline { stroke: var(--line2); stroke-width: 1; }
+.area { fill: var(--bar); fill-opacity: 0.16; stroke: none; }
+.line { fill: none; stroke: var(--bar); stroke-width: 1.5; }
+.axis { display: flex; justify-content: space-between; font-size: 9.5px; letter-spacing: 0.8px; color: var(--text-dim); }
+.empty { font-size: 11.5px; letter-spacing: 1px; color: var(--text-dim); padding: 20px 0; text-align: center; }

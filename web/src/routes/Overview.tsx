@@ -1,88 +1,177 @@
 import { useNavigate } from 'react-router-dom';
-import { useCharts, useJobs } from '../api/queries';
-import type { JobStatus } from '../api/types';
-import ChartCard from '../components/charts/ChartCard';
-import CumulativeAreaChart from '../components/charts/CumulativeAreaChart';
-import PassBarChart from '../components/charts/PassBarChart';
-import PageHeading from '../components/PageHeading';
-import ProgressBar from '../components/ProgressBar';
-import StatCard from '../components/StatCard';
-import table from '../components/Table.module.css';
-import { formatBytes } from '../format';
+import { useCharts, useJobs, useStatus } from '../api/queries';
+import type { Job } from '../api/types';
+import ThroughputAreaChart from '../components/charts/ThroughputAreaChart';
+import EmptyState from '../components/tui/EmptyState';
+import SectionHeader from '../components/tui/SectionHeader';
+import Tag from '../components/tui/Tag';
+import Ticks, { type TickTone } from '../components/tui/Ticks';
+import { formatEta, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
 import styles from './Overview.module.css';
 
-// The legacy dashboard omitted the failed card even though it counted the
-// status; showing it is a deliberate fix (#87).
-const CARDS: JobStatus[] = ['queued', 'active', 'stalled', 'done', 'failed'];
+// At most this many rows in the TRANSFERS panel — matches the mock
+// (docs/design/slskdarr-tui.dc.html:102) rather than the full jobs list.
+const MAX_TRANSFER_ROWS = 8;
+// At most this many rows in the RECONCILE list.
+const MAX_RECONCILE_ROWS = 7;
+// Per-row tick resolution in TRANSFERS, matching the mock exactly.
+const TRANSFER_TICKS = 104;
+// How many recent throughput samples feed the ACTIVE stat cell's sparkline.
+const SPARKLINE_SAMPLES = 20;
+
+/**
+ * Tick colour for a TRANSFERS row: queued takes priority over stalled since a
+ * job can carry a stale queuePosition into a terminal status, but never while
+ * still counted as 'active' here (see Tag.tagFor for the same precedence).
+ */
+function tickTone(job: Job): TickTone {
+  if (job.queuePosition) return 'queued';
+  if (job.status === 'stalled') return 'bad';
+  return 'bar';
+}
 
 export default function Overview() {
   const navigate = useNavigate();
   const { data: jobs = [] } = useJobs();
+  const { data: status } = useStatus();
   const { data: charts } = useCharts();
 
-  const counts = Object.fromEntries(
-    CARDS.map((s) => [s, jobs.filter((j) => j.status === s).length]),
-  ) as Record<JobStatus, number>;
+  // Sparklines are drawn only for ACTIVE: it's the one cell with a real
+  // series to plot (charts.throughput). The other four stat cells have no
+  // per-status history anywhere in the backend, and the mock's sparklines
+  // for them are generated noise — omitted rather than faked (see spec,
+  // Overview section).
+  const statCells = [
+    { label: t.status.active, value: status?.active ?? 0 },
+    { label: t.status.queued, value: status?.queued ?? 0 },
+    { label: t.status.stalled, value: status?.stalled ?? 0 },
+    { label: t.status.orphaned, value: status?.orphaned ?? 0 },
+    { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length },
+  ];
 
-  // Overview deliberately ignores the Jobs view's search and status filters.
-  const active = jobs.filter((j) => j.status === 'active');
+  const throughput = charts?.throughput ?? [];
+  const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
+  const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
+
+  const transferRows = jobs
+    .filter((j) => j.status === 'active' || j.status === 'stalled')
+    .slice(0, MAX_TRANSFER_ROWS);
+
+  // SearchPass carries no id of its own; the ordinal is this pass's position
+  // within the (already-capped-at-20, oldest-first) window the backend
+  // returns, not a lifetime counter slskdarr doesn't track.
+  const reconcileRows = (charts?.passes ?? [])
+    .map((pass, i) => ({ ...pass, ordinal: i + 1 }))
+    .slice(-MAX_RECONCILE_ROWS)
+    .reverse();
 
   return (
     <>
-      <PageHeading>{t.nav.overview}</PageHeading>
-
-      <div className={styles.cards}>
-        {CARDS.map((s) => (
-          <StatCard key={s} label={t.status[s]} value={counts[s]} />
+      <div className={styles.statGrid}>
+        {statCells.map((cell, i) => (
+          <div key={cell.label} className={styles.statCell}>
+            <div className={styles.statLabel}>{cell.label}</div>
+            <div className={styles.statValue}>{cell.value}</div>
+            {i === 0 && sparklineSamples.length > 0 && (
+              <div className={styles.sparkline}>
+                {sparklineSamples.map((sample, j) => (
+                  <span
+                    key={j}
+                    style={{ height: `${Math.max(8, (sample.bytesPerSecond / sparklinePeak) * 100)}%` }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         ))}
       </div>
 
-      <div className={styles.charts}>
-        <ChartCard title={t.overview.chartPasses}>
-          <PassBarChart passes={charts?.passes ?? []} />
-        </ChartCard>
-        <ChartCard title={t.overview.chartCompleted}>
-          <CumulativeAreaChart buckets={charts?.completedByHour ?? []} />
-        </ChartCard>
-      </div>
-
-      <table className={table.table}>
-        <thead>
-          <tr>
-            <th className={table.th}>{t.columns.album}</th>
-            <th className={table.th}>{t.columns.peer}</th>
-            <th className={table.th}>{t.columns.progress}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {active.length === 0 ? (
-            <tr>
-              <td className={table.empty} colSpan={3}>{t.overview.empty}</td>
-            </tr>
+      <div className={styles.mainGrid}>
+        <div className={styles.transfers}>
+          <SectionHeader
+            label={t.overview.transfersHeading}
+            meta={t.overview.activeCountMeta(status?.active ?? 0)}
+          />
+          {transferRows.length === 0 ? (
+            <EmptyState message={t.overview.empty} />
           ) : (
-            active.map((j) => (
-              <tr
-                key={j.id}
-                className={table.rowClickable}
-                onClick={() => navigate(`/jobs/${j.id}`)}
-              >
-                <td className={table.td}>
-                  <div>{j.title}</div>
-                  <div className={styles.sub}>{j.artist}</div>
-                </td>
-                <td className={table.td}>{j.peer || '—'}</td>
-                <td className={table.td}>
-                  <div className={styles.bytes}>
-                    {formatBytes(j.bytesDone)} / {formatBytes(j.bytesTotal)}
+            transferRows.map((job) => {
+              // A non-zero queuePosition means the job is waiting in a peer's
+              // remote queue: it's still 'active' but no bytes are moving,
+              // so the byte counts below are replaced and the tick bar must
+              // not flare as if data were arriving.
+              const queued = Boolean(job.queuePosition);
+              const pct = percent(job.bytesDone, job.bytesTotal);
+              const tone = tickTone(job);
+              const live = job.status === 'active' && !job.queuePosition;
+              const right = queued
+                ? t.overview.queuePos(job.queuePosition ?? 0)
+                : job.state === 'IMPORTING'
+                  ? t.jobs.verifying
+                  : `${formatSize(job.bytesDone)} / ${formatSize(job.bytesTotal)}`;
+
+              return (
+                <div
+                  key={job.id}
+                  className={styles.transferRow}
+                  onClick={() => navigate(`/jobs/${job.id}`)}
+                >
+                  <div className={styles.transferHead}>
+                    <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
+                    <span className={styles.transferTitle}>{job.title}</span>
+                    <span className={styles.transferSpeed}>{formatSpeed(job.speed)}</span>
+                    <span
+                      className={`${styles.transferPct} ${queued ? styles.pctQueued : tone === 'bad' ? styles.pctBad : styles.pctBar}`}
+                    >
+                      {pct}%
+                    </span>
                   </div>
-                  <ProgressBar done={j.bytesDone} total={j.bytesTotal} />
-                </td>
-              </tr>
-            ))
+                  <div className={styles.transferTicks}>
+                    <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={12} />
+                  </div>
+                  <div className={styles.transferSub}>
+                    <span>{job.artist} · {job.peer || '—'}</span>
+                    <span>{right}</span>
+                  </div>
+                </div>
+              );
+            })
           )}
-        </tbody>
-      </table>
+        </div>
+
+        <div>
+          <SectionHeader label={t.overview.throughputHeading} />
+          <div className={styles.throughputBody}>
+            <ThroughputAreaChart samples={throughput} />
+          </div>
+
+          <SectionHeader label={t.chrome.reconcile} />
+          {reconcileRows.length === 0 ? (
+            <EmptyState message={t.overview.noChartData} />
+          ) : (
+            <div className={styles.reconcileList}>
+              {reconcileRows.map((pass) => {
+                const matched = pass.matched > 0;
+                const durationSeconds = Math.round(
+                  (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000,
+                );
+                return (
+                  <div key={pass.ordinal} className={styles.reconcileRow}>
+                    <span className={styles.reconcileTime}>{formatShortTime(pass.finishedAt)}</span>
+                    <span className={styles.reconcileId}>#{pass.ordinal}</span>
+                    <span className={styles.reconcileSpacer} />
+                    <span className={matched ? styles.reconcileMatch : styles.reconcileNoMatch}>
+                      {matched ? t.overview.reconcileMatched(pass.matched) : t.overview.reconcileNoMatch}
+                    </span>
+                    <span className={styles.reconcileDur}>{formatEta(durationSeconds)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }
