@@ -11,3 +11,14 @@
 
 .spacer { flex: 1; }
 .meta { color: var(--dim); letter-spacing: 0.4px; }
+
+/* Neutralize the browser's default <h2> styling (bold, larger font, block
+   margins) so the heading reads exactly like the plain text it replaces —
+   every visual property comes from .header instead. */
+.label {
+  margin: 0;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
