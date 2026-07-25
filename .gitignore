@@ -1,6 +1,13 @@
-# Secrets — never commit real config with API keys
+# Secrets — never commit real config with API keys.
+# The .* pattern catches editor and hand-made backups (config.toml.bak etc.),
+# which the bare name does not.
 config.toml
+config.toml.*
 .env
+
+# Local compose override; the tracked examples are docker-compose.example.yml
+# and docker-compose.prod.yml.
+docker-compose.yml
 
 # Local database and build artifacts
 *.db
