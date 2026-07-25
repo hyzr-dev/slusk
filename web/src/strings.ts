@@ -146,6 +146,16 @@ export const t = {
     rescanUnavailable: 'Soulseek sharing is not enabled, so a rescan cannot be started.',
     rescanFailed: 'Could not start the share rescan. Please try again.',
   },
+  uploads: {
+    panelTitle: 'Active uploads',
+    empty: 'No active uploads. Peers download from you when they queue your shared files.',
+    slotsInUse: (active: number, slots: number) => `${active} / ${slots} slots`,
+    // Split rather than interpolated so the peer nick can carry the mono
+    // treatment the design gives it; the nick is rendered as its own span.
+    toPeerPrefix: 'to',
+    queuePlace: (n: number) => `queue #${n}`,
+    truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
+  },
   settings: {
     notWritableNotice:
       'The configuration file is mounted read-only, so settings cannot be edited here. Mount its directory writable (e.g. ./config:/config) instead of a single-file or read-only mount to enable editing.',

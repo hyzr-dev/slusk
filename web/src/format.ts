@@ -49,10 +49,11 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
   return `${(kb / 1024).toFixed(1)} MB/s`;
 }
 
-// Aggregate share/library sizes routinely reach hundreds of GB or several TB,
-// unlike the per-file/per-transfer sizes formatBytes covers (deliberately
-// locked to MB), so this scales up through GB and TB the same way formatSpeed
-// scales through KB/MB.
+// The scaling byte formatter: use it wherever a value can leave the MB range,
+// such as aggregate share/library sizes (routinely hundreds of GB or several
+// TB) or an individual transfer of a large file. It steps up through GB and TB
+// the same way formatSpeed steps through KB/MB. formatBytes stays deliberately
+// locked to MB for parity with the legacy dashboard, which its test pins.
 export function formatSize(bytes: number | null | undefined): string {
   if (!bytes) return '0 MB';
   const mb = bytes / (1024 * 1024);
@@ -60,4 +61,13 @@ export function formatSize(bytes: number | null | undefined): string {
   const gb = mb / 1024;
   if (gb < 1024) return `${gb.toFixed(1)} GB`;
   return `${(gb / 1024).toFixed(1)} TB`;
+}
+
+// UploadEntry.filename is a Soulseek virtual path, which is always
+// backslash-separated regardless of the host OS that shared it — never
+// forward-slash. The full path stays available (e.g. in a `title`
+// attribute); this is only for the compact row label.
+export function formatVirtualPath(path: string): string {
+  const parts = path.split('\\');
+  return parts[parts.length - 1];
 }

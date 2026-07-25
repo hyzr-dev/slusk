@@ -3,6 +3,7 @@ import {
   formatBytes,
   formatSpeed,
   formatSize,
+  formatVirtualPath,
   percent,
   formatDateTime,
   formatShortTime,
@@ -62,6 +63,22 @@ describe('formatSize', () => {
 
   it('scales to TB at or above 1024 GB', () => {
     expect(formatSize(1.4 * 1024 * 1024 * 1024 * 1024)).toBe('1.4 TB');
+  });
+});
+
+describe('formatVirtualPath', () => {
+  it('returns the last backslash-separated segment', () => {
+    expect(formatVirtualPath('Library\\Radiohead\\Kid A\\01 Everything In Its Right Place.flac')).toBe(
+      '01 Everything In Its Right Place.flac',
+    );
+  });
+
+  it('returns the whole string when there is no separator', () => {
+    expect(formatVirtualPath('track.mp3')).toBe('track.mp3');
+  });
+
+  it('returns an empty string for empty input', () => {
+    expect(formatVirtualPath('')).toBe('');
   });
 });
 

@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { SharesReport } from '../api/types';
+import type { SharesReport, UploadsReport } from '../api/types';
 import { t } from '../strings';
 import Shares from './Shares';
 
@@ -26,8 +26,27 @@ function makeReport(overrides: Partial<SharesReport> = {}): SharesReport {
   };
 }
 
+function makeUploadsReport(overrides: Partial<UploadsReport> = {}): UploadsReport {
+  return {
+    enabled: false,
+    slots: 0,
+    active: 0,
+    queued: 0,
+    truncated: 0,
+    uploads: [],
+    ...overrides,
+  };
+}
+
+// UploadsPanel mounts whenever Shares reaches its main (enabled) return, so
+// every test that seeds an enabled SharesReport would otherwise let its
+// useUploads() query attempt a real, unstubbed fetch. Seeding a disabled
+// UploadsReport here by default keeps every existing test free of that
+// network I/O; tests that actually exercise UploadsPanel override it below.
 function newClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  client.setQueryData(queryKeys.uploads, makeUploadsReport());
+  return client;
 }
 
 function renderShares(client: QueryClient) {
@@ -183,5 +202,134 @@ describe('rescan action', () => {
     renderShares(client);
     fireEvent.click(screen.getByRole('button', { name: t.shares.rescan }));
     await screen.findByText(t.shares.rescanFailed);
+  });
+});
+
+describe('uploads panel', () => {
+  it('does not render when native Soulseek sharing is disabled', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ enabled: false, folders: [] }));
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({ enabled: true, slots: 2, active: 1, uploads: [
+        { username: 'ripper_78', filename: 'Aphex Twin\\Windowlicker\\01.flac', active: true, position: 0, size: 1000, bytesWritten: 500 },
+      ] }),
+    );
+    renderShares(client);
+    expect(screen.queryByText(t.uploads.panelTitle)).not.toBeInTheDocument();
+  });
+
+  it('renders an active row with filename, peer, and byte counts', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({
+        enabled: true,
+        slots: 2,
+        active: 1,
+        uploads: [
+          {
+            username: 'ripper_78',
+            filename: 'Aphex Twin\\Windowlicker\\01 Windowlicker.flac',
+            active: true,
+            position: 0,
+            size: 20 * 1024 * 1024,
+            bytesWritten: 10 * 1024 * 1024,
+          },
+        ],
+      }),
+    );
+    renderShares(client);
+    expect(screen.getByText(t.uploads.panelTitle)).toBeInTheDocument();
+    expect(screen.getByText(t.uploads.slotsInUse(1, 2))).toBeInTheDocument();
+    expect(screen.getByText('01 Windowlicker.flac')).toBeInTheDocument();
+    expect(screen.getByText('ripper_78')).toBeInTheDocument();
+    expect(screen.getByText('10.0 MB / 20.0 MB')).toBeInTheDocument();
+  });
+
+  it('omits the byte caption for an active upload whose size is not resolved yet', () => {
+    // dispatch marks a job active before runUpload stores the file size, so
+    // size:0 is a real (brief) wire state. Rendering it would claim a 0-byte
+    // file; the bar stays, only the caption is suppressed.
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({
+        enabled: true,
+        slots: 2,
+        active: 1,
+        uploads: [
+          {
+            username: 'ripper_78',
+            filename: 'Aphex Twin\\Windowlicker\\01 Windowlicker.flac',
+            active: true,
+            position: 0,
+            size: 0,
+            bytesWritten: 0,
+          },
+        ],
+      }),
+    );
+    renderShares(client);
+    expect(screen.getByText('01 Windowlicker.flac')).toBeInTheDocument();
+    expect(screen.queryByText('0 MB / 0 MB')).not.toBeInTheDocument();
+  });
+
+  it('renders a queued row with its queue place instead of a progress bar', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({
+        enabled: true,
+        slots: 2,
+        active: 0,
+        queued: 1,
+        uploads: [
+          { username: 'nordic_rip', filename: 'Burial\\Archangel.flac', active: false, position: 3, size: 0, bytesWritten: 0 },
+        ],
+      }),
+    );
+    renderShares(client);
+    expect(screen.getByText('Archangel.flac')).toBeInTheDocument();
+    expect(screen.getByText('nordic_rip')).toBeInTheDocument();
+    expect(screen.getByText(t.uploads.queuePlace(3))).toBeInTheDocument();
+  });
+
+  it('shows the empty-state copy when there are no uploads', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(queryKeys.uploads, makeUploadsReport({ enabled: true, slots: 2 }));
+    renderShares(client);
+    expect(screen.getByText(t.uploads.empty)).toBeInTheDocument();
+  });
+
+  it('shows a truncation footer when entries were omitted', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({
+        enabled: true,
+        slots: 2,
+        active: 1,
+        queued: 6,
+        truncated: 5,
+        uploads: [
+          {
+            username: 'ripper_78',
+            filename: 'track.flac',
+            active: true,
+            position: 0,
+            size: 1000,
+            bytesWritten: 500,
+          },
+        ],
+      }),
+    );
+    renderShares(client);
+    expect(screen.getByText(t.uploads.truncated(5))).toBeInTheDocument();
   });
 });

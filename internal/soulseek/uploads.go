@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
@@ -14,6 +16,10 @@ import (
 const (
 	maxWaitingUploads        = 1024
 	maxWaitingUploadsPerUser = 64
+	// maxReportedUploads caps how many waiting uploads UploadReport includes,
+	// so a large queue can never make the dashboard's report expensive to
+	// build or serve. Active uploads are never truncated (see report).
+	maxReportedUploads = 100
 )
 
 type uploadKey struct {
@@ -21,9 +27,26 @@ type uploadKey struct {
 	filename string
 }
 
+// uploadJob is only ever handled through a *uploadJob (see byKey/waiting),
+// never copied by value, so its embedded atomics are safe. That is load
+// bearing: size/sent are updated from the per-Write streaming hot path
+// (progressWriter.Write via streamUpload), which must never acquire m.mu, so
+// these fields must stay plain atomics rather than being "simplified" into
+// mutex-guarded ints - that would put a lock acquisition on every upload
+// Write.
 type uploadJob struct {
 	key    uploadKey
 	active bool
+	// seq is the job's enqueue order, assigned under m.mu in enqueue. It
+	// gives report a stable ordering for active uploads (which are not kept
+	// in a slice like waiting is).
+	seq uint64
+	// size is the file's full size; 0 until runUpload resolves the share
+	// entry and stores it, just before opening the file.
+	size atomic.Uint64
+	// sent is the absolute number of bytes delivered to the peer so far,
+	// including any resume offset the peer requested. See streamUploadConn.
+	sent atomic.Uint64
 }
 
 type uploadResponseWaiter struct {
@@ -42,6 +65,9 @@ type uploadManager struct {
 	byToken map[soul.Token]uploadResponseWaiter
 	perUser map[string]int
 	wake    chan struct{}
+	// seq is a monotonic counter assigned to each enqueued job's seq field,
+	// giving report a stable ordering for active uploads.
+	seq uint64
 }
 
 func newUploadManager(c *Client, slots int) *uploadManager {
@@ -70,7 +96,8 @@ func (m *uploadManager) enqueue(username, filename string) error {
 		m.mu.Unlock()
 		return peer.ErrTooManyFiles
 	}
-	job := &uploadJob{key: key}
+	m.seq++
+	job := &uploadJob{key: key, seq: m.seq}
 	m.byKey[key] = job
 	m.waiting = append(m.waiting, job)
 	m.perUser[username]++
@@ -101,6 +128,93 @@ func (m *uploadManager) position(key uploadKey) (uint32, bool) {
 		}
 	}
 	return 0, false
+}
+
+// UploadEntry is one upload in an UploadReport: either currently streaming
+// (Active, Position 0) or waiting in the queue (Position is its 1-based
+// place, matching position()).
+type UploadEntry struct {
+	Username     string
+	Filename     string
+	Active       bool
+	Position     uint32 // 1-based queue place; 0 when Active
+	Size         uint64
+	BytesWritten uint64
+}
+
+// UploadReport is a point-in-time snapshot of the upload manager's state,
+// for the dashboard's upload-activity view. See uploadManager.report and
+// Client.UploadReport.
+type UploadReport struct {
+	Slots     int
+	Active    int
+	Queued    int // true waiting count, regardless of truncation
+	Truncated int // waiting uploads omitted from Uploads
+	Uploads   []UploadEntry
+}
+
+// report builds an UploadReport under one m.mu critical section: no I/O, no
+// blocking behind a transfer, and every field is copied by value so no
+// *uploadJob ever escapes the lock. BytesWritten/Size may be a few writes
+// stale since they are read via atomic.Load while the transfer keeps
+// writing - fine for a UI. limit bounds how many *waiting* uploads are
+// included; active uploads are never truncated (they are already bounded by
+// m.slots).
+//
+// After reset() (dispatcher shutdown), the report goes empty while
+// in-flight bytes may still move for a moment on an already-returned
+// *uploadJob - the same pre-existing semantics shared with
+// availability()/position().
+func (m *uploadManager) report(limit int) UploadReport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Sized from m.active rather than len(m.byKey)-len(m.waiting): the two are
+	// equal while byKey holds exactly the waiting plus the active jobs, but the
+	// subtraction would panic on a negative capacity if a later refactor ever
+	// broke that invariant - on a dashboard poll, far from the change itself.
+	active := make([]*uploadJob, 0, m.active)
+	for _, job := range m.byKey {
+		if job.active {
+			active = append(active, job)
+		}
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].seq < active[j].seq })
+
+	entries := make([]UploadEntry, 0, len(active)+max(0, min(limit, len(m.waiting))))
+	for _, job := range active {
+		entries = append(entries, UploadEntry{
+			Username:     job.key.username,
+			Filename:     job.key.filename,
+			Active:       true,
+			Position:     0,
+			Size:         job.size.Load(),
+			BytesWritten: job.sent.Load(),
+		})
+	}
+	emitted := 0
+	for i, job := range m.waiting {
+		if emitted >= limit {
+			break
+		}
+		entries = append(entries, UploadEntry{
+			Username:     job.key.username,
+			Filename:     job.key.filename,
+			Active:       false,
+			Position:     uint32(i + 1),
+			Size:         job.size.Load(),
+			BytesWritten: job.sent.Load(),
+		})
+		emitted++
+	}
+
+	return UploadReport{
+		Slots:     m.slots,
+		Active:    m.active,
+		Queued:    len(m.waiting),
+		Truncated: len(m.waiting) - emitted,
+		Uploads:   entries,
+	}
 }
 
 func (m *uploadManager) dispatch(ctx context.Context) {
@@ -277,4 +391,20 @@ type uploadPeerMessage[M any] interface {
 func sendUploadPeerMessage[M uploadPeerMessage[M]](session *peerSession, msg M) bool {
 	wire, err := msg.Serialize(msg)
 	return err == nil && session.TrySend(wire)
+}
+
+// UploadReport returns the current upload manager's state: slot usage,
+// active/queued counts, and up to maxReportedUploads waiting entries plus
+// every active one. Like ShareReport, it takes uploads' internal mutex only
+// for bookkeeping and never blocks behind an in-progress transfer.
+//
+// The nil check below is defensive only, for a hand-built Client: New always
+// assigns c.uploads, and a non-positive UploadSlots is clamped to a default
+// rather than disabling the manager. Callers that need to distinguish "native
+// Soulseek is off" get that from the client being nil, not from this report.
+func (c *Client) UploadReport() UploadReport {
+	if c.uploads == nil {
+		return UploadReport{}
+	}
+	return c.uploads.report(maxReportedUploads)
 }

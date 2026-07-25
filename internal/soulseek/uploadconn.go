@@ -28,6 +28,10 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 		c.denyQueuedUpload(ctx, job, peer.ErrFileNotShared)
 		return
 	}
+	// Store size before the file is even opened, so job.size is always
+	// non-zero before job.sent can be (a UploadReport reader never sees
+	// "sent bytes, but size still 0").
+	job.size.Store(indexed.wire.Size)
 	shared, err := openIndexedFile(indexed)
 	if err != nil {
 		c.denyQueuedUpload(ctx, job, peer.ErrFileReadError)
@@ -63,7 +67,7 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 		return
 	}
 
-	if err := c.streamUpload(ctx, job.key.username, reservation.token, shared, indexed.wire.Size); err != nil {
+	if err := c.streamUpload(ctx, job.key.username, reservation.token, shared, indexed.wire.Size, &job.sent); err != nil {
 		_ = sendUploadPeerMessage(session, &peer.UploadFailed{Filename: job.key.filename})
 		if c.logger != nil {
 			if errors.Is(err, errUploadTooSlow) {
@@ -122,7 +126,7 @@ func openIndexedFile(indexed *indexedFile) (*os.File, error) {
 	return f, nil
 }
 
-func (c *Client) streamUpload(ctx context.Context, username string, token soul.Token, shared *os.File, size uint64) error {
+func (c *Client) streamUpload(ctx context.Context, username string, token soul.Token, shared *os.File, size uint64, sent *atomic.Uint64) error {
 	conn, err := c.ConnectPeer(ctx, username, file.ConnectionType)
 	if err != nil {
 		return err
@@ -138,7 +142,7 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 		}
 	}()
 
-	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval)
+	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval, sent)
 }
 
 // uploadThroughputStrikeLimit is how many consecutive sub-floor sample
@@ -147,7 +151,10 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 // initial read latency never counts against it.
 const uploadThroughputStrikeLimit = 2
 
-func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration) error {
+func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent *atomic.Uint64) error {
+	if sent == nil {
+		sent = new(atomic.Uint64)
+	}
 	if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
 		return err
 	}
@@ -164,11 +171,21 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 	if offset.Offset > size {
 		return fmt.Errorf("invalid upload offset %d greater than size %d", offset.Offset, size)
 	}
+	// The peer's requested offset is where the transfer actually starts, so
+	// record it before any body bytes are sent. Store, not Add: exactly one
+	// attempt streams a given uploadJob (a retry gets a fresh job from a new
+	// enqueue), so there is no prior value to add to. Without this, a
+	// resumed upload would permanently under-report: streamUploadBody below
+	// is only given size-offset.Offset to send and counts only what it
+	// writes, so e.g. a 100MB file resumed at 90MB would finish reporting
+	// 10%; and when offset.Offset == size the body is skipped entirely,
+	// which would leave sent at 0 forever.
+	sent.Store(offset.Offset)
 	if offset.Offset < size {
 		if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
 			return err
 		}
-		if err := streamUploadBody(conn, shared, size-offset.Offset, idleTimeout, minThroughput, sampleInterval); err != nil {
+		if err := streamUploadBody(conn, shared, size-offset.Offset, idleTimeout, minThroughput, sampleInterval, sent); err != nil {
 			return err
 		}
 	}
@@ -199,8 +216,11 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 // close the connection - aborting the connection and returning
 // errUploadTooSlow if the peer sustains a throughput below minThroughput
 // for two consecutive sample windows (#108).
-func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration) error {
-	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout}
+func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent *atomic.Uint64) error {
+	if sent == nil {
+		sent = new(atomic.Uint64)
+	}
+	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout, written: sent}
 
 	var abortedSlow atomic.Bool
 	if minThroughput > 0 && sampleInterval > 0 {
@@ -226,6 +246,13 @@ func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout tim
 // interval is always skipped as grace, since it may include time spent
 // before the peer starts reading in earnest. It returns as soon as done is
 // closed, so it never outlives the transfer it is watching.
+//
+// writer.written is now the job's shared *atomic.Uint64 progress counter
+// (also read by UploadReport), and on a resumed transfer it may already
+// start above 0 (streamUploadConn stores the peer's requested offset before
+// the body copy begins) - the sampler only cares about the delta between
+// consecutive polls, so that starting value does not affect its throughput
+// math.
 func uploadThroughputSampler(writer *progressWriter, conn net.Conn, minThroughput int, sampleInterval time.Duration, abortedSlow *atomic.Bool, done <-chan struct{}) {
 	ticker := time.NewTicker(sampleInterval)
 	defer ticker.Stop()
@@ -275,7 +302,7 @@ func uploadThroughputSampler(writer *progressWriter, conn net.Conn, minThroughpu
 type progressWriter struct {
 	conn        net.Conn
 	idleTimeout time.Duration
-	written     atomic.Uint64
+	written     *atomic.Uint64
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {

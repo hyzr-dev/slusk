@@ -398,6 +398,7 @@ func main() {
 	// still gets working share stats/rescan endpoints.
 	var sharesFn observ.SharesFunc
 	var rescanSharesFn observ.RescanSharesFunc
+	var uploadsFn observ.UploadsFunc
 	if soulClient != nil {
 		sharesFn = func() observ.ShareStatsReport {
 			report := soulClient.ShareReport()
@@ -430,6 +431,27 @@ func main() {
 				return err
 			}
 		}
+		uploadsFn = func() observ.UploadReport {
+			report := soulClient.UploadReport()
+			uploads := make([]observ.UploadEntry, len(report.Uploads))
+			for i, u := range report.Uploads {
+				uploads[i] = observ.UploadEntry{
+					Username:     u.Username,
+					Filename:     u.Filename,
+					Active:       u.Active,
+					Position:     u.Position,
+					Size:         u.Size,
+					BytesWritten: u.BytesWritten,
+				}
+			}
+			return observ.UploadReport{
+				Slots:     report.Slots,
+				Active:    report.Active,
+				Queued:    report.Queued,
+				Truncated: report.Truncated,
+				Uploads:   uploads,
+			}
+		}
 	}
 	handler := observ.NewServer(observ.ServerDeps{
 		Registry:         reg,
@@ -457,6 +479,7 @@ func main() {
 		Charts:           chartsFn,
 		Shares:           sharesFn,
 		RescanShares:     rescanSharesFn,
+		Uploads:          uploadsFn,
 		Throughput:       throughputFn,
 	})
 	var authenticator observ.Authenticator
