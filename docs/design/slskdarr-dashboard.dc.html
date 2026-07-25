@@ -1,0 +1,1384 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;background:#0b0d10;}
+  ::selection{background:rgba(53,196,143,0.3);}
+  ::-webkit-scrollbar{width:10px;height:10px;}
+  ::-webkit-scrollbar-thumb{background:#2a2e37;border-radius:6px;border:2px solid #0b0d10;}
+  ::-webkit-scrollbar-thumb:hover{background:#363b45;}
+  input,select,button{font-family:inherit;}
+  @keyframes slsk-pulse{0%{box-shadow:0 0 0 0 rgba(53,196,143,0.5);}70%{box-shadow:0 0 0 6px rgba(53,196,143,0);}100%{box-shadow:0 0 0 0 rgba(53,196,143,0);}}
+  @keyframes slsk-flow{0%{background-position:0 0;}100%{background-position:28px 0;}}
+  @keyframes slsk-spin{to{transform:rotate(360deg);}}
+  @keyframes slsk-toast{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+  @keyframes slsk-shimmer{0%{opacity:.45;}50%{opacity:.9;}100%{opacity:.45;}}
+</style>
+</helmet>
+<div style="{{ rootStyle }}">
+
+  <aside style="width:238px;flex:0 0 238px;background:#101317;border-right:1px solid #1e222a;display:flex;flex-direction:column;height:100vh;">
+    <div style="display:flex;align-items:center;gap:11px;padding:18px 18px 16px;">
+      <div style="width:34px;height:34px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14px;color:#08130d;letter-spacing:-0.5px;">sl</div>
+      <div style="line-height:1.1;">
+        <div style="font-weight:600;font-size:15px;color:#e7e9ee;letter-spacing:-0.2px;">slskdarr</div>
+        <div style="font-size:11px;color:#5f6672;font-family:'IBM Plex Mono',monospace;margin-top:2px;">Lidarr → Soulseek</div>
+      </div>
+    </div>
+
+    <nav style="padding:2px 12px 10px;display:flex;flex-direction:column;gap:1px;overflow-y:auto;flex:1;">
+      <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="3">
+        <div style="font-size:10px;font-weight:600;letter-spacing:0.7px;text-transform:uppercase;color:#4a505b;padding:14px 12px 6px;">{{ g.label }}</div>
+        <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="3">
+          <button onClick="{{ it.onClick }}" style="{{ it.style }}" style-hover="background:#181c22;color:#cdd1d9;">
+            <span style="{{ it.iconWrap }}">{{ it.icon }}</span>
+            <span style="flex:1;">{{ it.label }}</span>
+            <sc-if value="{{ it.hasBadge }}" hint-placeholder-val="{{ false }}">
+              <span style="{{ it.badgeStyle }}">{{ it.badge }}</span>
+            </sc-if>
+            <sc-if value="{{ it.hasWarn }}" hint-placeholder-val="{{ false }}">
+              <span style="width:7px;height:7px;border-radius:50%;background:var(--stalled);"></span>
+            </sc-if>
+          </button>
+        </sc-for>
+      </sc-for>
+    </nav>
+
+    <div style="padding:14px 18px;border-top:1px solid #1e222a;display:flex;flex-direction:column;gap:9px;">
+      <sc-for list="{{ sidebarDeps }}" as="d" hint-placeholder-count="3">
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#8a919d;">
+          <span style="{{ d.dot }}"></span>
+          <span style="flex:1;">{{ d.name }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;color:#5f6672;font-size:11px;">{{ d.meta }}</span>
+        </div>
+      </sc-for>
+      <div style="font-size:10.5px;color:#4a505b;font-family:'IBM Plex Mono',monospace;margin-top:2px;">slskdarr v1.0.0-rc2</div>
+    </div>
+  </aside>
+
+  <main style="flex:1;min-width:0;height:100vh;overflow-y:auto;background:#0b0d10;">
+
+    <header style="position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:16px 26px;background:rgba(11,13,16,0.86);backdrop-filter:blur(10px);border-bottom:1px solid #1a1e25;">
+      <div style="flex:1;min-width:0;">
+        <h1 style="margin:0;font-size:18px;font-weight:600;color:#eef0f3;letter-spacing:-0.3px;">{{ pageTitle }}</h1>
+        <div style="font-size:12.5px;color:#6b7280;margin-top:2px;">{{ pageSubtitle }}</div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:8px;background:#12161b;border:1px solid #202631;">
+        <span style="width:8px;height:8px;border-radius:50%;background:var(--done);animation:slsk-pulse 2s infinite;"></span>
+        <span style="font-size:12px;color:#aeb4bf;font-weight:500;">Live</span>
+        <span style="font-size:11.5px;color:#5f6672;font-family:'IBM Plex Mono',monospace;border-left:1px solid #262b34;padding-left:8px;">{{ updatedText }}</span>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:8px;background:#12161b;border:1px solid #202631;font-size:11.5px;color:#7c828d;font-family:'IBM Plex Mono',monospace;" title="Nästa automatiska reconcile-pass">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+        <span>reconcile {{ nextReconcileText }}</span>
+      </div>
+
+      <button onClick="{{ runReconcile }}" style="display:flex;align-items:center;gap:7px;padding:8px 14px;border-radius:8px;border:1px solid rgba(53,196,143,0.35);background:rgba(53,196,143,0.12);color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(53,196,143,0.2);">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v6h-6"></path></svg>
+        Kör reconcile
+      </button>
+    </header>
+
+    <!-- setup-banner -->
+    <sc-if value="{{ showSetupBanner }}" hint-placeholder-val="{{ false }}">
+    <div style="margin:16px 26px 0;display:flex;align-items:center;gap:13px;padding:13px 16px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.32);">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--stalled)" stroke-width="2" stroke-linecap="round"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg>
+      <div style="flex:1;">
+        <div style="font-size:13px;font-weight:600;color:#e8d9b8;">Konfigurationen är ofullständig</div>
+        <div style="font-size:12px;color:#b09a6e;margin-top:1px;">Soulseek-anslutningen behöver testas och inga delade mappar är verifierade. slskdarr kör i begränsat läge.</div>
+      </div>
+      <button onClick="{{ goSetup }}" style="padding:7px 13px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.14);color:var(--stalled);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(224,167,64,0.22);">Öppna setup</button>
+    </div>
+    </sc-if>
+
+    <!-- ============ ÖVERSIKT ============ -->
+    <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
+    <div style="padding:22px 26px 40px;">
+
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:12px;padding:16px 18px;margin-bottom:16px;display:flex;align-items:center;gap:22px;">
+        <div style="flex:0 0 auto;">
+          <div style="font-size:12px;color:#8a919d;">Din musik just nu</div>
+          <div style="font-family:'IBM Plex Sans';font-size:20px;font-weight:600;color:#eef0f3;margin-top:3px;line-height:1.25;max-width:340px;text-wrap:pretty;">{{ nowSummary }}</div>
+        </div>
+        <div style="flex:1;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;">
+          <sc-for list="{{ nowPills }}" as="p" hint-placeholder-count="3">
+            <div style="{{ p.style }}">
+              <span style="{{ p.dot }}"></span>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:600;color:#eef0f3;">{{ p.value }}</span>
+              <span style="font-size:12px;color:#8a919d;">{{ p.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:13px;">
+        <sc-for list="{{ statCards }}" as="c" hint-placeholder-count="5">
+          <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:14px 15px;position:relative;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:7px;position:relative;z-index:1;">
+              <span style="{{ c.dot }}"></span>
+              <span style="font-size:12px;color:#8a919d;font-weight:500;">{{ c.label }}</span>
+            </div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:30px;font-weight:600;color:#eef0f3;margin-top:8px;line-height:1;letter-spacing:-1px;position:relative;z-index:1;">{{ c.value }}</div>
+            <div style="font-size:11.5px;color:#6b7280;margin-top:7px;position:relative;z-index:1;">{{ c.sub }}</div>
+            <div style="position:absolute;right:0;bottom:0;left:0;height:30px;opacity:0.55;z-index:0;pointer-events:none;">{{ c.spark }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1.55fr 1fr;gap:16px;margin-top:16px;align-items:start;">
+        <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #1e222a;">
+            <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Aktiva nedladdningar</div>
+            <div style="font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;">{{ throughputText }}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;">
+            <sc-for list="{{ overviewActive }}" as="j" hint-placeholder-count="4">
+              <div onClick="{{ j.openInJobs }}" style="display:flex;align-items:center;gap:13px;padding:12px 16px;border-bottom:1px solid #191d24;cursor:pointer;" style-hover="background:#181c22;">
+                <span style="{{ j.dot }}"></span>
+                <div style="min-width:0;flex:1;">
+                  <div style="display:flex;align-items:center;gap:7px;">
+                    <span style="font-size:13px;color:#e2e5ea;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.album }}</span>
+                    <span style="{{ j.srcTag }}">{{ j.srcLabel }}</span>
+                  </div>
+                  <div style="font-size:11.5px;color:#7c828d;margin-top:1px;">{{ j.artist }} · <span style="font-family:'IBM Plex Mono',monospace;">{{ j.peer }}</span></div>
+                </div>
+                <div style="width:150px;flex:0 0 150px;">
+                  <div style="height:6px;border-radius:4px;background:#22262e;overflow:hidden;">
+                    <div style="{{ j.barFill }}"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;margin-top:5px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6b7280;">
+                    <span style="{{ j.pctColor }}">{{ j.phaseShort }}</span>
+                    <span>{{ j.metaRight }}</span>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #1e222a;">
+            <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Senaste reconcile-pass</div>
+            <div style="font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;">total {{ reconcileTotal }}</div>
+          </div>
+          <div>
+            <sc-for list="{{ recentPasses }}" as="p" hint-placeholder-count="5">
+              <div style="display:flex;align-items:center;gap:11px;padding:11px 16px;border-bottom:1px solid #191d24;">
+                <span style="{{ p.dot }}"></span>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:12.5px;color:#d5d8de;font-family:'IBM Plex Mono',monospace;">#{{ p.id }}</div>
+                  <div style="font-size:11px;color:#6b7280;margin-top:1px;">{{ p.timeAgo }}</div>
+                </div>
+                <div style="text-align:right;font-size:11.5px;color:#8a919d;">
+                  <span style="{{ p.matchedColor }}">{{ p.matched }} matchade</span>
+                  <div style="font-family:'IBM Plex Mono',monospace;color:#5f6672;font-size:10.5px;margin-top:1px;">{{ p.wanted }} wanted · {{ p.dur }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ JOBB ============ -->
+    <sc-if value="{{ isJobs }}" hint-placeholder-val="{{ true }}">
+    <div style="padding:18px 26px 48px;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap;">
+        <div style="position:relative;flex:0 0 250px;">
+          <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5f6672" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+          <input value="{{ search }}" onInput="{{ onSearch }}" placeholder="Sök artist, album, peer…" style="width:100%;padding:8px 10px 8px 31px;border-radius:8px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;outline:none;" style-focus="border-color:var(--accent);"/>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:11px;color:#5f6672;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;margin-right:2px;">Källa</span>
+          <sc-for list="{{ sourceChips }}" as="f" hint-placeholder-count="3">
+            <button onClick="{{ f.onClick }}" style="{{ f.style }}">{{ f.label }}</button>
+          </sc-for>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
+        <span style="font-size:11px;color:#5f6672;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;margin-right:2px;">Status</span>
+        <sc-for list="{{ filterChips }}" as="f" hint-placeholder-count="6">
+          <button onClick="{{ f.onClick }}" style="{{ f.style }}">{{ f.label }} <span style="{{ f.countStyle }}">{{ f.count }}</span></button>
+        </sc-for>
+        <sc-if value="{{ filtersActive }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ clearFilters }}" style="margin-left:4px;padding:5px 10px;border-radius:7px;border:1px dashed #2f343d;background:transparent;color:#7c828d;font-size:11.5px;cursor:pointer;" style-hover="color:#c8cdd5;border-color:#3a3f49;">Rensa · {{ filterSummary }}</button>
+        </sc-if>
+      </div>
+
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;">
+        <table style="width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed;">
+          <colgroup><col style="width:112px"/><col/><col style="width:126px"/><col style="width:74px"/><col style="width:180px"/><col style="width:96px"/><col style="width:64px"/><col style="width:56px"/><col style="width:34px"/></colgroup>
+          <thead>
+            <tr style="background:#12151a;">
+              <sc-for list="{{ jobCols }}" as="h" hint-placeholder-count="9">
+                <th style="{{ h.style }}">{{ h.label }}</th>
+              </sc-for>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{ filteredJobs }}" as="j" hint-placeholder-count="8">
+              <tr onClick="{{ j.toggle }}" style="{{ j.rowStyle }}" style-hover="background:#181c22;">
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;">
+                  <span style="{{ j.pill }}">{{ j.statusLabel }}</span>
+                </td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;overflow:hidden;">
+                  <div style="display:flex;align-items:center;gap:7px;">
+                    <span style="color:#e2e5ea;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.album }}</span>
+                    <span style="{{ j.srcTag }}">{{ j.srcLabel }}</span>
+                  </div>
+                  <div style="color:#7c828d;font-size:11.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.artist }} · {{ j.year }}</div>
+                </td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;font-family:'IBM Plex Mono',monospace;color:#aab0bb;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.peer }}</td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;color:#aab0bb;font-family:'IBM Plex Mono',monospace;font-size:11px;">{{ j.format }}</td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;">
+                  <div style="display:flex;align-items:center;gap:9px;">
+                    <div style="flex:1;height:5px;border-radius:3px;background:#22262e;overflow:hidden;position:relative;">
+                      <div style="{{ j.barFill }}"></div>
+                    </div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;width:36px;text-align:right;{{ j.pctColorRaw }}">{{ j.pctOrState }}</span>
+                  </div>
+                  <div style="font-size:10px;color:#5f6672;margin-top:3px;font-family:'IBM Plex Mono',monospace;">{{ j.subState }}</div>
+                </td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;text-align:right;font-family:'IBM Plex Mono',monospace;color:#aab0bb;font-size:11.5px;white-space:nowrap;">{{ j.speedStr }}</td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;text-align:right;font-family:'IBM Plex Mono',monospace;color:#8a919d;font-size:11.5px;">{{ j.etaStr }}</td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;text-align:center;">
+                  <span style="{{ j.retryStyle }}">{{ j.retries }}</span>
+                </td>
+                <td style="padding:var(--rowpad);border-bottom:1px solid #191d24;text-align:center;color:#5f6672;">
+                  <span style="{{ j.chevron }}">›</span>
+                </td>
+              </tr>
+              <sc-if value="{{ j.expanded }}" hint-placeholder-val="{{ false }}">
+                <tr>
+                  <td colspan="9" style="padding:0;border-bottom:1px solid #191d24;background:#0e1115;">
+                    <div style="padding:18px 22px;">
+                      <sc-if value="{{ j.hasReason }}" hint-placeholder-val="{{ false }}">
+                        <div style="{{ j.reasonBox }}">
+                          <span style="font-weight:600;">{{ j.reasonTitle }}</span> — {{ j.reason }}
+                        </div>
+                      </sc-if>
+                      <div style="display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:24px;">
+                        <div>
+                          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6b7280;font-weight:600;margin-bottom:10px;">Peer & transfer</div>
+                          <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px;">
+                            <sc-for list="{{ j.detailRows }}" as="d" hint-placeholder-count="6">
+                              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="color:#7c828d;">{{ d.k }}</span><span style="font-family:'IBM Plex Mono',monospace;color:{{ d.color }};text-align:right;">{{ d.v }}</span></div>
+                            </sc-for>
+                          </div>
+                        </div>
+                        <div>
+                          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6b7280;font-weight:600;margin-bottom:10px;">Filer</div>
+                          <div style="display:flex;flex-direction:column;gap:3px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;">
+                            <sc-for list="{{ j.files }}" as="f" hint-placeholder-count="5">
+                              <div style="display:flex;align-items:center;gap:8px;padding:3px 0;">
+                                <span style="{{ f.dot }}"></span>
+                                <span style="flex:1;color:#aab0bb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ f.name }}</span>
+                                <span style="color:#5f6672;">{{ f.size }}</span>
+                              </div>
+                            </sc-for>
+                            <sc-if value="{{ j.moreFiles }}" hint-placeholder-val="{{ false }}">
+                              <div style="color:#5f6672;padding:3px 0 0 16px;">{{ j.moreFilesText }}</div>
+                            </sc-if>
+                          </div>
+                        </div>
+                        <div>
+                          <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#6b7280;font-weight:600;margin-bottom:10px;">Historik</div>
+                          <div style="display:flex;flex-direction:column;gap:0;">
+                            <sc-for list="{{ j.history }}" as="h" hint-placeholder-count="3">
+                              <div style="display:flex;gap:10px;padding-bottom:11px;">
+                                <div style="display:flex;flex-direction:column;align-items:center;flex:0 0 auto;">
+                                  <span style="width:7px;height:7px;border-radius:50%;background:{{ h.color }};margin-top:3px;"></span>
+                                  <span style="width:1px;flex:1;background:#262b34;margin-top:2px;"></span>
+                                </div>
+                                <div style="min-width:0;">
+                                  <div style="font-size:12px;color:#c8cdd5;">{{ h.event }}</div>
+                                  <div style="font-size:10.5px;color:#5f6672;font-family:'IBM Plex Mono',monospace;margin-top:1px;">{{ h.time }}</div>
+                                </div>
+                              </div>
+                            </sc-for>
+                          </div>
+                        </div>
+                      </div>
+                      <div style="display:flex;gap:9px;margin-top:18px;padding-top:15px;border-top:1px solid #1c2027;">
+                        <button onClick="{{ j.retry }}" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;border:1px solid rgba(53,196,143,0.3);background:rgba(53,196,143,0.1);color:var(--accent);font-size:12px;font-weight:500;cursor:pointer;" style-hover="background:rgba(53,196,143,0.18);">Försök igen</button>
+                        <button onClick="{{ j.forceSearch }}" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:12px;font-weight:500;cursor:pointer;" style-hover="background:#20252d;">Tvinga sökning</button>
+                        <button onClick="{{ j.cancel }}" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:12px;font-weight:500;cursor:pointer;" style-hover="background:#20252d;">Avbryt</button>
+                        <button onClick="{{ j.remove }}" style="display:flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;border:1px solid rgba(229,89,93,0.28);background:rgba(229,89,93,0.09);color:var(--orphaned);font-size:12px;font-weight:500;cursor:pointer;margin-left:auto;" style-hover="background:rgba(229,89,93,0.16);">Ta bort</button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              </sc-if>
+            </sc-for>
+          </tbody>
+        </table>
+        <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:44px;text-align:center;color:#5f6672;font-size:13px;">Inga jobb matchar filtret.</div>
+        </sc-if>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ SÖK ============ -->
+    <sc-if value="{{ isSearch }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:18px 26px 48px;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+        <div style="position:relative;flex:1;max-width:560px;">
+          <svg style="position:absolute;left:13px;top:50%;transform:translateY(-50%);" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5f6672" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+          <input value="{{ sQuery }}" onInput="{{ onSQuery }}" onKeyDown="{{ onSKey }}" placeholder="Sök på Soulseek — artist, album, spår…" style="width:100%;padding:11px 14px 11px 38px;border-radius:9px;background:#13161b;border:1px solid #23272f;color:#dfe2e8;font-size:14px;outline:none;" style-focus="border-color:var(--accent);"/>
+          <sc-if value="{{ sSearching }}" hint-placeholder-val="{{ false }}">
+            <span style="position:absolute;right:12px;top:50%;transform:translateY(-50%);width:15px;height:15px;border:2px solid #2a2f39;border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>
+          </sc-if>
+        </div>
+        <button onClick="{{ runSearch }}" style="padding:11px 18px;border-radius:9px;border:1px solid rgba(53,196,143,0.35);background:var(--accent);color:#08130d;font-size:13px;font-weight:600;cursor:pointer;" style-hover="filter:brightness(1.08);">Sök</button>
+      </div>
+
+      <!-- SÖK: tomt -->
+      <sc-if value="{{ sIdle }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:72px 20px;text-align:center;">
+          <div style="width:52px;height:52px;border-radius:14px;background:#14171c;border:1px solid #21252e;display:flex;align-items:center;justify-content:center;margin-bottom:16px;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#5f6672" stroke-width="1.8"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.5" y2="16.5"></line></svg>
+          </div>
+          <div style="font-size:15px;color:#c8cdd5;font-weight:500;">Sök direkt på Soulseek</div>
+          <div style="font-size:13px;color:#6b7280;margin-top:6px;max-width:420px;text-wrap:pretty;">Resultaten grupperas per peer och album. Det du laddar ner kan kopplas till Lidarr och importeras automatiskt — precis som de automatiska jobben.</div>
+          <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap;justify-content:center;">
+            <sc-for list="{{ sExamples }}" as="e" hint-placeholder-count="3">
+              <button onClick="{{ e.onClick }}" style="padding:7px 13px;border-radius:20px;border:1px solid #23272f;background:#13161b;color:#9aa1ad;font-size:12.5px;cursor:pointer;font-family:'IBM Plex Mono',monospace;" style-hover="border-color:var(--accent);color:#c8cdd5;">{{ e.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- SÖK: inga träffar -->
+      <sc-if value="{{ sEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:64px 20px;text-align:center;">
+          <div style="font-size:15px;color:#c8cdd5;font-weight:500;">Inga träffar för "{{ sLastQuery }}"</div>
+          <div style="font-size:13px;color:#6b7280;margin-top:6px;max-width:400px;text-wrap:pretty;">Ingen peer på nätverket delar detta just nu. Prova en annan stavning, utan årtal, eller sök på enbart artisten.</div>
+          <button onClick="{{ clearSearch }}" style="margin-top:16px;padding:8px 15px;border-radius:8px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:12.5px;cursor:pointer;" style-hover="background:#20252d;">Ny sökning</button>
+        </div>
+      </sc-if>
+
+      <!-- SÖK: resultat -->
+      <sc-if value="{{ sHasResults }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap;">
+          <div style="font-size:12.5px;color:#8a919d;">
+            <span style="color:#dfe2e8;font-weight:600;font-family:'IBM Plex Mono',monospace;">{{ sCount }}</span> träffar
+            <sc-if value="{{ sSearching }}" hint-placeholder-val="{{ false }}">
+              <span style="color:var(--accent);margin-left:6px;">· strömmar in…</span>
+            </sc-if>
+            <sc-if value="{{ sDone }}" hint-placeholder-val="{{ false }}">
+              <span style="color:#5f6672;margin-left:6px;">· sökning klar</span>
+            </sc-if>
+          </div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+            <span style="font-size:11.5px;color:#5f6672;">Sortera</span>
+            <select value="{{ sSort }}" onChange="{{ onSSort }}" style="padding:6px 10px;border-radius:7px;background:#13161b;border:1px solid #23272f;color:#c8cdd5;font-size:12px;outline:none;cursor:pointer;">
+              <option value="best">Bäst matchning</option>
+              <option value="size">Storlek</option>
+              <option value="speed">Hastighet</option>
+              <option value="avail">Tillgänglighet</option>
+            </select>
+            <sc-for list="{{ sFormatChips }}" as="f" hint-placeholder-count="4">
+              <button onClick="{{ f.onClick }}" style="{{ f.style }}">{{ f.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <sc-for list="{{ sResults }}" as="r" hint-placeholder-count="4">
+            <div style="{{ r.cardStyle }}">
+              <sc-if value="{{ r.isBest }}" hint-placeholder-val="{{ false }}">
+                <div style="position:absolute;top:-1px;right:16px;padding:2px 9px;border-bottom-left-radius:7px;border-bottom-right-radius:7px;background:var(--accent);color:#08130d;font-size:10px;font-weight:700;letter-spacing:0.4px;">BÄST MATCHNING</div>
+              </sc-if>
+              <div onClick="{{ r.toggle }}" style="display:flex;align-items:center;gap:14px;padding:14px 16px;cursor:pointer;">
+                <div style="min-width:0;flex:1;">
+                  <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
+                    <span style="font-size:14px;font-weight:600;color:#eef0f3;">{{ r.title }}</span>
+                    <span style="font-size:12px;color:#7c828d;">{{ r.artist }}</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+                    <sc-for list="{{ r.badges }}" as="b" hint-placeholder-count="3">
+                      <span style="{{ b.style }}">{{ b.label }}</span>
+                    </sc-for>
+                    <span style="font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;margin-left:2px;">{{ r.meta }}</span>
+                  </div>
+                </div>
+                <div style="flex:0 0 auto;text-align:right;">
+                  <div style="display:flex;align-items:center;gap:7px;justify-content:flex-end;">
+                    <span style="{{ r.availStyle }}">{{ r.availLabel }}</span>
+                  </div>
+                  <div style="font-size:11.5px;color:#7c828d;font-family:'IBM Plex Mono',monospace;margin-top:5px;">{{ r.peer }} · {{ r.speed }}</div>
+                </div>
+                <span style="{{ r.chevron }}">›</span>
+              </div>
+
+              <sc-if value="{{ r.expanded }}" hint-placeholder-val="{{ false }}">
+                <div style="border-top:1px solid #1e222a;padding:12px 16px;background:#0e1115;">
+                  <div style="display:flex;flex-direction:column;gap:1px;max-height:230px;overflow-y:auto;">
+                    <sc-for list="{{ r.tracks }}" as="t" hint-placeholder-count="6">
+                      <label style="{{ t.rowStyle }}" style-hover="background:#14181e;">
+                        <input type="checkbox" checked="{{ t.checked }}" onChange="{{ t.onToggle }}" style="width:14px;height:14px;accent-color:var(--accent);cursor:pointer;"/>
+                        <span style="width:22px;text-align:right;color:#5f6672;font-family:'IBM Plex Mono',monospace;font-size:11px;">{{ t.num }}</span>
+                        <span style="flex:1;color:#c8cdd5;font-family:'IBM Plex Mono',monospace;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ t.name }}</span>
+                        <span style="color:#6b7280;font-family:'IBM Plex Mono',monospace;font-size:11px;">{{ t.dur }}</span>
+                        <span style="color:#5f6672;font-family:'IBM Plex Mono',monospace;font-size:11px;width:60px;text-align:right;">{{ t.size }}</span>
+                      </label>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-if>
+
+              <!-- import-koppling inline -->
+              <sc-if value="{{ r.importOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="border-top:1px solid #1e222a;padding:14px 16px;background:#0f1319;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="m3 7 9 5 9-5"></path><path d="M3 7v10l9 5 9-5V7"></path><path d="m3 7 9-5 9 5"></path></svg>
+                    <span style="font-size:12px;font-weight:600;color:#dfe2e8;text-transform:uppercase;letter-spacing:0.4px;">Koppla till Lidarr</span>
+                  </div>
+
+                  <sc-if value="{{ r.importConfirmed }}" hint-placeholder-val="{{ false }}">
+                    <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:var(--done-bg);border:1px solid rgba(53,196,143,0.28);">
+                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--done)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+                      <div style="flex:1;">
+                        <div style="font-size:12.5px;color:#dfe2e8;">Kopplas till <span style="font-weight:600;">{{ r.matchAlbum }}</span> · {{ r.matchArtist }}</div>
+                        <div style="font-size:11px;color:#7c9d86;margin-top:1px;">{{ r.matchNote }}</div>
+                      </div>
+                      <button onClick="{{ r.changeMatch }}" style="padding:6px 11px;border-radius:7px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:11.5px;cursor:pointer;" style-hover="background:#20252d;">Ändra</button>
+                    </div>
+                  </sc-if>
+
+                  <sc-if value="{{ r.importPicking }}" hint-placeholder-val="{{ false }}">
+                    <div style="border-radius:9px;background:#12161b;border:1px solid #23272f;overflow:hidden;">
+                      <div style="padding:9px 12px;border-bottom:1px solid #1e222a;">
+                        <input value="{{ r.pickQuery }}" onInput="{{ r.onPickQuery }}" placeholder="Sök artist eller album i Lidarr-biblioteket…" style="width:100%;padding:7px 10px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12px;outline:none;" style-focus="border-color:var(--accent);"/>
+                      </div>
+                      <div style="max-height:190px;overflow-y:auto;">
+                        <sc-for list="{{ r.pickResults }}" as="a" hint-placeholder-count="4">
+                          <div onClick="{{ a.onPick }}" style="display:flex;align-items:center;gap:11px;padding:9px 12px;border-bottom:1px solid #191d24;cursor:pointer;" style-hover="background:#181c22;">
+                            <span style="{{ a.dot }}"></span>
+                            <div style="flex:1;min-width:0;">
+                              <div style="font-size:12.5px;color:#dfe2e8;">{{ a.album }}</div>
+                              <div style="font-size:11px;color:#7c828d;">{{ a.artist }} · {{ a.year }}</div>
+                            </div>
+                            <span style="font-size:10.5px;color:#5f6672;font-family:'IBM Plex Mono',monospace;">{{ a.status }}</span>
+                          </div>
+                        </sc-for>
+                        <sc-if value="{{ r.pickEmpty }}" hint-placeholder-val="{{ false }}">
+                          <div style="padding:20px;text-align:center;color:#5f6672;font-size:12px;">Inget i biblioteket matchar. Du kan hoppa över import.</div>
+                        </sc-if>
+                      </div>
+                    </div>
+                  </sc-if>
+
+                  <div style="display:flex;align-items:center;gap:9px;margin-top:13px;">
+                    <button onClick="{{ r.startDownload }}" style="display:flex;align-items:center;gap:7px;padding:8px 15px;border-radius:8px;border:1px solid rgba(53,196,143,0.35);background:var(--accent);color:#08130d;font-size:12.5px;font-weight:600;cursor:pointer;" style-hover="filter:brightness(1.08);">{{ r.downloadLabel }}</button>
+                    <button onClick="{{ r.skipImport }}" style="padding:8px 13px;border-radius:8px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:12.5px;font-weight:500;cursor:pointer;" style-hover="background:#20252d;">{{ r.skipLabel }}</button>
+                    <button onClick="{{ r.cancelImport }}" style="margin-left:auto;padding:8px 12px;border-radius:8px;border:none;background:transparent;color:#7c828d;font-size:12px;cursor:pointer;" style-hover="color:#c8cdd5;">Avbryt</button>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ r.showActions }}" hint-placeholder-val="{{ false }}">
+                <div style="border-top:1px solid #1e222a;padding:11px 16px;display:flex;align-items:center;gap:9px;background:#101318;">
+                  <button onClick="{{ r.downloadAlbum }}" style="display:flex;align-items:center;gap:7px;padding:8px 14px;border-radius:8px;border:1px solid rgba(53,196,143,0.32);background:rgba(53,196,143,0.11);color:var(--accent);font-size:12.5px;font-weight:600;cursor:pointer;" style-hover="background:rgba(53,196,143,0.18);">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+                    Ladda ner album
+                  </button>
+                  <button onClick="{{ r.downloadSelected }}" style="{{ r.selBtnStyle }}">Ladda ner valda ({{ r.selCount }})</button>
+                  <span style="margin-left:auto;font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;">{{ r.folderPath }}</span>
+                </div>
+              </sc-if>
+            </div>
+          </sc-for>
+
+          <sc-if value="{{ sSearching }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:11px;padding:16px;border-radius:11px;border:1px dashed #23272f;color:#6b7280;font-size:12.5px;justify-content:center;">
+              <span style="width:14px;height:14px;border:2px solid #2a2f39;border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>
+              Frågar peers på nätverket…
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+    </div>
+    </sc-if>
+
+    <!-- ============ DELNING ============ -->
+    <sc-if value="{{ isShare }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:22px 26px 48px;">
+
+      <sc-if value="{{ shareEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:flex-start;gap:15px;padding:20px;border-radius:12px;background:var(--orphaned-bg);border:1px solid rgba(229,89,93,0.3);margin-bottom:18px;">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--orphaned)" stroke-width="2" stroke-linecap="round" style="flex:0 0 auto;margin-top:1px;"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg>
+          <div style="flex:1;">
+            <div style="font-size:14px;font-weight:600;color:#f0c4c5;">Inga delade mappar konfigurerade</div>
+            <div style="font-size:12.5px;color:#c99a9c;margin-top:4px;max-width:560px;text-wrap:pretty;">Delning är inträdesbiljetten till Soulseek. Utan shares betraktas du som leechare och peers kan strypa eller blockera dina nedladdningar. Lägg till minst en mapp i konfigurationsfilen och kör en rescan.</div>
+            <div style="margin-top:10px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#a5787a;background:rgba(0,0,0,0.25);border:1px solid rgba(229,89,93,0.2);border-radius:7px;padding:8px 11px;display:inline-block;">shares:\n  - /music/library</div>
+          </div>
+        </div>
+      </sc-if>
+
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-bottom:16px;">
+        <sc-for list="{{ shareStats }}" as="s" hint-placeholder-count="3">
+          <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:14px 15px;">
+            <div style="font-size:12px;color:#8a919d;">{{ s.label }}</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:600;color:#eef0f3;margin-top:7px;line-height:1;">{{ s.value }}</div>
+            <div style="font-size:11.5px;color:#6b7280;margin-top:6px;">{{ s.sub }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid #1e222a;">
+          <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Delade mappar</div>
+          <button onClick="{{ rescanAll }}" style="{{ rescanBtnStyle }}">
+            <sc-if value="{{ rescanning }}" hint-placeholder-val="{{ false }}">
+              <span style="width:12px;height:12px;border:2px solid rgba(53,196,143,0.35);border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>
+            </sc-if>
+            <sc-if value="{{ notRescanning }}" hint-placeholder-val="{{ true }}">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v6h-6"></path></svg>
+            </sc-if>
+            {{ rescanLabel }}
+          </button>
+        </div>
+        <sc-if value="{{ rescanning }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:10px 16px;border-bottom:1px solid #1e222a;background:#12161b;">
+            <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#8a919d;margin-bottom:6px;font-family:'IBM Plex Mono',monospace;">
+              <span>Indexerar · {{ rescanFile }}</span><span>{{ rescanPct }}%</span>
+            </div>
+            <div style="height:5px;border-radius:3px;background:#22262e;overflow:hidden;">
+              <div style="height:100%;border-radius:3px;background:var(--accent);width:{{ rescanPct }}%;transition:width .3s;"></div>
+            </div>
+          </div>
+        </sc-if>
+        <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+          <thead>
+            <tr style="background:#12151a;">
+              <th style="text-align:left;padding:9px 16px;font-weight:600;font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;">Sökväg</th>
+              <th style="text-align:right;padding:9px 16px;font-weight:600;font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;">Filer</th>
+              <th style="text-align:right;padding:9px 16px;font-weight:600;font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;">Storlek</th>
+              <th style="text-align:right;padding:9px 16px;font-weight:600;font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;">Senast indexerad</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{ shares }}" as="s" hint-placeholder-count="3">
+              <tr>
+                <td style="padding:11px 16px;border-bottom:1px solid #191d24;font-family:'IBM Plex Mono',monospace;color:#c8cdd5;font-size:12px;">{{ s.path }}</td>
+                <td style="padding:11px 16px;border-bottom:1px solid #191d24;text-align:right;font-family:'IBM Plex Mono',monospace;color:#aab0bb;">{{ s.files }}</td>
+                <td style="padding:11px 16px;border-bottom:1px solid #191d24;text-align:right;font-family:'IBM Plex Mono',monospace;color:#aab0bb;">{{ s.size }}</td>
+                <td style="padding:11px 16px;border-bottom:1px solid #191d24;text-align:right;color:#8a919d;font-size:11.5px;">{{ s.indexed }}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+        <div style="padding:9px 16px;font-size:11px;color:#5f6672;background:#101318;border-top:1px solid #191d24;">Mappar definieras i konfigurationsfilen. Detta är en läsvy — lägg till eller ta bort shares i <span style="font-family:'IBM Plex Mono',monospace;color:#7c828d;">config.yaml</span>.</div>
+      </div>
+
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid #1e222a;">
+          <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Pågående uploads</div>
+          <div style="font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;">{{ uploadThroughput }} upp</div>
+        </div>
+        <sc-if value="{{ hasUploads }}" hint-placeholder-val="{{ true }}">
+          <sc-for list="{{ uploads }}" as="u" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:13px;padding:11px 16px;border-bottom:1px solid #191d24;">
+              <span style="{{ u.dot }}"></span>
+              <div style="min-width:0;flex:1;">
+                <div style="font-size:12.5px;color:#d5d8de;font-family:'IBM Plex Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ u.file }}</div>
+                <div style="font-size:11px;color:#7c828d;margin-top:1px;">till <span style="font-family:'IBM Plex Mono',monospace;">{{ u.peer }}</span></div>
+              </div>
+              <div style="width:130px;flex:0 0 130px;">
+                <div style="height:5px;border-radius:3px;background:#22262e;overflow:hidden;"><div style="{{ u.barFill }}"></div></div>
+                <div style="display:flex;justify-content:space-between;margin-top:4px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#6b7280;"><span>{{ u.pct }}%</span><span>{{ u.speed }}</span></div>
+              </div>
+            </div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ noUploads }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:28px;text-align:center;color:#5f6672;font-size:12.5px;">Inga aktiva uploads. Peers laddar ner från dig när de köar dina delade filer.</div>
+        </sc-if>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ HÄLSA ============ -->
+    <sc-if value="{{ isHealth }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:22px 26px 48px;">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-bottom:16px;">
+        <sc-for list="{{ healthDeps }}" as="d" hint-placeholder-count="3">
+          <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:15px 16px;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="{{ d.dot }}"></span>
+              <span style="font-size:13.5px;font-weight:600;color:#dfe2e8;flex:1;">{{ d.name }}</span>
+              <span style="{{ d.pill }}">{{ d.statusLabel }}</span>
+            </div>
+            <div style="font-size:12px;color:#8a919d;margin-top:9px;">{{ d.detail }}</div>
+            <div style="font-size:11px;color:#5f6672;margin-top:5px;font-family:'IBM Plex Mono',monospace;">{{ d.latency }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:16px;">
+        <sc-for list="{{ metricTiles }}" as="m" hint-placeholder-count="4">
+          <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:14px 15px;">
+            <div style="font-size:11px;color:#7c828d;font-family:'IBM Plex Mono',monospace;">{{ m.key }}</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:600;color:#eef0f3;margin-top:7px;line-height:1;">{{ m.value }}</div>
+            <div style="font-size:11.5px;color:#6b7280;margin-top:6px;">{{ m.label }}</div>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:16px 18px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <div>
+            <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Aktiva nedladdningar</div>
+            <div style="font-size:11.5px;color:#6b7280;margin-top:2px;">Live · senaste 48 sekunder</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--active);">
+            <span style="width:8px;height:8px;border-radius:50%;background:var(--active);animation:slsk-pulse 2s infinite;"></span>{{ activeNow }} nu
+          </div>
+        </div>
+        <div style="height:120px;margin-top:6px;">{{ activeChart }}</div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:16px 18px;">
+          <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Reconcile-frekvens</div>
+          <div style="font-size:11.5px;color:#6b7280;margin-top:2px;margin-bottom:8px;">Matchade album per pass · senaste 20</div>
+          <div style="height:120px;">{{ reconcileChart }}</div>
+        </div>
+        <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:16px 18px;">
+          <div style="font-size:13.5px;font-weight:600;color:#dfe2e8;">Klara nedladdningar</div>
+          <div style="font-size:11.5px;color:#6b7280;margin-top:2px;margin-bottom:8px;">Kumulativt · senaste 24 timmar</div>
+          <div style="height:120px;">{{ completedChart }}</div>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ SETUP ============ -->
+    <sc-if value="{{ isSetup }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:22px 26px 48px;max-width:720px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <sc-for list="{{ setupProgress }}" as="p" hint-placeholder-count="3">
+          <span style="{{ p.style }}"></span>
+        </sc-for>
+        <span style="font-size:12px;color:#8a919d;margin-left:6px;font-family:'IBM Plex Mono',monospace;">{{ setupDoneCount }}/3 klara</span>
+      </div>
+      <div style="font-size:13px;color:#6b7280;margin-bottom:18px;text-wrap:pretty;max-width:520px;">slskdarr validerar din konfigurationsfil. Fyll i värdena där och testa varje anslutning här — inget skrivs tillbaka från UI:t.</div>
+
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <sc-for list="{{ setupSteps }}" as="st" hint-placeholder-count="3">
+          <div style="{{ st.cardStyle }}">
+            <div style="display:flex;align-items:center;gap:13px;">
+              <span style="{{ st.numStyle }}">{{ st.numContent }}</span>
+              <div style="flex:1;">
+                <div style="font-size:14px;font-weight:600;color:#e2e5ea;">{{ st.title }}</div>
+                <div style="font-size:12px;color:#8a919d;margin-top:1px;">{{ st.subtitle }}</div>
+              </div>
+              <button onClick="{{ st.test }}" style="{{ st.btnStyle }}">
+                <sc-if value="{{ st.testing }}" hint-placeholder-val="{{ false }}">
+                  <span style="width:12px;height:12px;border:2px solid rgba(255,255,255,0.2);border-top-color:currentColor;border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>
+                </sc-if>
+                {{ st.btnLabel }}
+              </button>
+            </div>
+
+            <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+              <sc-for list="{{ st.fields }}" as="f" hint-placeholder-count="2">
+                <label style="display:flex;flex-direction:column;gap:6px;{{ f.span }}">
+                  <span style="font-size:11.5px;color:#8a919d;">{{ f.label }}</span>
+                  <input type="{{ f.type }}" value="{{ f.value }}" placeholder="{{ f.ph }}" style="padding:8px 11px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;font-family:'IBM Plex Mono',monospace;outline:none;" style-focus="border-color:var(--accent);"/>
+                </label>
+              </sc-for>
+            </div>
+
+            <sc-if value="{{ st.showResult }}" hint-placeholder-val="{{ false }}">
+              <div style="{{ st.resultBox }}">
+                <span style="{{ st.resultIcon }}">{{ st.resultGlyph }}</span>
+                <div style="flex:1;">
+                  <div style="font-size:12.5px;font-weight:600;color:{{ st.resultTitleColor }};">{{ st.resultTitle }}</div>
+                  <sc-if value="{{ st.hasHint }}" hint-placeholder-val="{{ false }}">
+                    <div style="font-size:12px;color:#b09a6e;margin-top:3px;">{{ st.resultHint }}</div>
+                  </sc-if>
+                </div>
+                <sc-if value="{{ st.hasFix }}" hint-placeholder-val="{{ false }}">
+                  <button onClick="{{ st.test }}" style="padding:6px 11px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.13);color:var(--stalled);font-size:11.5px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(224,167,64,0.2);">Testa igen</button>
+                </sc-if>
+              </div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ INSTÄLLNINGAR ============ -->
+    <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:22px 26px 48px;max-width:760px;">
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:18px 20px;margin-bottom:16px;">
+        <div style="font-size:14px;font-weight:600;color:#e2e5ea;margin-bottom:16px;">Reconcile</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+          <label style="display:flex;flex-direction:column;gap:6px;">
+            <span style="font-size:12px;color:#8a919d;">Intervall</span>
+            <select value="{{ intervalSel }}" onChange="{{ onInterval }}" style="padding:8px 11px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;outline:none;" style-focus="border-color:var(--accent);">
+              <option value="45">45 sekunder</option>
+              <option value="120">2 minuter</option>
+              <option value="300">5 minuter</option>
+              <option value="900">15 minuter</option>
+            </select>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:6px;">
+            <span style="font-size:12px;color:#8a919d;">Samtidiga nedladdningar</span>
+            <input type="number" value="4" style="padding:8px 11px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;font-family:'IBM Plex Mono',monospace;outline:none;" style-focus="border-color:var(--accent);"/>
+          </label>
+        </div>
+        <div style="margin-top:16px;">
+          <span style="font-size:12px;color:#8a919d;display:block;margin-bottom:8px;">Kvalitetspreferens</span>
+          <div style="display:flex;gap:8px;">
+            <span style="padding:6px 12px;border-radius:7px;background:rgba(53,196,143,0.12);border:1px solid rgba(53,196,143,0.3);color:var(--accent);font-size:12px;font-family:'IBM Plex Mono',monospace;">1 · FLAC</span>
+            <span style="padding:6px 12px;border-radius:7px;background:#191d24;border:1px solid #2a2f39;color:#aab0bb;font-size:12px;font-family:'IBM Plex Mono',monospace;">2 · MP3 320</span>
+            <span style="padding:6px 12px;border-radius:7px;background:#191d24;border:1px solid #2a2f39;color:#aab0bb;font-size:12px;font-family:'IBM Plex Mono',monospace;">3 · MP3 V0</span>
+          </div>
+        </div>
+      </div>
+      <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:18px 20px;margin-bottom:16px;">
+        <div style="font-size:14px;font-weight:600;color:#e2e5ea;margin-bottom:16px;">Sökning & timeout</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+          <label style="display:flex;flex-direction:column;gap:6px;">
+            <span style="font-size:12px;color:#8a919d;">Min. antal peer-filer</span>
+            <input type="number" value="8" style="padding:8px 11px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;font-family:'IBM Plex Mono',monospace;outline:none;" style-focus="border-color:var(--accent);"/>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:6px;">
+            <span style="font-size:12px;color:#8a919d;">Stalled-timeout (min)</span>
+            <input type="number" value="10" style="padding:8px 11px;border-radius:7px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;font-family:'IBM Plex Mono',monospace;outline:none;" style-focus="border-color:var(--accent);"/>
+          </label>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-bottom:14px;">Anslutningar (Soulseek, Lidarr, shares) hanteras i <button onClick="{{ goSetup }}" style="border:none;background:none;color:var(--accent);cursor:pointer;font-size:12px;padding:0;text-decoration:underline;">Setup</button> och valideras mot konfigurationsfilen.</div>
+      <div style="display:flex;gap:10px;">
+        <button onClick="{{ saveSettings }}" style="padding:9px 18px;border-radius:8px;border:1px solid rgba(53,196,143,0.35);background:var(--accent);color:#08130d;font-size:13px;font-weight:600;cursor:pointer;" style-hover="filter:brightness(1.08);">Spara</button>
+      </div>
+    </div>
+    </sc-if>
+
+    <!-- ============ KOMPONENTER ============ -->
+    <sc-if value="{{ isComponents }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:22px 26px 60px;max-width:1080px;">
+      <div style="font-size:12.5px;color:#6b7280;margin-bottom:22px;max-width:640px;text-wrap:pretty;">Återanvändbara enheter isolerade med sina varianter. Props anges per komponent — färger refererar tokens (<span style="font-family:'IBM Plex Mono',monospace;color:#7c828d;">--accent</span>, <span style="font-family:'IBM Plex Mono',monospace;color:#7c828d;">--active</span>, <span style="font-family:'IBM Plex Mono',monospace;color:#7c828d;">--manual</span> …), inte hårdkodade hex-värden.</div>
+
+      <sc-for list="{{ compSections }}" as="sec" hint-placeholder-count="6">
+        <div style="margin-bottom:30px;">
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+            <div style="font-size:14px;font-weight:600;color:#dfe2e8;">{{ sec.title }}</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#5f6672;">{{ sec.props }}</div>
+          </div>
+          <div style="font-size:12px;color:#6b7280;margin-bottom:12px;max-width:640px;">{{ sec.note }}</div>
+          <div style="background:#14171c;border:1px solid #21252e;border-radius:11px;padding:18px;display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;">
+            {{ sec.render }}
+          </div>
+        </div>
+      </sc-for>
+    </div>
+    </sc-if>
+
+  </main>
+
+  <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:100;display:flex;align-items:center;gap:10px;padding:11px 16px;border-radius:10px;background:#1a1e25;border:1px solid #2c313b;box-shadow:0 8px 24px rgba(0,0,0,0.45);animation:slsk-toast 0.2s ease;">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--accent);"></span>
+      <span style="font-size:13px;color:#dfe2e8;">{{ toast }}</span>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#35c48f&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Utseende&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;balanced&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;balanced&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Utseende&quot;}}">
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    this.PEERS = ['haze_v0id','flac_hoarder','nordic_rip','vinyl2flac','ripper_78','deep_archive','sound_seed','lossless_lars','audiophile_se','wax_and_bits'];
+    this.state = this.seed();
+  }
+
+  seed(){
+    const mk = (o) => Object.assign({
+      year:2010, tracks:11, format:'FLAC', sizeMB:400, progress:0, peer:'—',
+      speedKBs:0, retries:0, reason:'', addedMin:4, source:'lidarr', queuePos:0, stateMin:1, phase:''
+    }, o);
+
+    const jobs = [
+      mk({id:'J-2291', artist:'Burial', album:'Untrue', year:2007, tracks:13, sizeMB:342, status:'active', progress:91, peer:'haze_v0id', speedKBs:640, source:'lidarr', stateMin:6, phase:'DOWNLOADING'}),
+      mk({id:'J-2288', artist:'Four Tet', album:'Rounds', year:2003, tracks:10, sizeMB:410, status:'active', progress:68, peer:'flac_hoarder', speedKBs:880, source:'manual', stateMin:4, phase:'DOWNLOADING'}),
+      mk({id:'J-2286', artist:'Aphex Twin', album:'Drukqs', year:2001, tracks:30, sizeMB:612, status:'active', progress:0, peer:'vinyl2flac', speedKBs:0, source:'manual', queuePos:4, stateMin:2, phase:'SELECTING'}),
+      mk({id:'J-2284', artist:'Bonobo', album:'Black Sands', year:2010, tracks:12, sizeMB:512, status:'active', progress:47, peer:'nordic_rip', speedKBs:540, source:'lidarr', stateMin:3, phase:'DOWNLOADING'}),
+      mk({id:'J-2282', artist:'Kelela', album:'Raven', year:2023, tracks:15, sizeMB:498, status:'importing', progress:100, peer:'deep_archive', speedKBs:0, source:'manual', stateMin:1, phase:'IMPORTING'}),
+      mk({id:'J-2276', artist:'Aphex Twin', album:'Selected Ambient Works 85–92', year:1992, tracks:13, sizeMB:455, status:'stalled', progress:34, peer:'ripper_78', speedKBs:0, retries:3, source:'lidarr', stateMin:8, phase:'DOWNLOADING', reason:'Peer offline i 8 min — inga byte mottagna på 4 min.'}),
+      mk({id:'J-2271', artist:'Portishead', album:'Dummy', year:1994, tracks:11, sizeMB:298, status:'stalled', progress:5, peer:'sound_seed', speedKBs:0, retries:2, source:'manual', stateMin:12, phase:'DOWNLOADING', reason:'Ingen progress på 12 min. Väntar på ny peer-match.'}),
+      mk({id:'J-2268', artist:'Radiohead', album:'In Rainbows', year:2007, tracks:10, sizeMB:372, status:'queued', peer:'—', source:'lidarr', phase:'WANTED'}),
+      mk({id:'J-2265', artist:'Massive Attack', album:'Mezzanine', year:1998, tracks:11, sizeMB:430, status:'queued', peer:'—', source:'lidarr', phase:'WANTED'}),
+      mk({id:'J-2262', artist:'Björk', album:'Homogenic', year:1997, tracks:10, sizeMB:356, status:'queued', peer:'—', source:'lidarr', phase:'WANTED'}),
+      mk({id:'J-2260', artist:'DJ Koze', album:'Knock Knock', year:2018, tracks:16, sizeMB:520, status:'failed', progress:22, peer:'ripper_78', source:'manual', retries:4, stateMin:2, phase:'FAILED', reason:'Alla peers avvisade transfern eller föll bort. Inga fler källor att prova.'}),
+      mk({id:'J-2240', artist:'Boards of Canada', album:'Geogaddi', year:2002, tracks:23, sizeMB:590, status:'orphaned', peer:'wax_and_bits', progress:100, source:'manual', reason:'Transfer i Soulseek utan matchande Lidarr-jobb (album borttaget ur wanted).'}),
+      mk({id:'J-2231', artist:'Nils Frahm', album:'Spaces', year:2013, tracks:17, sizeMB:520, status:'orphaned', peer:'lossless_lars', progress:62, source:'lidarr', reason:'Lidarr-jobbet försvann under nedladdning — ingen import-destination.'}),
+      mk({id:'J-2222', artist:'Kiasmos', album:'Kiasmos', year:2014, tracks:8, sizeMB:376, status:'done', progress:100, peer:'audiophile_se', source:'lidarr', addedMin:4, phase:'DONE'}),
+      mk({id:'J-2210', artist:'Bibio', album:'Ambivalence Avenue', year:2009, tracks:15, sizeMB:412, status:'done', progress:100, peer:'nordic_rip', source:'manual', addedMin:26, phase:'DONE'}),
+      mk({id:'J-2198', artist:'Tycho', album:'Dive', year:2011, tracks:9, sizeMB:344, status:'done', progress:100, peer:'flac_hoarder', source:'lidarr', addedMin:51, phase:'DONE'})
+    ];
+    jobs.forEach(j => { j.files = this.mkFiles(j); j.history = this.mkHistory(j); });
+
+    const passes = [];
+    let idn = 1482;
+    const matchedSeq = [3,1,0,2,0,1,0,3,1,0,0,2,1,0,1,0,2,0,1,1];
+    for (let i=0;i<20;i++){ passes.push({ id:idn-i, matched:matchedSeq[i], wanted:34-Math.floor(i/3), dur:(0.4+Math.random()*0.7).toFixed(1)+'s', min:i*5 }); }
+
+    const activeLive=[]; for (let i=0;i<48;i++){ activeLive.push(3+Math.round(Math.sin(i/6)*1.4)+(i%9===0?1:0)); }
+    const completedCum=[]; let c=128; for (let i=0;i<24;i++){ c+=Math.floor(Math.random()*4); completedCum.push(c); }
+
+    const lidarrAlbums = [
+      {artist:'Radiohead', album:'Kid A', year:2000, status:'wanted'},
+      {artist:'Radiohead', album:'OK Computer', year:1997, status:'i bibliotek'},
+      {artist:'Aphex Twin', album:'Drukqs', year:2001, status:'wanted'},
+      {artist:'Four Tet', album:'Rounds', year:2003, status:'wanted'},
+      {artist:'Burial', album:'Untrue', year:2007, status:'wanted'},
+      {artist:'Bonobo', album:'Migration', year:2017, status:'i bibliotek'},
+      {artist:'Floating Points', album:'Promises', year:2021, status:'wanted'},
+      {artist:'Jamie xx', album:'In Colour', year:2015, status:'wanted'}
+    ];
+
+    const shares = [
+      {path:'/music/library', files:48213, size:'742 GB', indexed:'12 min sedan'},
+      {path:'/music/flac-archive', files:12904, size:'1.4 TB', indexed:'12 min sedan'},
+      {path:'/music/incoming', files:326, size:'18 GB', indexed:'12 min sedan'}
+    ];
+    const uploads = [
+      {file:'Aphex Twin - Windowlicker - 01.flac', peer:'ripper_78', pct:64, speedKBs:410},
+      {file:'Boards of Canada - ROYGBIV.mp3', peer:'sound_seed', pct:88, speedKBs:290},
+      {file:'Burial - Archangel.flac', peer:'nordic_rip', pct:12, speedKBs:180}
+    ];
+
+    const setup = {
+      soulseek:{state:'success', user:'nordic_listener', pass:''},
+      lidarr:{state:'failed', url:'http://lidarr:8687', key:'ab12cd34ef56'},
+      shares:{state:'untested'}
+    };
+
+    const searchPool = this.buildSearchPool();
+
+    return {
+      view:'overview', jobs, expandedId:null, filter:'all', source:'all', search:'',
+      reconcileTotal:1482, updatedAgo:1, reconcileInterval:45, nextReconcileIn:38,
+      passes, activeLive, completedCum, lidarrAlbums, shares, uploads, setup,
+      // search
+      sQuery:'', sLastQuery:'', searchState:'idle', searchResults:[], revealCount:0,
+      sExpandedId:null, sImportId:null, sSort:'best', sFmtFilter:'all',
+      selectedFiles:{}, importState:{},
+      searchPool,
+      // share
+      rescanning:false, rescanPct:0, rescanFile:'',
+      shareEmpty:false,
+      toast:null, tickN:0
+    };
+  }
+
+  buildSearchPool(){
+    return [
+      {id:'R1', title:'In Rainbows', artist:'Radiohead', year:2007, tracks:10, sizeMB:412, format:'FLAC', bitrate:'FLAC 16/44', complete:true, peer:'lossless_lars', speedKBs:920, freeSlot:true, queue:0},
+      {id:'R2', title:'In Rainbows', artist:'Radiohead', year:2007, tracks:10, sizeMB:96, format:'MP3 320', bitrate:'320 kbps', complete:true, peer:'sound_seed', speedKBs:540, freeSlot:false, queue:3},
+      {id:'R3', title:'In Rainbows (Disc 2)', artist:'Radiohead', year:2007, tracks:8, sizeMB:71, format:'MP3 V0', bitrate:'V0 VBR', complete:false, peer:'ripper_78', speedKBs:210, freeSlot:true, queue:0},
+      {id:'R4', title:'In Rainbows', artist:'Radiohead', year:2007, tracks:10, sizeMB:388, format:'FLAC', bitrate:'FLAC 24/96', complete:true, peer:'audiophile_se', speedKBs:0, freeSlot:false, queue:11},
+      {id:'R5', title:'In Rainbows [WEB]', artist:'Radiohead', year:2007, tracks:10, sizeMB:112, format:'MP3 320', bitrate:'320 kbps', complete:true, peer:'nordic_rip', speedKBs:660, freeSlot:true, queue:0},
+      {id:'R6', title:'In Rainbows', artist:'Radiohead', year:2007, tracks:7, sizeMB:58, format:'MP3 192', bitrate:'192 kbps', complete:false, peer:'wax_and_bits', speedKBs:140, freeSlot:false, queue:6}
+    ];
+  }
+
+  mkFiles(j){
+    const done=j.progress/100, per=(j.sizeMB/j.tracks), arr=[], shown=Math.min(j.tracks,7);
+    for (let i=1;i<=shown;i++){ const frac=i/j.tracks;
+      arr.push({ name:`${j.artist} - ${j.album} - ${String(i).padStart(2,'0')}.${j.format==='FLAC'?'flac':'mp3'}`, size:per.toFixed(0)+' MB', done:(j.status==='done'||j.status==='orphaned'||j.status==='importing')?true:frac<=done }); }
+    return arr;
+  }
+  mkHistory(j){
+    const h=[]; const src=j.source==='manual'?'Manuell sökning':'Lidarr wanted';
+    if (j.status==='done'){ h.push({event:'Nedladdning klar · importerad till Lidarr', time:j.addedMin+' min sedan', color:'var(--done)'}); h.push({event:`Matchad peer ${j.peer} (${j.format})`, time:(j.addedMin+3)+' min sedan', color:'var(--active)'}); h.push({event:'Hämtad från '+src, time:(j.addedMin+3)+' min sedan', color:'#5f6672'}); }
+    else if (j.status==='importing'){ h.push({event:'Verifierar & importerar till Lidarr', time:'nyss', color:'var(--done)'}); h.push({event:'Nedladdning klar', time:'1 min sedan', color:'var(--active)'}); h.push({event:'Hämtad från '+src, time:'9 min sedan', color:'#5f6672'}); }
+    else if (j.status==='orphaned'){ h.push({event:j.reason, time:'nyss', color:'var(--orphaned)'}); h.push({event:`Transfer aktiv med ${j.peer}`, time:'14 min sedan', color:'var(--active)'}); }
+    else if (j.status==='failed'){ h.push({event:'Markerad som misslyckad', time:'2 min sedan', color:'var(--orphaned)'}); for (let r=j.retries;r>=1;r--) h.push({event:`Försök #${r} misslyckades`, time:(r*3)+' min sedan', color:'var(--stalled)'}); h.push({event:'Hämtad från '+src, time:'18 min sedan', color:'#5f6672'}); }
+    else if (j.status==='stalled'){ h.push({event:'Markerad som stalled', time:'2 min sedan', color:'var(--stalled)'}); for (let r=j.retries;r>=1;r--) h.push({event:`Försök #${r} misslyckades`, time:(r*4)+' min sedan', color:'var(--stalled)'}); h.push({event:`Matchad peer ${j.peer}`, time:'21 min sedan', color:'var(--active)'}); }
+    else if (j.status==='active'){ if (j.queuePos>0){ h.push({event:`Köad hos ${j.peer} · plats ${j.queuePos}`, time:'nyss', color:'var(--stalled)'}); } else { h.push({event:'Nedladdning pågår', time:'nyss', color:'var(--active)'}); } h.push({event:`Matchad peer ${j.peer}`, time:'3 min sedan', color:'var(--accent)'}); h.push({event:'Hämtad från '+src, time:'3 min sedan', color:'#5f6672'}); }
+    else { h.push({event:'Köad — väntar på peer-match', time:'nyss', color:'var(--queued)'}); h.push({event:'Hämtad från '+src, time:'5 min sedan', color:'#5f6672'}); }
+    return h;
+  }
+
+  componentDidMount(){ this._t=setInterval(()=>this.tick(),1000); }
+  componentWillUnmount(){ clearInterval(this._t); [this._toastT,this._searchT,this._rescanT].forEach(t=>t&&clearTimeout(t)); if(this._searchI)clearInterval(this._searchI); if(this._rescanI)clearInterval(this._rescanI); }
+
+  tick(){
+    this.setState(s => {
+      const jobs=s.jobs.map(j=>({...j}));
+      jobs.forEach(j=>{
+        if (j.status==='active' && j.queuePos===0){
+          j.speedKBs=Math.max(90,Math.round(j.speedKBs*(0.9+Math.random()*0.2)));
+          j.progress=Math.min(100, j.progress+(j.speedKBs/(j.sizeMB*1024))*100*6);
+          if (j.progress>=100){ j.status='importing'; j.progress=100; j.speedKBs=0; j.phase='IMPORTING'; j.stateMin=0; j.files=j.files.map(f=>({...f,done:true})); j.history=[{event:'Verifierar & importerar till Lidarr', time:'nyss', color:'var(--done)'},...j.history]; }
+        } else if (j.status==='active' && j.queuePos>0){
+          if (Math.random()<0.12){ j.queuePos-=1; if (j.queuePos<=0){ j.queuePos=0; j.phase='DOWNLOADING'; j.speedKBs=300+Math.floor(Math.random()*500); j.history=[{event:'Slot ledig · nedladdning startad', time:'nyss', color:'var(--active)'},...j.history]; } }
+        } else if (j.status==='importing'){
+          if (Math.random()<0.25){ j.status='done'; j.phase='DONE'; j.addedMin=0; j.history=[{event:'Importerad till Lidarr', time:'nyss', color:'var(--done)'},...j.history]; }
+        }
+      });
+      const concurrency=4; let active=jobs.filter(j=>j.status==='active'&&j.queuePos===0).length;
+      while (active<concurrency){ const q=jobs.find(j=>j.status==='queued'); if(!q)break; q.status='active'; q.progress=0.4; q.phase='DOWNLOADING'; q.peer=this.PEERS[Math.floor(Math.random()*this.PEERS.length)]; q.speedKBs=300+Math.floor(Math.random()*600); q.stateMin=0; q.files=this.mkFiles(q); q.history=[{event:`Matchad peer ${q.peer} · nedladdning startad`, time:'nyss', color:'var(--accent)'},...q.history]; active++; }
+
+      let { nextReconcileIn, reconcileTotal, updatedAgo, passes, activeLive } = s;
+      updatedAgo+=1; if (updatedAgo>5) updatedAgo=0;
+      const live=activeLive.slice(1); live.push(active);
+      nextReconcileIn-=1; let newPasses=passes;
+      if (nextReconcileIn<=0){ nextReconcileIn=s.reconcileInterval; reconcileTotal+=1; const matched=Math.random()<0.45?(1+Math.floor(Math.random()*3)):0; newPasses=[{id:reconcileTotal,matched,wanted:34,dur:(0.4+Math.random()*0.7).toFixed(1)+'s',min:0},...passes.map(p=>({...p,min:p.min+1}))].slice(0,20); }
+      return { jobs, nextReconcileIn, reconcileTotal, updatedAgo, passes:newPasses, activeLive:live, tickN:s.tickN+1 };
+    });
+  }
+
+  // nav
+  go = (v) => () => this.setState({view:v});
+  goSetup = () => this.setState({view:'setup'});
+  setFilter=(f)=>this.setState({filter:f}); setSource=(f)=>this.setState({source:f});
+  clearFilters=()=>this.setState({filter:'all',source:'all',search:''});
+  onSearch=(e)=>this.setState({search:e.target.value});
+  onInterval=(e)=>{const v=parseInt(e.target.value,10);this.setState({reconcileInterval:v,nextReconcileIn:Math.min(v,this.state.nextReconcileIn)});};
+  toggleExpand=(id)=>this.setState(s=>({expandedId:s.expandedId===id?null:id}));
+
+  showToast=(m)=>{ if(this._toastT)clearTimeout(this._toastT); this.setState({toast:m}); this._toastT=setTimeout(()=>this.setState({toast:null}),2600); };
+
+  runReconcile=()=>{ this.setState(s=>({reconcileTotal:s.reconcileTotal+1,nextReconcileIn:s.reconcileInterval,passes:[{id:s.reconcileTotal+1,matched:1+Math.floor(Math.random()*2),wanted:34,dur:(0.4+Math.random()*0.5).toFixed(1)+'s',min:0},...s.passes.map(p=>({...p,min:p.min+1}))].slice(0,20)})); this.showToast('Reconcile-pass startat manuellt'); };
+  retryJob=(id)=>{ this.setState(s=>({jobs:s.jobs.map(j=>j.id!==id?j:{...j,status:'active',phase:'DOWNLOADING',queuePos:0,progress:Math.max(1,j.progress),speedKBs:400,retries:j.retries+1,reason:'',stateMin:0,peer:j.peer==='—'?this.PEERS[0]:j.peer,history:[{event:'Försök igen — söker ny peer',time:'nyss',color:'var(--accent)'},...j.history]})})); this.showToast('Startar om nedladdning'); };
+  cancelJob=(id)=>{ this.setState(s=>({jobs:s.jobs.map(j=>j.id!==id?j:{...j,status:'queued',phase:'WANTED',progress:0,speedKBs:0,queuePos:0,peer:'—',history:[{event:'Avbruten — åter i kö',time:'nyss',color:'var(--queued)'},...j.history]})})); this.showToast('Nedladdning avbruten'); };
+  removeJob=(id)=>{ this.setState(s=>({jobs:s.jobs.filter(j=>j.id!==id),expandedId:null})); this.showToast('Jobb borttaget'); };
+  forceSearch=(id)=>{ this.setState(s=>({jobs:s.jobs.map(j=>j.id!==id?j:{...j,history:[{event:'Tvingad Soulseek-sökning körd',time:'nyss',color:'var(--accent)'},...j.history]})})); this.showToast('Tvingar ny Soulseek-sökning'); };
+  saveSettings=()=>this.showToast('Inställningar sparade');
+  openJob=(id)=>()=>this.setState({view:'jobs',expandedId:id});
+
+  // search
+  onSQuery=(e)=>this.setState({sQuery:e.target.value});
+  onSKey=(e)=>{ if(e.key==='Enter') this.runSearch(); };
+  setExample=(q)=>()=>{ this.setState({sQuery:q}, ()=>this.runSearch()); };
+  clearSearch=()=>this.setState({sQuery:'',searchState:'idle',searchResults:[],revealCount:0,sExpandedId:null,sImportId:null});
+  onSSort=(e)=>this.setState({sSort:e.target.value});
+  setFmtFilter=(f)=>this.setState({sFmtFilter:f});
+
+  runSearch=()=>{
+    const q=(this.state.sQuery||'').trim();
+    if(!q) return;
+    if(this._searchI)clearInterval(this._searchI); if(this._searchT)clearTimeout(this._searchT);
+    const noHits=/xyzzy|asdf|zzz/i.test(q);
+    if(noHits){ this.setState({searchState:'searching',sLastQuery:q,searchResults:[],revealCount:0,sExpandedId:null,sImportId:null}); this._searchT=setTimeout(()=>this.setState({searchState:'empty'}),1400); return; }
+    const pool=this.state.searchPool.map(r=>({...r}));
+    this.setState({searchState:'searching',sLastQuery:q,searchResults:pool,revealCount:1,sExpandedId:null,sImportId:null,selectedFiles:{},importState:{}});
+    this._searchI=setInterval(()=>{
+      this.setState(s=>{ const n=s.revealCount+1; if(n>=pool.length){ clearInterval(this._searchI); return {revealCount:pool.length,searchState:'done'}; } return {revealCount:n}; });
+    },650);
+  };
+
+  toggleSExpand=(id)=>this.setState(s=>({sExpandedId:s.sExpandedId===id?null:id}));
+
+  trackList(r){ const per=(r.sizeMB/r.tracks); const arr=[]; for(let i=1;i<=r.tracks;i++){ arr.push({num:String(i).padStart(2,'0'), name:`${String(i).padStart(2,'0')} ${r.title} - track.${r.format==='FLAC'?'flac':'mp3'}`, dur:this.dur(), size:per.toFixed(1)+' MB'}); } return arr; }
+  dur(){ const m=2+Math.floor(Math.random()*5), s=Math.floor(Math.random()*60); return m+':'+String(s).padStart(2,'0'); }
+
+  toggleFile=(rid,idx)=>()=>this.setState(s=>{ const cur=s.selectedFiles[rid]||{}; const nx={...cur,[idx]:!cur[idx]}; return {selectedFiles:{...s.selectedFiles,[rid]:nx}}; });
+  selCount(rid,r){ const cur=this.state.selectedFiles[rid]; if(cur===undefined){ return r.tracks; } return Object.keys(cur).filter(k=>cur[k]).length; }
+  isChecked(rid,idx){ const cur=this.state.selectedFiles[rid]; if(cur===undefined||cur[idx]===undefined) return true; return cur[idx]; }
+
+  openImport=(rid,mode)=>{ const r=this.state.searchPool.find(x=>x.id===rid); const match=this.guessMatch(r); this.setState(s=>({sImportId:rid,importState:{...s.importState,[rid]:{mode:'confirmed', match, pickQuery:'', dlMode:mode}}})); };
+  guessMatch(r){ const a=this.state.lidarrAlbums.find(x=>x.album.toLowerCase().includes((r.title||'').toLowerCase().split(' (')[0]) ); return a || {artist:r.artist, album:(r.title||'').split(' [')[0].split(' (')[0], year:r.year, status:'wanted', guessed:true}; }
+  changeMatch=(rid)=>()=>this.setState(s=>({importState:{...s.importState,[rid]:{...s.importState[rid],mode:'picking'}}}));
+  onPickQuery=(rid)=>(e)=>{ const v=e.target.value; this.setState(s=>({importState:{...s.importState,[rid]:{...s.importState[rid],pickQuery:v}}})); };
+  pickAlbum=(rid,a)=>()=>this.setState(s=>({importState:{...s.importState,[rid]:{...s.importState[rid],mode:'confirmed',match:a}}}));
+  skipImport=(rid)=>()=>this.setState(s=>({importState:{...s.importState,[rid]:{...s.importState[rid],mode:'skip'}}}));
+  cancelImport=(rid)=>()=>this.setState(s=>{ const st={...s.importState}; delete st[rid]; return {sImportId:null,importState:st}; });
+  startDownload=(rid)=>()=>{ const is=this.state.importState[rid]; const skip=is&&is.mode==='skip'; this.setState(s=>{ const st={...s.importState}; delete st[rid]; return {sImportId:null,importState:st}; }); this.showToast(skip?'Nedladdning startad · ingen import':'Nedladdning startad · kopplad till Lidarr'); };
+
+  // share
+  rescanAll=()=>{ if(this.state.rescanning) return; const files=['/music/library/…/album.flac','/music/flac-archive/…/track.flac','/music/incoming/…/scan.mp3']; this.setState({rescanning:true,rescanPct:0,rescanFile:files[0]}); this._rescanI=setInterval(()=>{ this.setState(s=>{ const p=s.rescanPct+3+Math.random()*5; if(p>=100){ clearInterval(this._rescanI); this._rescanT=setTimeout(()=>this.setState({rescanning:false,rescanPct:0}),400); this.showToast('Rescan klar · index uppdaterat'); return {rescanPct:100}; } return {rescanPct:p, rescanFile:files[Math.floor(p/34)]||files[2]}; }); },260); };
+  toggleShareEmpty=()=>this.setState(s=>({shareEmpty:!s.shareEmpty}));
+
+  // setup
+  testStep=(k)=>()=>{ this.setState(s=>({setup:{...s.setup,[k]:{...s.setup[k],state:'testing'}}})); setTimeout(()=>{ this.setState(s=>{ const fail=(k==='lidarr'); return {setup:{...s.setup,[k]:{...s.setup[k],state:fail?'failed':'success'}}}; }); },1200); };
+
+  // charts
+  buildArea(points,opts){ opts=opts||{}; const w=100,h=opts.h||110,color=opts.color||'var(--accent)',fill=opts.fill||'rgba(53,196,143,0.14)',n=points.length; if(!n)return null; const mx=opts.max||Math.max.apply(null,points.concat([1])),mn=opts.min!==undefined?opts.min:0,step=n>1?w/(n-1):0; const pts=points.map((v,i)=>[+(i*step).toFixed(2),+(h-4-((v-mn)/(mx-mn||1))*(h-10)).toFixed(2)]); const line=pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '); return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:h+'px',display:'block'}},React.createElement('path',{d:line+' L '+w+' '+h+' L 0 '+h+' Z',fill}),React.createElement('path',{d:line,fill:'none',stroke:color,strokeWidth:1.6,vectorEffect:'non-scaling-stroke',strokeLinejoin:'round',strokeLinecap:'round'})); }
+  buildBars(points,opts){ opts=opts||{}; const w=100,h=opts.h||110,color=opts.color||'var(--active)',n=points.length,mx=opts.max||Math.max.apply(null,points.concat([1])),bw=w/n; return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:h+'px',display:'block'}},points.map((v,i)=>{const bh=Math.max(1,(v/mx)*(h-4));return React.createElement('rect',{key:i,x:(i*bw+0.7).toFixed(2),y:(h-bh).toFixed(2),width:(bw-1.4).toFixed(2),height:bh.toFixed(2),rx:1,fill:v===0?'#262b34':color});})); }
+
+  statusMeta(st){ const m={ active:{c:'var(--active)',bg:'var(--active-bg)',label:'Aktiv'}, queued:{c:'var(--queued)',bg:'var(--queued-bg)',label:'Köad'}, stalled:{c:'var(--stalled)',bg:'var(--stalled-bg)',label:'Stalled'}, orphaned:{c:'var(--orphaned)',bg:'var(--orphaned-bg)',label:'Orphaned'}, done:{c:'var(--done)',bg:'var(--done-bg)',label:'Klar'}, importing:{c:'var(--accent)',bg:'var(--done-bg)',label:'Importerar'}, failed:{c:'var(--orphaned)',bg:'var(--orphaned-bg)',label:'Misslyckad'} }; return m[st]||m.queued; }
+  barColor(st){ return st==='active'?'var(--active)':st==='stalled'?'var(--stalled)':st==='done'?'var(--done)':st==='importing'?'var(--accent)':st==='orphaned'?'var(--orphaned)':st==='failed'?'var(--orphaned)':'var(--queued)'; }
+  srcTag(src){ if(src==='manual') return {label:'Manuell', style:`display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:600;color:var(--manual);background:var(--manual-bg);border:1px solid rgba(34,201,214,0.25);white-space:nowrap;`}; return {label:'Lidarr', style:`display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:600;color:#9aa1ad;background:rgba(138,145,157,0.12);border:1px solid #2a2f39;white-space:nowrap;`}; }
+
+  fmtBadge(fmt){ const t={ 'FLAC':{c:'var(--done)',bg:'var(--done-bg)'}, 'MP3 320':{c:'var(--active)',bg:'var(--active-bg)'}, 'MP3 V0':{c:'var(--queued)',bg:'var(--queued-bg)'}, 'MP3 192':{c:'#8a919d',bg:'rgba(138,145,157,0.12)'} }; const m=t[fmt]||t['MP3 192']; return `display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;font-family:'IBM Plex Mono',monospace;color:${m.c};background:${m.bg};`; }
+  sizeStr(mb){ return mb>=1024?(mb/1024).toFixed(1)+' GB':Math.round(mb)+' MB'; }
+  speedStr(kb){ return kb<=0?'—':(kb>=1024?(kb/1024).toFixed(1)+' MB/s':Math.round(kb)+' KB/s'); }
+
+  renderVals(){
+    const s=this.state;
+    const accent=this.props.accent||'#35c48f';
+    const compact=(this.props.density||'balanced')==='compact';
+    const V=s.view;
+
+    const rootStyle={ '--accent':accent, '--active':'#4c8dff','--active-bg':'rgba(76,141,255,0.13)', '--queued':'#a78bfa','--queued-bg':'rgba(167,139,250,0.13)', '--stalled':'#e0a740','--stalled-bg':'rgba(224,167,64,0.13)', '--orphaned':'#e5595d','--orphaned-bg':'rgba(229,89,93,0.13)', '--done':'#35c48f','--done-bg':'rgba(53,196,143,0.13)', '--manual':'#22c9d6','--manual-bg':'rgba(34,201,214,0.13)', '--rowpad':compact?'6px 14px':'10px 14px', display:'flex',width:'100%',minHeight:'100vh', fontFamily:"'IBM Plex Sans', system-ui, sans-serif", color:'#dfe2e8', background:'#0b0d10', fontFeatureSettings:"'tnum' 1" };
+
+    const count=(st)=>s.jobs.filter(j=>j.status===st).length;
+    const activeReal=s.jobs.filter(j=>j.status==='active').length;
+    const counts={active:activeReal, queued:count('queued'), stalled:count('stalled'), orphaned:count('orphaned'), done:count('done'), importing:count('importing'), failed:count('failed')};
+
+    // nav
+    const ico=(p)=>`<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${p}</svg>`;
+    const navItem=(v,label,icon,badge,warn)=>{ const on=V===v; return { onClick:this.go(v), label, icon:React.createElement('span',{dangerouslySetInnerHTML:{__html:icon}}), iconWrap:'display:flex;', style:(on?'display:flex;align-items:center;gap:11px;width:100%;padding:8px 12px;border-radius:8px;border:none;background:#1a1f26;color:#eef0f3;font-size:13px;font-weight:600;cursor:pointer;text-align:left;box-shadow:inset 2px 0 0 var(--accent);':'display:flex;align-items:center;gap:11px;width:100%;padding:8px 12px;border-radius:8px;border:none;background:transparent;color:#8a919d;font-size:13px;font-weight:500;cursor:pointer;text-align:left;'), hasBadge:badge!==undefined&&badge>0, badge, badgeStyle:`font-family:'IBM Plex Mono',monospace;font-size:11px;padding:1px 7px;border-radius:10px;background:#20252d;color:#9aa1ad;`, hasWarn:!!warn }; };
+    const jobsBadge=counts.active+counts.queued+counts.stalled;
+    const navGroups=[
+      {label:'Övervaka', items:[
+        navItem('overview','Översikt', ico('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>')),
+        navItem('jobs','Jobb', ico('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.3" fill="currentColor" stroke="none"/>'), jobsBadge),
+        navItem('health','Hälsa', ico('<polyline points="3 12 7 12 10 5 14 19 17 12 21 12" stroke-linecap="round" stroke-linejoin="round"/>'))
+      ]},
+      {label:'Soulseek', items:[
+        navItem('search','Sök', ico('<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5" stroke-linecap="round"/>')),
+        navItem('share','Delning', ico('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>'))
+      ]},
+      {label:'System', items:[
+        navItem('setup','Setup', ico('<path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.9 4.9 2.8 2.8"/><path d="m16.3 16.3 2.8 2.8"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="3"/>'), undefined, s.setup.lidarr.state==='failed'||s.setup.shares.state!=='success'),
+        navItem('settings','Inställningar', ico('<line x1="4" y1="8" x2="20" y2="8"/><circle cx="9" cy="8" r="2.4" fill="#101317"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="15" cy="16" r="2.4" fill="#101317"/>')),
+        navItem('components','Komponenter', ico('<rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/>'))
+      ]}
+    ];
+
+    const depDot=(ok)=>`width:7px;height:7px;border-radius:50%;background:${ok?'var(--done)':'var(--stalled)'};`;
+    const sidebarDeps=[
+      {name:'Lidarr', meta:'v2.6', dot:depDot(s.setup.lidarr.state!=='failed')},
+      {name:'Soulseek', meta:'online', dot:depDot(true)},
+      {name:'Shares', meta:s.shareEmpty?'0':'3', dot:depDot(!s.shareEmpty)}
+    ];
+
+    // ---- jobs decorate
+    const decorate=(j)=>{
+      const meta=this.statusMeta(j.status);
+      const inQueue=j.status==='active'&&j.queuePos>0;
+      const isDl=j.status==='active'&&j.queuePos===0;
+      const flow=isDl?"background-image:linear-gradient(90deg,rgba(255,255,255,0.16) 25%,transparent 25%,transparent 50%,rgba(255,255,255,0.16) 50%,rgba(255,255,255,0.16) 75%,transparent 75%);background-size:14px 14px;animation:slsk-flow .7s linear infinite;":'';
+      const pillLabel=inQueue?'I peerns kö':(j.status==='importing'?'Importerar':meta.label);
+      const pillC=inQueue?'var(--stalled)':meta.c; const pillBg=inQueue?'var(--stalled-bg)':meta.bg;
+      const impSpin=j.status==='importing'?'<span style="display:inline-block;width:8px;height:8px;border:1.5px solid rgba(53,196,143,0.35);border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;margin-right:5px;vertical-align:-1px;"></span>':'';
+      const src=this.srcTag(j.source);
+      const pctOrState=j.status==='queued'?'—':(inQueue?'plats '+j.queuePos:Math.round(j.progress)+'%');
+      const subState=inQueue?('köar hos peer'):(j.status==='active'?('laddar ner · '+j.stateMin+' min'):(j.status==='importing'?'verifierar':(j.phase||meta.label).toLowerCase()));
+      const barW=inQueue?100:Math.max(2,j.progress);
+      const barBg=inQueue?"repeating-linear-gradient(45deg,#2a2f39 0 6px,#22262e 6px 12px)":this.barColor(j.status);
+      const dr=[
+        {k:'Soulseek-peer', v:j.peer, color:'#dfe2e8'},
+        {k:'Källa', v:j.source==='manual'?'Manuell':'Lidarr', color:j.source==='manual'?'var(--manual)':'#8a919d'},
+        {k:'Köposition', v:inQueue?('plats '+j.queuePos+' i peerns kö'):'—', color:inQueue?'var(--stalled)':'#8a919d'},
+        {k:'Tid i läge', v:j.stateMin+' min ('+(j.phase||'—')+')', color:'#dfe2e8'},
+        {k:'Kvalitet', v:j.format, color:'#dfe2e8'},
+        {k:'Storlek', v:this.sizeStr(j.sizeMB), color:'#dfe2e8'},
+        {k:'Nedladdat', v:this.sizeStr(j.sizeMB*j.progress/100), color:'#dfe2e8'},
+        {k:'Lidarr-jobb', v:j.id, color:'#8a919d'}
+      ];
+      return {...j,
+        statusLabel:React.createElement('span',{dangerouslySetInnerHTML:{__html:impSpin+pillLabel}}),
+        pill:`display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:${pillC};background:${pillBg};white-space:nowrap;`,
+        dot:`width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:${pillC};`,
+        srcTag:src.style, srcLabel:src.label,
+        sizeStr:this.sizeStr(j.sizeMB), speedStr:this.speedStr(j.speedKBs),
+        etaStr:(isDl&&j.speedKBs>0)?(()=>{ const sec=(j.sizeMB*1024*(1-j.progress/100))/(j.speedKBs*6); return sec>=60?Math.round(sec/60)+' min':Math.max(1,Math.round(sec))+' s'; })():'—',
+        pctOrState, subState,
+        pctColorRaw:`color:${j.progress>=100?'var(--done)':(isDl?'#c8cdd5':(inQueue?'var(--stalled)':'#6b7280'))};`,
+        pctColor:`color:${j.status==='importing'?'var(--accent)':(isDl?'var(--active)':(inQueue?'var(--stalled)':'#6b7280'))};`,
+        phaseShort:inQueue?('kö · plats '+j.queuePos):(j.status==='importing'?'importerar':(j.status==='stalled'?'stalled':Math.round(j.progress)+'%')),
+        barFill:`height:100%;border-radius:3px;width:${barW}%;background:${barBg};${flow}`,
+        retryStyle:j.retries>0?"display:inline-block;min-width:20px;padding:1px 6px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--stalled);background:var(--stalled-bg);":"font-family:'IBM Plex Mono',monospace;color:#4a505b;",
+        chevron:`display:inline-block;font-size:17px;transition:transform .15s;transform:rotate(${s.expandedId===j.id?'90deg':'0deg'});`,
+        rowStyle:`cursor:pointer;background:${s.expandedId===j.id?'#181c22':'transparent'};`,
+        expanded:s.expandedId===j.id, toggle:()=>this.toggleExpand(j.id),
+        retry:()=>this.retryJob(j.id), cancel:()=>this.cancelJob(j.id), remove:()=>this.removeJob(j.id), forceSearch:()=>this.forceSearch(j.id),
+        hasReason:!!j.reason, reasonTitle:this.statusMeta(j.status).label,
+        reasonBox:`padding:10px 13px;border-radius:8px;margin-bottom:16px;font-size:12.5px;color:${meta.c};background:${meta.bg};border:1px solid ${meta.c}33;`,
+        detailRows:dr, metaRight:inQueue?('plats '+j.queuePos):(j.status==='importing'?'verifierar':this.speedStr(j.speedKBs)),
+        openInJobs:this.openJob(j.id),
+        files:j.files.map(f=>({...f,dot:`width:6px;height:6px;border-radius:50%;flex:0 0 6px;background:${f.done?'var(--done)':'#3a3f49'};`})),
+        moreFiles:j.tracks>7, moreFilesText:'+'+(j.tracks-7)+' fler filer'
+      };
+    };
+    const jobsD=s.jobs.map(decorate);
+
+    let filtered=jobsD;
+    if (s.filter!=='all') filtered=filtered.filter(j=>j.status===s.filter);
+    if (s.source!=='all') filtered=filtered.filter(j=>j.source===s.source);
+    const q=s.search.trim().toLowerCase();
+    if (q) filtered=filtered.filter(j=>(j.artist+' '+j.album+' '+j.peer).toLowerCase().includes(q));
+
+    const chip=(key,label)=>{ const on=s.filter===key; const m=key==='all'?{c:'var(--accent)',bg:'rgba(53,196,143,0.12)'}:this.statusMeta(key); return {label,onClick:()=>this.setFilter(key), count:key==='all'?s.jobs.length:(counts[key]||0), style:`display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?m.c+'55':'#23272f'};background:${on?m.bg:'#13161b'};color:${on?m.c:'#9aa1ad'};`, countStyle:"font-family:'IBM Plex Mono',monospace;font-size:11px;opacity:.8;"}; };
+    const filterChips=[chip('all','Alla'),chip('active','Aktiva'),chip('queued','Köade'),chip('importing','Importerar'),chip('stalled','Stalled'),chip('failed','Misslyckade'),chip('orphaned','Orphaned'),chip('done','Klara')];
+    const srcChip=(key,label)=>{ const on=s.source===key; const c=key==='manual'?'var(--manual)':(key==='lidarr'?'#9aa1ad':'var(--accent)'); const bg=key==='manual'?'var(--manual-bg)':(key==='lidarr'?'rgba(138,145,157,0.12)':'rgba(53,196,143,0.12)'); return {label,onClick:()=>this.setSource(key), style:`padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?c+'55':'#23272f'};background:${on?bg:'#13161b'};color:${on?c:'#9aa1ad'};`}; };
+    const sourceChips=[srcChip('all','Alla'),srcChip('manual','Manuell'),srcChip('lidarr','Lidarr')];
+    const filtersActive=s.filter!=='all'||s.source!=='all'||!!q;
+    const fsum=[]; if(s.source!=='all')fsum.push(s.source==='manual'?'Manuell':'Lidarr'); if(s.filter!=='all')fsum.push(this.statusMeta(s.filter).label); if(q)fsum.push('"'+s.search.trim()+'"');
+    const th=(a)=>`text-align:${a};padding:9px 14px;font-weight:600;font-size:11px;letter-spacing:0.4px;text-transform:uppercase;color:#6b7280;border-bottom:1px solid #21252e;`;
+    const jobCols=[{label:'Status',style:th('left')},{label:'Album / Artist',style:th('left')},{label:'Peer',style:th('left')},{label:'Format',style:th('left')},{label:'Progress',style:th('left')},{label:'Hastighet',style:th('right')},{label:'ETA',style:th('right')},{label:'Försök',style:th('center')},{label:'',style:th('center')}];
+
+    // ---- overview
+    const spark=(arr,color,fill)=>this.buildArea(arr,{h:30,color,fill});
+    const statCards=[
+      {label:'Aktiva', value:counts.active, sub:counts.importing>0?(counts.importing+' importeras'):'nedladdas nu', dot:'width:9px;height:9px;border-radius:50%;background:var(--active);', spark:spark(s.activeLive.slice(-16),'var(--active)','rgba(76,141,255,0.14)')},
+      {label:'Köade', value:counts.queued, sub:'väntar på peer', dot:'width:9px;height:9px;border-radius:50%;background:var(--queued);', spark:spark([2,3,3,4,counts.queued+1,counts.queued],'var(--queued)','rgba(167,139,250,0.14)')},
+      {label:'Stalled', value:counts.stalled, sub:'behöver åtgärd', dot:'width:9px;height:9px;border-radius:50%;background:var(--stalled);', spark:spark([0,1,1,2,counts.stalled,counts.stalled],'var(--stalled)','rgba(224,167,64,0.14)')},
+      {label:'Orphaned', value:counts.orphaned, sub:'okänd transfer', dot:'width:9px;height:9px;border-radius:50%;background:var(--orphaned);', spark:spark([1,1,2,2,counts.orphaned,counts.orphaned],'var(--orphaned)','rgba(229,89,93,0.14)')},
+      {label:'Klara idag', value:counts.done, sub:'importerade', dot:'width:9px;height:9px;border-radius:50%;background:var(--done);', spark:spark(s.completedCum.slice(-16).map(v=>v-s.completedCum[s.completedCum.length-16]),'var(--done)','rgba(53,196,143,0.14)')}
+    ];
+    const overviewActive=jobsD.filter(j=>j.status==='active'||j.status==='importing'||j.status==='stalled');
+    const totalSpeed=s.jobs.filter(j=>j.status==='active'&&j.queuePos===0).reduce((a,j)=>a+j.speedKBs*6,0);
+    const throughputText=totalSpeed>0?(totalSpeed>=1024?(totalSpeed/1024).toFixed(1)+' MB/s':Math.round(totalSpeed)+' KB/s'):'inaktiv';
+    const recentPasses=s.passes.slice(0,6).map(p=>({id:p.id,matched:p.matched,wanted:p.wanted,dur:p.dur, timeAgo:p.min===0?'nyss':p.min+' min sedan', dot:`width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:${p.matched>0?'var(--accent)':'#3a3f49'};`, matchedColor:`color:${p.matched>0?'var(--accent)':'#6b7280'};font-weight:500;`}));
+    const nowSummary=`${counts.active} album laddas ner, ${counts.done} klara idag och ${counts.queued} väntar i kön.`;
+    const nowPill=(v,label,c)=>({value:v,label,style:'display:flex;align-items:center;gap:8px;padding:9px 13px;border-radius:9px;background:#0f1216;border:1px solid #1e222a;',dot:`width:8px;height:8px;border-radius:50%;background:${c};`});
+    const nowPills=[nowPill(counts.active,'nedladdas','var(--active)'),nowPill(counts.importing,'importeras','var(--accent)'),nowPill(counts.stalled+counts.failed,'behöver dig','var(--stalled)')];
+
+    // ---- health
+    const dh=(name,ok,label,detail,latency)=>({name, dot:`width:9px;height:9px;border-radius:50%;background:${ok?'var(--done)':'var(--stalled)'};`, statusLabel:label, pill:`display:inline-flex;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:${ok?'var(--done)':'var(--stalled)'};background:${ok?'var(--done-bg)':'var(--stalled-bg)'};`, detail, latency});
+    const lidOk=s.setup.lidarr.state!=='failed';
+    const healthDeps=[
+      dh('Lidarr', lidOk, lidOk?'Ansluten':'Ej nådd', lidOk?'API svarar · 34 album i wanted':'Kunde inte nå Lidarr — kontrollera setup', lidOk?'42 ms · v2.6.4':'timeout efter 5000 ms'),
+      dh('Soulseek-server', true, 'Inloggad', 'Ansluten som nordic_listener · 1 döljd fil delas ej', '88 ms · 214k peers online'),
+      dh('Share-indexering', !s.shareEmpty, s.shareEmpty?'Inga shares':'Indexerad', s.shareEmpty?'Inga delade mappar — du kan bli blockerad':'61k filer · 2.1 TB delas', s.shareEmpty?'—':'senast 12 min sedan')
+    ];
+    const metricTiles=[
+      {key:'slskdarr_reconcile_total', value:s.reconcileTotal, label:'reconcile-pass körda'},
+      {key:'slskdarr_downloads_active', value:counts.active, label:'aktiva transfers'},
+      {key:'slskdarr_unknown_transfers', value:counts.orphaned, label:'transfers utan jobb'},
+      {key:'slskdarr_stalled_total', value:counts.stalled+counts.failed, label:'stalled / misslyckade'}
+    ];
+    const activeChart=this.buildArea(s.activeLive,{h:120,color:'var(--active)',fill:'rgba(76,141,255,0.13)',max:Math.max.apply(null,s.activeLive.concat([5]))});
+    const reconcileChart=this.buildBars(s.passes.slice().reverse().map(p=>p.matched),{h:120,color:'var(--accent)',max:4});
+    const completedChart=this.buildArea(s.completedCum,{h:120,color:'var(--done)',fill:'rgba(53,196,143,0.13)',min:s.completedCum[0]-2});
+
+    // ---- search
+    const revealed=s.searchResults.slice(0,s.revealCount);
+    let sr=revealed.map(r=>({...r}));
+    const scoreFmt={'FLAC':4,'MP3 320':3,'MP3 V0':2,'MP3 192':1};
+    const score=(r)=>scoreFmt[r.format]*100 + (r.complete?40:0) + (r.freeSlot?30:-r.queue);
+    if (s.sSort==='best') sr.sort((a,b)=>score(b)-score(a));
+    else if (s.sSort==='size') sr.sort((a,b)=>b.sizeMB-a.sizeMB);
+    else if (s.sSort==='speed') sr.sort((a,b)=>b.speedKBs-a.speedKBs);
+    else if (s.sSort==='avail') sr.sort((a,b)=>(b.freeSlot?1:0)-(a.freeSlot?1:0)||a.queue-b.queue);
+    if (s.sFmtFilter!=='all') sr=sr.filter(r=>r.format===s.sFmtFilter);
+    const bestId=sr.length&&s.sSort==='best'?sr[0].id:null;
+
+    const sResults=sr.map(r=>{
+      const badges=[{label:r.format,style:this.fmtBadge(r.format)}];
+      badges.push(r.complete?{label:'Komplett',style:'display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;color:var(--done);background:var(--done-bg);'}:{label:'Ofullständig',style:'display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;color:var(--stalled);background:var(--stalled-bg);'});
+      const avail=r.freeSlot?{label:'Fri slot',style:'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;font-size:11.5px;font-weight:600;color:var(--done);background:var(--done-bg);'}:{label:'Kö · '+r.queue,style:'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;font-size:11.5px;font-weight:600;color:var(--stalled);background:var(--stalled-bg);'};
+      const is=s.importState[r.id]; const importOpen=!!is;
+      const sel=this.selCount(r.id,r);
+      const match=is&&is.match; const guessed=match&&match.guessed;
+      const pickQ=(is&&is.pickQuery||'').toLowerCase();
+      const pickResults=s.lidarrAlbums.filter(a=>!pickQ||(a.artist+' '+a.album).toLowerCase().includes(pickQ)).map(a=>({...a, onPick:this.pickAlbum(r.id,a), dot:`width:7px;height:7px;border-radius:50%;background:${a.status==='wanted'?'var(--queued)':'var(--done)'};`, status:a.status}));
+      return {...r,
+        cardStyle:`position:relative;background:#14171c;border:1px solid ${r.id===bestId?'rgba(53,196,143,0.4)':'#21252e'};border-radius:11px;overflow:hidden;`,
+        isBest:r.id===bestId, title:r.title, artist:r.artist,
+        badges, availStyle:avail.style, availLabel:avail.label,
+        meta:`${r.tracks} spår · ${this.sizeStr(r.sizeMB)} · ${r.bitrate}`,
+        peer:r.peer, speed:this.speedStr(r.speedKBs),
+        chevron:`display:inline-block;font-size:18px;color:#5f6672;transition:transform .15s;transform:rotate(${s.sExpandedId===r.id?'90deg':'0deg'});`,
+        toggle:()=>this.toggleSExpand(r.id), expanded:s.sExpandedId===r.id,
+        tracks:this.trackList(r).map((t,i)=>({...t, checked:this.isChecked(r.id,i), onToggle:this.toggleFile(r.id,i), rowStyle:'display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:6px;cursor:pointer;'})),
+        showActions:!importOpen, importOpen,
+        downloadAlbum:()=>this.openImport(r.id,'album'), downloadSelected:()=>this.openImport(r.id,'selected'),
+        selCount:sel, selBtnStyle:`padding:8px 14px;border-radius:8px;border:1px solid #2a2f39;background:#191d24;color:${sel>0?'#c8cdd5':'#5f6672'};font-size:12.5px;font-weight:500;cursor:${sel>0?'pointer':'not-allowed'};`,
+        folderPath:'\\'+r.peer+'\\'+r.artist+' - '+r.title,
+        importConfirmed:is&&is.mode==='confirmed', importPicking:is&&is.mode==='picking', importSkip:is&&is.mode==='skip',
+        matchAlbum:match?match.album:'', matchArtist:match?match.artist:'', matchNote:guessed?'Föreslaget från mappnamn — ändra om det är fel':'Finns i Lidarr wanted',
+        changeMatch:this.changeMatch(r.id), onPickQuery:this.onPickQuery(r.id), pickResults, pickEmpty:pickResults.length===0, pickQuery:is&&is.pickQuery||'',
+        skipImport:this.skipImport(r.id), skipLabel:(is&&is.mode==='skip')?'✓ Hoppar över import':'Hoppa över import',
+        cancelImport:this.cancelImport(r.id), startDownload:this.startDownload(r.id),
+        downloadLabel:(is&&is.dlMode==='selected')?('Ladda ner '+sel+' valda'):'Ladda ner album'
+      };
+    });
+    const sFmtChip=(key,label)=>{ const on=s.sFmtFilter===key; return {label,onClick:()=>this.setFmtFilter(key), style:`padding:5px 10px;border-radius:7px;font-size:11.5px;font-weight:500;cursor:pointer;border:1px solid ${on?'var(--accent)55':'#23272f'};background:${on?'rgba(53,196,143,0.12)':'#13161b'};color:${on?'var(--accent)':'#9aa1ad'};`}; };
+    const sFormatChips=[sFmtChip('all','Alla'),sFmtChip('FLAC','FLAC'),sFmtChip('MP3 320','320'),sFmtChip('MP3 V0','V0')];
+    const sExamples=['Radiohead In Rainbows','Aphex Twin','Bonobo Migration'].map(q=>({label:q,onClick:this.setExample(q)}));
+
+    // ---- share
+    const shareStats=[
+      {label:'Delade filer', value:s.shareEmpty?'0':'61 443', sub:s.shareEmpty?'inga mappar':'över 3 mappar'},
+      {label:'Delad storlek', value:s.shareEmpty?'0 GB':'2.1 TB', sub:'tillgängligt för peers'},
+      {label:'Uppladdat idag', value:'34 GB', sub:'till 18 peers'}
+    ];
+    const uploads=s.uploads.map(u=>({...u, dot:'width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:var(--active);', pct:u.pct, speed:this.speedStr(u.speedKBs), barFill:`height:100%;border-radius:3px;width:${u.pct}%;background:var(--active);`}));
+    const upTotal=s.uploads.reduce((a,u)=>a+u.speedKBs,0);
+
+    // ---- setup
+    const stepDef=[
+      {k:'soulseek', title:'Soulseek-inloggning', subtitle:'Anslut till nätverket för att kunna söka och dela', fields:[{label:'Användarnamn',type:'text',value:s.setup.soulseek.user,ph:'användarnamn',span:''},{label:'Lösenord',type:'password',value:'••••••••',ph:'lösenord',span:''}]},
+      {k:'lidarr', title:'Lidarr', subtitle:'Wanted-listan och import-destination', fields:[{label:'URL',type:'text',value:s.setup.lidarr.url,ph:'http://lidarr:8686',span:''},{label:'API-nyckel',type:'password',value:'••••••••••••',ph:'api-nyckel',span:''}]},
+      {k:'shares', title:'Delade mappar', subtitle:'Definierade i config.yaml — verifiera att de kan indexeras', fields:[{label:'Mappar (från config)',type:'text',value:'/music/library, +2',ph:'',span:'grid-column:1/-1;'}]}
+    ];
+    const rState=(k)=>s.setup[k].state;
+    const setupSteps=stepDef.map((d,i)=>{
+      const st=rState(d.k); const done=st==='success';
+      const testing=st==='testing'; const failed=st==='failed';
+      const btnLabel=testing?'Testar…':(done?'✓ Ansluten':(failed?'Misslyckades':'Testa anslutning'));
+      const btnStyle=`display:flex;align-items:center;gap:7px;padding:8px 14px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;border:1px solid ${done?'rgba(53,196,143,0.35)':failed?'rgba(229,89,93,0.35)':'#2a2f39'};background:${done?'var(--done-bg)':failed?'var(--orphaned-bg)':'#191d24'};color:${done?'var(--done)':failed?'var(--orphaned)':'#c8cdd5'};`;
+      const showResult=done||failed;
+      let resultBox='',resultGlyph='',resultTitle='',resultHint='',hasHint=false,hasFix=false,resultIcon='',resultTitleColor='';
+      if (done){ resultBox='display:flex;align-items:center;gap:11px;margin-top:14px;padding:11px 13px;border-radius:9px;background:var(--done-bg);border:1px solid rgba(53,196,143,0.28);'; resultGlyph='✓'; resultIcon='display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--done);color:#08130d;font-size:12px;font-weight:700;flex:0 0 20px;'; resultTitle=d.k==='soulseek'?'Inloggad som '+s.setup.soulseek.user:'Anslutning lyckades'; resultTitleColor='var(--done)'; }
+      else if (failed){ resultBox='display:flex;align-items:flex-start;gap:11px;margin-top:14px;padding:12px 13px;border-radius:9px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);'; resultGlyph='!'; resultIcon='display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;'; resultTitle='Kunde inte nå Lidarr på '+s.setup.lidarr.url; resultTitleColor='#e8d9b8'; resultHint='Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686, inte 8687) och att Lidarr är igång och nåbar från slskdarr-containern.'; hasHint=true; hasFix=true; }
+      const numDone=done; const numStyle=`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;flex:0 0 26px;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;${numDone?'background:var(--done);color:#08130d;':failed?'background:var(--orphaned-bg);color:var(--orphaned);border:1px solid rgba(229,89,93,0.4);':'background:#191d24;color:#8a919d;border:1px solid #2a2f39;'}`;
+      return {...d, cardStyle:`background:#14171c;border:1px solid ${failed?'rgba(224,167,64,0.28)':'#21252e'};border-radius:11px;padding:16px 18px;`, numStyle, numContent:numDone?'✓':String(i+1), title:d.title, subtitle:d.subtitle, test:this.testStep(d.k), testing, btnLabel, btnStyle, fields:d.fields, showResult, resultBox, resultIcon, resultGlyph, resultTitle, resultTitleColor, hasHint, resultHint, hasFix};
+    });
+    const setupDoneCount=['soulseek','lidarr','shares'].filter(k=>rState(k)==='success').length;
+    const setupProgress=['soulseek','lidarr','shares'].map(k=>({style:`width:34px;height:4px;border-radius:2px;background:${rState(k)==='success'?'var(--accent)':rState(k)==='failed'?'var(--orphaned)':'#2a2f39'};`}));
+
+    // ---- components showcase
+    const compSections=this.buildComponentsShowcase();
+
+    const titles={ overview:['Översikt','Vad som händer med din musik just nu'], jobs:['Jobb','Manuella och automatiska nedladdningar i samma vy'], search:['Sök','Manuell sökning på Soulseek'], share:['Delning','Delade mappar och uploads — din biljett till nätverket'], health:['Hälsa','Beroenden, metrics och trender'], setup:['Setup','Validera konfigurationen mot dina tjänster'], settings:['Inställningar','Reconcile-beteende och timeouts'], components:['Komponenter','Designsystem — isolerade enheter och varianter'] };
+    const t=titles[V];
+    const rc=s.nextReconcileIn;
+
+    return {
+      rootStyle, navGroups, sidebarDeps,
+      isOverview:V==='overview', isJobs:V==='jobs', isSearch:V==='search', isShare:V==='share', isHealth:V==='health', isSetup:V==='setup', isSettings:V==='settings', isComponents:V==='components',
+      pageTitle:t[0], pageSubtitle:t[1],
+      updatedText:s.updatedAgo===0?'uppdaterad nyss':'uppdaterad '+s.updatedAgo+'s sedan',
+      nextReconcileText:rc>=60?('om '+Math.floor(rc/60)+'m '+(rc%60)+'s'):('om '+rc+'s'),
+      runReconcile:this.runReconcile, goSetup:this.goSetup,
+      showSetupBanner:V!=='setup'&&(s.setup.lidarr.state==='failed'||s.setup.shares.state!=='success'),
+      // overview
+      nowSummary, nowPills, statCards, overviewActive, throughputText, recentPasses, reconcileTotal:s.reconcileTotal,
+      // jobs
+      search:s.search, onSearch:this.onSearch, sourceChips, filterChips, jobCols, filteredJobs:filtered, noResults:filtered.length===0,
+      filtersActive, clearFilters:this.clearFilters, filterSummary:fsum.join(' · '),
+      // search
+      sQuery:s.sQuery, onSQuery:this.onSQuery, onSKey:this.onSKey, runSearch:this.runSearch, clearSearch:this.clearSearch,
+      sSearching:s.searchState==='searching', sIdle:s.searchState==='idle', sEmpty:s.searchState==='empty', sDone:s.searchState==='done',
+      sHasResults:s.searchState==='searching'||s.searchState==='done', sLastQuery:s.sLastQuery, sCount:revealed.length,
+      sExamples, sSort:s.sSort, onSSort:this.onSSort, sFormatChips, sResults,
+      // share
+      shareEmpty:s.shareEmpty, shareStats, shares:s.shareEmpty?[]:s.shares, uploads:s.shareEmpty?[]:uploads, hasUploads:!s.shareEmpty, noUploads:s.shareEmpty,
+      uploadThroughput:this.speedStr(upTotal),
+      rescanAll:this.rescanAll, rescanning:s.rescanning, notRescanning:!s.rescanning, rescanPct:Math.round(s.rescanPct), rescanFile:s.rescanFile,
+      rescanLabel:s.rescanning?'Indexerar…':'Kör rescan',
+      rescanBtnStyle:`display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:8px;border:1px solid ${s.rescanning?'#2a2f39':'rgba(53,196,143,0.32)'};background:${s.rescanning?'#191d24':'rgba(53,196,143,0.11)'};color:${s.rescanning?'#8a919d':'var(--accent)'};font-size:12px;font-weight:600;cursor:${s.rescanning?'default':'pointer'};`,
+      // health
+      healthDeps, metricTiles, activeChart, reconcileChart, completedChart, activeNow:counts.active,
+      // setup
+      setupSteps, setupDoneCount, setupProgress,
+      // settings
+      intervalSel:String(s.reconcileInterval), onInterval:this.onInterval, saveSettings:this.saveSettings,
+      // components
+      compSections,
+      toast:s.toast
+    };
+  }
+
+  el(html){ return React.createElement('div',{dangerouslySetInnerHTML:{__html:html}}); }
+  buildComponentsShowcase(){
+    const wrap=(label,inner)=>`<div style="display:flex;flex-direction:column;gap:7px;align-items:flex-start;"><div>${inner}</div><span style="font-size:10.5px;color:#5f6672;font-family:'IBM Plex Mono',monospace;">${label}</span></div>`;
+    const pill=(c,bg,label)=>`<span style="display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;color:${c};background:${bg};">${label}</span>`;
+    const srcTag=(manual)=>manual?`<span style="display:inline-flex;align-items:center;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:600;color:var(--manual);background:var(--manual-bg);border:1px solid rgba(34,201,214,0.25);">Manuell</span>`:`<span style="display:inline-flex;align-items:center;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:600;color:#9aa1ad;background:rgba(138,145,157,0.12);border:1px solid #2a2f39;">Lidarr</span>`;
+    const fmt=(f)=>`<span style="${this.fmtBadge(f)}">${f}</span>`;
+
+    const s1=this.el([
+      wrap('source=manual', srcTag(true)),
+      wrap('source=lidarr', srcTag(false))
+    ].join(''));
+
+    const s2=this.el([
+      wrap('active', pill('var(--active)','var(--active-bg)','Aktiv')),
+      wrap('active · peer-kö', pill('var(--stalled)','var(--stalled-bg)','I peerns kö')),
+      wrap('queued', pill('var(--queued)','var(--queued-bg)','Köad')),
+      wrap('importing', pill('var(--accent)','var(--done-bg)','Importerar')),
+      wrap('stalled', pill('var(--stalled)','var(--stalled-bg)','Stalled')),
+      wrap('failed', pill('var(--orphaned)','var(--orphaned-bg)','Misslyckad')),
+      wrap('orphaned', pill('var(--orphaned)','var(--orphaned-bg)','Orphaned')),
+      wrap('done', pill('var(--done)','var(--done-bg)','Klar'))
+    ].join(''));
+
+    const compBadge=(ok)=>ok?`<span style="display:inline-flex;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;color:var(--done);background:var(--done-bg);">Komplett</span>`:`<span style="display:inline-flex;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;color:var(--stalled);background:var(--stalled-bg);">Ofullständig</span>`;
+    const avail=(free,n)=>free?`<span style="display:inline-flex;padding:3px 10px;border-radius:6px;font-size:11.5px;font-weight:600;color:var(--done);background:var(--done-bg);">Fri slot</span>`:`<span style="display:inline-flex;padding:3px 10px;border-radius:6px;font-size:11.5px;font-weight:600;color:var(--stalled);background:var(--stalled-bg);">Kö · ${n}</span>`;
+    const s3=this.el([
+      wrap('format=FLAC', fmt('FLAC')), wrap('format=MP3 320', fmt('MP3 320')), wrap('format=MP3 V0', fmt('MP3 V0')), wrap('format=MP3 192', fmt('MP3 192')),
+      wrap('complete=true', compBadge(true)), wrap('complete=false', compBadge(false)),
+      wrap('avail: free', avail(true)), wrap('avail: queued', avail(false,4))
+    ].join(''));
+
+    const card=(opts)=>{
+      const {best,title,artist,badges,availHtml,peer,speed,meta}=opts;
+      return `<div style="position:relative;width:340px;background:#14171c;border:1px solid ${best?'rgba(53,196,143,0.4)':'#21252e'};border-radius:11px;overflow:hidden;">
+        ${best?'<div style="position:absolute;top:-1px;right:16px;padding:2px 9px;border-bottom-left-radius:7px;border-bottom-right-radius:7px;background:var(--accent);color:#08130d;font-size:10px;font-weight:700;letter-spacing:0.4px;">BÄST MATCHNING</div>':''}
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;">
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:14px;font-weight:600;color:#eef0f3;">${title}</span><span style="font-size:12px;color:#7c828d;">${artist}</span></div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">${badges}<span style="font-size:11.5px;color:#6b7280;font-family:'IBM Plex Mono',monospace;">${meta}</span></div>
+          </div>
+          <div style="text-align:right;flex:0 0 auto;">${availHtml}<div style="font-size:11.5px;color:#7c828d;font-family:'IBM Plex Mono',monospace;margin-top:5px;">${peer} · ${speed}</div></div>
+        </div></div>`;
+    };
+    const s4=this.el([
+      wrap('isBest · FLAC · fri slot', card({best:true,title:'In Rainbows',artist:'Radiohead',badges:fmt('FLAC')+compBadge(true),availHtml:avail(true),peer:'lossless_lars',speed:'920 KB/s',meta:'10 spår · 412 MB'})),
+      wrap('MP3 320 · peer-kö', card({best:false,title:'In Rainbows',artist:'Radiohead',badges:fmt('MP3 320')+compBadge(true),availHtml:avail(false,3),peer:'sound_seed',speed:'540 KB/s',meta:'10 spår · 96 MB'})),
+      wrap('ofullständig', card({best:false,title:'In Rainbows (Disc 2)',artist:'Radiohead',badges:fmt('MP3 V0')+compBadge(false),availHtml:avail(true),peer:'ripper_78',speed:'210 KB/s',meta:'8 spår · 71 MB'}))
+    ].join(''));
+
+    const importCard=(mode)=>{
+      let inner='';
+      if(mode==='confirmed') inner=`<div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:var(--done-bg);border:1px solid rgba(53,196,143,0.28);"><span style="display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--done);color:#08130d;font-size:12px;font-weight:700;">✓</span><div style="flex:1;"><div style="font-size:12.5px;color:#dfe2e8;">Kopplas till <b>In Rainbows</b> · Radiohead</div><div style="font-size:11px;color:#7c9d86;margin-top:1px;">Finns i Lidarr wanted</div></div><span style="padding:6px 11px;border-radius:7px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:11.5px;">Ändra</span></div>`;
+      else if(mode==='suggest') inner=`<div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:var(--manual-bg);border:1px solid rgba(34,201,214,0.28);"><span style="color:var(--manual);font-size:14px;">?</span><div style="flex:1;"><div style="font-size:12.5px;color:#dfe2e8;">Förslag: <b>In Rainbows</b> · Radiohead</div><div style="font-size:11px;color:#7c9aa0;margin-top:1px;">Föreslaget från mappnamn — bekräfta eller ändra</div></div></div>`;
+      else inner=`<div style="display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:9px;background:#12161b;border:1px solid #23272f;"><span style="color:#6b7280;font-size:14px;">⊘</span><div style="flex:1;"><div style="font-size:12.5px;color:#c8cdd5;">Ingen import — laddas bara ner</div><div style="font-size:11px;color:#6b7280;margin-top:1px;">Hamnar i Soulseek-mappen, importeras ej till Lidarr</div></div></div>`;
+      return `<div style="width:420px;background:#0f1319;border:1px solid #21252e;border-radius:11px;padding:14px 16px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:11px;"><span style="font-size:11px;font-weight:600;color:#dfe2e8;text-transform:uppercase;letter-spacing:0.4px;">Koppla till Lidarr</span></div>${inner}<div style="display:flex;gap:9px;margin-top:13px;"><span style="padding:8px 15px;border-radius:8px;background:var(--accent);color:#08130d;font-size:12.5px;font-weight:600;">Ladda ner album</span><span style="padding:8px 13px;border-radius:8px;border:1px solid #2a2f39;background:#191d24;color:#c8cdd5;font-size:12.5px;">Hoppa över import</span></div></div>`;
+    };
+    const s5=this.el([
+      wrap('mode=confirmed (från kontext)', importCard('confirmed')),
+      wrap('mode=suggest (gissad)', importCard('suggest')),
+      wrap('mode=skip', importCard('skip'))
+    ].join(''));
+
+    const testState=(state)=>{
+      const map={ untested:['#191d24','#2a2f39','#c8cdd5','Testa anslutning'], testing:['#191d24','#2a2f39','#c8cdd5','Testar…'], success:['var(--done-bg)','rgba(53,196,143,0.35)','var(--done)','✓ Ansluten'], failed:['var(--orphaned-bg)','rgba(229,89,93,0.35)','var(--orphaned)','Misslyckades'] };
+      const m=map[state]; const spin=state==='testing'?'<span style="display:inline-block;width:11px;height:11px;border:2px solid rgba(200,200,200,0.25);border-top-color:#c8cdd5;border-radius:50%;animation:slsk-spin .7s linear infinite;vertical-align:-1px;margin-right:6px;"></span>':'';
+      return `<span style="display:inline-flex;align-items:center;padding:8px 14px;border-radius:8px;border:1px solid ${m[1]};background:${m[0]};color:${m[2]};font-size:12.5px;font-weight:600;">${spin}${m[3]}</span>`;
+    };
+    const s6=this.el([wrap('untested',testState('untested')),wrap('testing',testState('testing')),wrap('success',testState('success')),wrap('failed',testState('failed'))].join(''));
+
+    const errCard=`<div style="width:520px;display:flex;align-items:flex-start;gap:11px;padding:13px 15px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);"><span style="display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;">!</span><div style="flex:1;"><div style="font-size:12.5px;font-weight:600;color:#e8d9b8;">Kunde inte nå Lidarr på http://lidarr:8687</div><div style="font-size:12px;color:#b09a6e;margin-top:3px;text-wrap:pretty;">Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686) och att Lidarr är igång och nåbar från slskdarr-containern.</div></div><span style="padding:6px 11px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.13);color:var(--stalled);font-size:11.5px;font-weight:600;white-space:nowrap;">Testa igen</span></div>`;
+    const s7=this.el(wrap('orsak + åtgärd', errCard));
+
+    const emptyShare=`<div style="width:520px;display:flex;align-items:flex-start;gap:13px;padding:16px;border-radius:11px;background:var(--orphaned-bg);border:1px solid rgba(229,89,93,0.3);"><span style="color:var(--orphaned);font-size:18px;flex:0 0 auto;">⚠</span><div><div style="font-size:13px;font-weight:600;color:#f0c4c5;">Inga delade mappar konfigurerade</div><div style="font-size:12px;color:#c99a9c;margin-top:3px;text-wrap:pretty;">Utan shares betraktas du som leechare och peers kan strypa dina nedladdningar.</div></div></div>`;
+    const emptySearch=`<div style="width:340px;padding:24px;border-radius:11px;border:1px dashed #23272f;text-align:center;"><div style="font-size:13px;color:#c8cdd5;font-weight:500;">Inga träffar</div><div style="font-size:12px;color:#6b7280;margin-top:4px;">Ingen peer delar detta just nu.</div></div>`;
+    const setupBanner=`<div style="width:520px;display:flex;align-items:center;gap:13px;padding:13px 16px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.32);"><span style="color:var(--stalled);font-size:16px;">⚠</span><div style="flex:1;"><div style="font-size:13px;font-weight:600;color:#e8d9b8;">Konfigurationen är ofullständig</div><div style="font-size:12px;color:#b09a6e;margin-top:1px;">slskdarr kör i begränsat läge.</div></div><span style="padding:7px 13px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.14);color:var(--stalled);font-size:12px;font-weight:600;">Öppna setup</span></div>`;
+    const loadingRow=`<div style="width:340px;display:flex;align-items:center;gap:11px;padding:16px;border-radius:11px;border:1px dashed #23272f;color:#6b7280;font-size:12.5px;justify-content:center;"><span style="width:14px;height:14px;border:2px solid #2a2f39;border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>Frågar peers…</div>`;
+    const s8=this.el([wrap('empty: shares',emptyShare),wrap('empty: sök',emptySearch),wrap('loading',loadingRow),wrap('banner: setup',setupBanner)].join(''));
+
+    return [
+      {title:'Käll-badge', props:'source: manual | lidarr', note:'Källa är en egen dimension, aldrig blandad med status. Manuell = cyan (--manual, det enda distinkta hue som inte redan är en statusfärg); Lidarr = neutral slate. Tag-form med kant, inte fylld pill — så den aldrig krockar med statuspillen.', render:s1},
+      {title:'Statuspill', props:'status: 8 lägen', note:'Pillformad, tnum-siffror. "I peerns kö" är samma jobb-status active men amber — ett köande jobb ska läsas som väntande, inte nedladdande.', render:s2},
+      {title:'Kvalitets-badges', props:'format · complete · availability', note:'Rangordnad visuellt: FLAC grön > MP3 320 blå > V0 lila > 192 grå. Komplett grön / ofullständig amber. Fri slot grön / kö amber med position. Användaren jämför färg, inte text.', render:s3},
+      {title:'Sökträffkort', props:'isBest · badges[] · avail · peer', note:'En peer + en mapp = en träff. "Bäst matchning"-band på topprankad. Expanderar till fillista med kryssrutor.', render:s4},
+      {title:'Import-koppling', props:'mode: confirmed | suggest | skip', note:'Från artist-/albumkontext = bekräftad (grön). Fritextsökning = gissat förslag (cyan, "?"). Hoppa över = fullt legitimt, inte gömt.', render:s5},
+      {title:'Test-anslutning', props:'state: untested | testing | success | failed', note:'Alla fyra lägen på wizard-knappen.', render:s6},
+      {title:'Felkort (människospråk)', props:'cause + suggested action', note:'Bär både orsak och konkret åtgärdsförslag — aldrig råa felkoder som ECONNREFUSED.', render:s7},
+      {title:'Tomma & övergångstillstånd', props:'empty · loading · warning', note:'Det som oftast saknas när design blir kod: tomt, laddar, varning, delvis.', render:s8}
+    ];
+  }
+}
+</script>
+</body>
+</html>
