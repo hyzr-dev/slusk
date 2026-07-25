@@ -40,17 +40,13 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview), '/jobs', '/jobs/:id', '/health' and '/shares' are
-  // asserted separately below: the TUI reskin (#198) gives none of them an
-  // <h1> — PageHeading is gone from all five routes already, ahead of the
-  // other routes below losing theirs in their own tasks.
-  it.each([
-    ['/events', t.nav.events],
-    ['/peers', t.nav.peers],
-    ['/settings', t.nav.settings],
-  ])('renders %s without crashing', (path, heading) => {
-    renderAt(path);
-    expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
+  // '/' (Overview), '/jobs', '/jobs/:id', '/health', '/shares', '/events' and
+  // '/peers' are asserted separately below: the TUI reskin (#198) gives none
+  // of them an <h1> — PageHeading is gone from all seven routes already,
+  // ahead of the remaining route below losing its own in a later task.
+  it('renders /settings without crashing', () => {
+    renderAt('/settings');
+    expect(screen.getByRole('heading', { name: t.nav.settings })).toBeInTheDocument();
   });
 
   it('renders / (Overview) without crashing', () => {
@@ -61,6 +57,20 @@ describe('route tree', () => {
   it('renders /jobs without crashing', () => {
     renderAt('/jobs');
     expect(screen.getByText(t.jobs.gridHead.album)).toBeInTheDocument();
+  });
+
+  it('renders /events without crashing', () => {
+    // No seeded query data, so the filter box and header row are the only
+    // things guaranteed to render regardless of what useEvents resolves to.
+    renderAt('/events');
+    expect(screen.getByText(t.columns.time)).toBeInTheDocument();
+  });
+
+  it('renders /peers without crashing', () => {
+    // No seeded query data, so the header row is the only thing guaranteed
+    // to render regardless of what usePeers resolves to.
+    renderAt('/peers');
+    expect(screen.getByText(t.peers.gridHead.peer)).toBeInTheDocument();
   });
 
   it('renders /health without crashing', () => {

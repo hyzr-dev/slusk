@@ -1,7 +1,85 @@
-/* --panel-inset, not --panel: an expanded detail row is nested, recessed
-   content, not an active/elevated surface (that's --panel-raised, e.g. the
-   active nav item in Layout.module.css). */
-.detailRow { background: var(--panel-inset); }
+/* Shared by the header row and every peer row so PEER/SCORE/OK/FAIL/LAST SEEN
+   always line up, same convention as Jobs.module.css's .grid. */
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px 56px 56px 90px;
+  gap: 10px;
+  align-items: center;
+}
+
+.head {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 1.3px;
+  color: var(--text-dim);
+}
+
+.headRight { text-align: right; }
+
+/* A sortable column header. Buttons don't inherit font/color from their
+   container the way a <span> would, so both are set explicitly to match the
+   plain header cells beside it. */
+.sortHead {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+}
+
+.row {
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.row:hover { background: var(--panel-hover); }
+
+.rowExpanded { background: var(--panel-hover); }
+
+.peerCell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.caretButton {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+}
+
+.caret { color: var(--text-dim); font-size: 9px; }
+
+.username {
+  min-width: 0;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mono { font-family: var(--font-mono); color: var(--dim); }
+.right { text-align: right; white-space: nowrap; }
+
+/* --panel-inset, not --panel: an expanded artist-history block is nested,
+   recessed content, not an active/elevated surface (that's --panel-raised,
+   e.g. the active nav item in Layout.module.css). */
+.expansionWrap {
+  background: var(--panel-inset);
+  border-bottom: 1px solid var(--line);
+  padding: 3px 16px;
+}
 
 .artist {
   font-size: 11.5px;

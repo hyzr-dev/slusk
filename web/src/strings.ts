@@ -249,6 +249,16 @@ export const t = {
     noArtistHistory: 'No artist-specific history.',
     artistLine: (id: number, score: string, ok: number, fail: number) =>
       `Artist #${id} — score ${score}, ${ok} succeeded, ${fail} failed`,
+    // The TUI peers grid's column headers, short forms in the same idiom as
+    // jobs.gridHead (#198) — SCORE/OK/FAIL rather than the generic Title Case
+    // labels in `columns`, which predate this reskin.
+    gridHead: {
+      peer: 'PEER',
+      score: 'SCORE',
+      ok: 'OK',
+      fail: 'FAIL',
+      lastSeen: 'LAST SEEN',
+    },
   },
   health: {
     neverRun: 'Never run',
