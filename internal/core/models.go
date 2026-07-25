@@ -119,8 +119,8 @@ type PeerReliability struct {
 }
 
 // JobView is a read-only projection joining an AlbumJob with its most recent
-// transfer, for display purposes only (e.g. the dashboard). It is never
-// written back to the store.
+// transfer and its album-wide byte aggregates, for display purposes only
+// (e.g. the dashboard). It is never written back to the store.
 type JobView struct {
 	Job      AlbumJob
 	Transfer *Transfer  // nil if the job has no candidate/transfer yet
@@ -128,13 +128,19 @@ type JobView struct {
 	Attempt  *Candidate // nil if the job has no candidate yet
 	// AlbumBytesDone and AlbumBytesTotal are summed over every transfer of
 	// the job's current candidate (Attempt) — i.e. every file of the album,
-	// since candidate activation write-aheads a PENDING transfers row per
-	// file with bytes_total set from the file size. Unlike Transfer, which
-	// reflects only the single most recently updated file, these describe
-	// album-wide progress and are what the dashboard should render as the
-	// job's progress bar (issue #174). AlbumBytesRemaining is the same sum
-	// but excludes transfers in a terminal state (COMPLETED, ERRORED,
-	// CANCELLED), so it reflects only bytes that can still be transferred.
+	// since candidate activation (ActivateCandidateWithTransfers) and manual
+	// job creation (CreateManualJob) both write-ahead a PENDING transfers row
+	// per file with bytes_total set from the file size. Unlike Transfer,
+	// which reflects only the single most recently updated file, these
+	// describe album-wide progress and are what the dashboard should render
+	// as the job's progress bar (issue #174).
+	//
+	// AlbumBytesRemaining is not the same sum: it is
+	// SUM(GREATEST(bytes_total-bytes_done, 0)) per transfer, filtered to
+	// non-terminal states (excludes COMPLETED, ERRORED, CANCELLED) — the
+	// GREATEST clamp keeps a single over-reported transfer from making the
+	// album-wide remaining go negative.
+	//
 	// All three are zero when the job has no candidate.
 	AlbumBytesDone      int64
 	AlbumBytesTotal     int64

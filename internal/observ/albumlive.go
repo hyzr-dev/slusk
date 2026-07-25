@@ -46,16 +46,10 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 // starts). candidate == nil (a job with no candidate yet) yields all zeros /
 // hasQueuePosition false.
 //
-// This function previously also returned remaining bytes summed from live
-// transfers only, which meant files not yet enqueued (the per-peer in-flight
-// throttle, see issue #20) had no live entry and were silently excluded —
-// understating the album's true remaining size and making the ETA
-// optimistic early on, growing as more files were released (issue #174).
-// Remaining bytes are now sourced from core.JobView.AlbumBytesRemaining
-// (store-computed, SUMs every transfer row for the candidate, which are
-// written ahead for every file at candidate activation — see
-// internal/store/dashboard.go's jobViewSelect), so callers should use that
-// instead.
+// Remaining bytes are not computed here: callers get them from
+// core.JobView.AlbumBytesRemaining (store-computed — see
+// internal/store/dashboard.go's jobViewSelect and the field comment on
+// AlbumBytesRemaining).
 func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool) {
 	if candidate == nil {
 		return 0, 0, 0, false

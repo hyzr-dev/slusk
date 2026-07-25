@@ -451,9 +451,14 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	jobs := func(ctx context.Context) ([]core.JobView, error) {
 		return []core.JobView{
 			{
-				Job:                 core.AlbumJob{ID: 1, Title: "Live One", ArtistName: "X", State: core.StateDownloading},
-				Attempt:             &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
-				AlbumBytesRemaining: 500,
+				Job:     core.AlbumJob{ID: 1, Title: "Live One", ArtistName: "X", State: core.StateDownloading},
+				Attempt: &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+				// Deliberately different from the live transfer's own
+				// remaining (Size 1000 - BytesDone 500 = 500): if etaSeconds
+				// were computed from the live transfer's remaining instead of
+				// this store-provided value, this test would still pass at
+				// eta = 5, silently losing coverage of issue #174.
+				AlbumBytesRemaining: 900,
 			},
 		}, nil
 	}
@@ -484,9 +489,9 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	if got[0].QueuePosition != 4 {
 		t.Errorf("QueuePosition = %d, want 4", got[0].QueuePosition)
 	}
-	// remaining (store AlbumBytesRemaining) = 500, avgSpeed (live) = 100 -> eta = 5s.
-	if got[0].ETASeconds != 5 {
-		t.Errorf("ETASeconds = %d, want 5", got[0].ETASeconds)
+	// remaining (store AlbumBytesRemaining) = 900, avgSpeed (live) = 100 -> eta = 9s.
+	if got[0].ETASeconds != 9 {
+		t.Errorf("ETASeconds = %d, want 9", got[0].ETASeconds)
 	}
 }
 

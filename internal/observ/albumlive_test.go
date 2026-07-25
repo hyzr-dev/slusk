@@ -43,10 +43,10 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 		},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400, QueuePosition: 3},
-		{Username: "alice", Filename: "02.flac", State: core.TransferQueued, Speed: 50, SpeedAverage: 40, Size: 2000, BytesDone: 500},
-		{Username: "alice", Filename: "not-this-albums-file.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999, Size: 100, BytesDone: 0},
-		{Username: "bob", Filename: "01.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 0},
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90, QueuePosition: 3},
+		{Username: "alice", Filename: "02.flac", State: core.TransferQueued, Speed: 50, SpeedAverage: 40},
+		{Username: "alice", Filename: "not-this-albums-file.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999},
+		{Username: "bob", Filename: "01.flac", State: core.TransferInProgress, Speed: 999, SpeedAverage: 999},
 	}
 	idx := newLiveTransferIndex(live)
 
@@ -86,8 +86,8 @@ func TestAggregateLiveAlbumTwoAlbumsSamePeerDoNotContaminate(t *testing.T) {
 		Files:    []core.CandidateFile{{Filename: "albumB/01.flac", Size: 3000}},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "sharedpeer", Filename: "albumA/01.flac", State: core.TransferInProgress, Speed: 111, SpeedAverage: 100, Size: 1000, BytesDone: 200},
-		{Username: "sharedpeer", Filename: "albumB/01.flac", State: core.TransferInProgress, Speed: 222, SpeedAverage: 200, Size: 3000, BytesDone: 300},
+		{Username: "sharedpeer", Filename: "albumA/01.flac", State: core.TransferInProgress, Speed: 111, SpeedAverage: 100},
+		{Username: "sharedpeer", Filename: "albumB/01.flac", State: core.TransferInProgress, Speed: 222, SpeedAverage: 200},
 	}
 	idx := newLiveTransferIndex(live)
 
@@ -102,10 +102,13 @@ func TestAggregateLiveAlbumTwoAlbumsSamePeerDoNotContaminate(t *testing.T) {
 	}
 }
 
-// TestAggregateLiveAlbumUnmatchedFilesNotCounted asserts a file not yet
-// enqueued (no live entry at all) contributes nothing to speed rather than
-// erroring.
-func TestAggregateLiveAlbumUnmatchedFilesNotCounted(t *testing.T) {
+// TestAggregateLiveAlbumOnlyEnqueuedFileContributesSpeed asserts a file not
+// yet enqueued (no live entry at all) is simply skipped — the loop over
+// candidate.Files doesn't error or panic on the missing index lookup, and
+// only the one matched file's speed is summed. Remaining-bytes accounting
+// for not-yet-enqueued files is store-side (core.JobView.AlbumBytesRemaining,
+// see internal/store/dashboard.go), not this function's concern.
+func TestAggregateLiveAlbumOnlyEnqueuedFileContributesSpeed(t *testing.T) {
 	candidate := &core.Candidate{
 		Username: "alice",
 		Files: []core.CandidateFile{
@@ -114,7 +117,7 @@ func TestAggregateLiveAlbumUnmatchedFilesNotCounted(t *testing.T) {
 		},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90, Size: 1000, BytesDone: 400},
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 100, SpeedAverage: 90},
 	}
 	idx := newLiveTransferIndex(live)
 
@@ -143,10 +146,10 @@ func TestAggregateLiveAlbumIgnoresTerminalTransfers(t *testing.T) {
 		},
 	}
 	live := []core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", State: core.TransferErrored, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 500},
-		{Username: "alice", Filename: "02.flac", State: core.TransferCancelled, Speed: 999, SpeedAverage: 999, Size: 1000, BytesDone: 300},
-		{Username: "alice", Filename: "03.flac", State: core.TransferCompleted, Speed: 0, SpeedAverage: 0, Size: 1000, BytesDone: 1000},
-		{Username: "alice", Filename: "04.flac", State: core.TransferInProgress, Speed: 1000, SpeedAverage: 1000, Size: 1000, BytesDone: 200},
+		{Username: "alice", Filename: "01.flac", State: core.TransferErrored, Speed: 999, SpeedAverage: 999},
+		{Username: "alice", Filename: "02.flac", State: core.TransferCancelled, Speed: 999, SpeedAverage: 999},
+		{Username: "alice", Filename: "03.flac", State: core.TransferCompleted, Speed: 0, SpeedAverage: 0},
+		{Username: "alice", Filename: "04.flac", State: core.TransferInProgress, Speed: 1000, SpeedAverage: 1000},
 	}
 	idx := newLiveTransferIndex(live)
 

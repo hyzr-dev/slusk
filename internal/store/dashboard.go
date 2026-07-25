@@ -17,9 +17,10 @@ import (
 // purposes:
 //
 //   - t is the candidate's single most recent transfer (by updated_at), used
-//     for identity only: internal/app/jobs.go's Cancel/Delete need one
-//     concrete transfer's SlskdID/Username to act on the remote transfer, and
-//     the detail view uses it the same way.
+//     for identity only: internal/app/jobs.go's Cancel and Delete are the
+//     only readers of view.Transfer, needing one concrete transfer's
+//     SlskdID/Username to act on the remote transfer (Retry and ForceSearch
+//     fetch the view but never read Transfer).
 //   - agg sums bytes_done/bytes_total/remaining across every transfer of the
 //     candidate. ActivateCandidateWithTransfers and CreateManualJob insert a
 //     transfers row for every file of the album upfront (state PENDING,
@@ -55,6 +56,11 @@ const jobViewSelect = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
+			-- These three literals are hardcoded (unlike every other transfer-state bind
+			-- in this package, e.g. string(core.TransferPending)) because this subquery
+			-- has no placeholder of its own to parameterise with: jobViewSelect's callers
+			-- own $1 (see the StateCancelled and jobID binds below), and adding one here
+			-- would force renumbering every caller's params.
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
 				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
 		FROM transfers

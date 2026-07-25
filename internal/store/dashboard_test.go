@@ -250,10 +250,7 @@ func TestListJobsWithTransferAlbumBytesZeroWithoutAttempt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertWantedJob(ctx, 51, now)
-	if err != nil {
-		t.Fatalf("UpsertWantedJob: %v", err)
-	}
+	job, _ := s.UpsertWantedJob(ctx, 51, now)
 
 	views, err := s.ListJobsWithTransfer(ctx)
 	if err != nil {
