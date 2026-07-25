@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -100,46 +101,30 @@ func seedJobTransferFixture(t *testing.T, s *Store, ctx context.Context) jobTran
 	}
 }
 
-func TestActiveTransfersForJob(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	fixture := seedJobTransferFixture(t, s, ctx)
-
-	transfers, err := s.ActiveTransfersForJob(ctx, fixture.targetJob.ID)
-	if err != nil {
-		t.Fatalf("ActiveTransfersForJob: %v", err)
-	}
-	wantIDs := []int64{
-		fixture.ids[core.TransferPending],
-		fixture.ids[core.TransferQueued],
-		fixture.ids[core.TransferInProgress],
-		fixture.ids[core.TransferStalled],
-	}
-	if len(transfers) != len(wantIDs) {
-		t.Fatalf("ActiveTransfersForJob returned %d rows, want %d: %+v", len(transfers), len(wantIDs), transfers)
-	}
-	for i, transfer := range transfers {
-		if transfer.ID != wantIDs[i] {
-			t.Errorf("transfer[%d].ID = %d, want %d", i, transfer.ID, wantIDs[i])
-		}
-		if transfer.CandidateID != fixture.candidate1 && transfer.CandidateID != fixture.candidate2 {
-			t.Errorf("transfer[%d] belongs to unrelated candidate %d", i, transfer.CandidateID)
-		}
-	}
-}
-
 func TestCancelJobCancelsAllLiveTransfersAtomically(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	fixture := seedJobTransferFixture(t, s, ctx)
 	cancelledAt := fixture.seededAt.Add(45 * time.Minute)
 
-	ok, err := s.CancelJob(ctx, fixture.targetJob.ID, cancelledAt)
+	transfers, found, err := s.CancelJob(ctx, fixture.targetJob.ID, cancelledAt)
 	if err != nil {
 		t.Fatalf("CancelJob: %v", err)
 	}
-	if !ok {
+	if !found {
 		t.Fatal("CancelJob returned false for an existing job")
+	}
+	wantCaptured := []int64{
+		fixture.ids[core.TransferPending], fixture.ids[core.TransferQueued],
+		fixture.ids[core.TransferInProgress], fixture.ids[core.TransferStalled],
+	}
+	if len(transfers) != len(wantCaptured) {
+		t.Fatalf("captured transfers = %d, want %d: %+v", len(transfers), len(wantCaptured), transfers)
+	}
+	for i, transfer := range transfers {
+		if transfer.ID != wantCaptured[i] {
+			t.Errorf("captured transfer[%d] = %d, want %d", i, transfer.ID, wantCaptured[i])
+		}
 	}
 
 	type transferResult struct {
@@ -211,12 +196,12 @@ func TestCancelJobNotFound(t *testing.T) {
 	ctx := context.Background()
 	fixture := seedJobTransferFixture(t, s, ctx)
 
-	ok, err := s.CancelJob(ctx, 999999, fixture.seededAt.Add(time.Hour))
+	transfers, found, err := s.CancelJob(ctx, 999999, fixture.seededAt.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CancelJob: %v", err)
 	}
-	if ok {
-		t.Fatal("CancelJob returned true for an unknown job")
+	if found || len(transfers) != 0 {
+		t.Fatalf("CancelJob returned found=%v transfers=%v for an unknown job", found, transfers)
 	}
 	var state string
 	var updatedAt time.Time
@@ -225,6 +210,171 @@ func TestCancelJobNotFound(t *testing.T) {
 	}
 	if core.TransferState(state) != core.TransferQueued || !updatedAt.Equal(fixture.seededAt) {
 		t.Errorf("unknown-job cancel changed unrelated transfer: state %s updated %v", state, updatedAt)
+	}
+}
+
+func TestPrepareDeleteJobRejectsImportingWithoutMutation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	if err := s.AdvanceJobState(ctx, fixture.targetJob.ID, core.StateImporting, fixture.seededAt); err != nil {
+		t.Fatalf("advance to importing: %v", err)
+	}
+
+	transfers, found, err := s.PrepareDeleteJob(ctx, fixture.targetJob.ID, fixture.seededAt.Add(time.Hour))
+	if !errors.Is(err, ErrJobImporting) || found || len(transfers) != 0 {
+		t.Fatalf("PrepareDeleteJob = transfers=%v found=%v err=%v, want importing rejection", transfers, found, err)
+	}
+	if got := jobStateForStore(t, s, fixture.targetJob.ID); got != core.StateImporting {
+		t.Fatalf("job state = %v, want IMPORTING", got)
+	}
+	var transferState string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM transfers WHERE id = $1`, fixture.ids[core.TransferQueued]).Scan(&transferState); err != nil {
+		t.Fatalf("read transfer: %v", err)
+	}
+	if core.TransferState(transferState) != core.TransferQueued {
+		t.Fatalf("transfer state = %v, want QUEUED", transferState)
+	}
+}
+
+func TestCancelJobRollsBackJobAndTransfersOnTransferUpdateFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	if _, err := s.db.Exec(`CREATE FUNCTION fail_cancel_transfer() RETURNS trigger AS $$
+		BEGIN
+			IF NEW.state = 'CANCELLED' AND OLD.state != 'CANCELLED' THEN
+				RAISE EXCEPTION 'injected cancellation failure';
+			END IF;
+			RETURN NEW;
+		END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER fail_cancel_transfer BEFORE UPDATE ON transfers
+		FOR EACH ROW EXECUTE FUNCTION fail_cancel_transfer()`); err != nil {
+		t.Fatalf("install failure trigger: %v", err)
+	}
+
+	if _, _, err := s.CancelJob(ctx, fixture.targetJob.ID, fixture.seededAt.Add(time.Hour)); err == nil {
+		t.Fatal("CancelJob succeeded despite injected transfer failure")
+	}
+	if got := jobStateForStore(t, s, fixture.targetJob.ID); got != core.StateDownloading {
+		t.Fatalf("job state after rollback = %v, want DOWNLOADING", got)
+	}
+	var transferState string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM transfers WHERE id = $1`, fixture.ids[core.TransferQueued]).Scan(&transferState); err != nil {
+		t.Fatalf("read transfer: %v", err)
+	}
+	if core.TransferState(transferState) != core.TransferQueued {
+		t.Fatalf("transfer state after rollback = %v, want QUEUED", transferState)
+	}
+}
+
+func TestCancellationBarrierRejectsStaleTransferWriters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	queuedID := fixture.ids[core.TransferQueued]
+	if _, found, err := s.CancelJob(ctx, fixture.targetJob.ID, fixture.seededAt.Add(time.Hour)); err != nil || !found {
+		t.Fatalf("CancelJob: found=%v err=%v", found, err)
+	}
+
+	if id, ok, err := s.RecordEnqueueIntent(ctx, fixture.candidate1, "peer-one", "QUEUED-peer-one.flac", fixture.seededAt.Add(2*time.Hour), fixture.seededAt.Add(2*time.Hour)); err != nil || ok || id != 0 {
+		t.Fatalf("stale RecordEnqueueIntent = id=%d ok=%v err=%v", id, ok, err)
+	}
+	if err := s.RetryTransfer(ctx, queuedID, fixture.seededAt.Add(2*time.Hour)); err != nil {
+		t.Fatalf("stale RetryTransfer: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, queuedID, core.TransferCompleted, 100, 100, fixture.seededAt.Add(2*time.Hour)); err != nil {
+		t.Fatalf("stale UpdateTransferProgress: %v", err)
+	}
+	if ok, err := s.AttachTransferID(ctx, queuedID, "late-remote", fixture.seededAt.Add(2*time.Hour)); err != nil || ok {
+		t.Fatalf("stale AttachTransferID = ok=%v err=%v", ok, err)
+	}
+
+	var state, remoteID string
+	var retries, bytesDone int64
+	if err := s.db.QueryRowContext(ctx, `SELECT state, slskd_id, retries, bytes_done FROM transfers WHERE id = $1`, queuedID).Scan(&state, &remoteID, &retries, &bytesDone); err != nil {
+		t.Fatalf("read guarded transfer: %v", err)
+	}
+	if core.TransferState(state) != core.TransferCancelled || remoteID != "remote-QUEUED-peer-one.flac" || retries != 0 || bytesDone != 0 {
+		t.Fatalf("stale writers changed transfer: state=%v remote=%q retries=%d bytes=%d", state, remoteID, retries, bytesDone)
+	}
+}
+
+func TestTerminalTransferCannotBeResurrected(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	completedID := fixture.ids[core.TransferCompleted]
+
+	if id, ok, err := s.RecordEnqueueIntent(ctx, fixture.candidate1, "peer-one", "COMPLETED-peer-one.flac", fixture.seededAt.Add(time.Hour), fixture.seededAt.Add(time.Hour)); err != nil || ok || id != 0 {
+		t.Fatalf("terminal RecordEnqueueIntent = id=%d ok=%v err=%v", id, ok, err)
+	}
+	if err := s.RetryTransfer(ctx, completedID, fixture.seededAt.Add(time.Hour)); err != nil {
+		t.Fatalf("terminal RetryTransfer: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, completedID, core.TransferInProgress, 1, 10, fixture.seededAt.Add(time.Hour)); err != nil {
+		t.Fatalf("terminal UpdateTransferProgress: %v", err)
+	}
+	if ok, err := s.AttachTransferID(ctx, completedID, "replacement", fixture.seededAt.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("terminal AttachTransferID = ok=%v err=%v", ok, err)
+	}
+
+	var state, remoteID string
+	if err := s.db.QueryRowContext(ctx, `SELECT state, slskd_id FROM transfers WHERE id = $1`, completedID).Scan(&state, &remoteID); err != nil {
+		t.Fatalf("read terminal transfer: %v", err)
+	}
+	if core.TransferState(state) != core.TransferCompleted || remoteID != "remote-COMPLETED-peer-one.flac" {
+		t.Fatalf("terminal transfer changed: state=%v remote=%q", state, remoteID)
+	}
+}
+
+func TestHardDeleteFailureLeavesPreparedJobCancelled(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	if _, found, err := s.PrepareDeleteJob(ctx, fixture.targetJob.ID, fixture.seededAt.Add(time.Hour)); err != nil || !found {
+		t.Fatalf("PrepareDeleteJob: found=%v err=%v", found, err)
+	}
+	if _, err := s.db.Exec(`CREATE FUNCTION fail_candidate_delete() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'injected hard delete failure';
+		END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER fail_candidate_delete BEFORE DELETE ON candidates
+		FOR EACH ROW EXECUTE FUNCTION fail_candidate_delete()`); err != nil {
+		t.Fatalf("install failure trigger: %v", err)
+	}
+
+	if deleted, err := s.DeleteJob(ctx, fixture.targetJob.ID); err == nil || deleted {
+		t.Fatalf("DeleteJob = deleted=%v err=%v, want failure", deleted, err)
+	}
+	if got := jobStateForStore(t, s, fixture.targetJob.ID); got != core.StateCancelled {
+		t.Fatalf("job state after hard-delete rollback = %v, want CANCELLED", got)
+	}
+	var transferState string
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM transfers WHERE id = $1`, fixture.ids[core.TransferQueued]).Scan(&transferState); err != nil {
+		t.Fatalf("read transfer: %v", err)
+	}
+	if core.TransferState(transferState) != core.TransferCancelled {
+		t.Fatalf("transfer state after hard-delete rollback = %v, want CANCELLED", transferState)
+	}
+}
+
+func TestAttachTransferIDReportsDeleteBarrierAndHardDelete(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	queuedID := fixture.ids[core.TransferQueued]
+	if _, found, err := s.PrepareDeleteJob(ctx, fixture.targetJob.ID, fixture.seededAt.Add(time.Hour)); err != nil || !found {
+		t.Fatalf("PrepareDeleteJob: found=%v err=%v", found, err)
+	}
+	if ok, err := s.AttachTransferID(ctx, queuedID, "late-after-prepare", fixture.seededAt.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("AttachTransferID after prepare = ok=%v err=%v", ok, err)
+	}
+	if deleted, err := s.DeleteJob(ctx, fixture.targetJob.ID); err != nil || !deleted {
+		t.Fatalf("DeleteJob: deleted=%v err=%v", deleted, err)
+	}
+	if ok, err := s.AttachTransferID(ctx, queuedID, "late-after-delete", fixture.seededAt.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("AttachTransferID after delete = ok=%v err=%v", ok, err)
 	}
 }
 
@@ -237,7 +387,7 @@ func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 
 	// Step 1 of write-ahead: intent persisted, no slskd id yet.
 	deadline := now.Add(30 * time.Minute)
-	tid, err := s.RecordEnqueueIntent(ctx, candidateID, "bob", "album/01.flac", deadline, now)
+	tid, _, err := s.RecordEnqueueIntent(ctx, candidateID, "bob", "album/01.flac", deadline, now)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
@@ -258,7 +408,7 @@ func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 	}
 
 	// Step 2: attach the id.
-	if err := s.AttachTransferID(ctx, tid, "slskd-guid-1", now); err != nil {
+	if _, err := s.AttachTransferID(ctx, tid, "slskd-guid-1", now); err != nil {
 		t.Fatalf("AttachTransferID: %v", err)
 	}
 	tr2, _, _ := s.FindTransferByFallback(ctx, candidateID, "bob", "album/01.flac")
@@ -273,7 +423,7 @@ func TestTransfersPastDeadline(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	_, candidateID := newActiveCandidate(t, s, ctx, 1, "bob", 1.0, now)
 	// Deadline already in the past.
-	_, _ = s.RecordEnqueueIntent(ctx, candidateID, "bob", "f.flac", now.Add(-time.Minute), now)
+	_, _, _ = s.RecordEnqueueIntent(ctx, candidateID, "bob", "f.flac", now.Add(-time.Minute), now)
 
 	overdue, err := s.TransfersPastDeadline(ctx, now)
 	if err != nil {
@@ -290,11 +440,11 @@ func TestRecordEnqueueIntentIsConflictSafeWithinCandidate(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	_, a1 := newActiveCandidate(t, s, ctx, 300, "bob", 1.0, now)
 
-	id1, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
+	id1, _, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("first intent: %v", err)
 	}
-	id2, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(2*time.Hour), now)
+	id2, _, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(2*time.Hour), now)
 	if err != nil {
 		t.Fatalf("second intent (conflict) errored: %v", err)
 	}
@@ -310,7 +460,7 @@ func TestRecordEnqueueIntentAllowsTerminalHistoryReuseWithoutMovingOwnership(t *
 	_, a1 := newActiveCandidate(t, s, ctx, 301, "bob", 1.0, now)
 	_, a2 := newActiveCandidate(t, s, ctx, 302, "bob", 1.0, now)
 
-	id1, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
+	id1, _, err := s.RecordEnqueueIntent(ctx, a1, "bob", "same.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("first candidate intent: %v", err)
 	}
@@ -321,7 +471,7 @@ func TestRecordEnqueueIntentAllowsTerminalHistoryReuseWithoutMovingOwnership(t *
 		t.Fatalf("terminal transfer must not participate in fallback: found=%v err=%v", found, err)
 	}
 
-	id2, err := s.RecordEnqueueIntent(ctx, a2, "bob", "same.flac", now.Add(time.Hour), now)
+	id2, _, err := s.RecordEnqueueIntent(ctx, a2, "bob", "same.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("reuse terminal remote key for second candidate: %v", err)
 	}
@@ -360,7 +510,7 @@ func TestRetryTransferAccumulatesAndSurvivesResend(t *testing.T) {
 	if err := s.RecordPendingTransfer(ctx, a, "bob", "t.flac", 42, now); err != nil {
 		t.Fatalf("RecordPendingTransfer: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 
@@ -374,7 +524,7 @@ func TestRetryTransferAccumulatesAndSurvivesResend(t *testing.T) {
 
 	// Resending must NOT reset the retry count, or the bound is never reached and
 	// a rejection loops forever.
-	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(2*time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a, "bob", "t.flac", now.Add(2*time.Hour), now); err != nil {
 		t.Fatalf("resend RecordEnqueueIntent: %v", err)
 	}
 	if tr := only(); tr.Retries != 1 || tr.State != core.TransferQueued {
@@ -391,7 +541,7 @@ func TestUpdateTransferProgressLastProgressAtTracksBytes(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	_, a := newActiveCandidate(t, s, ctx, 900, "bob", 1.0, t0)
-	tid, _ := s.RecordEnqueueIntent(ctx, a, "bob", "p.flac", t0.Add(time.Hour), t0)
+	tid, _, _ := s.RecordEnqueueIntent(ctx, a, "bob", "p.flac", t0.Add(time.Hour), t0)
 
 	read := func() core.Transfer {
 		t.Helper()
@@ -445,7 +595,7 @@ func TestRetryTransferResetsStallClock(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	_, a := newActiveCandidate(t, s, ctx, 901, "bob", 1.0, t0)
-	tid, _ := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", t0.Add(time.Hour), t0)
+	tid, _, _ := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", t0.Add(time.Hour), t0)
 
 	read := func() core.Transfer {
 		t.Helper()
@@ -472,7 +622,7 @@ func TestRetryTransferResetsStallClock(t *testing.T) {
 
 	// topUpAttempt re-enqueues it and the download starts again at 0 bytes: the
 	// stall clock must restart from now, not from before the retry.
-	if _, err := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", tRetry.Add(time.Hour), tRetry); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a, "bob", "r.flac", tRetry.Add(time.Hour), tRetry); err != nil {
 		t.Fatalf("re-enqueue RecordEnqueueIntent: %v", err)
 	}
 	tRestart := tRetry.Add(time.Minute)

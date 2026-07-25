@@ -33,10 +33,10 @@ type SelectingStore interface {
 	// interface's doc comment stays the single place documenting what
 	// Selecting needs from the store.
 	TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error)
-	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error)
+	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
-	AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error
+	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
 }
 
 // SelectingParams configures a Selecting.
@@ -76,7 +76,7 @@ func (p SelectingParams) TransfersForCandidate(ctx context.Context, candidateID 
 	return p.Store.TransfersForCandidate(ctx, candidateID)
 }
 
-func (p SelectingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error) {
+func (p SelectingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error) {
 	return p.Store.RecordEnqueueIntent(ctx, candidateID, username, filename, deadline, now)
 }
 
@@ -88,12 +88,16 @@ func (p SelectingParams) UpdateTransferProgress(ctx context.Context, transferID 
 	return p.Store.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
 }
 
-func (p SelectingParams) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
-	return p.Store.AttachTransferID(ctx, transferID, slskdID, now)
+func (p SelectingParams) AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error) {
+	return p.Store.AttachTransferID(ctx, transferID, remoteID, now)
 }
 
 func (p SelectingParams) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	return p.Peers.Enqueue(ctx, username, filename, size)
+}
+
+func (p SelectingParams) Cancel(ctx context.Context, username, id string) error {
+	return p.Peers.Cancel(ctx, username, id)
 }
 
 // Selecting activates one cached candidate per runnable SELECTING job per
@@ -243,11 +247,12 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 // Peers fields (see the forwarding methods above SelectingParams).
 type topUpDeps interface {
 	TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error)
-	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error)
+	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
-	AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error
+	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
 	Enqueue(ctx context.Context, username, filename string, size int64) (string, error)
+	Cancel(ctx context.Context, username, id string) error
 }
 
 // topUpCandidate hands a candidate's PENDING files to slskd until
@@ -290,12 +295,17 @@ func topUpCandidate(ctx context.Context, d topUpDeps, candidateID int64, now tim
 		if inflight >= maxInflightPerPeer {
 			break
 		}
-		// Promote PENDING -> QUEUED with a real deadline, then hand it to slskd.
-		tid, err := d.RecordEnqueueIntent(ctx, candidateID, p.Username, p.Filename, deadline, now)
+		// Promote PENDING -> QUEUED with a real deadline, then hand it to the peer.
+		// A false result means a cancellation barrier made this stale snapshot
+		// ineligible before any remote side effect occurred.
+		tid, ok, err := d.RecordEnqueueIntent(ctx, candidateID, p.Username, p.Filename, deadline, now)
 		if err != nil {
 			return sent, err
 		}
-		slskdID, err := d.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
+		if !ok {
+			return sent, nil
+		}
+		remoteID, err := d.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
 		if err != nil {
 			if p.Retries < maxTransferRetries {
 				log.Info("enqueue failed, returning to pending", "user", p.Username, "file", p.Filename, "retries", p.Retries, "err", err)
@@ -310,7 +320,19 @@ func topUpCandidate(ctx context.Context, d topUpDeps, candidateID int64, now tim
 			}
 			continue
 		}
-		_ = d.AttachTransferID(ctx, tid, slskdID, now)
+		attached, attachErr := d.AttachTransferID(ctx, tid, remoteID, now)
+		if attachErr != nil || !attached {
+			// Enqueue succeeded but cancellation/delete committed before the id
+			// could be attached. Compensate immediately; remote cancellation stays
+			// best-effort, matching manual lifecycle actions.
+			if cancelErr := d.Cancel(ctx, p.Username, remoteID); cancelErr != nil {
+				log.Warn("compensating remote cancel failed", "transfer", tid, "user", p.Username, "remote_id", remoteID, "err", cancelErr)
+			}
+			if attachErr != nil {
+				return sent, attachErr
+			}
+			return sent, nil
+		}
 		inflight++
 		sent++
 	}

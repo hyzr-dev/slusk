@@ -17,36 +17,36 @@ import (
 // inside them.
 var storeErrJobImporting = store.ErrJobImporting
 
-// fakeJobStore is a JobStore fake. It keeps dashboard lookup data separate
-// from lifecycle transfer data so tests cannot accidentally use the one-row
-// dashboard projection as a cancellation work list. lookupIDs records
-// JobWithTransfer readbacks for manual-job creation assertions.
+// fakeJobStore is a JobStore fake. Cancellation preparation returns the same
+// all-transfer work list that the production transaction captures. lookupIDs
+// records JobWithTransfer readbacks for manual-job creation assertions.
 type fakeJobStore struct {
-	jobs            map[int64]core.JobView
-	activeTransfers map[int64][]core.Transfer
+	jobs             map[int64]core.JobView
+	barrierTransfers map[int64][]core.Transfer
 
-	jobErr             error
-	activeTransfersErr error
-	cancelErr          error
-	cancelOK           bool
-	retryErr           error
-	retryOK            bool
-	createErr          error
-	createJob          core.AlbumJob
-	forceSearchErr     error
-	forceSearchOK      bool
-	deleteErr          error
-	deleteOK           bool
+	jobErr           error
+	cancelErr        error
+	cancelFound      bool
+	prepareDeleteErr error
+	prepareFound     bool
+	retryErr         error
+	retryOK          bool
+	createErr        error
+	createJob        core.AlbumJob
+	forceSearchErr   error
+	forceSearchOK    bool
+	deleteErr        error
+	deleteOK         bool
 
-	activeTransfersCalled bool
-	cancelCalled          bool
-	cancelJobID           int64
-	retryCalled           bool
-	forceSearchCalled     bool
-	deleteCalled          bool
-	lookupIDs             []int64
-	operations            *[]string
-	createCalled          struct {
+	cancelCalled      bool
+	cancelJobID       int64
+	prepareCalled     bool
+	retryCalled       bool
+	forceSearchCalled bool
+	deleteCalled      bool
+	lookupIDs         []int64
+	operations        *[]string
+	createCalled      struct {
 		title, artistName, peer string
 		files                   []store.ManualJobFile
 	}
@@ -61,27 +61,27 @@ func (f *fakeJobStore) JobWithTransfer(ctx context.Context, jobID int64) (core.J
 	return v, ok, nil
 }
 
-func (f *fakeJobStore) ActiveTransfersForJob(ctx context.Context, jobID int64) ([]core.Transfer, error) {
-	f.activeTransfersCalled = true
-	if f.operations != nil {
-		*f.operations = append(*f.operations, "active")
-	}
-	if f.activeTransfersErr != nil {
-		return nil, f.activeTransfersErr
-	}
-	return f.activeTransfers[jobID], nil
-}
-
-func (f *fakeJobStore) CancelJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+func (f *fakeJobStore) CancelJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error) {
 	f.cancelCalled = true
 	f.cancelJobID = jobID
 	if f.operations != nil {
-		*f.operations = append(*f.operations, "cancel")
+		*f.operations = append(*f.operations, "barrier")
 	}
 	if f.cancelErr != nil {
-		return false, f.cancelErr
+		return nil, false, f.cancelErr
 	}
-	return f.cancelOK, nil
+	return f.barrierTransfers[jobID], f.cancelFound, nil
+}
+
+func (f *fakeJobStore) PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error) {
+	f.prepareCalled = true
+	if f.operations != nil {
+		*f.operations = append(*f.operations, "barrier")
+	}
+	if f.prepareDeleteErr != nil {
+		return nil, false, f.prepareDeleteErr
+	}
+	return f.barrierTransfers[jobID], f.prepareFound, nil
 }
 
 func (f *fakeJobStore) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
@@ -141,68 +141,49 @@ func (f *fakePeerCanceller) Cancel(ctx context.Context, username, id string) err
 }
 
 func TestJobsCancelNotFound(t *testing.T) {
-	store := &fakeJobStore{jobs: map[int64]core.JobView{}}
+	store := &fakeJobStore{}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
 
 	if err := j.Cancel(context.Background(), 42); !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("Cancel() = %v, want ErrJobNotFound", err)
 	}
-	if store.activeTransfersCalled || store.cancelCalled || len(peers.calls) != 0 {
-		t.Errorf("not-found cancel performed lifecycle work: active=%v cancel=%v remote=%v",
-			store.activeTransfersCalled, store.cancelCalled, peers.calls)
+	if !store.cancelCalled || len(peers.calls) != 0 {
+		t.Errorf("not-found cancel: barrier=%v remote=%v", store.cancelCalled, peers.calls)
 	}
 }
 
-func TestJobsCancelStoreLookupError(t *testing.T) {
-	store := &fakeJobStore{jobErr: errors.New("db down")}
-	peers := &fakePeerCanceller{}
-	j := &Jobs{Store: store, Peers: peers}
-
-	err := j.Cancel(context.Background(), 1)
-	if err == nil || errors.Is(err, ErrJobNotFound) {
-		t.Fatalf("Cancel() = %v, want the underlying store error", err)
-	}
-	if store.activeTransfersCalled || store.cancelCalled || len(peers.calls) != 0 {
-		t.Fatal("dashboard lookup failure must stop before lifecycle work")
-	}
-}
-
-func TestJobsCancelActiveTransferLookupErrorStopsMutation(t *testing.T) {
-	lookupErr := errors.New("transfer query failed")
+func TestJobsCancelBarrierErrorStopsRemoteCancellation(t *testing.T) {
+	barrierErr := errors.New("atomic cancel failed")
 	store := &fakeJobStore{
-		jobs:               map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		activeTransfersErr: lookupErr,
+		barrierTransfers: map[int64][]core.Transfer{1: {{ID: 1, Username: "bob", SlskdID: "g1"}}},
+		cancelErr:        barrierErr,
 	}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
 
-	if err := j.Cancel(context.Background(), 1); !errors.Is(err, lookupErr) {
-		t.Fatalf("Cancel() = %v, want active-transfer lookup error", err)
+	if err := j.Cancel(context.Background(), 1); !errors.Is(err, barrierErr) {
+		t.Fatalf("Cancel() = %v, want barrier error", err)
 	}
-	if store.cancelCalled || len(peers.calls) != 0 {
-		t.Fatalf("lookup failure mutated state: cancel=%v remote=%v", store.cancelCalled, peers.calls)
+	if len(peers.calls) != 0 {
+		t.Fatalf("remote cancellation ran before failed barrier: %v", peers.calls)
 	}
 }
 
-func TestJobsCancelAttemptsAllRemoteTransfersBeforeAtomicCancel(t *testing.T) {
+func TestJobsCancelCommitsBarrierBeforeAllRemoteAttempts(t *testing.T) {
 	operations := []string{}
 	store := &fakeJobStore{
-		jobs: map[int64]core.JobView{7: {
-			Job:      core.AlbumJob{ID: 7},
-			Transfer: &core.Transfer{ID: 999, Username: "dashboard", SlskdID: "decoy"},
-		}},
-		activeTransfers: map[int64][]core.Transfer{7: {
-			{ID: 10, Username: "pending-peer", SlskdID: "", State: core.TransferPending},
+		barrierTransfers: map[int64][]core.Transfer{7: {
+			{ID: 10, Username: "pending-peer", State: core.TransferPending},
 			{ID: 11, Username: "alice", SlskdID: "g1", State: core.TransferQueued},
 			{ID: 12, Username: "bob", SlskdID: "g2", State: core.TransferInProgress},
 			{ID: 13, Username: "carol", SlskdID: "g3", State: core.TransferStalled},
 		}},
-		cancelOK:   true,
-		operations: &operations,
+		cancelFound: true,
+		operations:  &operations,
 	}
 	peers := &fakePeerCanceller{
-		errors:     map[string]error{"g2": errors.New("slskd unreachable")},
+		errors:     map[string]error{"g2": errors.New("peer unreachable")},
 		operations: &operations,
 	}
 	j := &Jobs{Store: store, Peers: peers}
@@ -217,47 +198,16 @@ func TestJobsCancelAttemptsAllRemoteTransfersBeforeAtomicCancel(t *testing.T) {
 	if !store.cancelCalled || store.cancelJobID != 7 {
 		t.Errorf("CancelJob call = called %v job %d, want true/7", store.cancelCalled, store.cancelJobID)
 	}
-	wantOperations := []string{"active", "remote:g1", "remote:g2", "remote:g3", "cancel"}
+	wantOperations := []string{"barrier", "remote:g1", "remote:g2", "remote:g3"}
 	if !reflect.DeepEqual(operations, wantOperations) {
 		t.Errorf("operation order = %v, want %v", operations, wantOperations)
 	}
 }
 
-func TestJobsCancelStoreErrorAfterRemoteAttempts(t *testing.T) {
-	cancelErr := errors.New("atomic cancel failed")
+func TestJobsCancelSkipsEmptyRemoteIDAfterBarrier(t *testing.T) {
 	store := &fakeJobStore{
-		jobs:            map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		activeTransfers: map[int64][]core.Transfer{1: {{ID: 1, Username: "bob", SlskdID: "g1"}}},
-		cancelErr:       cancelErr,
-	}
-	peers := &fakePeerCanceller{}
-	j := &Jobs{Store: store, Peers: peers}
-
-	if err := j.Cancel(context.Background(), 1); !errors.Is(err, cancelErr) {
-		t.Fatalf("Cancel() = %v, want CancelJob error", err)
-	}
-	if len(peers.calls) != 1 || !store.cancelCalled {
-		t.Fatalf("calls before error: remote=%v cancel=%v", peers.calls, store.cancelCalled)
-	}
-}
-
-func TestJobsCancelRacedIntoNotFound(t *testing.T) {
-	store := &fakeJobStore{
-		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		cancelOK: false,
-	}
-	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
-
-	if err := j.Cancel(context.Background(), 1); !errors.Is(err, ErrJobNotFound) {
-		t.Fatalf("Cancel() = %v, want ErrJobNotFound", err)
-	}
-}
-
-func TestJobsCancelSkipsEmptyRemoteIDButCancelsLocally(t *testing.T) {
-	store := &fakeJobStore{
-		jobs:            map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		activeTransfers: map[int64][]core.Transfer{1: {{ID: 1, Username: "bob", State: core.TransferPending}}},
-		cancelOK:        true,
+		barrierTransfers: map[int64][]core.Transfer{1: {{ID: 1, Username: "bob", State: core.TransferPending}}},
+		cancelFound:      true,
 	}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
@@ -266,7 +216,7 @@ func TestJobsCancelSkipsEmptyRemoteIDButCancelsLocally(t *testing.T) {
 		t.Fatalf("Cancel() = %v, want nil", err)
 	}
 	if len(peers.calls) != 0 || !store.cancelCalled {
-		t.Errorf("empty remote ID handling: calls=%v cancel=%v", peers.calls, store.cancelCalled)
+		t.Errorf("empty remote ID handling: calls=%v barrier=%v", peers.calls, store.cancelCalled)
 	}
 }
 
@@ -501,67 +451,46 @@ func TestJobsForceSearchStoreError(t *testing.T) {
 }
 
 func TestJobsDeleteNotFound(t *testing.T) {
-	store := &fakeJobStore{jobs: map[int64]core.JobView{}}
+	store := &fakeJobStore{}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
 
 	if err := j.Delete(context.Background(), 42); !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("Delete() = %v, want ErrJobNotFound", err)
 	}
-	if store.activeTransfersCalled || store.deleteCalled || len(peers.calls) != 0 {
-		t.Fatal("not-found delete must stop before lifecycle work")
+	if !store.prepareCalled || store.deleteCalled || len(peers.calls) != 0 {
+		t.Fatalf("not-found delete: prepare=%v delete=%v remote=%v", store.prepareCalled, store.deleteCalled, peers.calls)
 	}
 }
 
-func TestJobsDeleteImportingStopsBeforeTransferLookup(t *testing.T) {
-	store := &fakeJobStore{jobs: map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, State: core.StateImporting}}}}
+func TestJobsDeleteImportingRejectedByPreparation(t *testing.T) {
+	store := &fakeJobStore{prepareDeleteErr: storeErrJobImporting}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
 
 	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobImporting) {
 		t.Fatalf("Delete() = %v, want ErrJobImporting", err)
 	}
-	if store.activeTransfersCalled || store.deleteCalled || len(peers.calls) != 0 {
-		t.Fatalf("IMPORTING fast path performed lifecycle work: active=%v delete=%v remote=%v",
-			store.activeTransfersCalled, store.deleteCalled, peers.calls)
-	}
-}
-
-func TestJobsDeleteActiveTransferLookupErrorStopsDelete(t *testing.T) {
-	lookupErr := errors.New("transfer query failed")
-	store := &fakeJobStore{
-		jobs:               map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		activeTransfersErr: lookupErr,
-	}
-	peers := &fakePeerCanceller{}
-	j := &Jobs{Store: store, Peers: peers}
-
-	if err := j.Delete(context.Background(), 1); !errors.Is(err, lookupErr) {
-		t.Fatalf("Delete() = %v, want active-transfer lookup error", err)
-	}
 	if store.deleteCalled || len(peers.calls) != 0 {
-		t.Fatalf("lookup failure mutated state: delete=%v remote=%v", store.deleteCalled, peers.calls)
+		t.Fatalf("IMPORTING preparation performed later work: delete=%v remote=%v", store.deleteCalled, peers.calls)
 	}
 }
 
-func TestJobsDeleteAttemptsAllRemoteTransfersBeforeDelete(t *testing.T) {
+func TestJobsDeleteBarrierThenAllRemoteTransfersThenHardDelete(t *testing.T) {
 	operations := []string{}
 	store := &fakeJobStore{
-		jobs: map[int64]core.JobView{7: {
-			Job:      core.AlbumJob{ID: 7, State: core.StateDownloading},
-			Transfer: &core.Transfer{ID: 999, Username: "dashboard", SlskdID: "decoy"},
-		}},
-		activeTransfers: map[int64][]core.Transfer{7: {
-			{ID: 10, Username: "pending-peer", SlskdID: ""},
+		barrierTransfers: map[int64][]core.Transfer{7: {
+			{ID: 10, Username: "pending-peer"},
 			{ID: 11, Username: "alice", SlskdID: "g1"},
 			{ID: 12, Username: "bob", SlskdID: "g2"},
 			{ID: 13, Username: "carol", SlskdID: "g3"},
 		}},
-		deleteOK:   true,
-		operations: &operations,
+		prepareFound: true,
+		deleteOK:     true,
+		operations:   &operations,
 	}
 	peers := &fakePeerCanceller{
-		errors:     map[string]error{"g2": errors.New("slskd unreachable")},
+		errors:     map[string]error{"g2": errors.New("peer unreachable")},
 		operations: &operations,
 	}
 	j := &Jobs{Store: store, Peers: peers}
@@ -573,33 +502,34 @@ func TestJobsDeleteAttemptsAllRemoteTransfersBeforeDelete(t *testing.T) {
 	if !reflect.DeepEqual(peers.calls, wantCalls) {
 		t.Errorf("remote calls = %#v, want %#v", peers.calls, wantCalls)
 	}
-	wantOperations := []string{"active", "remote:g1", "remote:g2", "remote:g3", "delete"}
+	wantOperations := []string{"barrier", "remote:g1", "remote:g2", "remote:g3", "delete"}
 	if !reflect.DeepEqual(operations, wantOperations) {
 		t.Errorf("operation order = %v, want %v", operations, wantOperations)
 	}
 }
 
-func TestJobsDeleteSuccessWithoutRemoteTransfers(t *testing.T) {
+func TestJobsDeleteHardDeleteFailureLeavesPreparedCancellation(t *testing.T) {
+	deleteErr := errors.New("hard delete failed")
 	store := &fakeJobStore{
-		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		deleteOK: true,
+		barrierTransfers: map[int64][]core.Transfer{1: {{ID: 1, Username: "bob", SlskdID: "g1"}}},
+		prepareFound:     true,
+		deleteErr:        deleteErr,
 	}
 	peers := &fakePeerCanceller{}
 	j := &Jobs{Store: store, Peers: peers}
 
-	if err := j.Delete(context.Background(), 1); err != nil {
-		t.Fatalf("Delete() = %v, want nil", err)
+	if err := j.Delete(context.Background(), 1); !errors.Is(err, deleteErr) {
+		t.Fatalf("Delete() = %v, want hard-delete error", err)
 	}
-	if len(peers.calls) != 0 || !store.deleteCalled {
-		t.Errorf("no-transfer delete: calls=%v delete=%v", peers.calls, store.deleteCalled)
+	if !store.prepareCalled || !store.deleteCalled || len(peers.calls) != 1 {
+		t.Fatalf("failure semantics: prepare=%v remote=%v delete=%v", store.prepareCalled, peers.calls, store.deleteCalled)
 	}
+	// The production PrepareDeleteJob has already committed CANCELLED here;
+	// Delete deliberately does not attempt to roll that barrier back.
 }
 
-func TestJobsDeleteRacedIntoNotFound(t *testing.T) {
-	store := &fakeJobStore{
-		jobs:     map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		deleteOK: false,
-	}
+func TestJobsDeleteRacedIntoNotFoundAfterPreparation(t *testing.T) {
+	store := &fakeJobStore{prepareFound: true, deleteOK: false}
 	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
 
 	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobNotFound) {
@@ -607,37 +537,11 @@ func TestJobsDeleteRacedIntoNotFound(t *testing.T) {
 	}
 }
 
-func TestJobsDeleteRacedIntoImporting(t *testing.T) {
-	store := &fakeJobStore{
-		jobs:      map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		deleteErr: storeErrJobImporting,
-	}
+func TestJobsDeleteRacedIntoImportingAfterPreparation(t *testing.T) {
+	store := &fakeJobStore{prepareFound: true, deleteErr: storeErrJobImporting}
 	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
 
 	if err := j.Delete(context.Background(), 1); !errors.Is(err, ErrJobImporting) {
 		t.Fatalf("Delete() = %v, want ErrJobImporting", err)
-	}
-}
-
-func TestJobsDeleteLookupError(t *testing.T) {
-	store := &fakeJobStore{jobErr: errors.New("db down")}
-	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
-
-	err := j.Delete(context.Background(), 1)
-	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobImporting) {
-		t.Fatalf("Delete() = %v, want the underlying store error", err)
-	}
-}
-
-func TestJobsDeleteStoreError(t *testing.T) {
-	store := &fakeJobStore{
-		jobs:      map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1}}},
-		deleteErr: errors.New("db exploded"),
-	}
-	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
-
-	err := j.Delete(context.Background(), 1)
-	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobImporting) {
-		t.Fatalf("Delete() = %v, want the wrapped store error", err)
 	}
 }

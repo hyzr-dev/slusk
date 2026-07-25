@@ -44,8 +44,8 @@ var ErrJobImporting = errors.New("job is importing")
 // JobStore is the slice of the store Jobs needs.
 type JobStore interface {
 	JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error)
-	ActiveTransfersForJob(ctx context.Context, jobID int64) ([]core.Transfer, error)
-	CancelJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
+	CancelJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
+	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
@@ -91,31 +91,20 @@ func (j *Jobs) cancelRemoteTransfers(ctx context.Context, jobID int64, transfers
 	}
 }
 
-// Cancel best-effort cancels every known live remote transfer, then atomically
-// marks all live child transfers and the job CANCELLED locally. Remote failures
-// are logged but do not block the durable local transition. Returns
-// ErrJobNotFound if no such job exists.
+// Cancel first commits the local cancellation barrier, atomically capturing
+// and cancelling every live child transfer with the job. It then best-effort
+// cancels the captured remote identities. Remote failures are logged but do
+// not undo the durable local transition. Returns ErrJobNotFound if no such job
+// exists.
 func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
-	_, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	transfers, found, err := j.Store.CancelJob(ctx, jobID, time.Now())
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrJobNotFound
 	}
-	transfers, err := j.Store.ActiveTransfersForJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
 	j.cancelRemoteTransfers(ctx, jobID, transfers)
-
-	ok, err := j.Store.CancelJob(ctx, jobID, time.Now())
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrJobNotFound
-	}
 	return nil
 }
 
@@ -196,22 +185,19 @@ func (j *Jobs) ForceSearch(ctx context.Context, jobID int64) error {
 
 // Delete permanently removes one job and its children (issue #159):
 // ErrJobNotFound if no such job exists, ErrJobImporting if it is currently
-// IMPORTING. Every known live remote transfer is cancelled best-effort first;
-// individual failures do not block later attempts or the durable local delete.
+// IMPORTING. It first commits the local cancellation barrier, then best-effort
+// cancels every captured remote identity before the hard delete. If the hard
+// delete fails, the job safely remains CANCELLED for a later retry.
 func (j *Jobs) Delete(ctx context.Context, jobID int64) error {
-	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	transfers, found, err := j.Store.PrepareDeleteJob(ctx, jobID, time.Now())
+	if errors.Is(err, store.ErrJobImporting) {
+		return ErrJobImporting
+	}
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrJobNotFound
-	}
-	if view.Job.State == core.StateImporting {
-		return ErrJobImporting
-	}
-	transfers, err := j.Store.ActiveTransfersForJob(ctx, jobID)
-	if err != nil {
-		return err
 	}
 	j.cancelRemoteTransfers(ctx, jobID, transfers)
 

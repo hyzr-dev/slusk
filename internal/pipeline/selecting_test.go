@@ -13,6 +13,20 @@ import (
 // newSelectingParams builds SelectingParams over a fresh store-backed
 // fixture, with generous defaults each test can override on the returned
 // struct before constructing a Selecting.
+type barrierAfterTransferSnapshot struct {
+	SelectingParams
+	afterSnapshot func()
+}
+
+func (d *barrierAfterTransferSnapshot) TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error) {
+	transfers, err := d.SelectingParams.TransfersForCandidate(ctx, candidateID)
+	if err == nil && d.afterSnapshot != nil {
+		d.afterSnapshot()
+		d.afterSnapshot = nil
+	}
+	return transfers, err
+}
+
 func newSelectingParams(t *testing.T, searcher *fakeSearcher) (SelectingParams, *store.Store) {
 	t.Helper()
 	st := newBackedStore(t)
@@ -118,6 +132,79 @@ func TestSelectingActivatesBestCandidateAndEnqueues(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected EventCandidateSelected recorded, got events %+v", events)
+	}
+}
+
+func TestTopUpCandidateStopsOnStalePendingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+	jobID, candidateID := seedActiveCandidate(t, st, 901, "peer", []core.CandidateFile{{Filename: "album/01.flac", Size: 10}}, now)
+
+	deps := &barrierAfterTransferSnapshot{SelectingParams: p}
+	deps.afterSnapshot = func() {
+		if _, found, err := st.CancelJob(ctx, jobID, now.Add(time.Second)); err != nil || !found {
+			t.Fatalf("CancelJob: found=%v err=%v", found, err)
+		}
+	}
+	sent, err := topUpCandidate(ctx, deps, candidateID, now, 1, 3, time.Hour, p.Logger)
+	if err != nil {
+		t.Fatalf("topUpCandidate: %v", err)
+	}
+	if sent != 0 || len(searcher.enqueued) != 0 {
+		t.Fatalf("stale top-up sent=%d remote=%v, want no enqueue", sent, searcher.enqueued)
+	}
+	if got := transferStatesFor(t, st, candidateID)["album/01.flac"].State; got != core.TransferCancelled {
+		t.Fatalf("transfer state = %v, want CANCELLED", got)
+	}
+}
+
+func TestTopUpCandidateCompensatesEnqueueReturningAfterLifecycleBarrier(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		barrier func(context.Context, *store.Store, int64, time.Time)
+	}{
+		{
+			name: "cancel",
+			barrier: func(ctx context.Context, st *store.Store, jobID int64, now time.Time) {
+				if _, found, err := st.CancelJob(ctx, jobID, now); err != nil || !found {
+					t.Fatalf("CancelJob: found=%v err=%v", found, err)
+				}
+			},
+		},
+		{
+			name: "delete",
+			barrier: func(ctx context.Context, st *store.Store, jobID int64, now time.Time) {
+				if _, found, err := st.PrepareDeleteJob(ctx, jobID, now); err != nil || !found {
+					t.Fatalf("PrepareDeleteJob: found=%v err=%v", found, err)
+				}
+				if deleted, err := st.DeleteJob(ctx, jobID); err != nil || !deleted {
+					t.Fatalf("DeleteJob: deleted=%v err=%v", deleted, err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+			searcher := &fakeSearcher{}
+			p, st := newSelectingParams(t, searcher)
+			jobID, candidateID := seedActiveCandidate(t, st, 902, "peer", []core.CandidateFile{{Filename: "album/01.flac", Size: 10}}, now)
+			searcher.enqueueHook = func() { tc.barrier(ctx, st, jobID, now.Add(time.Second)) }
+
+			sent, err := topUpCandidate(ctx, p, candidateID, now, 1, 3, time.Hour, p.Logger)
+			if err != nil {
+				t.Fatalf("topUpCandidate: %v", err)
+			}
+			if sent != 0 || len(searcher.enqueued) != 1 {
+				t.Fatalf("top-up sent=%d enqueued=%v, want one bounced enqueue", sent, searcher.enqueued)
+			}
+			wantRemoteID := "slskd-album/01.flac"
+			if len(searcher.cancelled) != 1 || searcher.cancelled[0] != wantRemoteID {
+				t.Fatalf("compensating cancellations = %v, want [%s]", searcher.cancelled, wantRemoteID)
+			}
+		})
 	}
 }
 

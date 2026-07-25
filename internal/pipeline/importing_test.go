@@ -41,7 +41,7 @@ func seedImportingJob(t *testing.T, st *store.Store, albumID int64, username str
 	ctx := context.Background()
 	jobID, candID = seedActiveCandidate(t, st, albumID, username, files, now)
 	for _, f := range files {
-		if _, err := st.RecordEnqueueIntent(ctx, candID, username, f.Filename, now.Add(time.Hour), now); err != nil {
+		if _, _, err := st.RecordEnqueueIntent(ctx, candID, username, f.Filename, now.Add(time.Hour), now); err != nil {
 			t.Fatalf("RecordEnqueueIntent: %v", err)
 		}
 	}

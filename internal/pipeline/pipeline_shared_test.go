@@ -160,8 +160,11 @@ type fakeSearcher struct {
 	// so Selecting/Downloading tests can assert how many (and which) files
 	// were actually handed to slskd.
 	enqueued []string
-	// enqueueErr, when set, fails every Enqueue call.
-	enqueueErr error
+	// enqueueErr, when set, fails every Enqueue call. enqueueHook runs after
+	// the remote identity exists but before Enqueue returns, allowing lifecycle
+	// race tests to deterministically interleave cancellation/deletion.
+	enqueueErr  error
+	enqueueHook func()
 
 	// cancelled records every id Cancel was called with, in order, and
 	// deletedFolders every folder DeleteDownloadFolder was called with, so
@@ -190,6 +193,9 @@ func (f *fakeSearcher) Enqueue(ctx context.Context, username, filename string, s
 		return "", f.enqueueErr
 	}
 	f.enqueued = append(f.enqueued, filename)
+	if f.enqueueHook != nil {
+		f.enqueueHook()
+	}
 	return "slskd-" + filename, nil
 }
 
