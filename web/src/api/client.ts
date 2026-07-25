@@ -15,14 +15,20 @@ export class ApiError extends Error {
   }
 }
 
-// Best-effort JSON parse of a failed response's body, so ApiError can carry
-// structured detail (e.g. per-field validation messages) when the server
-// sends one, without failing the throw itself if it didn't.
+// Best-effort parse of a failed response's body, so ApiError can carry the
+// server's own message. Most endpoints (e.g. POST /api/config) send
+// structured JSON with per-field validation detail; the job action endpoints
+// (retry/cancel/search/delete) answer with http.Error's plain text instead
+// (see internal/observ/observ.go), so a JSON parse there would throw and
+// silently drop the message — fall back to the raw text as `error` so both
+// shapes surface through the same `body.error` field.
 async function parseErrorBody(res: Response): Promise<ApiErrorBody | undefined> {
+  const text = await res.text();
+  if (!text) return undefined;
   try {
-    return (await res.json()) as ApiErrorBody;
+    return JSON.parse(text) as ApiErrorBody;
   } catch {
-    return undefined;
+    return { error: text.trim() };
   }
 }
 
@@ -38,6 +44,13 @@ export async function apiPost(path: string): Promise<void> {
   const res = await fetch(path, { method: 'POST' });
   if (!res.ok) {
     throw new ApiError(res.status, `POST ${path} failed with ${res.status}`, await parseErrorBody(res));
+  }
+}
+
+export async function apiDelete(path: string): Promise<void> {
+  const res = await fetch(path, { method: 'DELETE' });
+  if (!res.ok) {
+    throw new ApiError(res.status, `DELETE ${path} failed with ${res.status}`, await parseErrorBody(res));
   }
 }
 

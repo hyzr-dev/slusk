@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  basename,
   formatBytes,
+  formatBytesOrDash,
   formatSpeed,
+  formatEta,
   formatSize,
   formatVirtualPath,
   percent,
@@ -43,6 +46,60 @@ describe('formatSpeed', () => {
   it('scales to MB/s at or above 1 MB/s', () => {
     expect(formatSpeed(1024 * 1024)).toBe('1.0 MB/s');
     expect(formatSpeed(1536 * 1024)).toBe('1.5 MB/s');
+  });
+});
+
+describe('formatEta', () => {
+  it('returns an em dash for zero and nullish input', () => {
+    expect(formatEta(0)).toBe('—');
+    expect(formatEta(null)).toBe('—');
+    expect(formatEta(undefined)).toBe('—');
+  });
+
+  it('shows seconds below a minute', () => {
+    expect(formatEta(45)).toBe('45 s');
+  });
+
+  it('shows rounded minutes at or above 60 seconds', () => {
+    expect(formatEta(60)).toBe('1 min');
+    expect(formatEta(150)).toBe('3 min');
+  });
+
+  it('shows hours and minutes at or above one hour', () => {
+    expect(formatEta(3600)).toBe('1 h');
+    expect(formatEta(5400)).toBe('1 h 30 min');
+    expect(formatEta(7260)).toBe('2 h 1 min');
+  });
+
+  it('carries the rounded remainder instead of reporting 60 minutes', () => {
+    expect(formatEta(7199)).toBe('2 h');
+    expect(formatEta(86399)).toBe('24 h');
+  });
+});
+
+describe('formatBytesOrDash', () => {
+  it('returns an em dash for zero and nullish input, unlike formatBytes', () => {
+    expect(formatBytesOrDash(0)).toBe('—');
+    expect(formatBytesOrDash(null)).toBe('—');
+    expect(formatBytesOrDash(undefined)).toBe('—');
+  });
+
+  it('formats non-zero sizes the same as formatBytes', () => {
+    expect(formatBytesOrDash(1024 * 1024)).toBe('1.0 MB');
+  });
+});
+
+describe('basename', () => {
+  it('returns the leaf name for a forward-slash path', () => {
+    expect(basename('music/Album/01 Track.flac')).toBe('01 Track.flac');
+  });
+
+  it('returns the leaf name for a backslash path', () => {
+    expect(basename('music\\Album\\01 Track.flac')).toBe('01 Track.flac');
+  });
+
+  it('returns the input unchanged when there is no separator', () => {
+    expect(basename('01 Track.flac')).toBe('01 Track.flac');
   });
 });
 

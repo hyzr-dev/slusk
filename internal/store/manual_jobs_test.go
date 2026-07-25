@@ -58,7 +58,24 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 		}
 	}
 
-	// Round-trip through the read paths used by the dashboard.
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Attempt == nil || view.Attempt.State != core.CandidateActive {
+		t.Fatalf("JobWithTransfer attempt = %+v, want ACTIVE", view.Attempt)
+	}
+	if view.Transfer == nil || view.Transfer.State != core.TransferPending {
+		t.Fatalf("JobWithTransfer transfer = %+v, want PENDING", view.Transfer)
+	}
+	if view.Peer != "peer1" {
+		t.Errorf("JobWithTransfer peer = %q, want peer1", view.Peer)
+	}
+	if view.AlbumBytesDone != 0 || view.AlbumBytesTotal != 333 || view.AlbumBytesRemaining != 333 {
+		t.Errorf("JobWithTransfer bytes = done %d, total %d, remaining %d; want 0/333/333", view.AlbumBytesDone, view.AlbumBytesTotal, view.AlbumBytesRemaining)
+	}
+
+	// Round-trip through the detail read path used by the dashboard.
 	got, found, err := s.JobDetail(ctx, job.ID)
 	if err != nil || !found {
 		t.Fatalf("JobDetail: %v found=%v", err, found)

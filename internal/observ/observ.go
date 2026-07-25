@@ -201,7 +201,7 @@ type DeleteJobFunc func(ctx context.Context, jobID int64) error
 // directly (typically backed by app.Jobs.Create; see issue #155). Errors are
 // mapped to a status code by the POST /api/jobs handler:
 // errors.Is(err, app.ErrRemoteFileBusy) -> 409, anything else -> 500.
-type CreateJobFunc func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error)
+type CreateJobFunc func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error)
 
 // HealthyFunc reports either liveness or readiness. /healthz uses liveness
 // (modules continue attempting work), while /readyz additionally requires
@@ -297,6 +297,16 @@ type ServerDeps struct {
 	// tests that don't care) yields an empty series rather than omitting the
 	// field.
 	Throughput ThroughputFunc
+	// Conversations and Thread back GET /api/messages and GET
+	// /api/messages/{username} (issue #183). Unlike Shares/RescanShares these
+	// are wired unconditionally — message history stays readable even when
+	// the Soulseek backend that would send new messages is disabled. Send is
+	// nil when nothing can send (POST /api/messages/{username} then answers
+	// 503); MarkRead backs POST /api/messages/{username}/read.
+	Conversations ConversationsFunc
+	Thread        ThreadFunc
+	Send          SendMessageFunc
+	MarkRead      MarkReadFunc
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -582,6 +592,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
+	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
@@ -651,16 +662,12 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 		return
 	}
 
-	job, err := create(r.Context(), req.Title, req.Artist, peer, files)
+	view, err := create(r.Context(), req.Title, req.Artist, peer, files)
 	switch {
 	case err == nil:
-		v := core.JobView{Job: job, Peer: peer}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		// A freshly created manual job has no candidate yet (Attempt is nil),
-		// so there is nothing live to aggregate: the zero-value liveTransferIndex
-		// is exactly right here.
-		_ = json.NewEncoder(w).Encode(toJobDTO(v, failedRetryAfter, maxCandidates, liveTransferIndex{}))
+		_ = json.NewEncoder(w).Encode(toJobDTO(view, failedRetryAfter, maxCandidates, liveTransferIndex{}))
 	case errors.Is(err, app.ErrRemoteFileBusy):
 		writeConfigError(w, http.StatusConflict, err.Error(), nil)
 	default:
