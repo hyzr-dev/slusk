@@ -20,7 +20,8 @@ var storeErrJobImporting = store.ErrJobImporting
 // JobWithTransfer; a missing id reports not-found. advanceErr/retryErr, when
 // set, fail the corresponding call. advancedTo/retryCalled record what was
 // actually invoked so tests can assert on it. createErr/createJob configure
-// CreateManualJob's result; createCalled records its args for assertions.
+// CreateManualJob's result; createCalled records its args for assertions, and
+// lookupIDs records JobWithTransfer readbacks.
 type fakeJobStore struct {
 	jobs map[int64]core.JobView
 
@@ -39,6 +40,7 @@ type fakeJobStore struct {
 	retryCalled       bool
 	forceSearchCalled bool
 	deleteCalled      bool
+	lookupIDs         []int64
 	createCalled      struct {
 		title, artistName, peer string
 		files                   []store.ManualJobFile
@@ -46,6 +48,7 @@ type fakeJobStore struct {
 }
 
 func (f *fakeJobStore) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
+	f.lookupIDs = append(f.lookupIDs, jobID)
 	if f.jobErr != nil {
 		return core.JobView{}, false, f.jobErr
 	}
@@ -259,6 +262,94 @@ func TestJobsRetryStoreError(t *testing.T) {
 	err := j.Retry(context.Background(), 1)
 	if err == nil || errors.Is(err, ErrJobNotFound) || errors.Is(err, ErrJobNotRetryable) {
 		t.Fatalf("Retry() = %v, want the wrapped store error", err)
+	}
+}
+
+func TestJobsCreateReturnsCanonicalView(t *testing.T) {
+	files := []store.ManualJobFile{{Filename: "track.flac", Size: 111}}
+	want := core.JobView{
+		Job:             core.AlbumJob{ID: 42, Title: "Persisted Title", Source: core.SourceManual},
+		Peer:            "persisted_peer",
+		AlbumBytesDone:  0,
+		AlbumBytesTotal: 111,
+	}
+	store := &fakeJobStore{
+		createJob: core.AlbumJob{ID: 42},
+		jobs:      map[int64]core.JobView{42: want},
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	got, err := j.Create(context.Background(), "Requested Title", "Requested Artist", "requested_peer", files)
+	if err != nil {
+		t.Fatalf("Create() = %v", err)
+	}
+	if got.Job.ID != want.Job.ID || got.Job.Title != want.Job.Title || got.Peer != want.Peer || got.AlbumBytesTotal != want.AlbumBytesTotal {
+		t.Errorf("Create() = %+v, want canonical view %+v", got, want)
+	}
+	if len(store.lookupIDs) != 1 || store.lookupIDs[0] != 42 {
+		t.Errorf("JobWithTransfer lookup IDs = %v, want [42]", store.lookupIDs)
+	}
+	if store.createCalled.title != "Requested Title" || store.createCalled.artistName != "Requested Artist" || store.createCalled.peer != "requested_peer" {
+		t.Errorf("CreateManualJob args = title %q, artist %q, peer %q", store.createCalled.title, store.createCalled.artistName, store.createCalled.peer)
+	}
+	if len(store.createCalled.files) != 1 || store.createCalled.files[0] != files[0] {
+		t.Errorf("CreateManualJob files = %+v, want %+v", store.createCalled.files, files)
+	}
+}
+
+func TestJobsCreateReadbackError(t *testing.T) {
+	lookupErr := errors.New("readback failed")
+	fakeStore := &fakeJobStore{createJob: core.AlbumJob{ID: 42}, jobErr: lookupErr}
+	j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
+
+	_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+	if !errors.Is(err, lookupErr) {
+		t.Fatalf("Create() = %v, want readback error", err)
+	}
+	if len(fakeStore.lookupIDs) != 1 || fakeStore.lookupIDs[0] != 42 {
+		t.Errorf("JobWithTransfer lookup IDs = %v, want [42]", fakeStore.lookupIDs)
+	}
+}
+
+func TestJobsCreateReadbackNotFound(t *testing.T) {
+	fakeStore := &fakeJobStore{createJob: core.AlbumJob{ID: 42}, jobs: map[int64]core.JobView{}}
+	j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
+
+	_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+	if !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("Create() = %v, want ErrJobNotFound", err)
+	}
+	if len(fakeStore.lookupIDs) != 1 || fakeStore.lookupIDs[0] != 42 {
+		t.Errorf("JobWithTransfer lookup IDs = %v, want [42]", fakeStore.lookupIDs)
+	}
+}
+
+func TestJobsCreateFailureSkipsReadback(t *testing.T) {
+	tests := []struct {
+		name     string
+		storeErr error
+		wantErr  error
+	}{
+		{name: "create error", storeErr: errors.New("create failed")},
+		{name: "remote file busy", storeErr: store.ErrRemoteFileBusy, wantErr: ErrRemoteFileBusy},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeStore := &fakeJobStore{createErr: tt.storeErr}
+			j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
+
+			_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Create() = %v, want %v", err, tt.wantErr)
+				}
+			} else if !errors.Is(err, tt.storeErr) {
+				t.Fatalf("Create() = %v, want creation error", err)
+			}
+			if len(fakeStore.lookupIDs) != 0 {
+				t.Errorf("JobWithTransfer called after failed creation with IDs %v", fakeStore.lookupIDs)
+			}
+		})
 	}
 }
 
