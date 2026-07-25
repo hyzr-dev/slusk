@@ -100,6 +100,68 @@ describe('retry visibility', () => {
 
     expect(screen.queryByRole('button', { name: t.jobs.retry })).not.toBeInTheDocument();
   });
+
+  // ORPHANED is the other retry-eligible state (issue #60) — JobDetail
+  // previously only checked FAILED here.
+  it('shows Retry when the live job reports ORPHANED', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'ORPHANED', status: 'orphaned' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'ORPHANED' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
+  });
+});
+
+describe('delete action', () => {
+  it('requires a second click before firing the delete request', async () => {
+    const fetchMock = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    const deleteButton = screen.getByRole('button', { name: t.jobs.delete });
+    fireEvent.click(deleteButton);
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/jobs/1', expect.anything());
+    expect(screen.getByRole('button', { name: t.jobs.deleteConfirm })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.deleteConfirm }));
+    // useMutation's mutationFn runs in a microtask after mutate(), so the
+    // fetch call lands asynchronously — wait for it rather than asserting
+    // synchronously right after the click.
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/jobs/1', expect.objectContaining({ method: 'DELETE' })),
+    );
+  });
+
+  it('surfaces the server error message on a 409', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ error: 'job is importing' }), { status: 409 }),
+        ),
+      ),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'IMPORTING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'IMPORTING' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.delete }));
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.deleteConfirm }));
+
+    await waitFor(() => expect(screen.getByText(t.jobs.deleteFailed)).toBeInTheDocument());
+  });
 });
 
 describe('meta row: nextAttemptAt and retries', () => {

@@ -3,7 +3,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { apiGet, apiPost, apiPostJson } from './client';
+import { apiDelete, apiGet, apiPost, apiPostJson } from './client';
 import type {
   AppConfig,
   ChartsReport,
@@ -71,11 +71,16 @@ export function usePeers() {
 // Query keys include the job id, so a slow response for a previously viewed job
 // can never overwrite the current one — this replaces the legacy dashboard's
 // manual `detailJobId === id` guard.
-export function useJobDetail(id: number) {
+//
+// `enabled` defaults to true (JobDetail's own usage); the Jobs list expansion
+// panel passes it explicitly so the detail fetch only starts once a row is
+// expanded, rather than for every row up front.
+export function useJobDetail(id: number, options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.jobDetail(id),
     queryFn: () => apiGet<JobDetail>(`/api/jobs/${id}/detail`),
     refetchInterval: JOBS_INTERVAL,
+    enabled: options.enabled ?? true,
   });
 }
 
@@ -145,6 +150,35 @@ export function useRetryJob(id: number) {
       // Retry wipes candidate history server-side, so the cached detail is stale.
       void qc.invalidateQueries({ queryKey: queryKeys.jobDetail(id) });
       void qc.invalidateQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+// 409 unless the job is currently active (see internal/observ POST
+// /api/jobs/{id}/search) — mirrors useRetryJob/useCancelJob's invalidation set.
+export function useForceSearchJob(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiPost(`/api/jobs/${id}/search`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.jobs });
+      void qc.invalidateQueries({ queryKey: queryKeys.jobDetail(id) });
+      void qc.invalidateQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+// A hard delete, unlike cancel/retry: the job is gone server-side, so its
+// detail/events caches are removed outright rather than just invalidated —
+// there's nothing left to refetch.
+export function useDeleteJob(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiDelete(`/api/jobs/${id}`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.jobs });
+      qc.removeQueries({ queryKey: queryKeys.jobDetail(id) });
+      qc.removeQueries({ queryKey: queryKeys.jobEvents(id) });
     },
   });
 }

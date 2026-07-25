@@ -1,0 +1,49 @@
+.actions { display: flex; gap: 8px; align-items: center; }
+
+.retry {
+  padding: 7px 13px;
+  border-radius: 7px;
+  border: 1px solid rgba(53, 196, 143, 0.3);
+  background: rgba(53, 196, 143, 0.1);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.retry:hover:not(:disabled) { background: rgba(53, 196, 143, 0.18); }
+
+.neutral {
+  padding: 7px 13px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.neutral:hover:not(:disabled) { background: #20252d; }
+
+.delete {
+  margin-left: auto;
+  padding: 7px 13px;
+  border-radius: 7px;
+  border: 1px solid rgba(229, 89, 93, 0.28);
+  background: rgba(229, 89, 93, 0.09);
+  color: var(--orphaned);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.delete:hover:not(:disabled) { background: rgba(229, 89, 93, 0.16); }
+
+.retry:disabled, .neutral:disabled, .delete:disabled { opacity: 0.5; cursor: default; }
+
+.error {
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--failed-bg);
+  color: var(--failed);
+  font-size: 12.5px;
+  margin-top: 10px;
+}

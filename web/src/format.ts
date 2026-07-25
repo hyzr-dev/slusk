@@ -48,3 +48,12 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
   if (kb < 1024) return `${kb.toFixed(0)} KB/s`;
   return `${(kb / 1024).toFixed(1)} MB/s`;
 }
+
+// etaSeconds is a duration, not a timestamp (see api/types.ts Job.etaSeconds).
+// Minutes below an hour, seconds below a minute — this view never needs
+// hour-scale ETAs, so there's no third tier.
+export function formatEta(etaSeconds: number | null | undefined): string {
+  if (!etaSeconds) return '—';
+  if (etaSeconds >= 60) return `${Math.round(etaSeconds / 60)} min`;
+  return `${Math.round(etaSeconds)} s`;
+}

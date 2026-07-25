@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatSpeed, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
+import { formatBytes, formatSpeed, formatEta, percent, formatDateTime, formatShortTime, formatTime, formatScore } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -33,6 +33,23 @@ describe('formatSpeed', () => {
   it('scales to MB/s at or above 1 MB/s', () => {
     expect(formatSpeed(1024 * 1024)).toBe('1.0 MB/s');
     expect(formatSpeed(1536 * 1024)).toBe('1.5 MB/s');
+  });
+});
+
+describe('formatEta', () => {
+  it('returns an em dash for zero and nullish input', () => {
+    expect(formatEta(0)).toBe('—');
+    expect(formatEta(null)).toBe('—');
+    expect(formatEta(undefined)).toBe('—');
+  });
+
+  it('shows seconds below a minute', () => {
+    expect(formatEta(45)).toBe('45 s');
+  });
+
+  it('shows rounded minutes at or above 60 seconds', () => {
+    expect(formatEta(60)).toBe('1 min');
+    expect(formatEta(150)).toBe('3 min');
   });
 });
 

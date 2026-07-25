@@ -1,0 +1,49 @@
+.wrap { padding: 18px 22px; background: var(--panel-inset); }
+
+.reasonBox {
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  margin-bottom: 14px;
+  background: var(--failed-bg);
+  color: var(--failed);
+}
+.reasonBox.stalled { background: var(--stalled-bg); color: var(--stalled); }
+.reasonBox.orphaned { background: var(--orphaned-bg); color: var(--orphaned); }
+.reasonTitle { font-weight: 600; }
+
+.placeholder { color: var(--text-muted); font-size: 12.5px; padding: 4px 0; }
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 24px;
+}
+
+.colTitle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.detailRows { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.detailRow { display: flex; justify-content: space-between; gap: 10px; }
+.detailKey { color: var(--text-detail); }
+.detailValue { font-family: var(--font-mono); color: var(--text); text-align: right; }
+
+.fileList { display: flex; flex-direction: column; gap: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+.fileRow { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.fileName { flex: 1; color: #aab0bb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fileSize { color: var(--text-dim); }
+.moreFiles { color: var(--text-dim); padding: 3px 0 0 16px; }
+.candidateMeta { font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.dotActive { background: var(--active); }
+.dotQueued { background: var(--queued); }
+.dotFailed { background: var(--failed); }
+
+.actionsRow { margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--border-subtle); }

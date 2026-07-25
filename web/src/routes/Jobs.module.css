@@ -1,21 +1,159 @@
-.controls { display: flex; gap: 8px; margin-bottom: 12px; }
+.controlsRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
 
-.input, .select {
+.input {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
-  /* --panel, not --panel-raised: the latter marks elevated/active surfaces
-     (see the active nav item) and is visibly lighter than form chrome should be. */
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 12.5px;
+  width: 260px;
 }
 
-.input { width: 260px; }
-.sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.bytes { font-size: 11px; color: var(--text-detail); margin-bottom: 3px; }
+.chipGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
 
-/* Used by Events.tsx, which also reuses .controls/.input from this file for
-   its filter box rather than duplicating the same look in its own module. */
-.link { color: var(--active); text-decoration: none; }
-.link:hover { text-decoration: underline; }
+.chipGroupLabel {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.statusChip, .sourceChip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-muted);
+}
+
+.chipCount {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* Default selected look (the "all" chip): accent-colored. Status-specific
+   chips override with their own status color below. */
+.chipSelected {
+  border-color: rgba(53, 196, 143, 0.33);
+  background: rgba(53, 196, 143, 0.12);
+  color: var(--accent);
+}
+
+.chip_active.chipSelected { border-color: color-mix(in srgb, var(--active) 33%, transparent); background: var(--active-bg); color: var(--active); }
+.chip_queued.chipSelected { border-color: color-mix(in srgb, var(--queued) 33%, transparent); background: var(--queued-bg); color: var(--queued); }
+.chip_stalled.chipSelected { border-color: color-mix(in srgb, var(--stalled) 33%, transparent); background: var(--stalled-bg); color: var(--stalled); }
+.chip_failed.chipSelected { border-color: color-mix(in srgb, var(--failed) 33%, transparent); background: var(--failed-bg); color: var(--failed); }
+.chip_orphaned.chipSelected { border-color: color-mix(in srgb, var(--orphaned) 33%, transparent); background: var(--orphaned-bg); color: var(--orphaned); }
+.chip_done.chipSelected { border-color: color-mix(in srgb, var(--done) 33%, transparent); background: var(--done-bg); color: var(--done); }
+.chip_importing.chipSelected { border-color: rgba(53, 196, 143, 0.33); background: var(--done-bg); color: var(--accent); }
+
+.chipManual.chipSelected { border-color: rgba(34, 201, 214, 0.33); background: var(--manual-bg); color: var(--manual); }
+.chipLidarr.chipSelected { border-color: var(--border); background: rgba(138, 145, 157, 0.12); color: var(--text-muted); }
+
+.clearButton {
+  margin-left: 4px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px dashed var(--border-subtle);
+  background: transparent;
+  color: var(--text-detail);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.clearButton:hover { color: #c8cdd5; border-color: #3a3f49; }
+
+.tableWrap { overflow-x: auto; }
+
+.titleRow { display: flex; align-items: center; gap: 7px; }
+
+.idLink {
+  color: #e2e5ea;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.idLink:hover { text-decoration: underline; }
+
+.sub { font-size: 11.5px; color: var(--text-detail); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+
+.right { text-align: right; white-space: nowrap; }
+.center { text-align: center; }
+
+.progressRow { display: flex; align-items: center; gap: 9px; }
+
+.progressBar {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: #22262e;
+  overflow: hidden;
+  position: relative;
+}
+
+.progressFill { height: 100%; background: var(--active); }
+
+.progressHatched {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--stalled),
+    var(--stalled) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  opacity: 0.6;
+}
+
+.progressSub {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  text-transform: lowercase;
+}
+
+.retryPill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--stalled-bg);
+  color: var(--stalled);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.retryDim { color: var(--text-dim); font-size: 11.5px; }
+
+.chevron {
+  display: inline-block;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.chevronExpanded { transform: rotate(90deg); }
+
+.expansionCell { padding: 0; border-bottom: 1px solid var(--border-subtle); }

@@ -41,6 +41,13 @@ export async function apiPost(path: string): Promise<void> {
   }
 }
 
+export async function apiDelete(path: string): Promise<void> {
+  const res = await fetch(path, { method: 'DELETE' });
+  if (!res.ok) {
+    throw new ApiError(res.status, `DELETE ${path} failed with ${res.status}`, await parseErrorBody(res));
+  }
+}
+
 // body, when given, is sent as a JSON request body; omit it for the existing
 // empty-body POST endpoints (e.g. the connection tests).
 export async function apiPostJson<T>(path: string, body?: unknown): Promise<T> {

@@ -1,20 +1,23 @@
-import { Link, useParams } from 'react-router-dom';
-import {
-  useCancelJob,
-  useJobDetail,
-  useJobEvents,
-  useJobs,
-  useRetryJob,
-} from '../api/queries';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
+import type { JobState } from '../api/types';
+import JobActions from '../components/JobActions';
 import PageHeading from '../components/PageHeading';
+import SourceBadge from '../components/SourceBadge';
 import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
 import { formatBytes, formatDateTime, formatShortTime, formatSpeed } from '../format';
 import { candidateStateLabel, eventLabel, t } from '../strings';
 import styles from './JobDetail.module.css';
 
+// FAILED or ORPHANED are the two states JobActions offers Retry for.
+function isRetryEligible(state: JobState | undefined): boolean {
+  return state === 'FAILED' || state === 'ORPHANED';
+}
+
 export default function JobDetail() {
   const id = Number(useParams().id);
+  const navigate = useNavigate();
   const { data: jobs = [] } = useJobs();
   const {
     data: detail,
@@ -26,8 +29,6 @@ export default function JobDetail() {
     isLoading: eventsLoading,
     isPlaceholderData: eventsIsPlaceholder,
   } = useJobEvents(id);
-  const cancel = useCancelJob(id);
-  const retry = useRetryJob(id);
 
   const job = jobs.find((j) => j.id === id);
 
@@ -40,12 +41,18 @@ export default function JobDetail() {
   // actually loaded yet".
   const detailReady = detail !== undefined && !detailIsPlaceholder;
 
-  // Retry is offered when either source reports FAILED — the polled list and
-  // the detail response can disagree briefly, and both are authoritative
-  // enough. The detail side only counts once it's confirmed to belong to
-  // this job (see detailReady above) — otherwise a stale placeholder from a
-  // previously viewed failed job could show Retry on an unrelated job.
-  const isFailed = job?.state === 'FAILED' || (detailReady && detail?.state === 'FAILED');
+  // JobActions decides button visibility from a single `state`, but the
+  // polled list and the detail response can disagree briefly and both are
+  // authoritative enough — so pick whichever source reports a retry-eligible
+  // state (FAILED/ORPHANED) first. The detail side only counts once it's
+  // confirmed to belong to this job (see detailReady above) — otherwise a
+  // stale placeholder from a previously viewed failed job could show Retry
+  // on an unrelated job.
+  const actionState: JobState = isRetryEligible(job?.state)
+    ? job!.state
+    : detailReady && isRetryEligible(detail?.state)
+      ? detail!.state
+      : (job?.state ?? detail?.state ?? 'WANTED');
 
   // A notBefore in the past has no display relevance.
   const sleepingUntil =
@@ -62,6 +69,7 @@ export default function JobDetail() {
           <PageHeading>{job.title}</PageHeading>
           <div className={styles.meta}>
             <StatusPill status={job.status} state={job.state} />
+            <SourceBadge source={job.source} />
             <span>{job.artist}</span>
             <span>{job.peer || '—'}</span>
             <span className={table.mono}>
@@ -103,29 +111,9 @@ export default function JobDetail() {
         <PageHeading>{t.jobs.loading}</PageHeading>
       )}
 
-      <div className={styles.actions}>
-        <button
-          className={styles.action}
-          disabled={cancel.isPending}
-          onClick={() => cancel.mutate()}
-        >
-          {t.jobs.cancel}
-        </button>
-        {isFailed && (
-          <button
-            className={styles.action}
-            disabled={retry.isPending}
-            onClick={() => retry.mutate()}
-          >
-            {t.jobs.retry}
-          </button>
-        )}
+      <div className={styles.actionsWrap}>
+        <JobActions jobId={id} state={actionState} onDeleted={() => navigate('/jobs')} />
       </div>
-
-      {/* The legacy dashboard never checked res.ok on these actions, so a
-          failed cancel/retry was silently invisible; we surface it here. */}
-      {cancel.isError && <div className={styles.error}>{t.jobs.cancelFailed}</div>}
-      {retry.isError && <div className={styles.error}>{t.jobs.retryFailed}</div>}
 
       <h2 className={styles.section}>{t.jobs.attemptHistory}</h2>
       {detailLoading || detailIsPlaceholder ? (

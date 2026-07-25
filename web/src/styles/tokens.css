@@ -29,6 +29,12 @@
   --failed: #e5595d;
   --failed-bg: rgba(229, 89, 93, 0.13);
 
+  /* Source axis (issue #60): orthogonal to status, so it deliberately does
+     not reuse a status color. --manual is the one distinct cyan hue in the
+     palette; the Lidarr badge is neutral grey instead of a second color. */
+  --manual: #22c9d6;
+  --manual-bg: rgba(34, 201, 214, 0.13);
+
   --radius-sm: 8px;
   --radius: 11px;
 
