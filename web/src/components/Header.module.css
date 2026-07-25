@@ -1,0 +1,63 @@
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(53, 196, 143, 0.5); }
+  70% { box-shadow: 0 0 0 6px rgba(53, 196, 143, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(53, 196, 143, 0); }
+}
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 26px;
+  background: rgba(11, 13, 16, 0.86);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.titleBlock { flex: 1; min-width: 0; }
+.title { margin: 0; font-size: 18px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
+.subtitle { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+
+.liveBadge, .reconcileBadge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: 8px;
+  background: var(--panel-inset);
+  border: 1px solid var(--border-subtle);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--done);
+  animation: pulse 2s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .liveDot { animation: none; }
+}
+
+.liveLabel { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.updated {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  border-left: 1px solid var(--border-subtle);
+  padding-left: 8px;
+}
+
+.reconcileBadge { color: var(--text-detail); font-family: var(--font-mono); }
+.reconcileIcon {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+  flex: 0 0 11px;
+}

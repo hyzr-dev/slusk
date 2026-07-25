@@ -14,6 +14,35 @@ export const t = {
     shares: 'Shares',
     health: 'Health',
     settings: 'Settings',
+    groupMonitor: 'Monitor',
+    groupSoulseek: 'Soulseek',
+    groupSystem: 'System',
+    // Dependency rows above the version line in the sidebar (issue #181).
+    // Lidarr and Soulseek health are inferred from pipeline module state —
+    // there is no direct dependency-health endpoint — so the meta text is
+    // deliberately generic (ok/down) rather than a version or latency figure
+    // we do not actually have.
+    depLidarr: 'Lidarr',
+    depSoulseek: 'Soulseek',
+    depShares: 'Shares',
+    depHealthy: 'ok',
+    depUnhealthy: 'down',
+    depFolders: (n: number) => `${n} folder${n === 1 ? '' : 's'}`,
+  },
+  header: {
+    overview: { title: 'Overview', subtitle: 'Live pipeline status across every job' },
+    jobs: { title: 'Jobs', subtitle: 'All wanted, active and finished jobs' },
+    jobDetail: { title: 'Job detail', subtitleWithId: (id: string) => `Job #${id}` },
+    events: { title: 'Events', subtitle: 'Recent pipeline activity' },
+    peers: { title: 'Peers', subtitle: 'Soulseek peer reliability history' },
+    shares: { title: 'Shares', subtitle: 'What this instance shares back to Soulseek' },
+    health: { title: 'Health', subtitle: 'Pipeline module status' },
+    settings: { title: 'Settings', subtitle: 'Lidarr, Soulseek and pipeline configuration' },
+    live: 'Live',
+    updatedAgo: (seconds: number) => `updated ${seconds}s ago`,
+    reconcileIn: (minutes: number) => `reconcile in ${minutes} min`,
+    reconcileDueNow: 'reconcile due now',
+    reconcileTooltip: 'Next automatic wanted-sync pass',
   },
   status: {
     queued: 'Queued',
@@ -146,6 +175,30 @@ export const t = {
     completedAriaLabel: (total: number) =>
       `${total} completed downloads over the last 24 hours`,
     passTooltip: (time: string, matched: number) => `${time} — ${matched} matched`,
+
+    heroLabel: 'Your music right now',
+    heroSummary: (downloading: number, completed24h: number, queued: number) =>
+      `${downloading} ${downloading === 1 ? 'album' : 'albums'} downloading, ` +
+      `${completed24h} completed in the last 24 hours and ${queued} waiting in the queue.`,
+    pillDownloading: 'downloading',
+    pillImporting: 'importing',
+    pillNeedsYou: 'needs you',
+
+    statActiveSubImporting: (n: number) => `${n} importing`,
+    statActiveSub: 'downloading now',
+    statQueuedSub: 'waiting for peer',
+    statStalledSub: 'needs attention',
+    statOrphanedSub: 'unknown transfer',
+    statCompletedLabel: 'Completed (24h)',
+    statCompletedSub: 'imported',
+
+    activeDownloadsTitle: 'Active downloads',
+    throughputIdle: 'idle',
+    phaseQueue: (n: number) => `queue · #${n}`,
+    phaseImporting: 'importing',
+    phaseStalled: 'stalled',
+    metaQueue: (n: number) => `#${n}`,
+    metaVerifying: 'verifying',
   },
   peers: {
     empty: 'No peers recorded yet.',

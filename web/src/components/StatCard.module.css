@@ -4,5 +4,15 @@
   border-radius: var(--radius);
   padding: 14px 15px;
 }
-.label { font-size: 12px; color: var(--text-muted); }
-.value { font-family: var(--font-mono); font-size: 28px; font-weight: 600; margin-top: 6px; }
+.labelRow { display: flex; align-items: center; gap: 7px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+.label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.value {
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-weight: 600;
+  margin-top: 8px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+.sub { font-size: 11.5px; color: var(--text-muted); margin-top: 7px; }

@@ -28,16 +28,27 @@
 .brandName { font-weight: 600; }
 .brandTagline { font-size: 11px; color: var(--text-dim); }
 
-.nav { padding: 6px 12px; display: flex; flex-direction: column; gap: 2px; }
+.nav { padding: 2px 12px 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; flex: 1; }
+
+.groupLabel {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 14px 12px 6px;
+}
 
 .navItem, .navItemActive {
-  display: flex; align-items: center;
+  display: flex; align-items: center; gap: 11px;
   padding: 9px 12px;
   border-radius: var(--radius-sm);
   font-size: 13px;
   text-decoration: none;
   transition: background 0.12s;
 }
+
+.navLabel { flex: 1; }
 
 .navItem { color: var(--text-muted); font-weight: 500; }
 .navItem:hover { background: rgba(255, 255, 255, 0.03); }
@@ -49,4 +60,29 @@
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.main { flex: 1; min-width: 0; padding: 22px 26px 48px; }
+.badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--panel-raised);
+  color: var(--text-muted);
+}
+
+.deps {
+  padding: 14px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.depRow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.depDot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+.depOk { background: var(--done); }
+.depWarn { background: var(--stalled); }
+.depName { flex: 1; }
+.depMeta { font-family: var(--font-mono); color: var(--text-dim); font-size: 11px; }
+
+.mainCol { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
+.main { flex: 1; padding: 22px 26px 48px; }
