@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useCharts, useJobs, useStatus } from '../../api/queries';
 import { formatShortTime, formatSpeed } from '../../format';
 import { t } from '../../strings';
@@ -13,6 +14,36 @@ function totalSpeed(jobs: { status: string; speed?: number; queuePosition?: numb
   return jobs
     .filter((j) => j.status === 'active' && !j.queuePosition)
     .reduce((sum, j) => sum + (j.speed ?? 0), 0);
+}
+
+/**
+ * Pure derivation of the LIVE cell's label from TanStack Query's
+ * `dataUpdatedAt` (ms since epoch of the last successful fetch) and the
+ * current time, both as plain numbers so this is testable without waiting on
+ * a real clock or mocking timers.
+ *
+ * `dataUpdatedAt` is 0 before the first successful fetch ever completes —
+ * treated the same as "just updated" rather than computing a nonsense
+ * multi-billion-second age from the epoch.
+ */
+export function elapsedLabel(dataUpdatedAt: number, now: number): string {
+  if (!dataUpdatedAt) return t.chrome.updatedNow;
+  const seconds = Math.floor((now - dataUpdatedAt) / 1000);
+  if (seconds < 1) return t.chrome.updatedNow;
+  return t.chrome.updatedAgo(seconds);
+}
+
+/**
+ * Ticks the LIVE cell's label once a second so a stalled poll is visible as
+ * a number that keeps climbing, matching StatusBar's `useClock` shape.
+ */
+function useElapsedLabel(dataUpdatedAt: number): string {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return elapsedLabel(dataUpdatedAt, now);
 }
 
 /**
@@ -32,6 +63,7 @@ export default function TopBar() {
 
   const down = totalSpeed(jobs.data ?? []);
   const lastPass = charts.data?.passes?.at(-1);
+  const liveLabel = useElapsedLabel(status.dataUpdatedAt);
 
   return (
     <div className={styles.bar}>
@@ -42,7 +74,7 @@ export default function TopBar() {
       <div className={styles.cell}>
         <span className={status.isError ? styles.dotStale : styles.dot} />
         <span className={styles.quiet}>{t.chrome.live}</span>
-        <span>{status.isFetching ? t.chrome.updatedNow : ''}</span>
+        <span>{liveLabel}</span>
       </div>
 
       <div className={styles.cell}>
