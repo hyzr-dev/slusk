@@ -1,0 +1,17 @@
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  cursor: pointer;
+}
+
+.active { border-color: var(--dim); background: #14181b; color: var(--fg); }
+
+.count { color: var(--text-dim); }
+.activeCount { color: var(--dim); }

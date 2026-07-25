@@ -1,0 +1,13 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  color: var(--faint);
+}
+
+.spacer { flex: 1; }
+.meta { color: var(--dim); letter-spacing: 0.4px; }
