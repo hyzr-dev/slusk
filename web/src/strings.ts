@@ -341,6 +341,35 @@ export const t = {
       'The native Soulseek client can send and receive private messages, but there is no HTTP surface for them yet, so this view has nothing to read.',
     chatIssue: 'Tracked as issue #183.',
   },
+  setup: {
+    title: 'GUIDED SETUP',
+    // The mock says slskdarr never writes the config file. That stopped being
+    // true with issue #134 — the Config view writes it. This copy points there
+    // instead of describing a workflow we no longer have.
+    intro:
+      'Check that each dependency answers before letting the pipeline run. Anything that fails can be corrected in the Config view, or in the configuration file directly.',
+    stepSoulseek: 'Soulseek login',
+    stepLidarr: 'Lidarr connection',
+    stepShares: 'Shared folders',
+    test: 'TEST',
+    testing: 'TESTING',
+    stateOk: 'OK',
+    stateFailed: 'FAILED',
+    stateUntested: 'UNTESTED',
+    stateDisabled: 'NOT ENABLED',
+    fieldUrl: 'url',
+    fieldApiKey: 'api key',
+    fieldUsername: 'username',
+    fieldPassword: 'password',
+    fieldFolders: 'folders',
+    fieldIndex: 'index',
+    secretSet: 'configured',
+    secretUnset: 'not set',
+    foldersCount: (n: number) => `${n} configured`,
+    indexCount: (n: number) => `${n} files`,
+    sharesNoTest:
+      'There is no connection test for shares. The state is derived from whether the index has found any files.',
+  },
   settings: {
     notWritableNotice:
       'The configuration file is mounted read-only, so settings cannot be edited here. Mount its directory writable (e.g. ./config:/config) instead of a single-file or read-only mount to enable editing.',
