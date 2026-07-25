@@ -23,6 +23,26 @@ export const t = {
     failed: 'Failed',
     orphaned: 'Orphaned',
   },
+  // Two-letter status tags in the TUI job grid. The long labels in `status`
+  // and `state` are still used wherever there is room for them.
+  tag: {
+    DL: 'DL',
+    QU: 'QU',
+    ST: 'ST',
+    OR: 'OR',
+    FA: 'FA',
+    OK: 'OK',
+    IM: 'IM',
+  },
+  tagTitle: {
+    DL: 'Downloading',
+    QU: 'Queued',
+    ST: 'Stalled',
+    OR: 'Orphaned',
+    FA: 'Failed',
+    OK: 'Done',
+    IM: 'Importing',
+  },
   state: {
     WANTED: 'Wanted',
     SELECTING: 'Selecting candidate',

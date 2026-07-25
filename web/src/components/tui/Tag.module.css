@@ -1,0 +1,28 @@
+.tag {
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  padding: 1px 5px;
+  border: 1px solid var(--line2);
+  white-space: nowrap;
+}
+
+.bare {
+  border: none;
+  padding: 0;
+}
+
+.neutral {
+  color: var(--fg);
+}
+
+.quiet {
+  color: var(--faint);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.bad {
+  color: var(--bad);
+}
