@@ -39,8 +39,8 @@ func noopRescanShares() error                                                  {
 func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error)      { return nil, nil }
 func noopConfigWriter(ConfigUpdate) error                                      { return nil }
 func noopRestart()                                                             {}
-func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
-	return core.AlbumJob{}, nil
+func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	return core.JobView{}, nil
 }
 func noopSearchJob(ctx context.Context, jobID int64) error { return nil }
 func noopDeleteJob(ctx context.Context, jobID int64) error { return nil }
@@ -617,9 +617,14 @@ func TestCreateJobEndpointSuccess(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	var gotTitle, gotArtist, gotPeer string
 	var gotFiles []core.CandidateFile
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
+	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
 		gotTitle, gotArtist, gotPeer, gotFiles = title, artist, peer, files
-		return core.AlbumJob{ID: 42, Title: title, ArtistName: artist, State: core.StateDownloading, Source: core.SourceManual}, nil
+		return core.JobView{
+			Job:             core.AlbumJob{ID: 42, Title: title, ArtistName: artist, State: core.StateDownloading, Source: core.SourceManual},
+			Peer:            "persisted_peer",
+			AlbumBytesDone:  0,
+			AlbumBytesTotal: 111,
+		}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.CreateJob = create
@@ -640,6 +645,12 @@ func TestCreateJobEndpointSuccess(t *testing.T) {
 	if got.ID != 42 || got.Source != "manual" {
 		t.Errorf("unexpected job DTO: %+v", got)
 	}
+	if got.Peer != "persisted_peer" {
+		t.Errorf("Peer = %q, want persisted_peer from the canonical view", got.Peer)
+	}
+	if got.BytesDone != 0 || got.BytesTotal != 111 {
+		t.Errorf("bytes = %d/%d, want persisted aggregate 0/111", got.BytesDone, got.BytesTotal)
+	}
 	if gotTitle != "Some Album" || gotArtist != "Some Artist" || gotPeer != "flac_hoarder" {
 		t.Errorf("create called with title=%q artist=%q peer=%q", gotTitle, gotArtist, gotPeer)
 	}
@@ -651,9 +662,9 @@ func TestCreateJobEndpointSuccess(t *testing.T) {
 func TestCreateJobEndpointMissingPeerReturns422(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	called := false
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
+	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
 		called = true
-		return core.AlbumJob{}, nil
+		return core.JobView{}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.CreateJob = create
@@ -681,8 +692,8 @@ func TestCreateJobEndpointMissingPeerReturns422(t *testing.T) {
 
 func TestCreateJobEndpointEmptyFilesReturns422(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
-		return core.AlbumJob{}, nil
+	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+		return core.JobView{}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.CreateJob = create
@@ -707,8 +718,8 @@ func TestCreateJobEndpointEmptyFilesReturns422(t *testing.T) {
 
 func TestCreateJobEndpointMalformedJSONReturns400(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
-		return core.AlbumJob{}, nil
+	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+		return core.JobView{}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.CreateJob = create
@@ -725,8 +736,8 @@ func TestCreateJobEndpointMalformedJSONReturns400(t *testing.T) {
 
 func TestCreateJobEndpointRemoteFileBusyReturns409(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
-		return core.AlbumJob{}, app.ErrRemoteFileBusy
+	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+		return core.JobView{}, app.ErrRemoteFileBusy
 	}
 	deps := testServerDeps(reg)
 	deps.CreateJob = create

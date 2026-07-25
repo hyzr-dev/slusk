@@ -18,7 +18,7 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
-// ErrJobNotFound is returned by Cancel/Retry when no job with the given id exists.
+// ErrJobNotFound is returned when a requested job does not exist.
 var ErrJobNotFound = errors.New("job not found")
 
 // ErrJobNotRetryable is returned by Retry when the job exists but is not
@@ -123,12 +123,22 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 // to IMPORTING where Music.AlbumStatus misbehaves for a NULL/0 lidarr_album_id
 // (see #59/#60). Downloading still works end-to-end; only the subsequent
 // Lidarr import step is affected.
-func (j *Jobs) Create(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile) (core.AlbumJob, error) {
+func (j *Jobs) Create(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile) (core.JobView, error) {
 	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, files, time.Now())
 	if errors.Is(err, store.ErrRemoteFileBusy) {
-		return core.AlbumJob{}, ErrRemoteFileBusy
+		return core.JobView{}, ErrRemoteFileBusy
 	}
-	return job, err
+	if err != nil {
+		return core.JobView{}, err
+	}
+	view, found, err := j.Store.JobWithTransfer(ctx, job.ID)
+	if err != nil {
+		return core.JobView{}, err
+	}
+	if !found {
+		return core.JobView{}, ErrJobNotFound
+	}
+	return view, nil
 }
 
 // ForceSearch manually re-queues one job (issue #159) for an immediate
