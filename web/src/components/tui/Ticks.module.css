@@ -1,0 +1,5 @@
+.row { display: flex; gap: 1px; align-items: flex-end; }
+
+.tick { flex: 1; min-width: 1px; height: 100%; }
+
+.flare { animation: tui-flare 0.9s ease-out; }
