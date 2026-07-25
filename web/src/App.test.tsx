@@ -40,16 +40,15 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview), '/jobs' and '/jobs/:id' are asserted separately below:
-  // the TUI reskin (#198) gives none of them an <h1> — PageHeading is gone
-  // from all three routes already, ahead of the other routes below losing
-  // theirs in their own tasks.
+  // '/' (Overview), '/jobs', '/jobs/:id' and '/health' are asserted separately
+  // below: the TUI reskin (#198) gives none of them an <h1> — PageHeading is
+  // gone from all four routes already, ahead of the other routes below
+  // losing theirs in their own tasks.
   it.each([
     ['/events', t.nav.events],
     ['/peers', t.nav.peers],
     // No seeded query data, so Shares renders its heading-only loading state.
     ['/shares', t.nav.shares],
-    ['/health', t.nav.health],
     ['/settings', t.nav.settings],
   ])('renders %s without crashing', (path, heading) => {
     renderAt(path);
@@ -64,6 +63,14 @@ describe('route tree', () => {
   it('renders /jobs without crashing', () => {
     renderAt('/jobs');
     expect(screen.getByText(t.jobs.gridHead.album)).toBeInTheDocument();
+  });
+
+  it('renders /health without crashing', () => {
+    // No seeded query data — the METRICS SectionHeader label is static and
+    // renders regardless of what useStatus/useCharts/useUploads/useShares
+    // resolve to, unlike the dependency cards and chart panels above it.
+    renderAt('/health');
+    expect(screen.getByText(t.health.metricsHeading)).toBeInTheDocument();
   });
 
   it('renders /jobs/42 without crashing', () => {

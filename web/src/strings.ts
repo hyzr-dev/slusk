@@ -249,6 +249,29 @@ export const t = {
     neverRun: 'Never run',
     consecutiveFailures: (n: number) => `${n} consecutive failures`,
     empty: 'No modules reported.',
+    // TUI Health page (#198): short state word on a dependency card, colored
+    // by ModuleStatus.ready.
+    ready: 'OK',
+    notReady: 'ERROR',
+    reconcileRateHeading: 'RECONCILE RATE',
+    reconcileRateMeta: 'matched / pass · 20',
+    completedHeading: 'COMPLETED',
+    completedMeta: 'cumulative · 24h',
+    // The mock's METRICS section names six slskdarr_* Prometheus metrics, but
+    // only four exist in internal/observ and only two of those (reconcile_total,
+    // album_releases_errors_total) are Prometheus-only with no JSON equivalent.
+    // Rather than invent metric names for a row, these are human-readable
+    // counters sourced from the same JSON the rest of this page already reads
+    // (useStatus/useUploads/useShares) — the real Prometheus surface is linked
+    // via metricsMeta instead of being named row by row.
+    metricsHeading: 'METRICS',
+    metricsMeta: 'full set at /metrics',
+    metricActive: 'active downloads',
+    metricQueued: 'queued',
+    metricStalled: 'stalled',
+    metricOrphaned: 'orphaned transfers',
+    metricUploads: 'active uploads',
+    metricShared: 'shared files',
   },
   shares: {
     disabledNotice: 'Native Soulseek sharing is not enabled in the configuration.',

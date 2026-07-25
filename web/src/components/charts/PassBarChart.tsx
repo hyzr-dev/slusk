@@ -42,7 +42,6 @@ export default function PassBarChart({ passes }: { passes: SearchPass[] }) {
             y={y}
             width={BAR_WIDTH}
             height={height}
-            rx={2}
             className={matched ? styles.matched : styles.unmatched}
           >
             <title>{t.overview.passTooltip(formatShortTime(pass.startedAt), pass.matched)}</title>
