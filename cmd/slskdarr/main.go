@@ -392,6 +392,45 @@ func main() {
 			}
 		}
 	}
+	// The native Soulseek client shares files whenever it runs, independent of
+	// which backend downloads (cfg.Pipeline.Backend); keyed on soulClient !=
+	// nil, not the backend, so a slskd-download+native-share configuration
+	// still gets working share stats/rescan endpoints.
+	var sharesFn observ.SharesFunc
+	var rescanSharesFn observ.RescanSharesFunc
+	if soulClient != nil {
+		sharesFn = func() observ.ShareStatsReport {
+			report := soulClient.ShareReport()
+			folders := make([]observ.ShareFolderStats, len(report.Folders))
+			for i, f := range report.Folders {
+				folders[i] = observ.ShareFolderStats{
+					Name:        f.Name,
+					Path:        f.Path,
+					Directories: f.Directories,
+					Files:       f.Files,
+					TotalBytes:  f.TotalBytes,
+				}
+			}
+			return observ.ShareStatsReport{
+				Directories:  report.Directories,
+				Files:        report.Files,
+				TotalBytes:   report.TotalBytes,
+				IndexedAt:    report.IndexedAt,
+				ScanDuration: report.ScanDuration,
+				Scanning:     report.Scanning,
+				Folders:      folders,
+			}
+		}
+		rescanSharesFn = func() error {
+			err := soulClient.TriggerRescanShares()
+			switch {
+			case errors.Is(err, soulseek.ErrShareScanInProgress):
+				return observ.ErrShareScanInProgress
+			default:
+				return err
+			}
+		}
+	}
 	handler := observ.NewServer(observ.ServerDeps{
 		Registry:         reg,
 		Status:           statusFn,
@@ -416,6 +455,8 @@ func main() {
 		ConnectionTester: connectionTester,
 		LiveTransfers:    liveTransfersFn,
 		Charts:           chartsFn,
+		Shares:           sharesFn,
+		RescanShares:     rescanSharesFn,
 		Throughput:       throughputFn,
 	})
 	var authenticator observ.Authenticator

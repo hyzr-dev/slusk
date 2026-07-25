@@ -270,6 +270,13 @@ type ServerDeps struct {
 	// Charts supplies the Overview view's chart data served at /api/charts
 	// (see ChartsData).
 	Charts ChartsFunc
+	// Shares reports the native Soulseek share index served at GET
+	// /api/shares, and RescanShares backs POST /api/shares/rescan. Both are
+	// nil when native Soulseek sharing is not enabled, and their endpoints
+	// then answer "not enabled" instead of a misleading zero/failure (see
+	// registerShares).
+	Shares       SharesFunc
+	RescanShares RescanSharesFunc
 	// Throughput supplies the Overview view's live download-throughput series
 	// served at /api/charts (issue #157). nil (the non-native backends, or
 	// tests that don't care) yields an empty series rather than omitting the
@@ -558,6 +565,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	})
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
 	registerCharts(mux, deps.Charts, deps.Throughput)
+	registerShares(mux, deps.Shares, deps.RescanShares)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }

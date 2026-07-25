@@ -34,6 +34,8 @@ func noopRetry(ctx context.Context, jobID int64) error                         {
 func noopConfig() AppConfig                                                    { return AppConfig{} }
 func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     { return nil, nil }
 func noopCharts(ctx context.Context) (ChartsData, error)                       { return ChartsData{}, nil }
+func noopShares() ShareStatsReport                                             { return ShareStatsReport{} }
+func noopRescanShares() error                                                  { return nil }
 func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error)      { return nil, nil }
 func noopConfigWriter(ConfigUpdate) error                                      { return nil }
 func noopRestart()                                                             {}
@@ -64,6 +66,8 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		LiveTransfers:    noopLiveTransfers,
 		ConnectionTester: ConnectionTester{},
 		Charts:           noopCharts,
+		Shares:           noopShares,
+		RescanShares:     noopRescanShares,
 		Throughput:       noopThroughput,
 		ConfigWriter:     noopConfigWriter,
 		Restart:          noopRestart,

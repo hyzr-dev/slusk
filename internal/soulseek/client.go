@@ -272,16 +272,23 @@ type Client struct {
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
-	shares      atomic.Pointer[shareSnapshot]
-	shareScanMu sync.Mutex
+	shares atomic.Pointer[shareSnapshot]
+	// shareScanSem is the share-scan lock, as a capacity-1 semaphore rather
+	// than a plain mutex: TriggerRescanShares needs to claim it without
+	// blocking (tryAcquireShareScan) and ShareReport needs to read whether it
+	// is currently held (len(shareScanSem) > 0), neither of which a
+	// sync.Mutex supports.
+	shareScanSem chan struct{}
 	// announceMu serializes every SharedFoldersFiles announcement to the
 	// server (login-time in serveConnected, the initial background scan,
 	// SIGHUP rescans): announceShares reads the currently published snapshot
 	// stats and sends them as one critical section under it, so the wire
 	// order of announcements always matches publish order. It also guards
 	// announcedGeneration/announcedStats, which double as the dedup state
-	// (skip re-announcing stats the current server generation has already
-	// been told) and the login gate (hold scan/rescan announcements back
+	// (skip re-announcing directory/file counts the current server
+	// generation has already been told - see announceCurrentShares for why
+	// the comparison is by count, not the whole ShareStats value) and the
+	// login gate (hold scan/rescan announcements back
 	// until the generation's mandatory login-time announcement has gone
 	// out; see announceCurrentShares). Lock ordering: announceMu ->
 	// serverWriteMu -> mu; nothing acquires announceMu while holding either
@@ -427,6 +434,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		deliverWorkers:         make(chan struct{}, maxDeliverWorkers),
 		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
 		searchDeliveryInFlight: make(map[searchDeliveryKey]struct{}),
+		shareScanSem:           make(chan struct{}, 1),
 	}
 	c.shares.Store(emptyShareSnapshot())
 	c.uploads = newUploadManager(c, cfg.UploadSlots)
