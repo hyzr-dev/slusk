@@ -1,0 +1,29 @@
+.bar {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  border-right: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brandName { color: var(--fg); font-weight: 600; font-size: 13px; letter-spacing: 1.5px; }
+
+.dot { width: 6px; height: 6px; background: var(--ok); animation: tui-pulse 1.8s infinite; }
+.dotStale { width: 6px; height: 6px; background: var(--bad); }
+
+.spacer { flex: 1; }
+
+.value { color: var(--fg); }
+.quiet { color: var(--dim); }

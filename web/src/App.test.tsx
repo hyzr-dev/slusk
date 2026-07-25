@@ -41,17 +41,17 @@ function renderAt(path: string) {
 
 describe('route tree', () => {
   it.each([
-    ['/', 'Overview'],
-    ['/jobs', 'Jobs'],
+    ['/', t.nav.overview],
+    ['/jobs', t.nav.jobs],
     // JobDetail with no seeded query data falls through all three header
     // tiers (no live job, no cached detail) to the loading heading.
     ['/jobs/42', t.jobs.loading],
-    ['/events', 'Events'],
-    ['/peers', 'Peers'],
+    ['/events', t.nav.events],
+    ['/peers', t.nav.peers],
     // No seeded query data, so Shares renders its heading-only loading state.
-    ['/shares', 'Shares'],
-    ['/health', 'Health'],
-    ['/settings', 'Settings'],
+    ['/shares', t.nav.shares],
+    ['/health', t.nav.health],
+    ['/settings', t.nav.settings],
   ])('renders %s without crashing', (path, heading) => {
     renderAt(path);
     expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument();
@@ -60,6 +60,6 @@ describe('route tree', () => {
   it('marks the matching nav item active', () => {
     renderAt('/jobs');
     // CSS Modules hash class names, so match by substring rather than exact class.
-    expect(screen.getByRole('link', { name: 'Jobs' }).className).toMatch(/navItemActive/);
+    expect(screen.getByRole('link', { name: t.nav.jobs }).className).toMatch(/itemActive/);
   });
 });
