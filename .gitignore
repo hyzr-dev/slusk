@@ -8,6 +8,9 @@ config.toml
 *.db-shm
 /slskdarr
 
+# Agent tooling state — local to each developer's machine, not shared.
+.serena/
+
 # Vite build output; only the checked-in placeholder index.html is tracked.
 /internal/observ/web/dist/*
 !/internal/observ/web/dist/placeholder.html
