@@ -8,12 +8,13 @@ import Jobs from './routes/Jobs';
 import JobDetail from './routes/JobDetail';
 import Events from './routes/Events';
 import Peers from './routes/Peers';
+import Shares from './routes/Shares';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
 import { t } from './strings';
 
 // Renders the real route tree (mirroring App.tsx) at each path with a
-// MemoryRouter, proving every one of the seven routes mounts without
+// MemoryRouter, proving every one of the eight routes mounts without
 // crashing. BrowserRouter itself is exercised implicitly by the build
 // (the SPA is served by the Go backend, which handles history fallback).
 function renderAt(path: string) {
@@ -28,6 +29,7 @@ function renderAt(path: string) {
             <Route path="jobs/:id" element={<JobDetail />} />
             <Route path="events" element={<Events />} />
             <Route path="peers" element={<Peers />} />
+            <Route path="shares" element={<Shares />} />
             <Route path="health" element={<Health />} />
             <Route path="settings" element={<Settings />} />
           </Route>
@@ -46,6 +48,8 @@ describe('route tree', () => {
     ['/jobs/42', t.jobs.loading],
     ['/events', 'Events'],
     ['/peers', 'Peers'],
+    // No seeded query data, so Shares renders its heading-only loading state.
+    ['/shares', 'Shares'],
     ['/health', 'Health'],
     ['/settings', 'Settings'],
   ])('renders %s without crashing', (path, heading) => {

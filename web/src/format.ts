@@ -48,3 +48,16 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
   if (kb < 1024) return `${kb.toFixed(0)} KB/s`;
   return `${(kb / 1024).toFixed(1)} MB/s`;
 }
+
+// Aggregate share/library sizes routinely reach hundreds of GB or several TB,
+// unlike the per-file/per-transfer sizes formatBytes covers (deliberately
+// locked to MB), so this scales up through GB and TB the same way formatSpeed
+// scales through KB/MB.
+export function formatSize(bytes: number | null | undefined): string {
+  if (!bytes) return '0 MB';
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  if (gb < 1024) return `${gb.toFixed(1)} GB`;
+  return `${(gb / 1024).toFixed(1)} TB`;
+}
