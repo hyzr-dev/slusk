@@ -17,6 +17,7 @@ import type {
   ShareRescanResult,
   SharesReport,
   StatusReport,
+  UploadsReport,
 } from './types';
 
 // Intervals match the legacy dashboard exactly so perceived freshness is
@@ -28,6 +29,11 @@ const PEERS_INTERVAL = 5000;
 const CHARTS_INTERVAL = 15000; // passes change at most every discovery tick (~30s)
 const SHARES_INTERVAL = 15000;
 const SHARES_SCANNING_INTERVAL = 3000; // matches JOBS_INTERVAL while a scan is actively running
+// Uploads are live transfers, comparable to the jobs list rather than the
+// mostly-static share index: a typical track finishes inside 15s (the
+// SHARES_INTERVAL), which would miss most uploads' active window entirely.
+// 3s matches JOBS_INTERVAL, which polls a similarly-lived array.
+const UPLOADS_INTERVAL = 3000;
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -37,6 +43,7 @@ export const queryKeys = {
   config: ['config'] as const,
   charts: ['charts'] as const,
   shares: ['shares'] as const,
+  uploads: ['uploads'] as const,
   jobDetail: (id: number) => ['jobs', id, 'detail'] as const,
   jobEvents: (id: number) => ['jobs', id, 'events'] as const,
 };
@@ -167,6 +174,16 @@ export function useRescanShares() {
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: queryKeys.shares });
     },
+  });
+}
+
+// Unlike useShares there is no scanning/idle distinction to branch the
+// interval on, so a plain constant refetchInterval is enough.
+export function useUploads() {
+  return useQuery({
+    queryKey: queryKeys.uploads,
+    queryFn: () => apiGet<UploadsReport>('/api/uploads'),
+    refetchInterval: UPLOADS_INTERVAL,
   });
 }
 

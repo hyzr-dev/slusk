@@ -288,6 +288,10 @@ type ServerDeps struct {
 	// registerShares).
 	Shares       SharesFunc
 	RescanShares RescanSharesFunc
+	// Uploads reports the native Soulseek upload manager's live activity,
+	// served at GET /api/uploads (issue #179). nil when native Soulseek
+	// sharing is not enabled, mirroring Shares.
+	Uploads UploadsFunc
 	// Throughput supplies the Overview view's live download-throughput series
 	// served at /api/charts (issue #157). nil (the non-native backends, or
 	// tests that don't care) yields an empty series rather than omitting the
@@ -587,6 +591,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
+	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
 	mux.Handle("/", newAssetHandler())
 	return mux

@@ -7,6 +7,7 @@ import table from '../components/Table.module.css';
 import { formatDateTime, formatSize } from '../format';
 import { t } from '../strings';
 import styles from './Shares.module.css';
+import UploadsPanel from './UploadsPanel';
 
 export default function Shares() {
   const { data } = useShares();
@@ -145,6 +146,8 @@ export default function Shares() {
           <span className={styles.mono}>{t.shares.footerNoteConfigFile}</span>.
         </div>
       </div>
+
+      <UploadsPanel />
     </>
   );
 }

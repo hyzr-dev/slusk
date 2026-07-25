@@ -380,6 +380,42 @@ export interface ShareRescanResult {
   scanning: boolean;
 }
 
+/**
+ * internal/observ/uploads.go UploadEntry — one upload the native Soulseek
+ * upload manager knows about, either currently streaming or waiting in the
+ * queue. Filename is the normalized virtual share path (backslash-separated),
+ * not a host filesystem path. `active` true means `position` is 0
+ * (meaningless for an active upload); a `position` of 0 with `active` false
+ * never occurs. `size` is 0 until the transfer's share entry resolves, so
+ * render it as unknown rather than a 0-byte file. `bytesWritten` is absolute
+ * and already includes any resume offset — do not add one on top.
+ */
+export interface UploadEntry {
+  username: string;
+  filename: string;
+  active: boolean;
+  position: number;
+  size: number;
+  bytesWritten: number;
+}
+
+/**
+ * GET /api/uploads — internal/observ/uploads.go uploadsDTO. Always answers
+ * 200; enabled false means the native Soulseek upload manager isn't running
+ * (uploads is [] and every counter is 0), the same "enabled, not a failed
+ * request" convention as SharesReport. `queued` is the true queue length even
+ * when `uploads` was truncated before serialization; `truncated` counts how
+ * many queued entries were omitted from `uploads` to keep the payload bounded.
+ */
+export interface UploadsReport {
+  enabled: boolean;
+  slots: number;
+  active: number;
+  queued: number;
+  truncated: number;
+  uploads: UploadEntry[];
+}
+
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
 export interface SearchPass {
   startedAt: string;

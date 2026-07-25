@@ -37,7 +37,30 @@ compose() {
 
 render() {
     need_env
+    ensure_share_dir
     python3 "$SCRIPT_DIR/render_config.py" --env "$ENV_FILE" --runtime "$RUNTIME_DIR"
+}
+
+# Docker silently creates a missing bind-mount source as a root-owned empty
+# directory, which then shares nothing and looks like a broken share index
+# rather than a typo. Fail loudly on a bad SLSKDARR_SHARE_DIR instead, and only
+# create the default when the user has not pointed the lab elsewhere.
+ensure_share_dir() {
+    share_dir=$(sed -n 's/^[[:space:]]*SLSKDARR_SHARE_DIR[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -n 1 | tr -d '"'"'"'')
+    if [ -z "$share_dir" ]; then
+        mkdir -p "$SCRIPT_DIR/share"
+        return
+    fi
+    case "$share_dir" in
+        */CHANGE_ME/*)
+            echo "set SLSKDARR_SHARE_DIR in $ENV_FILE to a real directory, or remove the line to use testenv/share" >&2
+            exit 2
+            ;;
+    esac
+    if [ ! -d "$share_dir" ]; then
+        echo "SLSKDARR_SHARE_DIR=$share_dir is not a directory" >&2
+        exit 2
+    fi
 }
 
 up() {

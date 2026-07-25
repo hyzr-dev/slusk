@@ -26,6 +26,30 @@ backenden labbet finns för att köra mot riktig trafik. Sätt värdet till `sls
 för att jämföra mot daemonen. Observera att appens egen standard i
 `config.example.toml` fortfarande är `slskd`; det är bara labbet som är omvänt.
 
+## Delade filer
+
+`SLSKDARR_SHARE_DIR` pekar ut katalogen slskdarr delar med Soulseek-nätverket.
+Den monteras **read-only** på `/music/share` och är förkonfigurerad som
+`[[soulseek.shared_folders]]`. Utan den delar klienten ingenting: `/api/shares`
+rapporterar noll filer, ingen peer kan köa något från den, och varken
+share-vyn eller upload-panelen går att testa på riktigt.
+
+```
+SLSKDARR_SHARE_DIR=/Users/dittnamn/Music/share
+```
+
+Använd en **absolut sökväg** — värden i `.env` expanderas inte av skalet, så
+`~` och `$HOME` fungerar inte. Utelämnas raden används `testenv/share`, som
+`lab.sh` skapar tom (och som är gitignorerad).
+
+Katalogen monteras avsiktligt **inte** på `/music/library`: den sökvägen är
+Lidarrs root-folder, dit labbet importerar testalbum. En riktig musikkatalog
+där hade legat öppen för skrivningar från en miljö vars uttalade syfte är att
+vara destruktiv. Monteringen sitter bara på slskdarr, som enbart behöver läsa.
+
+Filer som läggs till medan labbet kör syns först efter en omindexering — klicka
+**Rescan** i share-vyn, eller starta om containern.
+
 `reset` tar bort all databas-, Lidarr-, slskd- och nedladdningsstate, bygger den
 aktuella koden, startar stacken och kör seedningen. Det är kommandot att använda
 när en PR verkligen ska testas från scratch.

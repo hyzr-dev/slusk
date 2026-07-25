@@ -15,6 +15,7 @@ docker-compose.yml
 *.db-shm
 /slskdarr
 /testenv/runtime/
+/testenv/share/
 __pycache__/
 
 # Agent tooling state — local to each developer's machine, not shared.
