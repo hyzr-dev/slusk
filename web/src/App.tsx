@@ -9,6 +9,8 @@ import Peers from './routes/Peers';
 import Shares from './routes/Shares';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
+import Search from './routes/Search';
+import Chat from './routes/Chat';
 
 // The legacy dashboard never blanked the UI on a failed poll — it kept showing
 // the last good response. `data` already survives a failed background refetch
@@ -38,6 +40,8 @@ export default function App() {
             <Route path="peers" element={<Peers />} />
             <Route path="shares" element={<Shares />} />
             <Route path="health" element={<Health />} />
+            <Route path="search" element={<Search />} />
+            <Route path="chat" element={<Chat />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

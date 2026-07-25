@@ -231,6 +231,16 @@ export const t = {
     queuePlace: (n: number) => `queue #${n}`,
     truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
   },
+  placeholder: {
+    searchTitle: 'SEARCH',
+    searchBody:
+      'Manual Soulseek search is not built yet. When it lands, results will group per peer and folder, and anything downloaded can be matched and imported into Lidarr.',
+    searchIssue: 'Tracked as issue #58.',
+    chatTitle: 'CHAT',
+    chatBody:
+      'The native Soulseek client can send and receive private messages, but there is no HTTP surface for them yet, so this view has nothing to read.',
+    chatIssue: 'Tracked as issue #183.',
+  },
   settings: {
     notWritableNotice:
       'The configuration file is mounted read-only, so settings cannot be edited here. Mount its directory writable (e.g. ./config:/config) instead of a single-file or read-only mount to enable editing.',
