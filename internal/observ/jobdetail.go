@@ -111,7 +111,9 @@ type LiveTransfersFunc func(ctx context.Context) ([]core.RemoteTransfer, error)
 // ListDownloads counterpart the same way the reconcile loop does
 // (internal/pipeline/downloading.go): by remote id first, then by
 // username+filename. The zero value matches nothing, so callers with no live
-// data can pass it directly.
+// data can pass it directly. Also reused by aggregateLiveAlbum
+// (albumlive.go, issue #157) for the same username+filename match at album
+// level — candidate files have no SlskdID, so only byFallback is used there.
 type liveTransferIndex struct {
 	byID       map[string]core.RemoteTransfer
 	byFallback map[string]core.RemoteTransfer

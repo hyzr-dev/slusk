@@ -35,6 +35,16 @@ export interface Job {
   year: number | null;
   tracks: number | null;
   format: string | null;
+  // Live, non-persisted values aggregated across every live transfer
+  // belonging to the job's current candidate (see aggregateLiveAlbum, issue
+  // #157) — album-level analogues of TransferDetail's own queuePosition/speed.
+  // omitempty on the Go side means they are absent (not zero) for a job with
+  // no candidate yet, or none currently in flight — so treat absent as "hide"
+  // rather than showing a misleading 0. etaSeconds is a duration to format,
+  // not a timestamp.
+  queuePosition?: number;
+  speed?: number;
+  etaSeconds?: number;
 }
 
 /** internal/observ/jobdetail.go transferDetailDTO */
@@ -348,11 +358,25 @@ export interface HourCount {
 }
 
 /**
+ * internal/observ/charts.go throughputSampleDTO — one live download-throughput
+ * sample (issue #157). Downloads only — uploads have no byte-throughput
+ * tracking.
+ */
+export interface ThroughputSample {
+  at: string;
+  bytesPerSecond: number;
+  activeTransfers: number;
+}
+
+/**
  * GET /api/charts — chartsDTO. passes is oldest-first, capped at 20;
  * completedByHour is always exactly 24 zero-filled hourly buckets, oldest
- * first, ending at the current hour.
+ * first, ending at the current hour; throughput is the native soulseek
+ * client's recent samples, oldest first, and is always [] (never absent) on a
+ * non-native backend or when unavailable.
  */
 export interface ChartsReport {
   passes: SearchPass[];
   completedByHour: HourCount[];
+  throughput: ThroughputSample[];
 }

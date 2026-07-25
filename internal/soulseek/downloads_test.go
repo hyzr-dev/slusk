@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
@@ -429,6 +430,8 @@ func TestListDownloadsMapsFields(t *testing.T) {
 	tr.retryable = true
 	tr.queuePosition = 5
 	tr.speed = 4096
+	tr.speedAvg = 3800
+	tr.speedAt = time.Now()
 	tr.bytesDone.Store(500)
 	c.downloads.insert(tr)
 
@@ -442,10 +445,57 @@ func TestListDownloadsMapsFields(t *testing.T) {
 	want := core.RemoteTransfer{
 		ID: "id1", Username: "alice", Filename: "song.flac",
 		State: core.TransferInProgress, Size: 1000, BytesDone: 500,
-		Failure: "stalled", Retryable: true, QueuePosition: 5, Speed: 4096,
+		Failure: "stalled", Retryable: true, QueuePosition: 5, Speed: 4096, SpeedAverage: 3800,
 	}
 	if got := list[0]; got != want {
 		t.Errorf("ListDownloads mapping = %+v, want %+v", got, want)
+	}
+}
+
+// TestListDownloadsReportsZeroSpeedWhenStale asserts the fix for issue #157's
+// stale-speed bug: a transfer whose progress callback has gone quiet for
+// longer than speedStaleAfter must report Speed/SpeedAverage 0 rather than
+// its last sampled value forever.
+func TestListDownloadsReportsZeroSpeedWhenStale(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+
+	tr := newTransfer("id1", "alice", "song.flac", 1000)
+	tr.state = core.TransferInProgress
+	tr.speed = 4096
+	tr.speedAvg = 3800
+	tr.speedAt = time.Now().Add(-speedStaleAfter - time.Second)
+	tr.bytesDone.Store(500)
+	c.downloads.insert(tr)
+
+	list, err := c.ListDownloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListDownloads: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("ListDownloads length = %d, want 1", len(list))
+	}
+	if got := list[0]; got.Speed != 0 || got.SpeedAverage != 0 {
+		t.Errorf("stale speed = %d, speedAvg = %d, want both 0", got.Speed, got.SpeedAverage)
+	}
+}
+
+// TestListDownloadsReportsZeroSpeedWhenNeverSampled asserts a transfer whose
+// progress callback has never fired (speedAt zero value) reports zero speed
+// rather than a bogus "now - zero time" duration comparison mistakenly
+// treating it as fresh.
+func TestListDownloadsReportsZeroSpeedWhenNeverSampled(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+
+	tr := newTransfer("id1", "alice", "song.flac", 1000)
+	tr.state = core.TransferQueued
+	c.downloads.insert(tr)
+
+	list, err := c.ListDownloads(context.Background())
+	if err != nil {
+		t.Fatalf("ListDownloads: %v", err)
+	}
+	if got := list[0]; got.Speed != 0 || got.SpeedAverage != 0 {
+		t.Errorf("never-sampled speed = %d, speedAvg = %d, want both 0", got.Speed, got.SpeedAverage)
 	}
 }
 
