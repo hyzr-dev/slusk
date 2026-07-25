@@ -76,11 +76,17 @@ type StatusFunc func(ctx context.Context) (StatusReport, error)
 // view of core.JobView so the frontend never needs to know about the
 // engine's internal state machine.
 type jobDTO struct {
-	ID              int64   `json:"id"`
-	Title           string  `json:"title"`
-	Artist          string  `json:"artist"`
-	Status          string  `json:"status"`
-	Peer            string  `json:"peer"`
+	ID     int64  `json:"id"`
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
+	Status string `json:"status"`
+	Peer   string `json:"peer"`
+	// BytesDone and BytesTotal are album totals (v.AlbumBytesDone/Total, see
+	// core.JobView and issue #174), summed across every file of the job's
+	// current candidate — not just the most recently updated transfer — so
+	// the frontend's progress bar doesn't jump backwards each time a new
+	// file in a multi-track album starts. Zero when the job has no
+	// candidate, matching AlbumBytesDone/Total's own zero value.
 	BytesDone       int64   `json:"bytesDone"`
 	BytesTotal      int64   `json:"bytesTotal"`
 	UpdatedAt       string  `json:"updatedAt"`
@@ -95,15 +101,22 @@ type jobDTO struct {
 	Year            *int    `json:"year"`
 	Tracks          *int    `json:"tracks"`
 	Format          *string `json:"format"`
-	// QueuePosition, Speed and ETASeconds are live, non-persisted values
-	// aggregated across every live transfer belonging to the job's current
-	// candidate (see aggregateLiveAlbum, issue #157) — album-level analogues
-	// of transferDetailDTO's per-file QueuePosition/Speed. omitempty is
+	// QueuePosition and Speed are live, non-persisted values aggregated
+	// across every live transfer belonging to the job's current candidate
+	// (see aggregateLiveAlbum, issue #157) — album-level analogues of
+	// transferDetailDTO's per-file QueuePosition/Speed. omitempty is
 	// deliberate for the same reason: a job with no candidate yet, or no
 	// currently in-flight transfer, has nothing live to report, so the field
-	// is simply absent rather than a misleading zero. ETASeconds is named
-	// with the unit suffix rather than "eta" so it isn't misread as a
-	// timestamp; the frontend formats the duration.
+	// is simply absent rather than a misleading zero. ETASeconds divides the
+	// store's album-wide AlbumBytesRemaining (see core.JobView, issue #174)
+	// by speedAvg — the summed per-transfer SpeedAverage from
+	// aggregateLiveAlbum, an EWMA-smoothed rate, NOT the instantaneous Speed
+	// field above — so etaSeconds is not simply AlbumBytesRemaining / Speed.
+	// Using the store's remaining bytes rather than a live remaining-bytes
+	// sum means it accounts for files the per-peer throttle (#20) hasn't
+	// released to the peer backend yet. ETASeconds is named with the unit
+	// suffix rather than "eta" so it isn't misread as a timestamp; the
+	// frontend formats the duration.
 	QueuePosition uint32 `json:"queuePosition,omitempty"`
 	Speed         int64  `json:"speed,omitempty"`
 	ETASeconds    int64  `json:"etaSeconds,omitempty"`
@@ -132,19 +145,17 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 		Year:            v.Job.Year,
 		Tracks:          v.Job.Tracks,
 		Format:          v.Job.Format,
-	}
-	if v.Transfer != nil {
-		d.BytesDone = v.Transfer.BytesDone
-		d.BytesTotal = v.Transfer.BytesTotal
+		BytesDone:       v.AlbumBytesDone,
+		BytesTotal:      v.AlbumBytesTotal,
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
-		speed, speedAvg, remaining, queuePosition, hasQueuePosition := aggregateLiveAlbum(v.Attempt, live)
+		speed, speedAvg, queuePosition, hasQueuePosition := aggregateLiveAlbum(v.Attempt, live)
 		d.Speed = speed
 		if hasQueuePosition {
 			d.QueuePosition = queuePosition
 		}
-		d.ETASeconds = etaSeconds(remaining, speedAvg)
+		d.ETASeconds = etaSeconds(v.AlbumBytesRemaining, speedAvg)
 	}
 	if v.Job.NotBefore != nil {
 		d.NotBefore = v.Job.NotBefore.Format(timeFormat)

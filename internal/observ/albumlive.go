@@ -39,19 +39,20 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 // that can still make progress (core.TransferQueued, core.TransferInProgress)
 // are counted: a terminal-but-not-yet-reconciled transfer (errored,
 // cancelled, completed) lingers in ListDownloads until the pipeline's next
-// reconcile pass, and counting its remaining bytes would inflate the album's
-// ETA with bytes that will never transfer (issue #157 F3). Returns the summed
-// instantaneous speed and EWMA-smoothed average speed (for ETA), total
-// remaining bytes across matched transfers, and the minimum queue position
-// among matched transfers that report one (the album's download effectively
-// starts once its first file starts). Files not yet enqueued (the per-peer
-// in-flight throttle, see issue #20) have no live entry and so are simply not
-// counted: the result describes only work currently in flight, not the
-// album's full remaining size. candidate == nil (a job with no candidate
-// yet) yields all zeros / hasQueuePosition false.
-func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg, remaining int64, queuePosition uint32, hasQueuePosition bool) {
+// reconcile pass, and its speed would misrepresent current throughput.
+// Returns the summed instantaneous speed and EWMA-smoothed average speed
+// (for ETA), and the minimum queue position among matched transfers that
+// report one (the album's download effectively starts once its first file
+// starts). candidate == nil (a job with no candidate yet) yields all zeros /
+// hasQueuePosition false.
+//
+// Remaining bytes are not computed here: callers get them from
+// core.JobView.AlbumBytesRemaining (store-computed — see
+// internal/store/dashboard.go's jobViewSelect and the field comment on
+// AlbumBytesRemaining).
+func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool) {
 	if candidate == nil {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	for _, f := range candidate.Files {
 		lt, ok := idx.byFallback[candidate.Username+"\x00"+f.Filename]
@@ -63,13 +64,10 @@ func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed
 		}
 		speed += lt.Speed
 		speedAvg += lt.SpeedAverage
-		if left := lt.Size - lt.BytesDone; left > 0 {
-			remaining += left
-		}
 		if lt.QueuePosition > 0 && (!hasQueuePosition || lt.QueuePosition < queuePosition) {
 			queuePosition = lt.QueuePosition
 			hasQueuePosition = true
 		}
 	}
-	return speed, speedAvg, remaining, queuePosition, hasQueuePosition
+	return speed, speedAvg, queuePosition, hasQueuePosition
 }

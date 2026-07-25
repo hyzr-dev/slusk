@@ -21,6 +21,9 @@ export interface Job {
   artist: string;
   status: JobStatus;
   peer: string;
+  // Album totals summed across every file of the job's current candidate,
+  // not just the most recently updated transfer (issue #174) — so the
+  // progress bar doesn't jump backwards when a new file starts.
   bytesDone: number;
   bytesTotal: number;
   updatedAt: string;

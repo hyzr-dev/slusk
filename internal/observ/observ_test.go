@@ -228,14 +228,22 @@ func TestMetricsEndpointServes(t *testing.T) {
 	}
 }
 
+// TestJobsEndpointReturnsJobList also verifies BytesDone/BytesTotal come
+// from the JobView's album totals (AlbumBytesDone/AlbumBytesTotal) rather
+// than the single latest Transfer — the fixture deliberately gives them
+// different values so a regression that reverts to Transfer's numbers is
+// caught (issue #174).
 func TestJobsEndpointReturnsJobList(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	jobs := func(ctx context.Context) ([]core.JobView, error) {
 		return []core.JobView{
 			{
-				Job:      core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateDownloading, Source: core.SourceLidarr},
-				Transfer: &core.Transfer{State: core.TransferInProgress, BytesDone: 100, BytesTotal: 200},
-				Peer:     "flac_hoarder",
+				Job:                 core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateDownloading, Source: core.SourceLidarr},
+				Transfer:            &core.Transfer{State: core.TransferInProgress, BytesDone: 100, BytesTotal: 200},
+				Peer:                "flac_hoarder",
+				AlbumBytesDone:      900,
+				AlbumBytesTotal:     2400,
+				AlbumBytesRemaining: 1500,
 			},
 		}, nil
 	}
@@ -266,8 +274,8 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 	if got[0].Peer != "flac_hoarder" {
 		t.Errorf("Peer = %q, want flac_hoarder", got[0].Peer)
 	}
-	if got[0].BytesDone != 100 || got[0].BytesTotal != 200 {
-		t.Errorf("bytes = %d/%d, want 100/200", got[0].BytesDone, got[0].BytesTotal)
+	if got[0].BytesDone != 900 || got[0].BytesTotal != 2400 {
+		t.Errorf("bytes = %d/%d, want 900/2400 (album totals, not the latest transfer's 100/200)", got[0].BytesDone, got[0].BytesTotal)
 	}
 	if got[0].State != "DOWNLOADING" {
 		t.Errorf("State = %q, want DOWNLOADING", got[0].State)
@@ -434,8 +442,10 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 }
 
 // TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA asserts a job
-// whose candidate has a matching live transfer gets queuePosition/speed/
-// etaSeconds populated from LiveTransfers (issue #157).
+// whose candidate has a matching live transfer gets queuePosition/speed
+// populated from LiveTransfers (issue #157), and etaSeconds computed from the
+// store-provided AlbumBytesRemaining (issue #174) combined with that live
+// average speed.
 func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	jobs := func(ctx context.Context) ([]core.JobView, error) {
@@ -443,6 +453,12 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 			{
 				Job:     core.AlbumJob{ID: 1, Title: "Live One", ArtistName: "X", State: core.StateDownloading},
 				Attempt: &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+				// Deliberately different from the live transfer's own
+				// remaining (Size 1000 - BytesDone 500 = 500): if etaSeconds
+				// were computed from the live transfer's remaining instead of
+				// this store-provided value, this test would still pass at
+				// eta = 5, silently losing coverage of issue #174.
+				AlbumBytesRemaining: 900,
 			},
 		}, nil
 	}
@@ -473,9 +489,60 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	if got[0].QueuePosition != 4 {
 		t.Errorf("QueuePosition = %d, want 4", got[0].QueuePosition)
 	}
-	// remaining = 500, avgSpeed = 100 -> eta = 5s.
-	if got[0].ETASeconds != 5 {
-		t.Errorf("ETASeconds = %d, want 5", got[0].ETASeconds)
+	// remaining (store AlbumBytesRemaining) = 900, avgSpeed (live) = 100 -> eta = 9s.
+	if got[0].ETASeconds != 9 {
+		t.Errorf("ETASeconds = %d, want 9", got[0].ETASeconds)
+	}
+}
+
+// TestJobsEndpointETAUsesAlbumBytesRemainingNotLiveOnly asserts etaSeconds
+// accounts for bytes not yet released to the peer backend by the per-peer
+// throttle (issue #20): AlbumBytesRemaining is larger than the sum of live
+// transfers' own remaining bytes, and etaSeconds must reflect the larger,
+// store-provided figure rather than only the live transfer's 500 remaining
+// bytes (issue #174).
+func TestJobsEndpointETAUsesAlbumBytesRemainingNotLiveOnly(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job: core.AlbumJob{ID: 1, Title: "Throttled Album", ArtistName: "X", State: core.StateDownloading},
+				Attempt: &core.Candidate{Username: "alice", Files: []core.CandidateFile{
+					{Filename: "01.flac", Size: 1000},
+					{Filename: "02.flac", Size: 1000}, // not yet enqueued: no live entry
+				}},
+				// Album-wide remaining across every file, including the
+				// not-yet-enqueued 02.flac (1000 bytes untouched) plus
+				// 01.flac's own 500 remaining.
+				AlbumBytesRemaining: 1500,
+			},
+		}, nil
+	}
+	live := func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		return []core.RemoteTransfer{
+			{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: 200, SpeedAverage: 100, Size: 1000, BytesDone: 500, QueuePosition: 4},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	deps.LiveTransfers = live
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// remaining = 1500 (album-wide, store), avgSpeed = 100 (live) -> eta = 15s,
+	// not 5s (which is what a live-only remaining of 500 would give).
+	if got[0].ETASeconds != 15 {
+		t.Errorf("ETASeconds = %d, want 15 (album-wide remaining, not the live-only 500)", got[0].ETASeconds)
 	}
 }
 
