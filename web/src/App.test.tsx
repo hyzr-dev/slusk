@@ -40,15 +40,13 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview), '/jobs', '/jobs/:id' and '/health' are asserted separately
-  // below: the TUI reskin (#198) gives none of them an <h1> — PageHeading is
-  // gone from all four routes already, ahead of the other routes below
-  // losing theirs in their own tasks.
+  // '/' (Overview), '/jobs', '/jobs/:id', '/health' and '/shares' are
+  // asserted separately below: the TUI reskin (#198) gives none of them an
+  // <h1> — PageHeading is gone from all five routes already, ahead of the
+  // other routes below losing theirs in their own tasks.
   it.each([
     ['/events', t.nav.events],
     ['/peers', t.nav.peers],
-    // No seeded query data, so Shares renders its heading-only loading state.
-    ['/shares', t.nav.shares],
     ['/settings', t.nav.settings],
   ])('renders %s without crashing', (path, heading) => {
     renderAt(path);
@@ -71,6 +69,13 @@ describe('route tree', () => {
     // resolve to, unlike the dependency cards and chart panels above it.
     renderAt('/health');
     expect(screen.getByText(t.health.metricsHeading)).toBeInTheDocument();
+  });
+
+  it('renders /shares without crashing', () => {
+    // No seeded query data, so Shares renders its loading placeholder rather
+    // than any of its real states.
+    renderAt('/shares');
+    expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
   });
 
   it('renders /jobs/42 without crashing', () => {

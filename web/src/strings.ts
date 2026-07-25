@@ -50,6 +50,10 @@ export const t = {
     FA: 'FA',
     OK: 'OK',
     IM: 'IM',
+    // Uploads panel marker, not a JobStatus/JobState — the map already
+    // serves as a general two-letter tag vocabulary, so it's added here
+    // rather than duplicated in its own small map.
+    UL: 'UL',
   },
   tagTitle: {
     DL: 'Downloading',
@@ -59,6 +63,7 @@ export const t = {
     FA: 'Failed',
     OK: 'Done',
     IM: 'Importing',
+    UL: 'Uploading',
   },
   state: {
     WANTED: 'Wanted',
@@ -285,16 +290,23 @@ export const t = {
     // for a user in exactly the state this warning card is shown to. Shown as
     // the fallback for a read-only config mount; Settings is the primary path.
     emptyConfigSnippet: '[[soulseek.shared_folders]]\nname = "Library"\npath = "/music/library"',
-    statFiles: 'Shared files',
-    statSize: 'Shared size',
     statNever: 'Never',
-    panelTitle: 'Shared folders',
+    panelTitle: 'SHARED FOLDERS',
+    summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,
+    gridHead: {
+      path: 'PATH',
+      files: 'FILES',
+      size: 'SIZE',
+      indexed: 'INDEXED',
+    },
+    // The word next to the header's spinner while a scan is running.
+    // SharesReport carries only `scanning: boolean`, no progress figure, so
+    // there is deliberately no percentage or tick bar here (spec, Shares
+    // section) — unlike the mock, which fakes both.
+    indexing: 'indexing',
     empty: 'Nothing is being shared.',
     rescan: 'Rescan',
-    rescanning: 'Scanning…',
-    footerNotePrefix: 'Add or remove shared folders in',
-    footerNoteReadOnlyFallback: 'If the configuration file is mounted read-only, edit',
-    footerNoteConfigFile: 'config.toml',
+    rescanStarted: 'rescan started',
     rescanConflict: 'A share scan is already in progress.',
     rescanUnavailable: 'Soulseek sharing is not enabled, so a rescan cannot be started.',
     rescanFailed: 'Could not start the share rescan. Please try again.',

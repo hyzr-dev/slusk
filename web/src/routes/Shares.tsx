@@ -1,34 +1,37 @@
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { useRescanShares, useShares } from '../api/queries';
-import PageHeading from '../components/PageHeading';
-import StatCard from '../components/StatCard';
-import table from '../components/Table.module.css';
+import { useFlash } from '../components/chrome/FlashContext';
+import EmptyState from '../components/tui/EmptyState';
+import SectionHeader from '../components/tui/SectionHeader';
 import { formatDateTime, formatSize } from '../format';
 import { t } from '../strings';
 import styles from './Shares.module.css';
 import UploadsPanel from './UploadsPanel';
 
+// A folder's INDEXED cell reads --bad once the last scan is at least this
+// old, matching the mock's treatment of an overdue index
+// (docs/design/slskdarr-tui.dc.html:~430). A folder that has never been
+// indexed is at least as stale as one, so it gets the same treatment.
+const STALE_INDEX_MS = 24 * 60 * 60 * 1000;
+
 export default function Shares() {
   const { data } = useShares();
   const rescan = useRescanShares();
+  const flash = useFlash();
 
   // `data` is undefined on first paint and `enabled` has no safe default to
   // branch on meanwhile — rendering the disabled notice (or the empty-shares
   // warning) before the real report arrives would flash the wrong state, so
-  // show only the heading until the query settles. Unlike Peers/Overview,
-  // there is no empty-array fallback that is also a valid rendered state here.
+  // show only a loading placeholder until the query settles. Unlike
+  // Peers/Overview, there is no empty-array fallback that is also a valid
+  // rendered state here.
   if (!data) {
-    return <PageHeading>{t.nav.shares}</PageHeading>;
+    return <div className={styles.placeholder}>{t.jobs.loading}</div>;
   }
 
   if (!data.enabled) {
-    return (
-      <>
-        <PageHeading>{t.nav.shares}</PageHeading>
-        <div className={styles.notice}>{t.shares.disabledNotice}</div>
-      </>
-    );
+    return <div className={styles.notice}>{t.shares.disabledNotice}</div>;
   }
 
   const scanning = data.scanning || rescan.isPending;
@@ -45,10 +48,11 @@ export default function Shares() {
     }
   }
 
+  const stale = !data.indexedAt || Date.now() - new Date(data.indexedAt).getTime() > STALE_INDEX_MS;
+  const indexedLabel = data.indexedAt ? formatDateTime(data.indexedAt) : t.shares.statNever;
+
   return (
     <>
-      <PageHeading>{t.nav.shares}</PageHeading>
-
       {data.folders.length === 0 && (
         <div className={styles.warningCard}>
           <svg
@@ -56,7 +60,7 @@ export default function Shares() {
             height="22"
             viewBox="0 0 24 24"
             fill="none"
-            stroke="var(--orphaned)"
+            stroke="var(--bad)"
             strokeWidth="2"
             strokeLinecap="round"
             className={styles.warningIcon}
@@ -78,74 +82,56 @@ export default function Shares() {
         </div>
       )}
 
-      <div className={styles.cards}>
-        <StatCard label={t.shares.statFiles} value={data.files} />
-        <StatCard label={t.shares.statSize} value={formatSize(data.totalBytes)} />
-        <StatCard
-          label={t.columns.lastIndexed}
-          value={data.indexedAt ? formatDateTime(data.indexedAt) : t.shares.statNever}
-        />
+      <SectionHeader
+        label={t.shares.panelTitle}
+        meta={
+          <span className={styles.headerActions}>
+            <span>{t.shares.summary(data.folders.length, data.files, formatSize(data.totalBytes))}</span>
+            {scanning && (
+              <span className={styles.indexing}>
+                <span className={styles.spinner} aria-hidden="true" />
+                {t.shares.indexing}
+              </span>
+            )}
+            <button
+              type="button"
+              className={styles.rescanButton}
+              disabled={scanning}
+              onClick={() =>
+                rescan.mutate(undefined, { onSuccess: () => flash(t.shares.rescanStarted) })
+              }
+            >
+              {t.shares.rescan}
+            </button>
+          </span>
+        }
+      />
+      {/* The live region stays mounted and only takes on styling once it has
+          content: a role="status" node inserted at the same moment as its
+          text is unreliably announced, and .rescanError carries padding and
+          a background that would otherwise show as an empty bar. */}
+      <div className={rescanMessage ? styles.rescanError : undefined} role="status">
+        {rescanMessage}
       </div>
 
-      <div className={styles.panel}>
-        <div className={styles.panelHeader}>
-          <div className={styles.panelTitle}>{t.shares.panelTitle}</div>
-          <button
-            className={styles.rescanButton}
-            disabled={scanning}
-            onClick={() => rescan.mutate()}
-          >
-            {scanning ? (
-              <span className={styles.spinner} />
-            ) : (
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M20 11a8 8 0 1 0-2.3 5.7" />
-                <path d="M20 4v6h-6" />
-              </svg>
-            )}
-            {scanning ? t.shares.rescanning : t.shares.rescan}
-          </button>
-        </div>
-        {/* The live region stays mounted and only takes on styling once it has
-            content: a role="status" node inserted at the same moment as its
-            text is unreliably announced, and .rescanError carries padding and
-            a background that would otherwise show as an empty bar. */}
-        <div className={rescanMessage ? styles.rescanError : undefined} role="status">
-          {rescanMessage}
-        </div>
-
-        <table className={`${table.table} ${styles.tableInPanel}`}>
-          <thead>
-            <tr>
-              <th className={table.th}>{t.columns.path}</th>
-              <th className={`${table.th} ${styles.alignRight}`}>{t.columns.files}</th>
-              <th className={`${table.th} ${styles.alignRight}`}>{t.columns.size}</th>
-              <th className={`${table.th} ${styles.alignRight}`}>{t.columns.lastIndexed}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.folders.length === 0 && (
-              <tr><td className={table.empty} colSpan={4}>{t.shares.empty}</td></tr>
-            )}
-            {data.folders.map((f) => (
-              <tr key={f.path}>
-                <td className={`${table.td} ${table.mono}`}>{f.path}</td>
-                <td className={`${table.td} ${table.mono} ${styles.alignRight}`}>{f.files}</td>
-                <td className={`${table.td} ${table.mono} ${styles.alignRight}`}>{formatSize(f.totalBytes)}</td>
-                <td className={`${table.td} ${styles.alignRight}`}>
-                  {data.indexedAt ? formatDateTime(data.indexedAt) : t.shares.statNever}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className={styles.footerNote}>
-          {t.shares.footerNotePrefix}{' '}
-          <Link to="/settings">{t.nav.settings}</Link>.{' '}
-          {t.shares.footerNoteReadOnlyFallback}{' '}
-          <span className={styles.mono}>{t.shares.footerNoteConfigFile}</span>.
-        </div>
+      <div className={styles.folderGridHead}>
+        <span>{t.shares.gridHead.path}</span>
+        <span className={styles.alignRight}>{t.shares.gridHead.files}</span>
+        <span className={styles.alignRight}>{t.shares.gridHead.size}</span>
+        <span className={styles.alignRight}>{t.shares.gridHead.indexed}</span>
       </div>
+      {data.folders.length === 0 ? (
+        <EmptyState message={t.shares.empty} />
+      ) : (
+        data.folders.map((f) => (
+          <div key={f.path} className={styles.folderRow}>
+            <span className={styles.folderPath}>{f.path}</span>
+            <span className={styles.folderDim}>{f.files}</span>
+            <span className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
+            <span className={stale ? styles.folderIndexedBad : styles.folderIndexed}>{indexedLabel}</span>
+          </div>
+        ))
+      )}
 
       <UploadsPanel />
     </>
