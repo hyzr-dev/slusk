@@ -114,8 +114,7 @@
   font-size: 11px;
 }
 
-.reconcileTime { color: var(--text-dim); width: 44px; }
-.reconcileId { color: var(--faint); }
+.reconcileTime { color: var(--text-dim); width: 56px; }
 .reconcileSpacer { flex: 1; }
 .reconcileMatch { color: var(--fg); }
 .reconcileNoMatch { color: var(--text-dim); }

@@ -58,13 +58,11 @@ export default function Overview() {
     .filter((j) => j.status === 'active' || j.status === 'stalled')
     .slice(0, MAX_TRANSFER_ROWS);
 
-  // SearchPass carries no id of its own; the ordinal is this pass's position
-  // within the (already-capped-at-20, oldest-first) window the backend
-  // returns, not a lifetime counter slskdarr doesn't track.
-  const reconcileRows = (charts?.passes ?? [])
-    .map((pass, i) => ({ ...pass, ordinal: i + 1 }))
-    .slice(-MAX_RECONCILE_ROWS)
-    .reverse();
+  // SearchPass carries no id of its own, and the window this slices from is
+  // capped at 20 and slides — a position-based number would look like a
+  // stable reference but silently point at a different pass on the next
+  // poll, so no id column is shown at all (see spec, Overview section).
+  const reconcileRows = (charts?.passes ?? []).slice(-MAX_RECONCILE_ROWS).reverse();
 
   return (
     <>
@@ -157,9 +155,8 @@ export default function Overview() {
                   (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000,
                 );
                 return (
-                  <div key={pass.ordinal} className={styles.reconcileRow}>
+                  <div key={pass.startedAt} className={styles.reconcileRow}>
                     <span className={styles.reconcileTime}>{formatShortTime(pass.finishedAt)}</span>
-                    <span className={styles.reconcileId}>#{pass.ordinal}</span>
                     <span className={styles.reconcileSpacer} />
                     <span className={matched ? styles.reconcileMatch : styles.reconcileNoMatch}>
                       {matched ? t.overview.reconcileMatched(pass.matched) : t.overview.reconcileNoMatch}
