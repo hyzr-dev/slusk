@@ -122,6 +122,12 @@ type Config struct {
 	SharedFolders []SharedFolder
 	UploadSlots   int
 
+	// MessageSink, when non-nil, receives incoming private messages (issue #183). Left nil,
+	// incoming messages are logged and deliberately NOT acked, so the server keeps them and
+	// redelivers at the next login rather than the client silently destroying mail it has
+	// nowhere to put.
+	MessageSink MessageSink
+
 	// AllowPrivatePeerAddresses permits dialing server-supplied peer
 	// addresses in RFC 1918 / ULA private ranges (threat T12: the central
 	// server supplies raw IP:port for peers, which is otherwise untrusted
@@ -271,6 +277,13 @@ type Client struct {
 	tree         *distributedTree
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
+
+	// incoming carries received private messages from readLoop to
+	// runMessageWorker (see messages.go). It is deliberately not
+	// generation-scoped: a persisted message outlives the connection it
+	// arrived on, and each entry carries its own generation so a stale ack
+	// is refused rather than misapplied to a newer session.
+	incoming chan incomingMessage
 
 	shares atomic.Pointer[shareSnapshot]
 	// shareScanSem is the share-scan lock, as a capacity-1 semaphore rather
@@ -435,6 +448,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		searchDeliveries:       make(map[searchDeliveryKey]time.Time),
 		searchDeliveryInFlight: make(map[searchDeliveryKey]struct{}),
 		shareScanSem:           make(chan struct{}, 1),
+		incoming:               make(chan incomingMessage, incomingMessageQueue),
 	}
 	c.shares.Store(emptyShareSnapshot())
 	c.uploads = newUploadManager(c, cfg.UploadSlots)
@@ -456,7 +470,8 @@ func New(cfg Config, logger *slog.Logger) *Client {
 // own (unexported) message[M] constraint.
 type serverMessage[M any] interface {
 	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress | *server.GetUserStats |
-		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch | *server.SharedFoldersFiles
+		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch | *server.SharedFoldersFiles |
+		*server.MessageUser | *server.MessageAcked
 	Serialize(M) ([]byte, error)
 }
 
@@ -572,6 +587,16 @@ func (c *Client) Run(ctx context.Context) error {
 	if !c.startTracked(func() { c.sampleThroughput(runCtx) }) {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before throughput sampler start")
+	}
+	// The message worker spans reconnects rather than living inside
+	// serveConnected: a message only needs a live connection for its ack, and
+	// each queued entry carries the generation it arrived on so a stale ack is
+	// refused instead of landing in a newer session.
+	if c.cfg.MessageSink != nil {
+		if !c.startTracked(func() { c.runMessageWorker(runCtx) }) {
+			_ = ln.Close()
+			return errors.New("soulseek: lifecycle stopped before message worker start")
+		}
 	}
 
 	for {
@@ -963,6 +988,9 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.Speed)
 		}
 		return nil
+
+	case server.CodeMessageUser:
+		return c.handleIncomingPrivateMessage(reader)
 	}
 
 	if c.logger != nil {

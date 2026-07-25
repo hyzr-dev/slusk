@@ -26,7 +26,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 
 func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics"} {
+	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()

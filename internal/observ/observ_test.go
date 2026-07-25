@@ -42,8 +42,16 @@ func noopRestart()                                                             {
 func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.AlbumJob, error) {
 	return core.AlbumJob{}, nil
 }
-func noopSearchJob(ctx context.Context, jobID int64) error { return nil }
-func noopDeleteJob(ctx context.Context, jobID int64) error { return nil }
+func noopSearchJob(ctx context.Context, jobID int64) error               { return nil }
+func noopDeleteJob(ctx context.Context, jobID int64) error               { return nil }
+func noopConversations(ctx context.Context) ([]core.Conversation, error) { return nil, nil }
+func noopThread(ctx context.Context, username string, limit int, beforeID int64) ([]core.PrivateMessage, error) {
+	return nil, nil
+}
+func noopSendMessage(ctx context.Context, username, body string) (core.PrivateMessage, error) {
+	return core.PrivateMessage{}, nil
+}
+func noopMarkRead(ctx context.Context, username string) (int, error) { return 0, nil }
 
 // testServerDeps returns ServerDeps wired to noop implementations. Tests
 // override only the fields they exercise.
@@ -74,6 +82,10 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		CreateJob:        noopCreateJob,
 		SearchJob:        noopSearchJob,
 		DeleteJob:        noopDeleteJob,
+		Conversations:    noopConversations,
+		Thread:           noopThread,
+		Send:             noopSendMessage,
+		MarkRead:         noopMarkRead,
 	}
 }
 

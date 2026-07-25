@@ -293,6 +293,16 @@ type ServerDeps struct {
 	// tests that don't care) yields an empty series rather than omitting the
 	// field.
 	Throughput ThroughputFunc
+	// Conversations and Thread back GET /api/messages and GET
+	// /api/messages/{username} (issue #183). Unlike Shares/RescanShares these
+	// are wired unconditionally — message history stays readable even when
+	// the Soulseek backend that would send new messages is disabled. Send is
+	// nil when nothing can send (POST /api/messages/{username} then answers
+	// 503); MarkRead backs POST /api/messages/{username}/read.
+	Conversations ConversationsFunc
+	Thread        ThreadFunc
+	Send          SendMessageFunc
+	MarkRead      MarkReadFunc
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -577,6 +587,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
+	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
