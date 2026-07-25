@@ -187,7 +187,10 @@ export const t = {
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
     // the mock, but jobFilter.ts's SourceFilter needs a UI to reach it from;
-    // see Jobs.tsx's SOURCE_CHIP_ORDER.
+    // see Jobs.tsx's SOURCE_CHIP_ORDER. The group's own accessible name —
+    // distinct from sourceLabel above, which is the expansion meta-tree's
+    // (lowercase) row label and must stay free to reword independently.
+    sourceFilterLabel: 'Source',
     sourceChipLabel: {
       all: 'ALL',
       manual: 'MANUAL',

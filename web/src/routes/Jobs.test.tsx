@@ -56,7 +56,7 @@ function statusGroup() {
   return within(screen.getByRole('group', { name: t.columns.status }));
 }
 function sourceGroup() {
-  return within(screen.getByRole('group', { name: t.jobs.sourceLabel }));
+  return within(screen.getByRole('group', { name: t.jobs.sourceFilterLabel }));
 }
 
 function renderJobs(jobs: Job[], client?: QueryClient) {
@@ -123,10 +123,26 @@ describe('placeholders for absent fields', () => {
 describe('queue position rendering', () => {
   it('tags an active job waiting in a peer queue as QU and shows a compact queue position', () => {
     stubFetchIndefinitely();
-    renderJobs([makeJob({ id: 1, status: 'active', queuePosition: 4 })]);
+    const { container } = renderJobs([makeJob({ id: 1, status: 'active', queuePosition: 4 })]);
 
     expect(screen.getByTitle(t.tagTitle.QU)).toHaveTextContent('QU');
     expect(screen.getByText(t.jobs.queueShort(4))).toBeInTheDocument();
+    // The one behaviour that actively misinforms rather than merely looking
+    // wrong: no bytes move while a job sits in a peer's queue, so its Ticks
+    // bar must never flare as though a transfer were live.
+    expect(container.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
+  // The other half of the same pin: a job that IS genuinely downloading
+  // (active, no queue position) must flare exactly one tick, so this view
+  // can't silently regress to never flaring at all either.
+  it('flares the bar for a genuinely transferring row', () => {
+    stubFetchIndefinitely();
+    const { container } = renderJobs([
+      makeJob({ id: 1, status: 'active', queuePosition: undefined, bytesDone: 50, bytesTotal: 100 }),
+    ]);
+
+    expect(container.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
   });
 
   // Regression: queuePosition comes from the live ListDownloads snapshot
@@ -233,6 +249,39 @@ describe('chip filtering', () => {
     expect(screen.getByText('Rounds')).toBeInTheDocument();
     expect(screen.getByText('Sound of Silver')).toBeInTheDocument();
     expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
+  });
+
+  // Mirror of the test above, the other way round: the two axes must count
+  // by the same rule. Regression — the source ALL bucket used to reuse the
+  // status axis's own `allCount` (which respects the *source* filter and
+  // ignores *status*), so with a status chip selected it disagreed with
+  // MANUAL + LIDARR and clicking it showed more rows than it promised.
+  it("the source ALL chip's count reflects the status filter too, not the unfiltered job list", () => {
+    stubFetchIndefinitely();
+    renderJobs([
+      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
+      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'active' }),
+      makeJob({ id: 3, title: 'Sound of Silver', source: 'manual', status: 'done' }),
+    ]);
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) }));
+
+    // Clicking ACTIVE leaves 2 jobs (one manual, one lidarr) — the source
+    // ALL chip's own counter must already read 2, matching MANUAL (1) +
+    // LIDARR (1), not 3 (jobs.length).
+    const sourceAllChip = sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.all) });
+    expect(within(sourceAllChip).getByText('2')).toBeInTheDocument();
+    expect(
+      within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).getByText('1'),
+    ).toBeInTheDocument();
+    expect(
+      within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.lidarr) })).getByText('1'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(sourceAllChip);
+    expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
+    expect(screen.getByText('Rounds')).toBeInTheDocument();
+    expect(screen.queryByText('Sound of Silver')).not.toBeInTheDocument();
   });
 });
 

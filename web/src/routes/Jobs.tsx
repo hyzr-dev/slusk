@@ -191,8 +191,13 @@ export default function Jobs() {
   // Source counts mirror the same "what would this chip show" contract, but
   // jobFilter.ts has no dedicated helper for this axis — reusing
   // matchesFilters directly here is simpler than adding one for three values.
+  // Deliberately NOT `allCount`: that sum respects the current *source*
+  // filter (it comes from countByStatus(jobs, search, source)) while
+  // ignoring *status* — the two axes must count by the same rule, so this
+  // recomputes the source-ALL bucket the same way as manual/lidarr below,
+  // filtering by search and status but leaving source itself at 'all'.
   const sourceCounts: Record<SourceFilter, number> = {
-    all: allCount,
+    all: jobs.filter((j) => matchesFilters(j, search, status, 'all')).length,
     manual: jobs.filter((j) => matchesFilters(j, search, status, 'manual')).length,
     lidarr: jobs.filter((j) => matchesFilters(j, search, status, 'lidarr')).length,
   };
@@ -228,7 +233,7 @@ export default function Jobs() {
           ))}
         </div>
         <span aria-hidden className={styles.chipDivider} />
-        <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceLabel}>
+        <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceFilterLabel}>
           {SOURCE_CHIP_ORDER.map((key) => (
             <Chip
               key={key}

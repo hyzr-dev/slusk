@@ -1,9 +1,21 @@
 /* This module is also imported by Events.tsx for its filter box (.controls,
-   .input) and its job-id link (.link) rather than duplicating the same look
-   in its own module — don't rename or remove those without checking that
-   file too. Jobs.tsx itself no longer uses them (see .filterBox/.filterInput
-   below for its own TUI-styled equivalent). */
+   .input) and its job-id link (.link) — kept verbatim (including its
+   pre-reskin `--radius-sm`/`--panel`/`--border`/`--text` references, which
+   that file's own future task will migrate) rather than duplicated in its
+   own module. Don't rename or remove .controls/.input/.link without
+   checking Events.tsx too. Jobs.tsx itself no longer uses any of the three
+   — see .filterBox/.filterInput below for its own TUI-styled equivalent. */
 .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+
+.input {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+  width: 260px;
+}
 
 .link { color: var(--active); text-decoration: none; }
 .link:hover { text-decoration: underline; }
