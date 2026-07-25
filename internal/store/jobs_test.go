@@ -27,6 +27,207 @@ func newActiveCandidate(t *testing.T, s *Store, ctx context.Context, lidarrAlbum
 	return job, cand.ID
 }
 
+type jobTransferFixture struct {
+	targetJob  core.AlbumJob
+	otherJob   core.AlbumJob
+	candidate1 int64
+	candidate2 int64
+	ids        map[core.TransferState]int64
+	otherID    int64
+	seededAt   time.Time
+}
+
+func seedJobTransferFixture(t *testing.T, s *Store, ctx context.Context) jobTransferFixture {
+	t.Helper()
+	seededAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	targetJob, err := s.UpsertWantedJob(ctx, 1701, seededAt)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob target: %v", err)
+	}
+	otherJob, err := s.UpsertWantedJob(ctx, 1702, seededAt)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob other: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, targetJob.ID, core.StateDownloading, seededAt); err != nil {
+		t.Fatalf("AdvanceJobState target: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, otherJob.ID, core.StateDownloading, seededAt); err != nil {
+		t.Fatalf("AdvanceJobState other: %v", err)
+	}
+
+	insertCandidate := func(jobID int64, username string) int64 {
+		t.Helper()
+		var id int64
+		if err := s.db.QueryRowContext(ctx,
+			`INSERT INTO candidates (album_job_id, username, score, files, state, created_at, updated_at)
+			 VALUES ($1, $2, 1, '[]'::jsonb, $3, $4, $4) RETURNING id`,
+			jobID, username, string(core.CandidateNew), seededAt).Scan(&id); err != nil {
+			t.Fatalf("insert candidate %s: %v", username, err)
+		}
+		return id
+	}
+	candidate1 := insertCandidate(targetJob.ID, "peer-one")
+	candidate2 := insertCandidate(targetJob.ID, "peer-two")
+	otherCandidate := insertCandidate(otherJob.ID, "peer-other")
+
+	insertTransfer := func(candidateID int64, username string, state core.TransferState) int64 {
+		t.Helper()
+		var id int64
+		filename := string(state) + "-" + username + ".flac"
+		if err := s.db.QueryRowContext(ctx,
+			`INSERT INTO transfers (candidate_id, slskd_id, username, filename, state, deadline, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+			candidateID, "remote-"+filename, username, filename, string(state), seededAt.Add(time.Hour), seededAt).Scan(&id); err != nil {
+			t.Fatalf("insert %s transfer: %v", state, err)
+		}
+		return id
+	}
+
+	ids := make(map[core.TransferState]int64)
+	ids[core.TransferPending] = insertTransfer(candidate1, "peer-one", core.TransferPending)
+	ids[core.TransferQueued] = insertTransfer(candidate1, "peer-one", core.TransferQueued)
+	ids[core.TransferCompleted] = insertTransfer(candidate1, "peer-one", core.TransferCompleted)
+	ids[core.TransferErrored] = insertTransfer(candidate1, "peer-one", core.TransferErrored)
+	ids[core.TransferInProgress] = insertTransfer(candidate2, "peer-two", core.TransferInProgress)
+	ids[core.TransferStalled] = insertTransfer(candidate2, "peer-two", core.TransferStalled)
+	ids[core.TransferCancelled] = insertTransfer(candidate2, "peer-two", core.TransferCancelled)
+	otherID := insertTransfer(otherCandidate, "peer-other", core.TransferQueued)
+
+	return jobTransferFixture{
+		targetJob: targetJob, otherJob: otherJob,
+		candidate1: candidate1, candidate2: candidate2,
+		ids: ids, otherID: otherID, seededAt: seededAt,
+	}
+}
+
+func TestActiveTransfersForJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+
+	transfers, err := s.ActiveTransfersForJob(ctx, fixture.targetJob.ID)
+	if err != nil {
+		t.Fatalf("ActiveTransfersForJob: %v", err)
+	}
+	wantIDs := []int64{
+		fixture.ids[core.TransferPending],
+		fixture.ids[core.TransferQueued],
+		fixture.ids[core.TransferInProgress],
+		fixture.ids[core.TransferStalled],
+	}
+	if len(transfers) != len(wantIDs) {
+		t.Fatalf("ActiveTransfersForJob returned %d rows, want %d: %+v", len(transfers), len(wantIDs), transfers)
+	}
+	for i, transfer := range transfers {
+		if transfer.ID != wantIDs[i] {
+			t.Errorf("transfer[%d].ID = %d, want %d", i, transfer.ID, wantIDs[i])
+		}
+		if transfer.CandidateID != fixture.candidate1 && transfer.CandidateID != fixture.candidate2 {
+			t.Errorf("transfer[%d] belongs to unrelated candidate %d", i, transfer.CandidateID)
+		}
+	}
+}
+
+func TestCancelJobCancelsAllLiveTransfersAtomically(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+	cancelledAt := fixture.seededAt.Add(45 * time.Minute)
+
+	ok, err := s.CancelJob(ctx, fixture.targetJob.ID, cancelledAt)
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("CancelJob returned false for an existing job")
+	}
+
+	type transferResult struct {
+		state     core.TransferState
+		updatedAt time.Time
+	}
+	results := make(map[int64]transferResult)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, state, updated_at FROM transfers
+		 WHERE candidate_id IN ($1, $2) OR id = $3 ORDER BY id`,
+		fixture.candidate1, fixture.candidate2, fixture.otherID)
+	if err != nil {
+		t.Fatalf("read transfers: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var state string
+		var updatedAt time.Time
+		if err := rows.Scan(&id, &state, &updatedAt); err != nil {
+			t.Fatalf("scan transfer: %v", err)
+		}
+		results[id] = transferResult{state: core.TransferState(state), updatedAt: updatedAt}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate transfers: %v", err)
+	}
+
+	for _, state := range []core.TransferState{
+		core.TransferPending, core.TransferQueued, core.TransferInProgress, core.TransferStalled,
+	} {
+		got := results[fixture.ids[state]]
+		if got.state != core.TransferCancelled || !got.updatedAt.Equal(cancelledAt) {
+			t.Errorf("formerly %s transfer = state %s updated %v, want CANCELLED at %v",
+				state, got.state, got.updatedAt, cancelledAt)
+		}
+	}
+	for _, state := range []core.TransferState{
+		core.TransferCompleted, core.TransferErrored, core.TransferCancelled,
+	} {
+		got := results[fixture.ids[state]]
+		if got.state != state || !got.updatedAt.Equal(fixture.seededAt) {
+			t.Errorf("terminal %s transfer changed to state %s updated %v", state, got.state, got.updatedAt)
+		}
+	}
+	other := results[fixture.otherID]
+	if other.state != core.TransferQueued || !other.updatedAt.Equal(fixture.seededAt) {
+		t.Errorf("unrelated transfer changed: state %s updated %v", other.state, other.updatedAt)
+	}
+
+	var targetState, otherState string
+	var targetUpdated, otherUpdated time.Time
+	if err := s.db.QueryRowContext(ctx, `SELECT state, updated_at FROM album_jobs WHERE id = $1`, fixture.targetJob.ID).Scan(&targetState, &targetUpdated); err != nil {
+		t.Fatalf("read target job: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT state, updated_at FROM album_jobs WHERE id = $1`, fixture.otherJob.ID).Scan(&otherState, &otherUpdated); err != nil {
+		t.Fatalf("read other job: %v", err)
+	}
+	if core.AlbumJobState(targetState) != core.StateCancelled || !targetUpdated.Equal(cancelledAt) {
+		t.Errorf("target job = state %s updated %v, want CANCELLED at %v", targetState, targetUpdated, cancelledAt)
+	}
+	if core.AlbumJobState(otherState) != core.StateDownloading || !otherUpdated.Equal(fixture.seededAt) {
+		t.Errorf("unrelated job changed: state %s updated %v", otherState, otherUpdated)
+	}
+}
+
+func TestCancelJobNotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	fixture := seedJobTransferFixture(t, s, ctx)
+
+	ok, err := s.CancelJob(ctx, 999999, fixture.seededAt.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if ok {
+		t.Fatal("CancelJob returned true for an unknown job")
+	}
+	var state string
+	var updatedAt time.Time
+	if err := s.db.QueryRowContext(ctx, `SELECT state, updated_at FROM transfers WHERE id = $1`, fixture.otherID).Scan(&state, &updatedAt); err != nil {
+		t.Fatalf("read unrelated transfer: %v", err)
+	}
+	if core.TransferState(state) != core.TransferQueued || !updatedAt.Equal(fixture.seededAt) {
+		t.Errorf("unknown-job cancel changed unrelated transfer: state %s updated %v", state, updatedAt)
+	}
+}
+
 func TestWriteAheadEnqueueAndRecover(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

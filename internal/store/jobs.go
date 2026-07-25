@@ -131,6 +131,44 @@ func (s *Store) AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJ
 	return nil
 }
 
+// CancelJob atomically marks every live transfer under every candidate of the
+// job and the job itself CANCELLED. It returns false if the job no longer exists.
+func (s *Store) CancelJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("cancel job: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM album_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("cancel job: select for update: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE transfers SET state = $1, updated_at = $2
+		 WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $3)
+		 AND state IN ($4, $5, $6, $7)`,
+		string(core.TransferCancelled), now, jobID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled)); err != nil {
+		return false, fmt.Errorf("cancel job: update transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3`,
+		string(core.StateCancelled), now, jobID); err != nil {
+		return false, fmt.Errorf("cancel job: update job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("cancel job: commit: %w", err)
+	}
+	return true, nil
+}
+
 // TransfersPastDeadline returns non-terminal transfers whose deadline has passed.
 func (s *Store) TransfersPastDeadline(ctx context.Context, now time.Time) ([]core.Transfer, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -148,6 +186,24 @@ func (s *Store) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
 	rows, err := s.db.QueryContext(ctx,
 		transferSelect+` WHERE state IN ($1, $2, $3)`,
 		string(core.TransferQueued), string(core.TransferInProgress), string(core.TransferStalled))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTransfers(rows)
+}
+
+// ActiveTransfersForJob returns all lifecycle-live transfers under every
+// candidate owned by a job. Unlike global reconciliation, manual lifecycle
+// actions include PENDING transfers that have not yet been sent remotely.
+func (s *Store) ActiveTransfersForJob(ctx context.Context, jobID int64) ([]core.Transfer, error) {
+	rows, err := s.db.QueryContext(ctx,
+		transferSelect+` WHERE candidate_id IN (
+			SELECT id FROM candidates WHERE album_job_id = $1
+		) AND state IN ($2, $3, $4, $5)
+		ORDER BY id`,
+		jobID, string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled))
 	if err != nil {
 		return nil, err
 	}
