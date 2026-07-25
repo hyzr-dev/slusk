@@ -11,7 +11,7 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/soulseek"
 )
 
-func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, logger *slog.Logger) *soulseek.Client {
+func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, sink soulseek.MessageSink, logger *slog.Logger) *soulseek.Client {
 	folders := make([]soulseek.SharedFolder, 0, len(cfg.SharedFolders))
 	for _, folder := range cfg.SharedFolders {
 		folders = append(folders, soulseek.SharedFolder{Name: folder.Name, Path: folder.Path})
@@ -23,6 +23,7 @@ func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, logger *sl
 		GluetunControlURL:         cfg.Gluetun.ControlURL,
 		GluetunAPIKey:             cfg.Gluetun.APIKey,
 		AllowPrivatePeerAddresses: cfg.AllowPrivatePeerAddresses,
+		MessageSink:               sink,
 	}, logger)
 }
 

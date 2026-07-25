@@ -141,7 +141,8 @@ func main() {
 
 	var soulClient *soulseek.Client
 	if cfg.Soulseek.Enabled() {
-		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, logger)
+		sink := &messageSink{store: st, logger: logger}
+		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, logger)
 	}
 
 	// Backend selection: config.Validate already guarantees soulClient != nil
@@ -431,6 +432,30 @@ func main() {
 			}
 		}
 	}
+	// Conversations/Thread stay wired even when soulClient is nil, so message
+	// history remains readable with no Soulseek backend configured — only
+	// sending requires a live client.
+	conversationsFn := st.Conversations
+	threadFn := st.Thread
+	markReadFn := func(ctx context.Context, username string) (int, error) {
+		n, err := st.MarkConversationRead(ctx, username, time.Now())
+		return int(n), err
+	}
+	var sendMessageFn observ.SendMessageFunc
+	if soulClient != nil {
+		// Send-then-persist, deliberately in that order: only record a message
+		// once it has actually gone out. The residual failure mode (send
+		// succeeds, RecordOutgoingMessage fails) surfaces as a 502 for a
+		// message that WAS delivered - worse would be the reverse ordering,
+		// which risks a "sent" row in the store for a message that never left.
+		// There is no pending/retry state by design (see issue #183).
+		sendMessageFn = func(ctx context.Context, username, body string) (core.PrivateMessage, error) {
+			if err := soulClient.SendPrivateMessage(ctx, username, body); err != nil {
+				return core.PrivateMessage{}, err
+			}
+			return st.RecordOutgoingMessage(ctx, username, body, time.Now())
+		}
+	}
 	handler := observ.NewServer(observ.ServerDeps{
 		Registry:         reg,
 		Status:           statusFn,
@@ -458,6 +483,10 @@ func main() {
 		Shares:           sharesFn,
 		RescanShares:     rescanSharesFn,
 		Throughput:       throughputFn,
+		Conversations:    conversationsFn,
+		Thread:           threadFn,
+		Send:             sendMessageFn,
+		MarkRead:         markReadFn,
 	})
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
