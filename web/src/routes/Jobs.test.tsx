@@ -255,6 +255,23 @@ describe('row expansion', () => {
     );
   });
 
+  // The row itself stays clickable for mouse users, and the toggle button must
+  // not double-toggle by letting its own click bubble up to that same handler.
+  it('toggles from a click on an ordinary cell, and the toggle button does not double-fire', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+    renderJobs([makeJob({ id: 1, peer: 'flac_hoarder' })], client);
+
+    fireEvent.click(screen.getByText('flac_hoarder'));
+    expect(screen.getByRole('button', { name: t.jobs.hideDetails })).toBeInTheDocument();
+
+    // A bubbling click from the button would toggle twice and land back open.
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.hideDetails }));
+    expect(screen.getByRole('button', { name: t.jobs.showDetails })).toBeInTheDocument();
+  });
+
   // Regression: the row used to be a role="button" tr with an onKeyDown that
   // called preventDefault() on Enter, which also fired for a focused child
   // <Link> (the keydown bubbles), cancelling the browser's own Enter-on-link

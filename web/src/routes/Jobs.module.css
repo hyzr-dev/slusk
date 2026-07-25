@@ -151,10 +151,13 @@
 
 /* Fixed-width, right-aligned so the percentage column lines up regardless of
    digit count (mock: width:36px; text-align:right). */
+/* min-width, not width: the same span renders "queue #4" for a job waiting in
+   a peer's queue, which is wider than the "NN%" the mock sized this for. */
 .pct {
   display: inline-block;
-  width: 36px;
+  min-width: 36px;
   text-align: right;
+  white-space: nowrap;
 }
 .pct.pctDone { color: var(--done); }
 .pct.pctActive { color: var(--text); }

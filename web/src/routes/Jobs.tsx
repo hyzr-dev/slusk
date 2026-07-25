@@ -259,6 +259,12 @@ export default function Jobs() {
                         <button
                           type="button"
                           className={styles.chevronButton}
+                          onClick={(e) => {
+                            // Without stopPropagation the click also reaches the
+                            // row handler below and toggles a second time.
+                            e.stopPropagation();
+                            toggleExpanded(j.id);
+                          }}
                           aria-expanded={expanded}
                           aria-controls={expansionId}
                           aria-label={expanded ? t.jobs.hideDetails : t.jobs.showDetails}

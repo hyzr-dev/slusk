@@ -57,6 +57,11 @@ describe('formatEta', () => {
     expect(formatEta(5400)).toBe('1 h 30 min');
     expect(formatEta(7260)).toBe('2 h 1 min');
   });
+
+  it('carries the rounded remainder instead of reporting 60 minutes', () => {
+    expect(formatEta(7199)).toBe('2 h');
+    expect(formatEta(86399)).toBe('24 h');
+  });
 });
 
 describe('formatBytesOrDash', () => {

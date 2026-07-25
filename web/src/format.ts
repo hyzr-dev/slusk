@@ -72,8 +72,13 @@ export function formatSpeed(bytesPerSec: number | null | undefined): string {
 export function formatEta(etaSeconds: number | null | undefined): string {
   if (!etaSeconds) return '—';
   if (etaSeconds >= 3600) {
-    const h = Math.floor(etaSeconds / 3600);
-    const m = Math.round((etaSeconds % 3600) / 60);
+    let h = Math.floor(etaSeconds / 3600);
+    let m = Math.round((etaSeconds % 3600) / 60);
+    // Rounding the remainder can reach a full hour (7199s -> 1h 60min).
+    if (m === 60) {
+      h += 1;
+      m = 0;
+    }
     return m > 0 ? `${h} h ${m} min` : `${h} h`;
   }
   if (etaSeconds >= 60) return `${Math.round(etaSeconds / 60)} min`;
