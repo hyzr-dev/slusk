@@ -13,25 +13,53 @@ import (
 )
 
 // jobViewSelect joins each album_job with its most recently created candidate
-// row and that candidate's most recent transfer (by updated_at), if any. A
-// job with no candidates yet still appears, with NULL candidate/transfer
-// columns. a.files is included (additive; no new JOINs or aggregates) so the
-// observ package can aggregate album-level live speed/ETA across every file
-// of the candidate rather than just the one transfer this view already joins
-// (issue #157) — see core.Candidate.Files. Callers append their own WHERE
-// clause.
+// row (a), and that candidate is in turn joined twice for two different
+// purposes:
+//
+//   - t is the candidate's single most recent transfer (by updated_at), used
+//     for identity only: internal/app/jobs.go's Cancel/Delete need one
+//     concrete transfer's SlskdID/Username to act on the remote transfer, and
+//     the detail view uses it the same way.
+//   - agg sums bytes_done/bytes_total/remaining across every transfer of the
+//     candidate. ActivateCandidateWithTransfers and CreateManualJob insert a
+//     transfers row for every file of the album upfront (state PENDING,
+//     bytes_total from the file size), so this sum is already album-complete
+//     even for files the per-peer throttle (#20) hasn't released to the peer
+//     backend yet — see core.JobView.AlbumBytes* and issue #174.
+//
+// A job with no candidates yet still appears, with NULL candidate/transfer
+// columns and agg's COALESCE-guarded zeros. a.files is included (additive; no
+// new JOINs or aggregates) so the observ package can aggregate album-level
+// live speed/ETA across every file of the candidate rather than just the one
+// transfer this view already joins (issue #157) — see core.Candidate.Files.
+// Callers append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
 		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
-		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files
+		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
+		agg.bytes_done, agg.bytes_total, agg.bytes_remaining
 	FROM album_jobs j
 	LEFT JOIN candidates a ON a.id = (
 		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
 	)
 	LEFT JOIN transfers t ON t.id = (
 		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC LIMIT 1
-	)`
+	)
+	LEFT JOIN LATERAL (
+		SELECT
+			COALESCE(SUM(bytes_done), 0)  AS bytes_done,
+			COALESCE(SUM(bytes_total), 0) AS bytes_total,
+			-- Remaining excludes only the three terminal states (core.TransferCompleted,
+			-- core.TransferErrored, core.TransferCancelled), expressed as NOT IN so any
+			-- future non-terminal state counts as remaining by default rather than
+			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
+			-- STALLED can still recover or be retried.
+			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
+				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
+		FROM transfers
+		WHERE candidate_id = a.id
+	) agg ON true`
 
 func scanJobView(r rowScanner) (core.JobView, error) {
 	var v core.JobView
@@ -53,6 +81,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
+		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
 	)
 	if err != nil {
 		return core.JobView{}, err

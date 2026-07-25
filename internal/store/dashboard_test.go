@@ -173,6 +173,205 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	}
 }
 
+// TestListJobsWithTransferAggregatesAlbumBytes reproduces the multi-track
+// album progress-bar bug (issue #174): AlbumBytesDone/Total must be the SUM
+// across every transfer of the candidate, not just the latest transfer's
+// numbers — while Transfer must still hold the latest row (identity for
+// Cancel/Delete), so a regression that repurposes the t join instead of
+// adding the lateral agg join is caught.
+func TestListJobsWithTransferAggregatesAlbumBytes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 50, now)
+	_ = s.UpdateJobMetadata(ctx, job.ID, "Album Bytes", "Aphex Twin", "", 0, now)
+
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "album_peer", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	attempt, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+
+	tid1, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track1: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid1, core.TransferInProgress, 1000, 2000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress track1: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track2: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferInProgress, 300, 3000, later); err != nil {
+		t.Fatalf("UpdateTransferProgress track2: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+
+	// Sums across both transfers, not just the latest (track2).
+	if v.AlbumBytesDone != 1300 {
+		t.Errorf("AlbumBytesDone = %d, want 1300 (1000+300)", v.AlbumBytesDone)
+	}
+	if v.AlbumBytesTotal != 5000 {
+		t.Errorf("AlbumBytesTotal = %d, want 5000 (2000+3000)", v.AlbumBytesTotal)
+	}
+	if v.AlbumBytesRemaining != 3700 {
+		t.Errorf("AlbumBytesRemaining = %d, want 3700 ((2000-1000)+(3000-300))", v.AlbumBytesRemaining)
+	}
+
+	// Transfer identity must still be the latest row (track2), unchanged by
+	// the aggregate join.
+	if v.Transfer == nil {
+		t.Fatalf("expected non-nil Transfer")
+	}
+	if v.Transfer.Filename != "track2.flac" || v.Transfer.BytesDone != 300 || v.Transfer.BytesTotal != 3000 {
+		t.Errorf("Transfer = %+v, want the latest row (track2.flac, bytesDone 300, bytesTotal 3000)", v.Transfer)
+	}
+}
+
+// TestListJobsWithTransferAlbumBytesZeroWithoutAttempt covers the a.id IS
+// NULL case: the lateral aggregate must yield zeros (via COALESCE), not NULL
+// scan errors, for a job with no candidate yet.
+func TestListJobsWithTransferAlbumBytesZeroWithoutAttempt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 51, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+	if v.Job.ID != job.ID {
+		t.Fatalf("unexpected job in result: %+v", v.Job)
+	}
+	if v.Transfer != nil {
+		t.Errorf("expected nil Transfer, got %+v", v.Transfer)
+	}
+	if v.AlbumBytesDone != 0 || v.AlbumBytesTotal != 0 || v.AlbumBytesRemaining != 0 {
+		t.Errorf("AlbumBytes* = %d/%d/%d, want all zero for a job with no candidate", v.AlbumBytesDone, v.AlbumBytesTotal, v.AlbumBytesRemaining)
+	}
+}
+
+// TestListJobsWithTransferAlbumBytesRemainingExcludesTerminal covers the
+// FILTER clause: a terminal (ERRORED) transfer with leftover bytes must
+// still count toward AlbumBytesDone/Total (it happened) but must be excluded
+// from AlbumBytesRemaining (it will never resume).
+func TestListJobsWithTransferAlbumBytesRemainingExcludesTerminal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 52, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "flaky_peer", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	attempt, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+
+	// A live transfer still in progress.
+	tid1, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track1.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track1: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid1, core.TransferInProgress, 100, 1000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress track1: %v", err)
+	}
+
+	// A terminal (errored) transfer with bytes left undone.
+	later := now.Add(time.Minute)
+	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track2.flac", later.Add(time.Hour), later)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track2: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferErrored, 200, 2000, later); err != nil {
+		t.Fatalf("UpdateTransferProgress track2: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+
+	if v.AlbumBytesDone != 300 {
+		t.Errorf("AlbumBytesDone = %d, want 300 (100+200, errored transfer's bytes still counted)", v.AlbumBytesDone)
+	}
+	if v.AlbumBytesTotal != 3000 {
+		t.Errorf("AlbumBytesTotal = %d, want 3000 (1000+2000, errored transfer's total still counted)", v.AlbumBytesTotal)
+	}
+	// Only track1's leftover (1000-100=900) counts; track2 is terminal so its
+	// leftover (2000-200=1800) is excluded.
+	if v.AlbumBytesRemaining != 900 {
+		t.Errorf("AlbumBytesRemaining = %d, want 900 (only the non-terminal track1's leftover)", v.AlbumBytesRemaining)
+	}
+}
+
+// TestListJobsWithTransferAlbumBytesRemainingNeverNegative covers the
+// GREATEST(..., 0) guard: a transfer whose bytes_done overshoots bytes_total
+// (a progress report past the announced size) must not push
+// AlbumBytesRemaining negative.
+func TestListJobsWithTransferAlbumBytesRemainingNeverNegative(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 53, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "overshoot_peer", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	attempt, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+
+	tid, err := s.RecordEnqueueIntent(ctx, attempt.ID, "overshoot_peer", "track1.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid, core.TransferInProgress, 1500, 1000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+	if v.AlbumBytesRemaining != 0 {
+		t.Errorf("AlbumBytesRemaining = %d, want 0 (bytes_done > bytes_total must not go negative)", v.AlbumBytesRemaining)
+	}
+}
+
 func TestListJobsWithTransferPopulatesAttempt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
