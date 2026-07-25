@@ -1,21 +1,104 @@
 package soulseek
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
 	"math"
 	"os"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
 
+// ShareFileMeta is one file's cached technical metadata, keyed by its local
+// path. Bitrate and Duration are both zero exactly when the file was examined
+// and yielded no attributes at all — extractTechnicalMetadata rejects a zero
+// bitrate or duration, so zero can never be a legitimate value and doubles as a
+// cached negative result rather than "unknown".
+type ShareFileMeta struct {
+	Path     string
+	Size     int64
+	ModTime  time.Time
+	Bitrate  uint32
+	Duration uint32
+}
+
+// ShareMetaCache persists the result of reading a shared audio file's technical
+// metadata so a restart does not have to open every mp3 and flac again. It is
+// deliberately set-oriented rather than per-file: a round trip per file would
+// trade filesystem latency for database latency at the same order of magnitude.
+//
+// Every method is best-effort. An error from either one is logged and the scan
+// continues by reading the files — the cache may never affect what is
+// advertised, only how long producing it takes.
+type ShareMetaCache interface {
+	// LoadShareMeta returns every cached row. The caller treats an error as an
+	// empty cache.
+	LoadShareMeta(ctx context.Context) ([]ShareFileMeta, error)
+
+	// SaveShareMeta upserts every entry in upserts (keyed on Path) and deletes
+	// the rows named by stalePaths. It is called only after a share scan has
+	// walked every configured root successfully; stalePaths is exactly the set
+	// of paths this scan loaded but did not observe.
+	SaveShareMeta(ctx context.Context, upserts []ShareFileMeta, stalePaths []string) error
+}
+
+// audioFormatOf reports the audio format extractTechnicalMetadata recognizes
+// for path ("mp3" or "flac"), or "" for anything else. Shared by
+// extractTechnicalMetadata and scanShares's cache lookup so both agree on
+// exactly which files are worth caching at all.
+func audioFormatOf(path string) string {
+	switch extensionOf(path) {
+	case "flac":
+		return "flac"
+	case "mp3":
+		return "mp3"
+	default:
+		return ""
+	}
+}
+
+// attributesFromCache rebuilds the wire attributes extractTechnicalMetadata
+// would have produced, from a cached entry. nil when both fields are zero —
+// the cached negative result (see ShareFileMeta).
+func attributesFromCache(m ShareFileMeta) []peer.Attribute {
+	if m.Bitrate == 0 && m.Duration == 0 {
+		return nil
+	}
+	return []peer.Attribute{{Code: peer.Bitrate, Value: m.Bitrate}, {Code: peer.Duration, Value: m.Duration}}
+}
+
+// attributeValues extracts the bitrate/duration values extractTechnicalMetadata
+// placed on the wire (0/0 if attrs is nil, i.e. a negative result), for caching.
+func attributeValues(attrs []peer.Attribute) (bitrate, duration uint32) {
+	for _, a := range attrs {
+		switch a.Code {
+		case peer.Bitrate:
+			bitrate = a.Value
+		case peer.Duration:
+			duration = a.Value
+		}
+	}
+	return bitrate, duration
+}
+
+// sameShareFileMeta reports whether a cached entry is still valid for a file
+// currently observed with size and mod. Compared on UnixMicro rather than
+// time.Equal so a mod time that lost sub-microsecond precision on its way
+// through the store (see migrations/0007_share_metadata_cache.sql) still
+// compares equal - that is the whole point of storing microseconds.
+func sameShareFileMeta(cached ShareFileMeta, size int64, mod time.Time) bool {
+	return cached.Size == size && cached.ModTime.UnixMicro() == mod.UnixMicro()
+}
+
 func extractTechnicalMetadata(path string, size int64, logger *slog.Logger) []peer.Attribute {
-	ext := extensionOf(path)
+	format := audioFormatOf(path)
 	var seconds float64
 	var err error
-	switch ext {
+	switch format {
 	case "flac":
 		seconds, err = flacDuration(path)
 	case "mp3":
@@ -25,7 +108,7 @@ func extractTechnicalMetadata(path string, size int64, logger *slog.Logger) []pe
 	}
 	if err != nil || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 		if err != nil && logger != nil {
-			logger.Debug("audio metadata unavailable; sharing file without technical attributes", "path", path, "format", ext, "err", err)
+			logger.Debug("audio metadata unavailable; sharing file without technical attributes", "path", path, "format", format, "err", err)
 		}
 		return nil
 	}
