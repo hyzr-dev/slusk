@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useEvents } from '../api/queries';
-import PageHeading from '../components/PageHeading';
 import table from '../components/Table.module.css';
 import { formatDateTime } from '../format';
 import { eventLabel, t } from '../strings';
@@ -16,8 +15,6 @@ export default function Events() {
 
   return (
     <>
-      <PageHeading>{t.nav.events}</PageHeading>
-
       <div className={styles.controls}>
         <input
           className={styles.input}

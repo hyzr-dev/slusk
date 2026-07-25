@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { useRescanShares, useShares } from '../api/queries';
-import PageHeading from '../components/PageHeading';
 import StatCard from '../components/StatCard';
 import table from '../components/Table.module.css';
 import { formatDateTime, formatSize } from '../format';
@@ -15,19 +14,15 @@ export default function Shares() {
   // `data` is undefined on first paint and `enabled` has no safe default to
   // branch on meanwhile — rendering the disabled notice (or the empty-shares
   // warning) before the real report arrives would flash the wrong state, so
-  // show only the heading until the query settles. Unlike Peers/Overview,
+  // render nothing until the query settles (the sticky header already shows
+  // the "Shares" title regardless of load state). Unlike Peers/Overview,
   // there is no empty-array fallback that is also a valid rendered state here.
   if (!data) {
-    return <PageHeading>{t.nav.shares}</PageHeading>;
+    return null;
   }
 
   if (!data.enabled) {
-    return (
-      <>
-        <PageHeading>{t.nav.shares}</PageHeading>
-        <div className={styles.notice}>{t.shares.disabledNotice}</div>
-      </>
-    );
+    return <div className={styles.notice}>{t.shares.disabledNotice}</div>;
   }
 
   const scanning = data.scanning || rescan.isPending;
@@ -46,8 +41,6 @@ export default function Shares() {
 
   return (
     <>
-      <PageHeading>{t.nav.shares}</PageHeading>
-
       {data.folders.length === 0 && (
         <div className={styles.warningCard}>
           <svg

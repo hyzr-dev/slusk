@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useJobs, useShares, useStatus } from '../api/queries';
+import type { ModuleStatus, StatusReport } from '../api/types';
 import Header from './Header';
 import styles from './Layout.module.css';
 import { t } from '../strings';
@@ -40,9 +41,44 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
+type HealthState = 'ok' | 'warn' | 'unknown';
+
+// A module's dependency-dot state, distinguishing three cases the old
+// `ready ?? true` logic conflated into two:
+//   - unknown: the /status query hasn't loaded yet, the backend didn't
+//     report this module at all, or the module has never completed a first
+//     tick since process start (lastAttempt === "") — none of these mean
+//     "healthy", but they don't mean "down" either.
+//   - warn: the module has attempted at least once and is not ready.
+//   - ok: the module is ready.
+function moduleHealth(status: StatusReport | undefined, module: ModuleStatus | undefined): HealthState {
+  if (!status || !module || !module.lastAttempt) return 'unknown';
+  return module.ready ? 'ok' : 'warn';
+}
+
+// Combines two modules' health into one dependency row: warn wins over
+// unknown, which wins over ok, so a single struggling module is never
+// masked by a healthy sibling.
+function combineHealth(a: HealthState, b: HealthState): HealthState {
+  if (a === 'warn' || b === 'warn') return 'warn';
+  if (a === 'unknown' || b === 'unknown') return 'unknown';
+  return 'ok';
+}
+
+function healthMeta(state: HealthState): string {
+  if (state === 'ok') return t.nav.depHealthy;
+  if (state === 'warn') return t.nav.depUnhealthy;
+  return t.nav.depUnknown;
+}
+
 export default function Layout() {
   const { data: status } = useStatus();
   const { data: jobs = [] } = useJobs();
+  // Polled at the same 15s cadence as the Shares route itself (SHARES_INTERVAL
+  // in api/queries.ts) rather than a separate, slower interval — the sidebar
+  // only reads `enabled` and a folder count from this response, but keeping
+  // one interval for the one query key avoids two components disagreeing on
+  // how fresh "fresh" means for the same data.
   const { data: shares } = useShares();
 
   const jobsBadge = jobs.filter(
@@ -51,24 +87,34 @@ export default function Layout() {
 
   // Lidarr and Soulseek have no dedicated health endpoint (issue #181): their
   // dot is inferred from the pipeline module that talks to them, which is a
-  // proxy, not a direct signal — a module can read healthy simply because it
-  // has not ticked since the dependency actually died. wanted_sync is the
-  // only module that calls Lidarr; downloading/selecting both depend on a
-  // working Soulseek connection. Default to healthy (not "down") while the
-  // status query is still loading, so the sidebar doesn't flash a false
-  // warning on every page load.
+  // proxy, not a direct signal. wanted_sync is the only module that calls
+  // Lidarr. Soulseek is depended on by both discovery (issues searches) and
+  // downloading (transfers) — selecting itself only ranks already-found
+  // candidates and does not touch the network.
   const modules = status?.moduleDetails ?? {};
-  const lidarrHealthy = modules.wanted_sync ? modules.wanted_sync.ready : true;
-  const soulseekHealthy =
-    (modules.downloading ? modules.downloading.ready : true) &&
-    (modules.selecting ? modules.selecting.ready : true);
-  const shareFolders = shares?.folders.length ?? 0;
-  const sharesHealthy = shareFolders > 0;
+  const lidarrState = moduleHealth(status, modules.wanted_sync);
+  const soulseekState = combineHealth(
+    moduleHealth(status, modules.discovery),
+    moduleHealth(status, modules.downloading),
+  );
 
-  const deps = [
-    { name: t.nav.depLidarr, healthy: lidarrHealthy, meta: lidarrHealthy ? t.nav.depHealthy : t.nav.depUnhealthy },
-    { name: t.nav.depSoulseek, healthy: soulseekHealthy, meta: soulseekHealthy ? t.nav.depHealthy : t.nav.depUnhealthy },
-    { name: t.nav.depShares, healthy: sharesHealthy, meta: t.nav.depFolders(shareFolders) },
+  // SharesReport.enabled (not folders.length, which is [] both when sharing
+  // is off and when it's on with nothing configured) is what distinguishes
+  // "native Soulseek sharing is off" — a normal setup, not a fault — from
+  // "sharing is on but no folders are configured" — a real warning, since
+  // sharing is the price of admission to the Soulseek network.
+  const shareFolders = shares?.folders.length ?? 0;
+  const sharesState: HealthState = !shares ? 'unknown' : !shares.enabled ? 'unknown' : shareFolders > 0 ? 'ok' : 'warn';
+  const sharesMeta = !shares
+    ? t.nav.depUnknown
+    : !shares.enabled
+      ? t.nav.depDisabled
+      : `${healthMeta(sharesState)} · ${t.nav.depFolders(shareFolders)}`;
+
+  const deps: { name: string; state: HealthState; meta: string }[] = [
+    { name: t.nav.depLidarr, state: lidarrState, meta: healthMeta(lidarrState) },
+    { name: t.nav.depSoulseek, state: soulseekState, meta: healthMeta(soulseekState) },
+    { name: t.nav.depShares, state: sharesState, meta: sharesMeta },
   ];
 
   return (
@@ -82,31 +128,44 @@ export default function Layout() {
           </div>
         </div>
 
-        <nav className={styles.nav}>
-          {NAV_GROUPS.map((group) => (
-            <div key={group.label}>
-              <div className={styles.groupLabel}>{group.label}</div>
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) => (isActive ? styles.navItemActive : styles.navItem)}
-                >
-                  <span className={styles.navLabel}>{item.label}</span>
-                  {item.to === '/jobs' && jobsBadge > 0 && (
-                    <span className={styles.badge}>{jobsBadge}</span>
-                  )}
-                </NavLink>
-              ))}
-            </div>
-          ))}
+        <nav className={styles.nav} aria-label={t.nav.navAriaLabel}>
+          {NAV_GROUPS.map((group) => {
+            const groupHeadingId = `nav-group-${group.label.toLowerCase()}`;
+            return (
+              <div key={group.label}>
+                <div className={styles.groupLabel} id={groupHeadingId}>{group.label}</div>
+                <ul className={styles.groupList} aria-labelledby={groupHeadingId}>
+                  {group.items.map((item) => (
+                    <li key={item.to}>
+                      <NavLink
+                        to={item.to}
+                        end={item.end}
+                        className={({ isActive }) => (isActive ? styles.navItemActive : styles.navItem)}
+                      >
+                        <span className={styles.navLabel}>{item.label}</span>
+                        {item.to === '/jobs' && jobsBadge > 0 && (
+                          <span className={styles.badge} aria-label={t.nav.jobsBadgeLabel(jobsBadge)}>
+                            {jobsBadge}
+                          </span>
+                        )}
+                      </NavLink>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
         </nav>
 
         <div className={styles.deps}>
           {deps.map((d) => (
             <div key={d.name} className={styles.depRow}>
-              <span className={`${styles.depDot} ${d.healthy ? styles.depOk : styles.depWarn}`} aria-hidden="true" />
+              <span
+                className={`${styles.depDot} ${
+                  d.state === 'ok' ? styles.depOk : d.state === 'warn' ? styles.depWarn : styles.depUnknown
+                }`}
+                aria-hidden="true"
+              />
               <span className={styles.depName}>{d.name}</span>
               <span className={styles.depMeta}>{d.meta}</span>
             </div>

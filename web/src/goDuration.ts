@@ -17,6 +17,11 @@ const UNIT_SECONDS: Record<string, number> = {
 // Longer unit suffixes ("ms", "us", "µs", "ns") must be tried before the
 // single-letter ones ("m", "s") they contain, or "500ms" would match "m" and
 // leave a dangling "s" that fails the whole-string check below.
+//
+// A repeated unit (e.g. "5s5s") is accepted and summed to 10s rather than
+// rejected — Go's time.Duration.String() never emits this, so it's not a
+// real input we need to guard against, just a side effect of matching
+// unit-value pairs globally instead of validating overall duration shape.
 const DURATION_RE = /(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)/g;
 
 export function parseGoDuration(input: string | null | undefined): number | null {

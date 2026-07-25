@@ -7,7 +7,6 @@ import pill from '../components/StatusPill.module.css';
 import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
 import { formatEta, formatSpeed, percent } from '../format';
-import PageHeading from '../components/PageHeading';
 import { stateLabel, t } from '../strings';
 import { countByStatus, matchesFilters, type SourceFilter, type StatusFilter } from './jobFilter';
 import JobExpansion from './JobExpansion';
@@ -96,8 +95,6 @@ export default function Jobs() {
 
   return (
     <>
-      <PageHeading>{t.nav.jobs}</PageHeading>
-
       <div className={styles.controlsRow}>
         <input
           className={styles.input}

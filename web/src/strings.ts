@@ -27,7 +27,17 @@ export const t = {
     depShares: 'Shares',
     depHealthy: 'ok',
     depUnhealthy: 'down',
+    // Neither "ok" nor "down": the module has not reported a health signal
+    // yet (status query still loading, or the module has never completed a
+    // first tick since process start) — must not read as either colour.
+    depUnknown: 'checking…',
+    // Shares' third state (see SharesReport.enabled): native Soulseek
+    // sharing is off in the configuration, which is a normal, deliberate
+    // setup rather than a fault — distinct from "enabled with 0 folders".
+    depDisabled: 'disabled',
     depFolders: (n: number) => `${n} folder${n === 1 ? '' : 's'}`,
+    navAriaLabel: 'Primary',
+    jobsBadgeLabel: (n: number) => `${n} jobs active, queued or stalled`,
   },
   header: {
     overview: { title: 'Overview', subtitle: 'Live pipeline status across every job' },
@@ -189,15 +199,16 @@ export const t = {
     statQueuedSub: 'waiting for peer',
     statStalledSub: 'needs attention',
     statOrphanedSub: 'unknown transfer',
+    statFailedSub: 'needs retry',
     statCompletedLabel: 'Completed (24h)',
     statCompletedSub: 'imported',
 
     activeDownloadsTitle: 'Active downloads',
+    heroPillsLabel: 'Current job counts',
     throughputIdle: 'idle',
     phaseQueue: (n: number) => `queue · #${n}`,
     phaseImporting: 'importing',
     phaseStalled: 'stalled',
-    metaQueue: (n: number) => `#${n}`,
     metaVerifying: 'verifying',
   },
   peers: {

@@ -1,5 +1,4 @@
 import { useStatus } from '../api/queries';
-import PageHeading from '../components/PageHeading';
 import table from '../components/Table.module.css';
 import { formatTime } from '../format';
 import { t } from '../strings';
@@ -12,8 +11,6 @@ export default function Health() {
 
   return (
     <>
-      <PageHeading>{t.nav.health}</PageHeading>
-
       <table className={table.table}>
         <thead>
           <tr>

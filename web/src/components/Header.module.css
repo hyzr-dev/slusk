@@ -1,7 +1,7 @@
 @keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(53, 196, 143, 0.5); }
-  70% { box-shadow: 0 0 0 6px rgba(53, 196, 143, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(53, 196, 143, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--done) 50%, transparent); }
+  70% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--done) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--done) 0%, transparent); }
 }
 
 .header {
@@ -12,7 +12,7 @@
   align-items: center;
   gap: 14px;
   padding: 16px 26px;
-  background: rgba(11, 13, 16, 0.86);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border-subtle);
 }

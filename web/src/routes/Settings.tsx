@@ -3,7 +3,6 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { apiGet, ApiError } from '../api/client';
 import { queryKeys, useConfig, useTestConnection, useUpdateConfig } from '../api/queries';
 import type { AppConfig, ConfigUpdateRequest, SharedFolderDTO } from '../api/types';
-import PageHeading from '../components/PageHeading';
 import { t } from '../strings';
 import styles from './Settings.module.css';
 
@@ -12,7 +11,6 @@ export default function Settings() {
 
   return (
     <>
-      <PageHeading>{t.nav.settings}</PageHeading>
       {config && !config.writable && (
         <div className={styles.notice}>{t.settings.notWritableNotice}</div>
       )}

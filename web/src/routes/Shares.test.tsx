@@ -41,10 +41,14 @@ function renderShares(client: QueryClient) {
 }
 
 describe('loading state', () => {
-  it('renders only the heading before data arrives', () => {
+  it('renders nothing before data arrives', () => {
+    // The page title comes from the sticky chrome header (components/Header.tsx)
+    // when Shares is mounted inside Layout; rendered standalone here (as this
+    // whole file does), there is no header, so the loading state has nothing
+    // to show yet — only that it doesn't render the wrong state early.
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
-    renderShares(newClient());
-    expect(screen.getByRole('heading', { name: t.nav.shares })).toBeInTheDocument();
+    const { container } = renderShares(newClient());
+    expect(container.textContent).toBe('');
     expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
     expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.shares.rescan })).not.toBeInTheDocument();

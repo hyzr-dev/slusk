@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { ChartsReport, Job, JobStatus } from '../api/types';
@@ -84,6 +84,24 @@ function renderOverview(jobsData: Job[] = jobs, chartsData: ChartsReport | undef
   );
 }
 
+// A real route for /jobs/:id, so the keyboard-activation test below can
+// assert on actual navigation rather than reaching into useNavigate internals.
+function renderOverviewWithRouting() {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(queryKeys.jobs, jobs);
+  queryClient.setQueryData(queryKeys.charts, charts);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Overview />} />
+          <Route path="/jobs/:id" element={<div>job detail page</div>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
 // A stat card's value/sub live in DOM siblings of the label, not attached to
 // it directly — climb from the label to the shared card container so
 // `within` can scope assertions and avoid colliding with identical numbers
@@ -94,7 +112,9 @@ function statCard(labelText: string): HTMLElement {
 }
 
 function pill(labelText: string): HTMLElement {
-  const pills = document.querySelector(`.${styles.heroPills}`) as HTMLElement;
+  // role="group" + aria-label, not a scoped class selector, so a restyle of
+  // the hero doesn't break this query for no behavioural reason.
+  const pills = screen.getByRole('group', { name: t.overview.heroPillsLabel });
   return within(pills).getByText(labelText).parentElement as HTMLElement;
 }
 
@@ -132,12 +152,16 @@ describe('Overview stat cards', () => {
     expect(within(card).getByText(t.overview.statActiveSub)).toBeInTheDocument();
   });
 
-  it('shows queued, stalled and orphaned cards with their sub-labels', () => {
+  it('shows queued, stalled, failed and orphaned cards with their sub-labels', () => {
     renderOverview();
     expect(within(statCard(t.status.queued)).getByText('1')).toBeInTheDocument();
     expect(within(statCard(t.status.queued)).getByText(t.overview.statQueuedSub)).toBeInTheDocument();
     expect(within(statCard(t.status.stalled)).getByText('1')).toBeInTheDocument();
     expect(within(statCard(t.status.stalled)).getByText(t.overview.statStalledSub)).toBeInTheDocument();
+    // Restored per #87 — folding failed into the "needs you" pill alone made
+    // the failed/stalled split invisible; the stat card makes it visible again.
+    expect(within(statCard(t.status.failed)).getByText('1')).toBeInTheDocument();
+    expect(within(statCard(t.status.failed)).getByText(t.overview.statFailedSub)).toBeInTheDocument();
     expect(within(statCard(t.status.orphaned)).getByText('1')).toBeInTheDocument();
     expect(within(statCard(t.status.orphaned)).getByText(t.overview.statOrphanedSub)).toBeInTheDocument();
   });
@@ -171,11 +195,28 @@ describe('Overview active downloads panel', () => {
     expect(panel.getByText(formatSpeed(percentJob2.speed))).toBeInTheDocument();
   });
 
-  it('renders the queue phase/meta for a job waiting in a peer queue', () => {
+  it('renders the queue phase for a job waiting in a peer queue, without repeating the queue position as the meta text', () => {
     renderOverview();
     const panel = within(activePanel());
     expect(panel.getByText(t.overview.phaseQueue(4))).toBeInTheDocument();
-    expect(panel.getByText(t.overview.metaQueue(4))).toBeInTheDocument();
+    // queueJob has no etaSeconds, so the right-hand meta falls back to
+    // formatEta's "—" rather than the redundant "#4" the left already shows.
+    const row = screen.getByText('Job 3').closest('[role="link"]') as HTMLElement;
+    expect(within(row).getByText('—')).toBeInTheDocument();
+  });
+
+  it('renders a hatched, neutral progress fill for a queued row instead of a solid colour', () => {
+    renderOverview();
+    const row = screen.getByText('Job 3').closest('[role="link"]') as HTMLElement;
+    expect(row.querySelector(`.${styles.rowBarHatched}`)).toBeInTheDocument();
+  });
+
+  it('is keyboard-activatable: pressing Enter on a row navigates to its job detail page', () => {
+    renderOverviewWithRouting();
+    const row = screen.getByText('Job 3').closest('[role="link"]') as HTMLElement;
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(screen.getByText('job detail page')).toBeInTheDocument();
   });
 
   it('renders the importing phase/meta for a job in the IMPORTING state', () => {

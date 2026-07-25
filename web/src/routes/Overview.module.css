@@ -37,7 +37,7 @@
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 13px;
   margin-bottom: 16px;
 }
@@ -72,6 +72,7 @@
 }
 .row:last-child { border-bottom: none; }
 .row:hover { background: var(--panel-raised); }
+.row:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
 
 .rowDot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
 .rowMain { min-width: 0; flex: 1; }
@@ -90,6 +91,16 @@
 .rowProgress { width: 150px; flex: 0 0 150px; }
 .rowBar { height: 6px; border-radius: 4px; background: var(--panel-inset); overflow: hidden; }
 .rowBarFill { height: 100%; border-radius: 3px; }
+/* Neutral grey hatch for a peer-queued job, matching Jobs.module.css's
+   .progressHatched: at 100% width a solid colour would read as complete or
+   actively transferring, which a job waiting in a peer's queue is not. */
+.rowBarHatched {
+  background: repeating-linear-gradient(
+    45deg,
+    #2a2f39 0 6px,
+    #22262e 6px 12px
+  );
+}
 .rowMeta {
   display: flex;
   justify-content: space-between;

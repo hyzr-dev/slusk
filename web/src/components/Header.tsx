@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
-import { useConfig, useJobs, useStatus } from '../api/queries';
-import type { ModuleStatus } from '../api/types';
+import { useConfig, useJobDetail, useJobs, useStatus } from '../api/queries';
+import type { Job, JobDetail, ModuleStatus } from '../api/types';
 import { parseGoDuration } from '../goDuration';
 import { t } from '../strings';
 import styles from './Header.module.css';
@@ -11,19 +11,15 @@ interface Heading {
   subtitle: string;
 }
 
-// Route -> page title/subtitle. /jobs/:id is handled separately below since
-// its subtitle needs the id from the URL, not a static string.
-function heading(pathname: string, jobId: string | undefined): Heading {
+// Route -> static page title/subtitle. /jobs/:id is handled separately in
+// jobDetailHeading below since its title needs live job data, not a static
+// string.
+function heading(pathname: string): Heading {
   switch (true) {
     case pathname === '/':
       return t.header.overview;
     case pathname === '/jobs':
       return t.header.jobs;
-    case pathname.startsWith('/jobs/'):
-      return {
-        title: t.header.jobDetail.title,
-        subtitle: jobId ? t.header.jobDetail.subtitleWithId(jobId) : '',
-      };
     case pathname === '/events':
       return t.header.events;
     case pathname === '/peers':
@@ -57,12 +53,43 @@ function reconcileText(
   return t.header.reconcileIn(Math.max(1, Math.round(dueInSeconds / 60)));
 }
 
+// The job-detail route's title needs live data, not a static string — this
+// is the sole surviving purpose of the per-route heading this diff removes
+// everywhere else (see routes/JobDetail.tsx, which used to render its own
+// PageHeading for exactly this reason). Mirrors JobDetail's own three-tier
+// fallback: the live job list, then the cached detail response, then a
+// loading placeholder — so the header and the page body never disagree
+// about which tier they're in.
+function jobDetailHeading(
+  jobs: Job[],
+  jobIdParam: string | undefined,
+  detail: JobDetail | undefined,
+  detailReady: boolean,
+): Heading {
+  const numericId = Number(jobIdParam);
+  const job = jobs.find((j) => j.id === numericId);
+  const subtitle = jobIdParam ? t.header.jobDetail.subtitleWithId(jobIdParam) : '';
+  if (job) return { title: job.title, subtitle };
+  if (detailReady && detail) return { title: detail.title, subtitle };
+  return { title: t.jobs.loading, subtitle: '' };
+}
+
 export default function Header() {
   const location = useLocation();
   const { id } = useParams();
-  const { dataUpdatedAt } = useJobs();
+  const isJobDetail = location.pathname.startsWith('/jobs/');
+
+  const { data: jobs = [], dataUpdatedAt } = useJobs();
   const { data: status } = useStatus();
   const { data: config } = useConfig();
+  // Only fetches on the job-detail route (see useJobDetail's `enabled`
+  // param) — Header renders on every route, unlike JobDetail itself.
+  const numericId = Number(id);
+  const {
+    data: detail,
+    isPlaceholderData: detailIsPlaceholder,
+  } = useJobDetail(numericId, isJobDetail && !Number.isNaN(numericId));
+  const detailReady = detail !== undefined && !detailIsPlaceholder;
 
   // Ticks once a second so "updated Ns ago" and the reconcile countdown stay
   // current between poll intervals, without inventing a second source of
@@ -73,22 +100,19 @@ export default function Header() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const page = heading(location.pathname, id);
+  const page = isJobDetail ? jobDetailHeading(jobs, id, detail, detailReady) : heading(location.pathname);
   const updatedSeconds = dataUpdatedAt ? Math.max(0, Math.round((now - dataUpdatedAt) / 1000)) : null;
   const reconcile = reconcileText(status?.moduleDetails.wanted_sync, config?.pipeline.wantedSyncInterval, now);
+  const reconcileLabel = reconcile ? `${reconcile} — ${t.header.reconcileTooltip}` : undefined;
 
   return (
     <header className={styles.header}>
       <div className={styles.titleBlock}>
-        {/* Not an <h1>: every route already renders its own PageHeading h1
-            with the same text (see e.g. routes/Jobs.tsx), and this sticky
-            chrome header is present on every page alongside it. A second,
-            identically-named top-level heading would be a real accessibility
-            regression (two landmarks announcing "Jobs") and breaks
-            getByRole('heading', ...) uniqueness in the existing route tests
-            (App.test.tsx, Shares.test.tsx) — reworking every route to drop
-            its own heading was out of scope for this change. */}
-        <div className={styles.title}>{page.title}</div>
+        {/* The sole <h1> on the page: every route used to render its own
+            PageHeading with the same text, which was a real accessibility
+            regression (two landmarks announcing "Jobs") — see #181 review.
+            Routes no longer render a heading of their own. */}
+        <h1 className={styles.title}>{page.title}</h1>
         <div className={styles.subtitle}>{page.subtitle}</div>
       </div>
 
@@ -101,7 +125,10 @@ export default function Header() {
       </div>
 
       {reconcile && (
-        <div className={styles.reconcileBadge} title={t.header.reconcileTooltip}>
+        // `title` alone is a hover-only tooltip, invisible to keyboard and
+        // touch users; aria-label duplicates the explanation into the
+        // accessible name so screen readers get it even without a pointer.
+        <div className={styles.reconcileBadge} title={t.header.reconcileTooltip} aria-label={reconcileLabel}>
           <span className={styles.reconcileIcon} aria-hidden="true" />
           <span>{reconcile}</span>
         </div>

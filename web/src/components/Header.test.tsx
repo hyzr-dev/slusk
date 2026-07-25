@@ -3,9 +3,37 @@ import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { AppConfig, ModuleStatus, StatusReport } from '../api/types';
+import type { AppConfig, Job, JobDetail, ModuleStatus, StatusReport } from '../api/types';
 import { t } from '../strings';
 import Header from './Header';
+
+function makeJob(id: number, title: string): Job {
+  return {
+    id,
+    title,
+    artist: 'Some Artist',
+    status: 'active',
+    peer: '',
+    bytesDone: 0,
+    bytesTotal: 0,
+    updatedAt: '',
+    state: 'DOWNLOADING',
+    candidatesTried: 1,
+    maxCandidates: 3,
+    failReason: '',
+    nextAttemptAt: '',
+    retries: 0,
+    notBefore: '',
+    source: 'lidarr',
+    year: null,
+    tracks: null,
+    format: null,
+  };
+}
+
+function makeJobDetail(id: number, title: string): JobDetail {
+  return { id, title, artist: 'Some Artist', state: 'DOWNLOADING', attempts: [] };
+}
 
 function makeModule(overrides: Partial<ModuleStatus> = {}): ModuleStatus {
   return {
@@ -41,12 +69,25 @@ function makeConfig(wantedSyncInterval: string | undefined): AppConfig {
 
 function renderHeader(
   path: string,
-  opts: { status?: StatusReport; config?: AppConfig; jobsUpdatedAt?: number } = {},
+  opts: {
+    status?: StatusReport;
+    config?: AppConfig;
+    jobsUpdatedAt?: number;
+    jobs?: Job[];
+    jobDetail?: JobDetail;
+  } = {},
 ) {
   const client = new QueryClient();
-  if (opts.jobsUpdatedAt !== undefined) {
+  if (opts.jobs) {
+    client.setQueryData(
+      queryKeys.jobs,
+      opts.jobs,
+      opts.jobsUpdatedAt !== undefined ? { updatedAt: opts.jobsUpdatedAt } : undefined,
+    );
+  } else if (opts.jobsUpdatedAt !== undefined) {
     client.setQueryData(queryKeys.jobs, [], { updatedAt: opts.jobsUpdatedAt });
   }
+  if (opts.jobDetail) client.setQueryData(queryKeys.jobDetail(opts.jobDetail.id), opts.jobDetail);
   if (opts.status) client.setQueryData(queryKeys.status, opts.status);
   if (opts.config) client.setQueryData(queryKeys.config, opts.config);
   return render(
@@ -76,10 +117,28 @@ describe('Header page title mapping', () => {
     expect(screen.getByText(expected.subtitle)).toBeInTheDocument();
   });
 
-  it('shows the job detail title with the id from the URL for /jobs/:id', () => {
-    renderHeader('/jobs/42');
-    expect(screen.getByText(t.header.jobDetail.title)).toBeInTheDocument();
-    expect(screen.getByText(t.header.jobDetail.subtitleWithId('42'))).toBeInTheDocument();
+  // The static "Job detail" title (t.header.jobDetail.title) is only the
+  // eventual fallback shape — with no seeded job data it can't be shown, so
+  // these test the header's actual three-tier behaviour: live job, cached
+  // detail, then a loading placeholder. See routes/JobDetail.tsx, which used
+  // to render its own duplicate heading for the same reason.
+  describe('job detail title (/jobs/:id)', () => {
+    it('shows a loading placeholder before any job data has arrived', () => {
+      renderHeader('/jobs/42');
+      expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
+    });
+
+    it('shows the title from the live jobs list once it loads', () => {
+      renderHeader('/jobs/42', { jobs: [makeJob(42, 'Kind of Blue')] });
+      expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
+      expect(screen.getByText(t.header.jobDetail.subtitleWithId('42'))).toBeInTheDocument();
+    });
+
+    it('falls back to the cached job-detail title once a job ages out of the live list', () => {
+      renderHeader('/jobs/42', { jobDetail: makeJobDetail(42, 'Blue Train') });
+      expect(screen.getByText('Blue Train')).toBeInTheDocument();
+      expect(screen.getByText(t.header.jobDetail.subtitleWithId('42'))).toBeInTheDocument();
+    });
   });
 });
 

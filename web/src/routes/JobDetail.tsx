@@ -2,7 +2,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
 import type { JobState } from '../api/types';
 import JobActions, { isRetryEligible } from '../components/JobActions';
-import PageHeading from '../components/PageHeading';
 import SourceBadge from '../components/SourceBadge';
 import StatusPill from '../components/StatusPill';
 import table from '../components/Table.module.css';
@@ -61,7 +60,6 @@ export default function JobDetail() {
           middle tier keeps the page useful after a job ages out of /api/jobs. */}
       {job ? (
         <>
-          <PageHeading>{job.title}</PageHeading>
           <div className={styles.meta}>
             <StatusPill status={job.status} state={job.state} />
             <SourceBadge source={job.source} />
@@ -89,7 +87,6 @@ export default function JobDetail() {
         </>
       ) : detailReady && detail ? (
         <>
-          <PageHeading>{detail.title}</PageHeading>
           <div className={styles.meta}>
             <span>{detail.artist}</span>
             {/* jobDetailDTO carries no `status` field (internal/observ/jobdetail.go),
@@ -102,9 +99,7 @@ export default function JobDetail() {
             <span>{t.state[detail.state] ?? detail.state}</span>
           </div>
         </>
-      ) : (
-        <PageHeading>{t.jobs.loading}</PageHeading>
-      )}
+      ) : null}
 
       <div className={styles.actionsWrap}>
         <JobActions jobId={id} state={actionState} onDeleted={() => navigate('/jobs')} />

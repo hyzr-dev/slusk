@@ -39,9 +39,11 @@
   padding: 14px 12px 6px;
 }
 
+.groupList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+
 .navItem, .navItemActive {
   display: flex; align-items: center; gap: 11px;
-  padding: 9px 12px;
+  padding: 8px 12px;
   border-radius: var(--radius-sm);
   font-size: 13px;
   text-decoration: none;
@@ -81,6 +83,9 @@
 .depDot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
 .depOk { background: var(--done); }
 .depWarn { background: var(--stalled); }
+/* Neither healthy nor unhealthy: status not yet loaded, module never
+   reported, or (for Shares) native sharing intentionally disabled. */
+.depUnknown { background: var(--text-dim); }
 .depName { flex: 1; }
 .depMeta { font-family: var(--font-mono); color: var(--text-dim); font-size: 11px; }
 

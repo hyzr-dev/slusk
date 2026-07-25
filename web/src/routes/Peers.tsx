@@ -1,7 +1,6 @@
 import { Fragment, useState } from 'react';
 import { usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
-import PageHeading from '../components/PageHeading';
 import table from '../components/Table.module.css';
 import { formatScore } from '../format';
 import { t } from '../strings';
@@ -39,8 +38,6 @@ export default function Peers() {
 
   return (
     <>
-      <PageHeading>{t.nav.peers}</PageHeading>
-
       <table className={table.table}>
         <thead>
           <tr>

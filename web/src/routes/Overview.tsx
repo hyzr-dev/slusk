@@ -4,32 +4,46 @@ import { useCharts, useJobs } from '../api/queries';
 import ChartCard from '../components/charts/ChartCard';
 import CumulativeAreaChart from '../components/charts/CumulativeAreaChart';
 import PassBarChart from '../components/charts/PassBarChart';
-import PageHeading from '../components/PageHeading';
 import SourceBadge from '../components/SourceBadge';
 import StatCard from '../components/StatCard';
-import { formatSpeed, percent } from '../format';
+import { formatEta, formatSpeed, percent } from '../format';
 import { t } from '../strings';
+import { countByStatus } from './jobFilter';
 import styles from './Overview.module.css';
 
 // A row's phase/state below the progress bar, and the matching value on the
 // right (mock: docs/design/slskdarr-dashboard.dc.html lines 158-166,
 // 1105/1114). Mirrors the queue/importing/stalled precedence Jobs.tsx uses
-// for its own pill and progress sub-line.
-function rowPhase(job: Job, inQueue: boolean, pct: number): { phase: string; meta: string; dotClass: string } {
+// for its own pill and progress sub-line. inQueue is derived here, not
+// passed in, so the job.queuePosition! assertion below is sound by local
+// reasoning rather than by caller convention.
+function rowPhase(job: Job, pct: number): { phase: string; meta: string; dotClass: string; hatched: boolean } {
   if (job.state === 'IMPORTING') {
-    return { phase: t.overview.phaseImporting, meta: t.overview.metaVerifying, dotClass: styles.dotImporting };
+    return {
+      phase: t.overview.phaseImporting,
+      meta: t.overview.metaVerifying,
+      dotClass: styles.dotImporting,
+      hatched: false,
+    };
   }
+  const inQueue = job.status === 'active' && (job.queuePosition ?? 0) > 0;
   if (inQueue) {
+    // A peer-queued job has transferred zero bytes — a hatched neutral fill
+    // (not a solid colour) keeps it from reading as complete or actively
+    // downloading, matching the mock's barBg for inQueue rows. The dot and
+    // phase text use --stalled (dotStalled), not --active, since this job
+    // isn't moving yet (mock's pctColor for inQueue: var(--stalled)).
     return {
       phase: t.overview.phaseQueue(job.queuePosition!),
-      meta: t.overview.metaQueue(job.queuePosition!),
-      dotClass: styles.dotActive,
+      meta: formatEta(job.etaSeconds),
+      dotClass: styles.dotStalled,
+      hatched: true,
     };
   }
   if (job.status === 'stalled') {
-    return { phase: t.overview.phaseStalled, meta: formatSpeed(job.speed), dotClass: styles.dotStalled };
+    return { phase: t.overview.phaseStalled, meta: formatSpeed(job.speed), dotClass: styles.dotStalled, hatched: false };
   }
-  return { phase: `${pct}%`, meta: formatSpeed(job.speed), dotClass: styles.dotActive };
+  return { phase: `${pct}%`, meta: formatSpeed(job.speed), dotClass: styles.dotActive, hatched: false };
 }
 
 export default function Overview() {
@@ -37,13 +51,22 @@ export default function Overview() {
   const { data: jobs = [] } = useJobs();
   const { data: charts } = useCharts();
 
-  const activeCount = jobs.filter((j) => j.status === 'active').length;
-  const importingCount = jobs.filter((j) => j.state === 'IMPORTING').length;
-  const downloadingCount = activeCount - importingCount;
-  const queuedCount = jobs.filter((j) => j.status === 'queued').length;
-  const stalledCount = jobs.filter((j) => j.status === 'stalled').length;
-  const orphanedCount = jobs.filter((j) => j.status === 'orphaned').length;
-  const failedCount = jobs.filter((j) => j.status === 'failed').length;
+  // countByStatus (jobFilter.ts) already implements this exact bucketing —
+  // including the "importing is a state-level refinement of active" split —
+  // so Overview reuses it instead of re-running the same filter passes
+  // Jobs.tsx and Layout.tsx already run.
+  const counts = countByStatus(jobs, '', 'all');
+  const importingCount = counts.importing;
+  // Direct filter, not activeCount - importingCount: that subtraction is
+  // only correct while dashboardStatus() maps IMPORTING to the "active"
+  // status, and goes negative silently if that invariant ever changes.
+  // counts.active is already jobs with status active and state !== IMPORTING.
+  const downloadingCount = counts.active;
+  const activeCount = counts.active + counts.importing;
+  const queuedCount = counts.queued;
+  const stalledCount = counts.stalled;
+  const orphanedCount = counts.orphaned;
+  const failedCount = counts.failed;
   // The backend zero-fills completedByHour to exactly 24 UTC-pinned hourly
   // buckets (see api/types.ts ChartsReport) — summing them, rather than a
   // client-side "since local midnight" cutoff, is what avoids the
@@ -58,8 +81,6 @@ export default function Overview() {
 
   return (
     <>
-      <PageHeading>{t.nav.overview}</PageHeading>
-
       <div className={styles.hero}>
         <div className={styles.heroLeft}>
           <div className={styles.heroLabel}>{t.overview.heroLabel}</div>
@@ -67,7 +88,7 @@ export default function Overview() {
             {t.overview.heroSummary(downloadingCount, completed24h, queuedCount)}
           </div>
         </div>
-        <div className={styles.heroPills}>
+        <div className={styles.heroPills} role="group" aria-label={t.overview.heroPillsLabel}>
           <div className={styles.pill}>
             <span className={`${styles.pillDot} ${styles.dotActive}`} aria-hidden="true" />
             <span className={styles.pillValue}>{downloadingCount}</span>
@@ -105,6 +126,17 @@ export default function Overview() {
           dotColor="var(--stalled)"
           sub={t.overview.statStalledSub}
         />
+        {/* Restored per #87 (see the removed dashboard comment this diff had
+            dropped): the legacy dashboard omitted the failed card even
+            though it counted the status; showing it is a deliberate fix, not
+            an addition, and folding failed into the "needs you" pill alone
+            makes the failed/stalled split invisible. */}
+        <StatCard
+          label={t.status.failed}
+          value={failedCount}
+          dotColor="var(--failed)"
+          sub={t.overview.statFailedSub}
+        />
         <StatCard
           label={t.status.orphaned}
           value={orphanedCount}
@@ -133,12 +165,21 @@ export default function Overview() {
             {activeDownloads.map((j) => {
               const inQueue = j.status === 'active' && (j.queuePosition ?? 0) > 0;
               const pct = percent(j.bytesDone, j.bytesTotal);
-              const { phase, meta, dotClass } = rowPhase(j, inQueue, pct);
+              const { phase, meta, dotClass, hatched } = rowPhase(j, pct);
+              const openJob = () => navigate(`/jobs/${j.id}`);
               return (
                 <div
                   key={j.id}
                   className={styles.row}
-                  onClick={() => navigate(`/jobs/${j.id}`)}
+                  role="link"
+                  tabIndex={0}
+                  onClick={openJob}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openJob();
+                    }
+                  }}
                 >
                   <span className={`${styles.rowDot} ${dotClass}`} aria-hidden="true" />
                   <div className={styles.rowMain}>
@@ -153,7 +194,7 @@ export default function Overview() {
                   <div className={styles.rowProgress}>
                     <div className={styles.rowBar}>
                       <div
-                        className={`${styles.rowBarFill} ${dotClass}`}
+                        className={`${styles.rowBarFill} ${hatched ? styles.rowBarHatched : dotClass}`}
                         style={{ width: `${inQueue ? 100 : Math.max(2, pct)}%` }}
                       />
                     </div>

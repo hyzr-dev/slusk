@@ -43,12 +43,12 @@ describe('route tree', () => {
   it.each([
     ['/', 'Overview'],
     ['/jobs', 'Jobs'],
-    // JobDetail with no seeded query data falls through all three header
-    // tiers (no live job, no cached detail) to the loading heading.
+    // Header's title is the page's sole <h1> (see components/Header.tsx).
+    // With no seeded query data, /jobs/:id falls through all three of its
+    // job-detail tiers (no live job, no cached detail) to the loading title.
     ['/jobs/42', t.jobs.loading],
     ['/events', 'Events'],
     ['/peers', 'Peers'],
-    // No seeded query data, so Shares renders its heading-only loading state.
     ['/shares', 'Shares'],
     ['/health', 'Health'],
     ['/settings', 'Settings'],

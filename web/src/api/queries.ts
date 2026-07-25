@@ -77,15 +77,18 @@ export function usePeers() {
 // can never overwrite the current one — this replaces the legacy dashboard's
 // manual `detailJobId === id` guard.
 //
-// No `enabled` flag is needed here: the Jobs list expansion panel (issue #60)
-// only mounts JobExpansion — and therefore only calls this hook — once a row
-// is expanded, so the fetch is naturally scoped to expanded rows rather than
-// firing for every row up front.
-export function useJobDetail(id: number) {
+// `enabled` defaults to true: the Jobs list expansion panel (issue #60) only
+// mounts JobExpansion — and therefore only calls this hook — once a row is
+// expanded, so the fetch is naturally scoped to expanded rows without extra
+// wiring there. Header (issue #181) needs to opt out explicitly instead: it
+// renders on every route, and would otherwise fire `/api/jobs/NaN/detail`
+// whenever the current route isn't a job-detail page.
+export function useJobDetail(id: number, enabled = true) {
   return useQuery({
     queryKey: queryKeys.jobDetail(id),
     queryFn: () => apiGet<JobDetail>(`/api/jobs/${id}/detail`),
     refetchInterval: JOBS_INTERVAL,
+    enabled,
   });
 }
 
