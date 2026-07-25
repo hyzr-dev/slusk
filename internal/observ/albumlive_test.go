@@ -139,7 +139,7 @@ func TestAggregateLiveAlbumIgnoresTerminalTransfers(t *testing.T) {
 	candidate := &core.Candidate{
 		Username: "alice",
 		Files: []core.CandidateFile{
-			{Filename: "01.flac", Size: 1000}, // errored at 50%, will never finish
+			{Filename: "01.flac", Size: 1000}, // errored, will never finish
 			{Filename: "02.flac", Size: 1000}, // cancelled
 			{Filename: "03.flac", Size: 1000}, // completed, not yet reconciled away
 			{Filename: "04.flac", Size: 1000}, // the only one still actually downloading

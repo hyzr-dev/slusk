@@ -16,11 +16,17 @@ import (
 // row (a), and that candidate is in turn joined twice for two different
 // purposes:
 //
-//   - t is the candidate's single most recent transfer (by updated_at), used
-//     for identity only: internal/app/jobs.go's Cancel and Delete are the
-//     only readers of view.Transfer, needing one concrete transfer's
+//   - t is the candidate's single most recent transfer (by updated_at). It
+//     must stay a single row rather than becoming an aggregate:
+//     internal/app/jobs.go's Cancel and Delete need one concrete transfer's
 //     SlskdID/Username to act on the remote transfer (Retry and ForceSearch
-//     fetch the view but never read Transfer).
+//     fetch the view but never read Transfer), observ.dashboardStatus derives
+//     a job's stalled/active/failed status from Transfer.State, and
+//     scanJobView copies t.username into JobView.Peer, which the jobs list
+//     renders. Note the latter two read one arbitrary file's row as if it
+//     spoke for the album — the same conflation issue #174 fixed for the byte
+//     columns, left in place here because changing it would change what those
+//     two values mean.
 //   - agg sums bytes_done/bytes_total/remaining across every transfer of the
 //     candidate. ActivateCandidateWithTransfers and CreateManualJob insert a
 //     transfers row for every file of the album upfront (state PENDING,
@@ -56,11 +62,12 @@ const jobViewSelect = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
-			-- These three literals are hardcoded (unlike every other transfer-state bind
-			-- in this package, e.g. string(core.TransferPending)) because this subquery
-			-- has no placeholder of its own to parameterise with: jobViewSelect's callers
-			-- own $1 (see the StateCancelled and jobID binds below), and adding one here
-			-- would force renumbering every caller's params.
+			-- These three literals are hardcoded, unlike every other transfer-state bind
+			-- in this package (e.g. string(core.TransferPending)). The reason is that
+			-- jobViewSelect is a const prefix its callers concatenate their own WHERE
+			-- clause onto, so the placeholder numbering space is shared: binding these
+			-- here would claim $1-$3 and shift every caller's own params (see the
+			-- StateCancelled and jobID binds below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
 				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
 		FROM transfers
