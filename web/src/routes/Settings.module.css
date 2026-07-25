@@ -1,29 +1,36 @@
 .notice {
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--active-bg);
-  color: var(--active);
-  font-size: 12.5px;
-  margin-bottom: 16px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--faint);
+  font-size: 11.5px;
 }
 
+/* A group is one section of the form (Lidarr, slskd, Pipeline, ...) — no
+   card chrome, just a top rule separating it from the section above,
+   matching the unboxed list idiom the rest of the app uses. */
 .group {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px 20px;
-  margin-bottom: 14px;
+  border-top: 1px solid var(--line);
 }
 
-.groupTitle { font-size: 14px; font-weight: 600; margin: 0 0 16px; }
+/* Danger zone keeps the same unboxed shape but reads as higher-stakes via a
+   left accent rather than a full border, since a boxed card would be the
+   one card-like shape left in the view. */
+.dangerGroup {
+  border-top: 1px solid var(--line);
+  border-left: 2px solid var(--bad);
+}
 
-/* A named subsection within a card (Gluetun, Shared folders inside
-   Soulseek) — one step quieter than groupTitle since it isn't its own card. */
+.groupTitle { font-size: inherit; font-weight: 400; margin: 0; }
+
+/* A named subsection within a group (Gluetun, Shared folders inside
+   Soulseek) — one step quieter than groupTitle since it isn't its own
+   section. */
 .subTitle {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  margin: 18px 0 10px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.4px;
+  color: var(--dim);
+  margin: 16px 0 8px;
 }
 
 /* Row wrapping a subTitle and its HelpPopover, so the popover sits beside
@@ -33,33 +40,37 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 18px 0 10px;
+  margin: 16px 0 8px;
 }
 .subTitleRow .subTitle { margin: 0; }
-/* Subsection popovers sit just after the heading near the card's left edge,
+/* Subsection popovers sit just after the heading near the row's left edge,
    so the right-anchored default (see .helpPanel) would overflow leftward. */
 .subTitleRow .helpPanel {
   left: 0;
   right: auto;
 }
 
-/* --- Collapsible section (accordion) chrome ------------------------------ */
-
-/* The header row for a whole card: the toggle <button> lives inside the
-   real <h2> so the heading survives in the accessibility tree, and the
-   button's stretched ::after (positioned against this row) makes the full
-   row clickable anyway. */
+/* --- Collapsible section (accordion) chrome ------------------------------
+   Styled after SectionHeader (components/tui/SectionHeader.module.css): same
+   padding, border-bottom, size and color, so a group's header row reads
+   like every other section rule in the app. It can't be the SectionHeader
+   component itself — the toggle <button> has to live inside a real <h2> for
+   the accordion to stay in the accessibility tree, and SectionHeader has no
+   notion of aria-expanded. */
 .sectionHeader {
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 2px 0;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  color: var(--faint);
 }
 
-/* Inside the header row, the title needs no bottom margin of its own —
-   .sectionBody's margin-top provides the gap when the section is open, and
-   there's nothing below it to space from when collapsed. */
+/* Inside the header row, the title needs no margin of its own — the row's
+   own padding and border-bottom already do the spacing. */
 .sectionHeader .groupTitle,
 .sectionHeader .dangerTitle {
   margin: 0;
@@ -72,6 +83,7 @@
   border: none;
   color: inherit;
   font: inherit;
+  letter-spacing: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -83,29 +95,26 @@
   inset: 0;
 }
 .sectionHeaderButton:focus-visible { outline: none; }
-.sectionHeaderButton:focus-visible::after { outline: 2px solid var(--active); outline-offset: 2px; }
+.sectionHeaderButton:focus-visible::after { outline: 1px solid var(--fg); outline-offset: -1px; }
 
 .sectionHeaderRight { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 
-.chevron { font-size: 11px; color: var(--text-dim); }
+.chevron { font-size: 11px; color: var(--faint); }
 
-/* Content wrapper for an open section — carries the gap below the header
-   row, since the title's own bottom margin is zeroed there. */
-.sectionBody { margin-top: 16px; }
+/* Content wrapper for an open section — carries the padding the group used
+   to get from its own card chrome, since the header row is edge-to-edge. */
+.sectionBody { padding: 16px; }
 
 .changedBadge {
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--done-bg);
-  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  color: var(--ok);
   white-space: nowrap;
 }
 
 /* --- Advanced disclosure (nested, quieter than a top-level section) ----- */
 
-.advancedGroup { margin-top: 18px; }
+.advancedGroup { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 16px; }
 
 .advancedHeader {
   display: flex;
@@ -121,39 +130,33 @@
   text-align: left;
   cursor: pointer;
 }
-.advancedHeader:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+.advancedHeader:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
 
-.advancedTitle { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+.advancedTitle { font-size: 11px; letter-spacing: 0.4px; color: var(--dim); }
 
-.advancedBody { display: flex; flex-direction: column; gap: 16px; }
+.advancedBody { display: flex; flex-direction: column; }
 
 /* --- Per-field help popover ----------------------------------------------- */
 
-.labelRow { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.labelRow { display: flex; align-items: center; gap: 6px; }
 
 .helpWrapper { position: relative; display: inline-flex; }
 
 .helpButton {
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border);
+  padding: 0 4px;
+  border: 1px solid var(--line2);
   background: none;
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  color: var(--faint);
+  font-size: 9.5px;
+  line-height: 14px;
   cursor: pointer;
 }
-.helpButton:hover { color: var(--text); border-color: var(--text-muted); }
-.helpButton:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+.helpButton:hover { color: var(--fg); border-color: var(--dim); }
+.helpButton:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
 
 /* Anchored right rather than left: the wrapper sits at the right end of its
-   label row, so a left-anchored panel would overflow the card (and likely
-   the viewport) for fields in the grid's right column. */
+   label row, so a left-anchored panel would overflow past the row's edge
+   for fields whose label is short. */
 .helpPanel {
   position: absolute;
   top: 100%;
@@ -163,35 +166,42 @@
   width: max-content;
   max-width: 320px;
   padding: 10px 12px;
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  font-size: 12px;
+  background: var(--panel-inset);
+  border: 1px solid var(--line2);
+  color: var(--dim);
+  font-size: 11.5px;
   font-weight: normal;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  letter-spacing: 0.3px;
 }
 
 .grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
 }
 
-.field { display: flex; flex-direction: column; gap: 6px; }
-.label { font-size: 12px; color: var(--text-muted); }
+/* One field per row: label in the fixed-width left column (matches the
+   190px 1fr rhythm used by the config rows in the design mock), value
+   (input/select, plus its error) in the right column. */
+.field {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 14px;
+  align-items: start;
+  padding: 6.5px 0;
+  border-bottom: 1px solid var(--line);
+}
+.label { font-size: 11.5px; color: var(--faint); letter-spacing: 0.3px; }
 .key { font-family: var(--font-mono); color: var(--text-dim); }
+
+.value { display: flex; flex-direction: column; gap: 4px; }
 
 .input,
 .select {
-  padding: 8px 11px;
-  border-radius: var(--radius-sm);
-  /* --panel-inset, not --panel: inputs read as recessed relative to the
-     card they sit in, matching the design mock's darker input surface. */
+  padding: 5px 9px;
   background: var(--panel-inset);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 12.5px;
+  border: 1px solid var(--line2);
+  color: var(--fg);
+  font-size: 11.5px;
 }
 /* Numeric/technical values (durations, addresses, DSNs, ids) read better in
    the monospace face; the backend/log-level dropdowns stay in the sans font
@@ -200,19 +210,19 @@
 
 .input:disabled,
 .select:disabled {
-  color: var(--text-muted);
+  color: var(--faint);
   cursor: default;
 }
 .input:not(:disabled) { cursor: text; }
 .input:not(:disabled):focus,
 .select:not(:disabled):focus {
   outline: none;
-  border-color: var(--active);
+  border-color: var(--fg);
 }
 
 .fieldError {
-  font-size: 12px;
-  color: var(--failed);
+  font-size: 11px;
+  color: var(--bad);
 }
 
 .folderRows { display: flex; flex-direction: column; gap: 12px; }
@@ -222,85 +232,50 @@
   grid-template-columns: 1fr 1fr auto;
   gap: 12px;
   align-items: end;
+  padding: 6.5px 0;
+  border-bottom: 1px solid var(--line);
+}
+/* Folder rows use the paired-column layout (name | path | remove), not the
+   190px label grid above — there's no separate label column here, .field is
+   reused only for its input styling via nested Field components. */
+.folderRow .field {
+  grid-template-columns: 1fr;
+  gap: 4px;
+  border-bottom: none;
+  padding: 0;
 }
 
-.removeFolderButton,
-.addFolderButton {
-  padding: 8px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 12.5px;
-  cursor: pointer;
-  height: fit-content;
-}
-.addFolderButton { margin-top: 2px; align-self: flex-start; }
-
-/* Danger zone: same card chrome, but bordered and titled in the failed
-   accent so it visually reads as higher-stakes than the rest of the form. */
-.dangerGroup {
-  background: var(--panel);
-  border: 1px solid var(--failed);
-  border-radius: var(--radius);
-  padding: 18px 20px;
-  margin-bottom: 14px;
-}
-.dangerTitle { font-size: 14px; font-weight: 600; margin: 0 0 16px; color: var(--failed); }
-.dangerHint { font-size: 12px; color: var(--text-muted); margin-top: 14px; }
+/* Danger zone: title in the failed accent so it visually reads as
+   higher-stakes than the rest of the form. */
+.dangerTitle { color: var(--bad); }
+.dangerHint { font-size: 11px; color: var(--dim); margin-top: 12px; }
 
 .saveRow {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  /* Sits between two .group cards: inset horizontally to line up with their
-     inner padding, and keep clear air before the Connections card below. */
-  margin: 4px 16px 20px;
+  padding: 16px;
+  border-top: 1px solid var(--line);
 }
 
-.saveButton {
-  padding: 9px 18px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
-  border: none;
-  /* --bg, not a bespoke near-black hex: it's the same dark surface color
-     used elsewhere, and reads correctly against the accent-green fill. */
-  color: var(--bg);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.saveButton:disabled { opacity: 0.5; cursor: default; }
-
-.saveError { font-size: 12px; color: var(--failed); }
-.dangerWarning { font-size: 12px; font-weight: 600; color: var(--failed); }
+.saveError { font-size: 11px; color: var(--bad); }
+.dangerWarning { font-size: 11px; letter-spacing: 0.3px; color: var(--bad); }
 
 .restartingBanner {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--active);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  color: var(--ok);
 }
 
-.testButton {
-  padding: 6px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.testButton:disabled { opacity: 0.5; cursor: default; }
+.testRow { display: flex; align-items: center; gap: 12px; padding: 6.5px 0; border-bottom: 1px solid var(--line); }
+.testLabel { width: 220px; font-size: 11.5px; color: var(--faint); }
 
-.testRow { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-.testLabel { width: 220px; font-size: 12.5px; color: var(--text-muted); }
-
-.status { font-size: 12px; font-weight: 600; }
-.untested { color: var(--text-dim); }
-.testing { color: var(--active); }
-.success { color: var(--done); }
-.failure { color: var(--failed); }
+.status { font-size: 11px; letter-spacing: 0.4px; }
+.untested { color: var(--faint); }
+.testing { color: var(--dim); }
+.success { color: var(--ok); }
+.failure { color: var(--bad); }
 
 /* The failure reason can be long; let it take the rest of the row and wrap. */
-.testError { flex: 1; font-size: 12px; color: var(--text-muted); }
+.testError { flex: 1; font-size: 11px; color: var(--dim); }

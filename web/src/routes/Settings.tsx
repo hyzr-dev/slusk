@@ -3,7 +3,8 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { apiGet, ApiError } from '../api/client';
 import { queryKeys, useConfig, useTestConnection, useUpdateConfig } from '../api/queries';
 import type { AppConfig, ConfigUpdateRequest, SharedFolderDTO } from '../api/types';
-import PageHeading from '../components/PageHeading';
+import Button from '../components/tui/Button';
+import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
 import styles from './Settings.module.css';
 
@@ -12,20 +13,24 @@ export default function Settings() {
 
   return (
     <>
-      <PageHeading>{t.nav.settings}</PageHeading>
       {config && !config.writable && (
         <div className={styles.notice}>{t.settings.notWritableNotice}</div>
       )}
       {config && <ConfigForm config={config} />}
 
+      {/* Not collapsible (unlike the cards above), so this uses the plain
+          SectionHeader primitive rather than CollapsibleSection's
+          accordion. */}
       <section className={styles.group}>
-        <h2 className={styles.groupTitle}>{t.settings.connections}</h2>
-        <ConnectionTest label={t.settings.lidarr} dependency="lidarr" />
-        {/* Only offer the Soulseek test when the native client is enabled —
-            otherwise there is nothing to connect to. */}
-        {config?.soulseek.enabled && (
-          <ConnectionTest label={t.settings.soulseek} dependency="soulseek" />
-        )}
+        <SectionHeader label={t.settings.connections} />
+        <div className={styles.sectionBody}>
+          <ConnectionTest label={t.settings.lidarr} dependency="lidarr" />
+          {/* Only offer the Soulseek test when the native client is enabled —
+              otherwise there is nothing to connect to. */}
+          {config?.soulseek.enabled && (
+            <ConnectionTest label={t.settings.soulseek} dependency="soulseek" />
+          )}
+        </div>
       </section>
     </>
   );
@@ -204,42 +209,47 @@ function Field({
         </label>
         {help && <HelpPopover text={help} label={label} />}
       </span>
-      {kind === 'select' ? (
-        <select
-          id={inputId}
-          className={styles.select}
-          value={value}
-          disabled={disabled}
-          aria-invalid={error ? true : undefined}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {options?.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          id={inputId}
-          className={styles.input}
-          type={nativeInputType(kind)}
-          step={kind === 'integer' ? '1' : undefined}
-          value={value}
-          placeholder={placeholder}
-          disabled={disabled}
-          aria-invalid={error ? true : undefined}
-          // Secret fields hold API keys/tokens/DSNs, not login credentials;
-          // keep browser password managers from offering to save or fill them.
-          autoComplete={kind === 'password' ? 'new-password' : undefined}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      )}
-      {error && (
-        <span className={styles.fieldError} data-field-error>
-          {error}
-        </span>
-      )}
+      {/* Input/select and its error share one column (see the field's
+          190px 1fr grid in Settings.module.css) — grouped in a wrapper so
+          the error lands under the value, not under the label. */}
+      <span className={styles.value}>
+        {kind === 'select' ? (
+          <select
+            id={inputId}
+            className={styles.select}
+            value={value}
+            disabled={disabled}
+            aria-invalid={error ? true : undefined}
+            onChange={(e) => onChange(e.target.value)}
+          >
+            {options?.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            id={inputId}
+            className={styles.input}
+            type={nativeInputType(kind)}
+            step={kind === 'integer' ? '1' : undefined}
+            value={value}
+            placeholder={placeholder}
+            disabled={disabled}
+            aria-invalid={error ? true : undefined}
+            // Secret fields hold API keys/tokens/DSNs, not login credentials;
+            // keep browser password managers from offering to save or fill them.
+            autoComplete={kind === 'password' ? 'new-password' : undefined}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )}
+        {error && (
+          <span className={styles.fieldError} data-field-error>
+            {error}
+          </span>
+        )}
+      </span>
     </div>
   );
 }
@@ -1143,17 +1153,11 @@ function ConfigForm({ config }: { config: AppConfig }) {
                 onChange={(v) => updateFolder(i, 'path', v)}
               />
               {!disabled && (
-                <button type="button" className={styles.removeFolderButton} onClick={() => removeFolder(i)}>
-                  {t.settings.removeFolder}
-                </button>
+                <Button onClick={() => removeFolder(i)}>{t.settings.removeFolder}</Button>
               )}
             </div>
           ))}
-          {!disabled && (
-            <button type="button" className={styles.addFolderButton} onClick={addFolder}>
-              {t.settings.addFolder}
-            </button>
-          )}
+          {!disabled && <Button onClick={addFolder}>{t.settings.addFolder}</Button>}
         </div>
 
         <AdvancedDisclosure open={advancedOpen.soulseek} onToggle={() => toggleAdvanced('soulseek')}>
@@ -1192,9 +1196,9 @@ function ConfigForm({ config }: { config: AppConfig }) {
 
       {!disabled && (
         <div className={styles.saveRow}>
-          <button className={styles.saveButton} disabled={update.isPending} onClick={handleSaveClick}>
+          <Button variant="primary" disabled={update.isPending} onClick={handleSaveClick}>
             {saveLabel}
-          </button>
+          </Button>
           {dangerArmed && <span className={styles.dangerWarning}>{t.settings.dangerConfirmWarning}</span>}
           {saveError && <span className={styles.saveError}>{saveError}</span>}
           {restarting && <span className={styles.restartingBanner}>{t.settings.savedRestarting}</span>}
@@ -1232,13 +1236,9 @@ function ConnectionTest({
   return (
     <div className={styles.testRow}>
       <label className={styles.testLabel}>{label}</label>
-      <button
-        className={styles.testButton}
-        disabled={test.isPending}
-        onClick={() => test.mutate()}
-      >
+      <Button disabled={test.isPending} onClick={() => test.mutate()}>
         {t.settings.testConnection}
-      </button>
+      </Button>
       <span className={`${styles.status} ${styles[status]}`}>
         {t.settings.testStatus[status]}
       </span>

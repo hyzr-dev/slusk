@@ -40,13 +40,15 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // '/' (Overview), '/jobs', '/jobs/:id', '/health', '/shares', '/events' and
-  // '/peers' are asserted separately below: the TUI reskin (#198) gives none
-  // of them an <h1> — PageHeading is gone from all seven routes already,
-  // ahead of the remaining route below losing its own in a later task.
+  // Every route below is asserted on stable visible text rather than an
+  // <h1>: the TUI reskin (#198) gives none of the eight routes a heading —
+  // PageHeading is gone everywhere now.
   it('renders /settings without crashing', () => {
+    // No seeded query data, so useConfig() never resolves and the whole
+    // ConfigForm stays unrendered — the static Connections section (which
+    // doesn't depend on config) is the only thing guaranteed to render.
     renderAt('/settings');
-    expect(screen.getByRole('heading', { name: t.nav.settings })).toBeInTheDocument();
+    expect(screen.getByText(t.settings.connections)).toBeInTheDocument();
   });
 
   it('renders / (Overview) without crashing', () => {
