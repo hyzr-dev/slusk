@@ -14,6 +14,8 @@ import type {
   JobDetail,
   JobEvent,
   Peer,
+  ShareRescanResult,
+  SharesReport,
   StatusReport,
 } from './types';
 
@@ -24,6 +26,8 @@ const EVENTS_INTERVAL = 3000;
 const STATUS_INTERVAL = 5000;
 const PEERS_INTERVAL = 5000;
 const CHARTS_INTERVAL = 15000; // passes change at most every discovery tick (~30s)
+const SHARES_INTERVAL = 15000;
+const SHARES_SCANNING_INTERVAL = 3000; // matches JOBS_INTERVAL while a scan is actively running
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -32,6 +36,7 @@ export const queryKeys = {
   peers: ['peers'] as const,
   config: ['config'] as const,
   charts: ['charts'] as const,
+  shares: ['shares'] as const,
   jobDetail: (id: number) => ['jobs', id, 'detail'] as const,
   jobEvents: (id: number) => ['jobs', id, 'events'] as const,
 };
@@ -132,6 +137,30 @@ export function useCancelJob(id: number) {
       void qc.invalidateQueries({ queryKey: queryKeys.jobs });
       void qc.invalidateQueries({ queryKey: queryKeys.jobDetail(id) });
       void qc.invalidateQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+// refetchInterval takes the Query object under TanStack Query v5 (not v4's
+// (data, query) tuple), so scanning is read off query.state.data.
+export function useShares() {
+  return useQuery({
+    queryKey: queryKeys.shares,
+    queryFn: () => apiGet<SharesReport>('/api/shares'),
+    refetchInterval: (query) => (query.state.data?.scanning ? SHARES_SCANNING_INTERVAL : SHARES_INTERVAL),
+  });
+}
+
+// Invalidates onSettled rather than onSuccess (contrast useCancelJob above):
+// a 409 conflict response still means a scan is genuinely running server-side,
+// so refetching queryKeys.shares is the right reaction to that failure too,
+// not just to a successful 202.
+export function useRescanShares() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiPostJson<ShareRescanResult>('/api/shares/rescan'),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.shares });
     },
   });
 }

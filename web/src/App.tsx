@@ -6,6 +6,7 @@ import Jobs from './routes/Jobs';
 import JobDetail from './routes/JobDetail';
 import Events from './routes/Events';
 import Peers from './routes/Peers';
+import Shares from './routes/Shares';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
 
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="jobs/:id" element={<JobDetail />} />
             <Route path="events" element={<Events />} />
             <Route path="peers" element={<Peers />} />
+            <Route path="shares" element={<Shares />} />
             <Route path="health" element={<Health />} />
             <Route path="settings" element={<Settings />} />
           </Route>
