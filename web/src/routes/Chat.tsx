@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
@@ -7,7 +7,7 @@ import Button from '../components/tui/Button';
 import EmptyState from '../components/tui/EmptyState';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
-import { formatShortTime } from '../format';
+import { formatShortTime, localDayKey } from '../format';
 import { t } from '../strings';
 import styles from './Chat.module.css';
 
@@ -45,6 +45,37 @@ const MAX_MESSAGE_BYTES = 8192;
 // How close to the bottom (in pixels) counts as "already at the bottom" for
 // the autoscroll-on-new-message behavior below.
 const NEAR_BOTTOM_PX = 40;
+
+/**
+ * The `── today ──` rule between two calendar days in a thread (issue #247).
+ *
+ * The dashes are added here, not baked into the strings, so the decoration
+ * stays a styling decision — the same split EmptyState documents. Only the two
+ * nameable days get words; anything older shows its sv-SE date, which is what
+ * localDayKey already returns.
+ *
+ * `role="separator"` rather than a bare div: this sits inside the message
+ * pane's `role="log" aria-live="polite"`, so a divider appended along with the
+ * first message of a new day would otherwise be announced as if it were a
+ * message. The aria-label carries the day, because a screen reader reading
+ * "dash dash dash" is not information.
+ */
+function DayDivider({ day }: { day: string }) {
+  const now = new Date();
+  const today = localDayKey(now.toISOString());
+  // setDate, not a 24h subtraction: a DST day is 23 or 25 hours long, and
+  // subtracting a fixed 86 400 000 ms across the transition can land back on
+  // today or skip to the day before yesterday.
+  const prev = new Date(now);
+  prev.setDate(prev.getDate() - 1);
+  const yesterday = localDayKey(prev.toISOString());
+  const label = day === today ? t.chat.today : day === yesterday ? t.chat.yesterday : day;
+  return (
+    <div role="separator" aria-label={label} className={styles.dayDivider}>
+      {`── ${label} ──`}
+    </div>
+  );
+}
 
 export default function Chat() {
   const { username } = useParams<{ username?: string }>();
@@ -218,17 +249,28 @@ export default function Chat() {
               <EmptyState message={t.chat.threadEmpty} />
             )}
             {hasData(threadPhase) &&
-              messages.map((m) => (
-                <div key={m.id} className={styles.messageLine}>
-                  <span className={styles.messageTime}>{formatShortTime(m.sentAt)}</span>
-                  <span className={m.direction === 'OUT' ? styles.whoYou : styles.whoPeer}>
-                    {m.direction === 'OUT' ? t.chat.you : t.chat.peer(username)}
-                  </span>
-                  <span className={m.direction === 'OUT' ? styles.bodyOut : styles.bodyIn}>
-                    {m.body}
-                  </span>
-                </div>
-              ))}
+              messages.map((m, i) => {
+                // A divider is emitted whenever the local day changes, and
+                // always before the first message: a thread whose every
+                // message predates today would otherwise still carry no date
+                // at all, which is the whole bug (#247).
+                const day = localDayKey(m.sentAt);
+                const showDivider = i === 0 || day !== localDayKey(messages[i - 1].sentAt);
+                return (
+                  <Fragment key={m.id}>
+                    {showDivider && <DayDivider day={day} />}
+                    <div className={styles.messageLine}>
+                      <span className={styles.messageTime}>{formatShortTime(m.sentAt)}</span>
+                      <span className={m.direction === 'OUT' ? styles.whoYou : styles.whoPeer}>
+                        {m.direction === 'OUT' ? t.chat.you : t.chat.peer(username)}
+                      </span>
+                      <span className={m.direction === 'OUT' ? styles.bodyOut : styles.bodyIn}>
+                        {m.body}
+                      </span>
+                    </div>
+                  </Fragment>
+                );
+              })}
           </div>
           <Composer username={username} />
         </div>

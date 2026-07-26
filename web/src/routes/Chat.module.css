@@ -74,6 +74,18 @@
   margin-bottom: 10px;
 }
 
+/* Day divider (#247). Left-aligned, not centred: every message line starts at
+   the same left edge, and a centred label floats free of the grid in a view
+   this sparse. align-self stops the flex column from stretching it to full
+   width, which would pull the dashes to the far edges. */
+.dayDivider {
+  align-self: flex-start;
+  margin: 12px 0 6px;
+  font-size: 10.5px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
 .messageLine {
   display: flex;
   gap: 9px;
