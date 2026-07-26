@@ -141,7 +141,7 @@ export const t = {
     noEvents: 'No events.',
     noCandidate: 'No candidate yet.',
     cancelFailed: 'Could not cancel the job. It may already have finished.',
-    retryFailed: 'Could not retry the job. Only failed jobs can be retried.',
+    retryFailed: 'Could not retry the job. Only failed or parked jobs can be retried.',
     forceSearchFailed: 'Could not force a search. The job may already be active.',
     deleteFailed: 'Could not delete the job. It may currently be importing.',
     sleepingUntil: (time: string) => `Sleeping until ${time}`,

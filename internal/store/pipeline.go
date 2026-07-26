@@ -230,6 +230,24 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 	}
 	defer tx.Rollback()
 
+	// Cancellation locks the job before its transfers. Use the same order here
+	// so parking and cancellation cannot deadlock while each holds one row.
+	var jobID int64
+	var jobState string
+	err = tx.QueryRowContext(ctx,
+		`SELECT j.id, j.state
+		 FROM album_jobs j
+		 JOIN candidates c ON c.album_job_id = j.id
+		 JOIN transfers t ON t.candidate_id = c.id
+		 WHERE c.id = $1 AND t.id = $2
+		 FOR UPDATE OF j`, candidateID, transferID).Scan(&jobID, &jobState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: lock job: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`UPDATE transfers SET state = $1, bytes_done = $2, bytes_total = $3,
 			last_progress_at = CASE WHEN $4 > bytes_done THEN $5 ELSE last_progress_at END,
@@ -250,16 +268,19 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 		return false, nil
 	}
 
-	res, err = tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2
-		 WHERE id = (SELECT album_job_id FROM candidates WHERE id = $3) AND state = $4`,
-		string(core.StateParked), now, candidateID, string(core.StateDownloading))
-	if err != nil {
-		return false, fmt.Errorf("park job for candidate: update job: %w", err)
-	}
-	jobRows, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
+	var jobRows int64
+	if core.AlbumJobState(jobState) == core.StateDownloading {
+		res, err = tx.ExecContext(ctx,
+			`UPDATE album_jobs SET state = $1, updated_at = $2
+			 WHERE id = $3 AND state = $4`,
+			string(core.StateParked), now, jobID, string(core.StateDownloading))
+		if err != nil {
+			return false, fmt.Errorf("park job for candidate: update job: %w", err)
+		}
+		jobRows, err = res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("park job for candidate: commit: %w", err)

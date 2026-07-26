@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
@@ -463,6 +465,148 @@ func TestParkJobForCandidate(t *testing.T) {
 			t.Errorf("transfer state = %q, want ERRORED", got)
 		}
 	})
+}
+
+func TestParkJobForCandidateLocksJobBeforeTransferWhenCancellationOverlaps(t *testing.T) {
+	s := newTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	jobID, candID, transferID := seedParkJobFixture(t, s, 503, now)
+
+	// Hold an advisory lock from a separate transaction. The AFTER trigger
+	// stops parking only after its transfer UPDATE owns the transfer row, which
+	// gives the test a deterministic point at which to inspect the earlier job
+	// lock and start cancellation without timing sleeps.
+	lockTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin advisory lock transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback() })
+	if _, err := lockTx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(243, (
+			SELECT oid::integer FROM pg_database WHERE datname = current_database()
+		))`); err != nil {
+		t.Fatalf("acquire advisory lock: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE FUNCTION block_park_transfer() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(243, (
+				SELECT oid::integer FROM pg_database WHERE datname = current_database()
+			));
+			RETURN NEW;
+		END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER block_park_transfer AFTER UPDATE ON transfers
+			FOR EACH ROW WHEN (NEW.state = 'ERRORED') EXECUTE FUNCTION block_park_transfer()`); err != nil {
+		t.Fatalf("install blocking trigger: %v", err)
+	}
+
+	type parkResult struct {
+		changed bool
+		err     error
+	}
+	parkDone := make(chan parkResult, 1)
+	go func() {
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		parkDone <- parkResult{changed: changed, err: err}
+	}()
+	waitForStoreQueryWait(t, s, `%UPDATE transfers SET state = $1, bytes_done%`, "advisory")
+
+	probeTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin job-lock probe: %v", err)
+	}
+	var state string
+	err = probeTx.QueryRowContext(ctx,
+		`SELECT state FROM album_jobs WHERE id = $1 FOR UPDATE NOWAIT`, jobID).Scan(&state)
+	_ = probeTx.Rollback()
+	jobLockedFirst := false
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+			t.Fatalf("probe job lock: %v", err)
+		}
+		jobLockedFirst = true
+	}
+
+	type cancellationResult struct {
+		found bool
+		err   error
+	}
+	cancelDone := make(chan cancellationResult, 1)
+	go func() {
+		_, found, err := s.CancelJob(ctx, jobID, now.Add(2*time.Minute))
+		cancelDone <- cancellationResult{found: found, err: err}
+	}()
+	waitForStoreQueryWait(t, s, `%FOR UPDATE%`, "")
+
+	if err := lockTx.Rollback(); err != nil {
+		t.Fatalf("release advisory lock: %v", err)
+	}
+
+	var parked parkResult
+	select {
+	case parked = <-parkDone:
+	case <-ctx.Done():
+		t.Fatalf("parking did not finish: %v", ctx.Err())
+	}
+	if parked.err != nil {
+		t.Errorf("ParkJobForCandidate: %v", parked.err)
+	} else if !parked.changed {
+		t.Error("ParkJobForCandidate did not park the DOWNLOADING job")
+	}
+
+	var cancelled cancellationResult
+	select {
+	case cancelled = <-cancelDone:
+	case <-ctx.Done():
+		t.Fatalf("cancellation did not finish: %v", ctx.Err())
+	}
+	if cancelled.err != nil {
+		t.Errorf("CancelJob: %v", cancelled.err)
+	} else if !cancelled.found {
+		t.Error("CancelJob did not find the parked job")
+	}
+	if !jobLockedFirst {
+		t.Error("parking reached the transfer update without locking the owning job first")
+	}
+	if got := jobStateForStore(t, s, jobID); got != core.StateCancelled {
+		t.Errorf("job state = %q, want CANCELLED", got)
+	}
+	if got := transferForParkFixture(t, s, candID).State; got != core.TransferErrored {
+		t.Errorf("transfer state = %q, want ERRORED", got)
+	}
+}
+
+func waitForStoreQueryWait(t *testing.T, s *Store, queryPattern, waitEvent string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		var waiting bool
+		err := s.db.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid != pg_backend_pid()
+			  AND query LIKE $1
+			  AND wait_event_type = 'Lock'
+			  AND ($2 = '' OR wait_event = $2)
+		)`, queryPattern, waitEvent).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect blocked store query: %v", err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("query %q did not reach database lock wait: %v", queryPattern, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func TestParkJobForCandidateRollsBackOnEitherWriteFailure(t *testing.T) {
