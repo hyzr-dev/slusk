@@ -14,21 +14,21 @@ import styles from './Chat.module.css';
 /**
  * Private-message chat view (issue #183): a conversation rail on the left, one
  * thread's messages plus a composer on the right. Deviates from the mock
- * (docs/design/slskdarr-tui.dc.html, the CHAT block and chatVals()) in four
+ * (docs/design/slskdarr-tui.dc.html, the CHAT block and chatVals()) in three
  * deliberate ways:
  *
- *  1. No online/offline dot in the rail and no ONLINE/OFFLINE chip in the
- *     thread header — Conversation/PrivateMessage carry no presence field,
- *     and inventing one would show a lie (see repo memory
- *     interface-must-not-invent-data).
- *  2. A quiet "load older" control at the top of the pane when hasMore is
+ *  1. A quiet "load older" control at the top of the pane when hasMore is
  *     true. The mock draws no history affordance, but the API's hasMore/
  *     before= paging exists specifically to be used.
- *  3. Sending latches into a disabled state on a 503 (sending private
+ *  2. Sending latches into a disabled state on a 503 (sending private
  *     messages not enabled) — nothing advertises this in advance, so one
  *     failed attempt is the only way the UI can learn it.
- *  4. The composer is a real <form onSubmit>, not a bare input with
+ *  3. The composer is a real <form onSubmit>, not a bare input with
  *     onKeyDown, so Enter-to-send and a mouse click both go through one path.
+ *
+ * Presence follows the mock only when Conversation.online is defined. An
+ * absent value is unknown or unsupported and must not be presented as
+ * offline.
  *
  * jsdom computes no layout and paints nothing (see CLAUDE.md), so the three
  * scroll behaviors below — jump to bottom on thread switch, conditional
@@ -83,6 +83,7 @@ export default function Chat() {
 
   const conversationsQuery = useConversations();
   const conversations = conversationsQuery.data ?? [];
+  const selectedConversation = conversations.find((c) => c.username === username);
   const conversationsPhase = queryPhase(conversationsQuery);
   const status503 =
     conversationsQuery.isError &&
@@ -200,8 +201,16 @@ export default function Chat() {
                 to={`/chat/${encodeURIComponent(c.username)}`}
                 className={active ? styles.rowActive : styles.row}
                 aria-current={active ? 'page' : undefined}
-                aria-label={t.chat.threadLabel(c.username, c.unread)}
+                aria-label={t.chat.threadLabel(c.username, c.unread, c.online)}
               >
+                {c.online !== undefined && (
+                  <span
+                    aria-hidden="true"
+                    className={`${styles.presenceDot} ${c.online ? styles.presenceOnline : styles.presenceOffline}`}
+                  >
+                    ■
+                  </span>
+                )}
                 <span className={styles.rowName}>{c.username}</span>
                 {c.unread > 0 && <span className={styles.rowUnread}>{c.unread}</span>}
               </Link>
@@ -218,7 +227,18 @@ export default function Chat() {
         // sibling's DOM node behind instead of removing it. One key on
         // their shared parent gets the same remount with no such risk.
         <div key={username} className={styles.pane}>
-          <SectionHeader label={username} />
+          <SectionHeader
+            label={username}
+            meta={
+              selectedConversation?.online !== undefined ? (
+                <span
+                  className={`${styles.presenceChip} ${selectedConversation.online ? styles.presenceOnline : styles.presenceOffline}`}
+                >
+                  {selectedConversation.online ? t.chat.online : t.chat.offline}
+                </span>
+              ) : undefined
+            }
+          />
           {threadQuery.hasNextPage && (
             // Outside the role="log" region below, deliberately: it is a
             // pagination control, not a new-message announcement, and

@@ -53,6 +53,25 @@
 
 .rowUnread { font-size: 10px; color: var(--fg); }
 
+.presenceDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  line-height: 8px;
+}
+
+.presenceChip {
+  font-size: 10px;
+  letter-spacing: 0.8px;
+}
+
+.presenceOnline { color: var(--ok); }
+.presenceOffline { color: var(--faint); }
+
 .pane {
   flex: 1;
   min-width: 0;

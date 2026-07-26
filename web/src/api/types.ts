@@ -433,6 +433,8 @@ export type MessageDirection = 'IN' | 'OUT';
 /** GET /api/messages — internal/observ/messages.go conversationDTO */
 export interface Conversation {
   username: string;
+  /** Absent means presence is unknown or unsupported; false is explicitly offline. */
+  online?: boolean;
   lastMessage: string;
   lastMessageAt: string;
   lastDirection: MessageDirection;
