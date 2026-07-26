@@ -90,7 +90,7 @@ export default function JobDetail() {
           middle tier keeps the page useful after a job ages out of /api/jobs. */}
       {job ? (
         <>
-          <SectionHeader label={job.title} meta={job.artist} />
+          <SectionHeader label={job.title} meta={job.artist} prominent />
           <div className={styles.meta}>
             <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
             {job.source === 'manual' && (
@@ -119,7 +119,7 @@ export default function JobDetail() {
         </>
       ) : detailReady && detail ? (
         <>
-          <SectionHeader label={detail.title} meta={detail.artist} />
+          <SectionHeader label={detail.title} meta={detail.artist} prominent />
           <div className={styles.meta}>
             {/* jobDetailDTO carries no `status` field (internal/observ/jobdetail.go),
                 so there's nothing to degrade to here — unlike stateLabel()'s

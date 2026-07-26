@@ -13,10 +13,23 @@ import styles from './SectionHeader.module.css';
  * after (a terminal UI) has no notion of headings at all. `.label` resets
  * the browser's default heading font/margin back to `.header`'s own
  * styling, so this is visually identical to a plain <span>.
+ *
+ * Set `prominent` when the header names the page's subject rather than
+ * labelling a panel — a job's album and artist on the detail page, say. The
+ * quiet default works because a section label sits above content that
+ * carries the meaning; a page subject *is* the meaning and has to be read.
  */
-export default function SectionHeader({ label, meta }: { label: string; meta?: ReactNode }) {
+export default function SectionHeader({
+  label,
+  meta,
+  prominent = false,
+}: {
+  label: string;
+  meta?: ReactNode;
+  prominent?: boolean;
+}) {
   return (
-    <div className={styles.header}>
+    <div className={prominent ? `${styles.header} ${styles.prominent}` : styles.header}>
       <h2 className={styles.label}>{label}</h2>
       <span className={styles.spacer} />
       {meta ? <span className={styles.meta}>{meta}</span> : null}
