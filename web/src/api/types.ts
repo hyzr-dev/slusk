@@ -26,6 +26,10 @@ export interface Job {
   // progress bar doesn't jump backwards when a new file starts.
   bytesDone: number;
   bytesTotal: number;
+  // When the job was first created — unlike updatedAt this never changes on
+  // progress/state updates, so it's used to sort the Overview TRANSFERS panel
+  // by start order (#233) without rows reordering on every progress tick.
+  createdAt: string;
   updatedAt: string;
   state: JobState;
   candidatesTried: number;

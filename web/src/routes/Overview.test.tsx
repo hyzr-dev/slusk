@@ -18,6 +18,7 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
     peer: status === 'active' ? 'someuser' : '',
     bytesDone: status === 'active' ? 50 : 0,
     bytesTotal: status === 'active' ? 100 : 0,
+    createdAt: '',
     updatedAt: '',
     state: 'DOWNLOADING',
     candidatesTried: 1,

@@ -18,6 +18,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     peer: '',
     bytesDone: 0,
     bytesTotal: 0,
+    createdAt: '',
     updatedAt: '',
     state: 'FAILED',
     candidatesTried: 1,

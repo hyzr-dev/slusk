@@ -9,10 +9,14 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
+import { sortJobs } from './jobSort';
 import styles from './Overview.module.css';
 
 // At most this many rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:102) rather than the full jobs list.
+// Jobs are sorted oldest-first before slicing (#233), so this caps the panel
+// to the eight transfers that have been running the longest, not an
+// arbitrary prefix of whatever order the backend happened to return.
 const MAX_TRANSFER_ROWS = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
@@ -66,9 +70,15 @@ export default function Overview() {
   const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
   const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
 
-  const transferRows = jobs
-    .filter((j) => j.status === 'active' || j.status === 'stalled')
-    .slice(0, MAX_TRANSFER_ROWS);
+  // Sorted by createdAt ascending — oldest first — rather than the backend's
+  // own updated_at DESC ordering, so a row stays in place for its whole
+  // lifetime instead of jumping to the top on every progress update and
+  // potentially pushing another job out of the slice below (#233).
+  const transferRows = sortJobs(
+    jobs.filter((j) => j.status === 'active' || j.status === 'stalled'),
+    'createdAt',
+    'asc',
+  ).slice(0, MAX_TRANSFER_ROWS);
 
   // SearchPass carries no id of its own, and the window this slices from is
   // capped at 20 and slides — a position-based number would look like a

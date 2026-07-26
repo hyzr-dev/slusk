@@ -21,6 +21,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     peer: 'flac_hoarder',
     bytesDone: 50,
     bytesTotal: 100,
+    createdAt: '',
     updatedAt: '',
     state: 'DOWNLOADING',
     candidatesTried: 1,
