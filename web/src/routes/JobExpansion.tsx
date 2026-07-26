@@ -1,6 +1,7 @@
 import { useJobDetail } from '../api/queries';
 import type { AttemptDetail, Job } from '../api/types';
 import JobActions from '../components/JobActions';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { basename, compareFileNames, formatEta, formatSize } from '../format';
 import { t } from '../strings';
 import styles from './JobExpansion.module.css';
@@ -30,8 +31,13 @@ function secondsInState(job: Job): number | undefined {
 }
 
 export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse: () => void }) {
-  const { data: detail, isLoading } = useJobDetail(job.id);
-  const candidate = detail ? currentCandidate(detail.attempts) : undefined;
+  const detailQuery = useJobDetail(job.id);
+  const { data: detail } = detailQuery;
+  const phase = queryPhase(detailQuery);
+  // hasData() also closes a latent hole the bare `isLoading` check left: with
+  // keepPreviousData, expanding row B right after row A returned the *A*
+  // detail with isLoading false, so B's file list showed A's files.
+  const candidate = hasData(phase) && detail ? currentCandidate(detail.attempts) : undefined;
   const queued = job.status === 'active' && (job.queuePosition ?? 0) > 0;
   const elapsed = secondsInState(job);
 
@@ -89,35 +95,35 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
 
         <div>
           <div className={styles.colTitle}>{t.jobs.files}</div>
-          {isLoading ? (
-            <div className={styles.placeholder}>{t.jobs.loading}</div>
-          ) : !candidate ? (
-            <div className={styles.placeholder}>{t.jobs.noCandidate}</div>
-          ) : (
-            <div className={styles.fileList}>
-              {/* Sorted before truncating: the API returns transfers in
-                  arbitrary order, so "the first five" would otherwise be five
-                  arbitrary files rather than the first five tracks. Copied
-                  because the array belongs to the query cache. */}
-              {[...candidate.transfers]
-                .sort((x, y) => compareFileNames(x.filename, y.filename))
-                .slice(0, MAX_FILES_SHOWN)
-                .map((tr) => (
-                <div key={tr.filename} className={styles.fileRow}>
-                  <span className={tr.state === 'COMPLETED' ? styles.markDone : styles.markPending}>
-                    {tr.state === 'COMPLETED' ? '✓' : '·'}
-                  </span>
-                  <span className={styles.fileName}>{basename(tr.filename)}</span>
-                  <span className={styles.fileSize}>{formatSize(tr.bytesTotal)}</span>
-                </div>
-              ))}
-              {candidate.transfers.length > MAX_FILES_SHOWN && (
-                <div className={styles.moreFiles}>
-                  {t.jobs.moreFiles(candidate.transfers.length - MAX_FILES_SHOWN)}
-                </div>
-              )}
-            </div>
-          )}
+          <QueryNotice phase={phase} />
+          {hasData(phase) &&
+            (!candidate ? (
+              <div className={styles.placeholder}>{t.jobs.noCandidate}</div>
+            ) : (
+              <div className={styles.fileList}>
+                {/* Sorted before truncating: the API returns transfers in
+                    arbitrary order, so "the first five" would otherwise be five
+                    arbitrary files rather than the first five tracks. Copied
+                    because the array belongs to the query cache. */}
+                {[...candidate.transfers]
+                  .sort((x, y) => compareFileNames(x.filename, y.filename))
+                  .slice(0, MAX_FILES_SHOWN)
+                  .map((tr) => (
+                  <div key={tr.filename} className={styles.fileRow}>
+                    <span className={tr.state === 'COMPLETED' ? styles.markDone : styles.markPending}>
+                      {tr.state === 'COMPLETED' ? '✓' : '·'}
+                    </span>
+                    <span className={styles.fileName}>{basename(tr.filename)}</span>
+                    <span className={styles.fileSize}>{formatSize(tr.bytesTotal)}</span>
+                  </div>
+                ))}
+                {candidate.transfers.length > MAX_FILES_SHOWN && (
+                  <div className={styles.moreFiles}>
+                    {t.jobs.moreFiles(candidate.transfers.length - MAX_FILES_SHOWN)}
+                  </div>
+                )}
+              </div>
+            ))}
         </div>
       </div>
 

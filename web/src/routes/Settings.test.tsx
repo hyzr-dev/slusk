@@ -267,6 +267,24 @@ describe('rendering', () => {
     // All five weight fixture values are 1.0 (String(1.0) === '1').
     expect(within(pipelineCard).getAllByDisplayValue('1')).toHaveLength(5);
   });
+
+  it('shows the loading line above the connections section while config has never resolved', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const client = newClient();
+    renderSettings(client);
+
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: t.settings.connections })).toBeInTheDocument();
+  });
+
+  it('shows the failed line above the connections section when the config fetch never succeeds', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+    const client = newClient();
+    renderSettings(client);
+
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: t.settings.connections })).toBeInTheDocument();
+  });
 });
 
 describe('saving settings', () => {

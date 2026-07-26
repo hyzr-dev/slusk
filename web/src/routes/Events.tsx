@@ -2,13 +2,16 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useEvents } from '../api/queries';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { formatShortTime } from '../format';
 import { eventLabel, t } from '../strings';
 import { matchesFilter } from './eventFilter';
 import styles from './Events.module.css';
 
 export default function Events() {
-  const { data: events = [] } = useEvents();
+  const eventsQuery = useEvents();
+  const events = eventsQuery.data ?? [];
+  const phase = queryPhase(eventsQuery);
   const [filter, setFilter] = useState('');
 
   const filtered = events.filter((e) => matchesFilter(e, filter));
@@ -36,22 +39,26 @@ export default function Events() {
           <span role="columnheader">{t.columns.detail}</span>
         </div>
 
-        {filtered.map((e) => (
-          <div key={e.id} role="row" className={`${styles.grid} ${styles.row}`}>
-            <span role="cell" className={styles.mono}>{formatShortTime(e.createdAt)}</span>
-            {/* role="cell" goes on the span, not the <a>, so the link keeps its own link role */}
-            <span role="cell" className={styles.mono}>
-              <Link to={`/jobs/${e.jobId}`} className={styles.link}>
-                #{e.jobId}
-              </Link>
-            </span>
-            <span role="cell">{eventLabel(e.event)}</span>
-            <span role="cell" className={styles.detail}>{e.detail}</span>
-          </div>
-        ))}
+        {hasData(phase) &&
+          filtered.map((e) => (
+            <div key={e.id} role="row" className={`${styles.grid} ${styles.row}`}>
+              <span role="cell" className={styles.mono}>{formatShortTime(e.createdAt)}</span>
+              {/* role="cell" goes on the span, not the <a>, so the link keeps its own link role */}
+              <span role="cell" className={styles.mono}>
+                <Link to={`/jobs/${e.jobId}`} className={styles.link}>
+                  #{e.jobId}
+                </Link>
+              </span>
+              <span role="cell">{eventLabel(e.event)}</span>
+              <span role="cell" className={styles.detail}>{e.detail}</span>
+            </div>
+          ))}
       </div>
 
-      {filtered.length === 0 && <EmptyState message={t.events.empty} />}
+      {/* Both of these sit outside the table: `role="table"` admits only rows,
+          so a notice or an empty state nested inside would be invalid ARIA. */}
+      <QueryNotice phase={phase} />
+      {hasData(phase) && filtered.length === 0 && <EmptyState message={t.events.empty} />}
     </>
   );
 }

@@ -2,6 +2,7 @@ import { Fragment, useState } from 'react';
 import { usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { formatScore, formatShortTime } from '../format';
 import { t } from '../strings';
 import styles from './Peers.module.css';
@@ -17,7 +18,9 @@ function lastSeenAt(p: Peer): string {
 }
 
 export default function Peers() {
-  const { data: peers = [] } = usePeers();
+  const peersQuery = usePeers();
+  const peers = peersQuery.data ?? [];
+  const phase = queryPhase(peersQuery);
   const [sortKey, setSortKey] = useState<SortKey>('score');
   const [desc, setDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -64,7 +67,7 @@ export default function Peers() {
           <span role="columnheader" className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
         </div>
 
-        {sorted.map((p) => {
+        {hasData(phase) && sorted.map((p) => {
           const isExpanded = expanded === p.username;
           const expansionId = `peer-expansion-${p.username}`;
 
@@ -128,7 +131,10 @@ export default function Peers() {
         })}
       </div>
 
-      {sorted.length === 0 && <EmptyState message={t.peers.empty} />}
+      {/* Both of these sit outside the table: `role="table"` admits only rows,
+          so a notice or an empty state nested inside would be invalid ARIA. */}
+      <QueryNotice phase={phase} />
+      {hasData(phase) && sorted.length === 0 && <EmptyState message={t.peers.empty} />}
     </>
   );
 }

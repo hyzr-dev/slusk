@@ -3,6 +3,7 @@ import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
 import type { JobState, TransferDetail } from '../api/types';
 import JobActions, { isRetryEligible } from '../components/JobActions';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
@@ -43,27 +44,19 @@ export default function JobDetail() {
   const id = Number(useParams().id);
   const navigate = useNavigate();
   const { data: jobs = [] } = useJobs();
-  const {
-    data: detail,
-    isLoading: detailLoading,
-    isPlaceholderData: detailIsPlaceholder,
-  } = useJobDetail(id);
-  const {
-    data: events,
-    isLoading: eventsLoading,
-    isPlaceholderData: eventsIsPlaceholder,
-  } = useJobEvents(id);
+  const detailQuery = useJobDetail(id);
+  const eventsQuery = useJobEvents(id);
+  const { data: detail } = detailQuery;
+  const { data: events } = eventsQuery;
+  const detailPhase = queryPhase(detailQuery);
+  const eventsPhase = queryPhase(eventsQuery);
 
   const job = jobs.find((j) => j.id === id);
 
-  // The QueryClient sets `placeholderData: keepPreviousData` globally, so
-  // navigating to a job id never fetched before doesn't put `useJobDetail`/
-  // `useJobEvents` into a loading state — it instead returns the *previous*
-  // job's data with `isPlaceholderData: true`. Without this guard the page
-  // would show job 41's attempt history while the URL says job 42. Anywhere
-  // `detail`/`events` inform what's rendered, treat placeholder data as "not
-  // actually loaded yet".
-  const detailReady = detail !== undefined && !detailIsPlaceholder;
+  // hasData() is exactly the old `detail !== undefined && !detailIsPlaceholder`
+  // — see ownPhase() in QueryNotice.tsx, which carries the keepPreviousData
+  // rationale that used to live here.
+  const detailReady = hasData(detailPhase);
 
   // JobActions decides button visibility from a single `state`, but the
   // polled list and the detail response can disagree briefly and both are
@@ -132,7 +125,7 @@ export default function JobDetail() {
           </div>
         </>
       ) : (
-        <div className={styles.placeholder}>{t.jobs.loading}</div>
+        <QueryNotice phase={detailPhase} />
       )}
 
       <div className={styles.actionsWrap}>
@@ -140,80 +133,80 @@ export default function JobDetail() {
       </div>
 
       <SectionHeader label={t.jobs.attemptHistory} />
-      {detailLoading || detailIsPlaceholder ? (
-        <div className={styles.placeholder}>{t.jobs.loading}</div>
-      ) : !detail?.attempts.length ? (
-        <EmptyState message={t.jobs.noAttempts} />
-      ) : (
-        detail.attempts.map((a) => (
-          <div key={a.id} className={styles.attempt}>
-            <div className={styles.attemptHead}>
-              <strong className={styles.attemptUser}>{a.username}</strong>
-              <span>{candidateStateLabel(a.state)}</span>
-              {a.failReason && <span className={styles.attemptFail}>{a.failReason}</span>}
-              <span className={styles.attemptMeta}>
-                {formatDateTime(a.createdAt)} — {t.jobs.fileCount(a.fileCount)}
-              </span>
-            </div>
-            {/* Copied before sorting: this array belongs to the query cache,
-                and sorting in place would mutate it for every other reader. */}
-            {[...a.transfers]
-              .sort((x, y) => compareFileNames(x.filename, y.filename))
-              .map((tr) => {
-              const { tone, live } = transferTone(tr);
-              const pct = percent(tr.bytesDone, tr.bytesTotal);
-              return (
-                <div key={tr.filename} className={styles.transfer}>
-                  <span className={styles.transferName}>{basename(tr.filename)}</span>
-                  <div className={styles.ticksWrap}>
-                    <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={7} />
+      <QueryNotice phase={detailPhase} />
+      {hasData(detailPhase) &&
+        (!detail?.attempts.length ? (
+          <EmptyState message={t.jobs.noAttempts} />
+        ) : (
+          detail.attempts.map((a) => (
+            <div key={a.id} className={styles.attempt}>
+              <div className={styles.attemptHead}>
+                <strong className={styles.attemptUser}>{a.username}</strong>
+                <span>{candidateStateLabel(a.state)}</span>
+                {a.failReason && <span className={styles.attemptFail}>{a.failReason}</span>}
+                <span className={styles.attemptMeta}>
+                  {formatDateTime(a.createdAt)} — {t.jobs.fileCount(a.fileCount)}
+                </span>
+              </div>
+              {/* Copied before sorting: this array belongs to the query cache,
+                  and sorting in place would mutate it for every other reader. */}
+              {[...a.transfers]
+                .sort((x, y) => compareFileNames(x.filename, y.filename))
+                .map((tr) => {
+                const { tone, live } = transferTone(tr);
+                const pct = percent(tr.bytesDone, tr.bytesTotal);
+                return (
+                  <div key={tr.filename} className={styles.transfer}>
+                    <span className={styles.transferName}>{basename(tr.filename)}</span>
+                    <div className={styles.ticksWrap}>
+                      <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={7} />
+                    </div>
+                    <span className={`${table.mono} ${styles.transferBytes}`}>
+                      {formatSize(tr.bytesDone)} / {formatSize(tr.bytesTotal)}
+                    </span>
+                    <span className={styles.transferExtra}>
+                      {/* speed and queue position are live-only and mutually exclusive
+                          in practice (downloading vs waiting in the peer's queue); each
+                          is absent unless the native backend reported it. */}
+                      {tr.speed ? formatSpeed(tr.speed) : ''}
+                      {tr.speed && tr.queuePosition ? ' · ' : ''}
+                      {tr.queuePosition ? t.jobs.queuePosition(tr.queuePosition) : ''}
+                    </span>
+                    <span className={styles.transferRetries}>
+                      {tr.retries > 0 ? t.jobs.transferRetries(tr.retries) : ''}
+                    </span>
                   </div>
-                  <span className={`${table.mono} ${styles.transferBytes}`}>
-                    {formatSize(tr.bytesDone)} / {formatSize(tr.bytesTotal)}
-                  </span>
-                  <span className={styles.transferExtra}>
-                    {/* speed and queue position are live-only and mutually exclusive
-                        in practice (downloading vs waiting in the peer's queue); each
-                        is absent unless the native backend reported it. */}
-                    {tr.speed ? formatSpeed(tr.speed) : ''}
-                    {tr.speed && tr.queuePosition ? ' · ' : ''}
-                    {tr.queuePosition ? t.jobs.queuePosition(tr.queuePosition) : ''}
-                  </span>
-                  <span className={styles.transferRetries}>
-                    {tr.retries > 0 ? t.jobs.transferRetries(tr.retries) : ''}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        ))
-      )}
+                );
+              })}
+            </div>
+          ))
+        ))}
 
       <SectionHeader label={t.jobs.events} />
-      {eventsLoading || eventsIsPlaceholder ? (
-        <div className={styles.placeholder}>{t.jobs.loading}</div>
-      ) : !events?.length ? (
-        <EmptyState message={t.jobs.noEvents} />
-      ) : (
-        <table className={table.table}>
-          <thead>
-            <tr>
-              <th className={table.th}>{t.columns.time}</th>
-              <th className={table.th}>{t.columns.event}</th>
-              <th className={table.th}>{t.columns.detail}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {events.map((e) => (
-              <tr key={e.id}>
-                <td className={`${table.td} ${table.mono}`}>{formatDateTime(e.createdAt)}</td>
-                <td className={table.td}>{eventLabel(e.event)}</td>
-                <td className={table.td}>{e.detail}</td>
+      <QueryNotice phase={eventsPhase} />
+      {hasData(eventsPhase) &&
+        (!events?.length ? (
+          <EmptyState message={t.jobs.noEvents} />
+        ) : (
+          <table className={table.table}>
+            <thead>
+              <tr>
+                <th className={table.th}>{t.columns.time}</th>
+                <th className={table.th}>{t.columns.event}</th>
+                <th className={table.th}>{t.columns.detail}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+            </thead>
+            <tbody>
+              {events.map((e) => (
+                <tr key={e.id}>
+                  <td className={`${table.td} ${table.mono}`}>{formatDateTime(e.createdAt)}</td>
+                  <td className={table.td}>{eventLabel(e.event)}</td>
+                  <td className={table.td}>{e.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
     </>
   );
 }

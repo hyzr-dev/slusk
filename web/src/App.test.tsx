@@ -101,7 +101,7 @@ describe('route tree', () => {
     // No seeded query data, so Shares renders its loading placeholder rather
     // than any of its real states.
     renderAt('/shares');
-    expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
   });
 
   it('renders /jobs/42 without crashing', () => {
@@ -110,7 +110,7 @@ describe('route tree', () => {
     // same text also appears in the attempt-history and events placeholders
     // below it, so assert at least one match rather than a unique heading.
     renderAt('/jobs/42');
-    expect(screen.getAllByText(t.jobs.loading).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
   });
 
   it('marks the matching nav item active', () => {

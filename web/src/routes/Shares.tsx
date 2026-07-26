@@ -3,6 +3,7 @@ import { ApiError } from '../api/client';
 import { useRescanShares, useShares } from '../api/queries';
 import { useFlash } from '../components/chrome/FlashContext';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { formatDateTime, formatSize } from '../format';
 import { t } from '../strings';
@@ -19,18 +20,24 @@ import UploadsPanel from './UploadsPanel';
 const STALE_INDEX_MS = 24 * 60 * 60 * 1000;
 
 export default function Shares() {
-  const { data } = useShares();
+  const sharesQuery = useShares();
+  const { data } = sharesQuery;
+  const phase = queryPhase(sharesQuery);
   const rescan = useRescanShares();
   const flash = useFlash();
 
   // `data` is undefined on first paint and `enabled` has no safe default to
   // branch on meanwhile — rendering the disabled notice (or the empty-shares
   // warning) before the real report arrives would flash the wrong state, so
-  // show only a loading placeholder until the query settles. Unlike
+  // show only the query notice until the query settles. Unlike
   // Peers/Overview, there is no empty-array fallback that is also a valid
   // rendered state here.
+  //
+  // Truthiness is enough to mean "never answered" here and narrows `data` for
+  // everything below: queryKeys.shares is a constant key, so keepPreviousData
+  // can never substitute another key's response into it.
   if (!data) {
-    return <div className={styles.placeholder}>{t.jobs.loading}</div>;
+    return <QueryNotice phase={phase} />;
   }
 
   if (!data.enabled) {
@@ -56,6 +63,7 @@ export default function Shares() {
 
   return (
     <>
+      <QueryNotice phase={phase} />
       {data.folders.length === 0 && (
         <div className={styles.warningCard}>
           <svg

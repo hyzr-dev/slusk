@@ -1,11 +1,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { Peer } from '../api/types';
 import { t } from '../strings';
 import Peers from './Peers';
+
+afterEach(() => vi.unstubAllGlobals());
+
+function stubFetchIndefinitely() {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+}
+
+function stubFetchFailing() {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+}
 
 function makePeer(overrides: Partial<Peer> = {}): Peer {
   return {
@@ -35,7 +45,10 @@ const peers: Peer[] = [
 ];
 
 function renderPeers() {
-  const queryClient = new QueryClient();
+  // A real refetch on mount would otherwise hit the unmocked global fetch;
+  // keep it pending indefinitely so the seeded data is what's asserted on.
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.peers, peers);
   return render(
     <QueryClientProvider client={queryClient}>
@@ -133,5 +146,37 @@ describe('Peers row expansion', () => {
     fireEvent.click(screen.getByText('alice'));
     fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(screen.getByText(t.peers.artistLine(1, '1.50', 2, 0))).toBeInTheDocument();
+  });
+});
+
+describe('Peers query state', () => {
+  it('shows the loading line, not the empty message, before the first fetch resolves', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Peers />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+    expect(screen.queryByText(t.peers.empty, { exact: false })).not.toBeInTheDocument();
+    expect(screen.getByText(t.peers.gridHead.peer)).toBeInTheDocument();
+  });
+
+  it('shows the failed line, not the empty message, when the fetch never succeeds', async () => {
+    stubFetchFailing();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Peers />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.queryByText(t.peers.empty, { exact: false })).not.toBeInTheDocument();
+    expect(screen.getByText(t.peers.gridHead.peer)).toBeInTheDocument();
   });
 });
