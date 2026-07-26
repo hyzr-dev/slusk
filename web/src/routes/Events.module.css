@@ -15,8 +15,16 @@
   flex: 0 0 230px;
 }
 
+/* Same focus treatment as Jobs.module.css — see the rationale there. */
+.filterBox:focus-within {
+  border-color: var(--fg);
+  outline: 1px solid var(--fg);
+}
+
 .filterSlash { color: var(--dim); font-size: 12px; }
 
+/* outline: none is safe here only because .filterBox:focus-within above marks
+   the focus. Don't remove that rule without putting an indicator back. */
 .filterInput {
   flex: 1;
   background: transparent;
@@ -53,11 +61,17 @@
 
 .mono { font-family: var(--font-mono); color: var(--dim); }
 
-/* Grid item #2 before the cell got a `role="cell"` wrapper span; now inline
-   inside that span, so width is reclaimed with display: block to fill the
-   56px column again. */
-.link { display: block; color: var(--active); text-decoration: none; }
-.link:hover { text-decoration: underline; }
+/* The mock has no link colour, so the underline carries the affordance on its
+   own — without it this sits on top of .mono and is indistinguishable from the
+   surrounding row text. Hover brightens rather than adding the underline;
+   hover is not available to keyboard or touch, so it can't be the only cue.
+
+   display: block because this was grid item #2 until the cell gained a
+   `role="cell"` wrapper span; inline inside that span it would shrink to the
+   width of the id, and the rest of the column would stop being clickable.
+   The underline still tracks the text, not the box. */
+.link { display: block; text-decoration: underline; text-underline-offset: 2px; }
+.link:hover { color: var(--fg); }
 
 .detail {
   color: var(--faint);

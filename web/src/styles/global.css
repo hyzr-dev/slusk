@@ -19,8 +19,8 @@ body {
 ::selection { background: rgba(255, 255, 255, 0.16); }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: #1e2226; }
-::-webkit-scrollbar-thumb:hover { background: #2c3237; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 
 input, select, button { font-family: inherit; }
 
@@ -29,8 +29,29 @@ input, select, button { font-family: inherit; }
 @keyframes tui-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
 /* The newest filled tick in a live progress bar flashes white and stretches
-   for one beat, so a moving transfer is visible without reading the number. */
+   for one beat, so a moving transfer is visible without reading the number.
+   Under reduced motion this is suppressed along with everything else, and the
+   cue is not replaced: it signals *movement*, which is precisely what the user
+   asked not to be shown. Progress is still legible from how many ticks are
+   lit, and an active transfer still says so in the state column. */
 @keyframes tui-flare {
   0% { background: #ffffff; transform: scaleY(1.55); }
   100% { transform: scaleY(1); }
+}
+
+/* Blunt on purpose. Three targeted overrides would cover today's animations
+   (tui-pulse, tui-flare, shares-spin) and silently miss the fourth one someone
+   adds later. Duration rather than `animation: none` so animations that carry
+   an end state still land on it.
+
+   Two cues degrade rather than disappear: the status dot stops pulsing but
+   stays visible, and the rescan spinner freezes — Shares also reports rescan
+   progress in its live region, so the state is still announced. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

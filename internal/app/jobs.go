@@ -44,7 +44,8 @@ var ErrJobImporting = errors.New("job is importing")
 // JobStore is the slice of the store Jobs needs.
 type JobStore interface {
 	JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error)
-	AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJobState, now time.Time) error
+	CancelJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
+	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
@@ -52,7 +53,7 @@ type JobStore interface {
 }
 
 // TransferCanceller is the slice of the slskd client Jobs needs to cancel a
-// job's live remote transfer.
+// job's live remote transfers.
 type TransferCanceller interface {
 	Cancel(ctx context.Context, username, id string) error
 }
@@ -72,24 +73,39 @@ func (j *Jobs) log() *slog.Logger {
 	return slog.Default()
 }
 
-// Cancel cancels a job locally even if the remote slskd cancel call fails:
-// the job's local state must advance to cancelled regardless, since any
-// stale slskd-side entry gets cleaned up by the next reconcile pass. Returns
-// ErrJobNotFound if no such job exists.
+// cancelRemoteTransfers attempts every known remote cancellation. Individual
+// failures cannot prevent later attempts or the durable local lifecycle action.
+func (j *Jobs) cancelRemoteTransfers(ctx context.Context, jobID int64, transfers []core.Transfer) {
+	for _, transfer := range transfers {
+		if transfer.SlskdID == "" {
+			continue
+		}
+		if err := j.Peers.Cancel(ctx, transfer.Username, transfer.SlskdID); err != nil {
+			j.log().Warn("remote transfer cancel failed",
+				"job_id", jobID,
+				"transfer_id", transfer.ID,
+				"username", transfer.Username,
+				"slskd_id", transfer.SlskdID,
+				"err", err)
+		}
+	}
+}
+
+// Cancel first commits the local cancellation barrier, atomically capturing
+// and cancelling every live child transfer with the job. It then best-effort
+// cancels the captured remote identities. Remote failures are logged but do
+// not undo the durable local transition. Returns ErrJobNotFound if no such job
+// exists.
 func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
-	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	transfers, found, err := j.Store.CancelJob(ctx, jobID, time.Now())
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrJobNotFound
 	}
-	if view.Transfer != nil && view.Transfer.SlskdID != "" {
-		if err := j.Peers.Cancel(ctx, view.Transfer.Username, view.Transfer.SlskdID); err != nil {
-			j.log().Warn("slskd cancel failed, still advancing job state", "job_id", jobID, "err", err)
-		}
-	}
-	return j.Store.AdvanceJobState(ctx, jobID, core.StateCancelled, time.Now())
+	j.cancelRemoteTransfers(ctx, jobID, transfers)
+	return nil
 }
 
 // Retry manually revives one FAILED or ORPHANED job by id: ErrJobNotFound if
@@ -169,25 +185,22 @@ func (j *Jobs) ForceSearch(ctx context.Context, jobID int64) error {
 
 // Delete permanently removes one job and its children (issue #159):
 // ErrJobNotFound if no such job exists, ErrJobImporting if it is currently
-// IMPORTING. Any live remote transfer is cancelled best-effort first, the
-// same as Cancel - a failed remote cancel must not block the delete, since
-// any stale slskd-side entry is left for the next reconcile pass to clean up.
+// IMPORTING. It first commits the local cancellation barrier, then best-effort
+// cancels every captured remote identity before the hard delete. If the hard
+// delete fails, the job safely remains CANCELLED for a later retry.
 func (j *Jobs) Delete(ctx context.Context, jobID int64) error {
-	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	transfers, found, err := j.Store.PrepareDeleteJob(ctx, jobID, time.Now())
+	if errors.Is(err, store.ErrJobImporting) {
+		return ErrJobImporting
+	}
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrJobNotFound
 	}
-	if view.Job.State == core.StateImporting {
-		return ErrJobImporting
-	}
-	if view.Transfer != nil && view.Transfer.SlskdID != "" {
-		if err := j.Peers.Cancel(ctx, view.Transfer.Username, view.Transfer.SlskdID); err != nil {
-			j.log().Warn("slskd cancel failed, still deleting job", "job_id", jobID, "err", err)
-		}
-	}
+	j.cancelRemoteTransfers(ctx, jobID, transfers)
+
 	ok, err := j.Store.DeleteJob(ctx, jobID)
 	if errors.Is(err, store.ErrJobImporting) {
 		return ErrJobImporting

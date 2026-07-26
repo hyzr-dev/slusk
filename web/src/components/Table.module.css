@@ -1,10 +1,13 @@
+/* The tokens this used before the #198 reskin (--panel, --border, --radius,
+   --border-subtle) no longer exist. --panel-inset recesses the event history
+   the same way Peers recesses its artist block, and the radius is gone because
+   nothing in the TUI has rounded corners. */
 .table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: var(--panel-inset);
+  border: 1px solid var(--line2);
   overflow: hidden;
 }
 
@@ -13,10 +16,14 @@
   padding: 9px 14px;
   font-size: 11px;
   text-transform: uppercase;
-  color: #6b7280;
-  border-bottom: 1px solid var(--border);
+  /* --dim, not the --text-dim every other column header uses: at 4.12:1 the
+     hard-coded grey this replaces failed AA, and --text-dim (3.55:1) would
+     fail it harder. #212 decides whether the palette's quiet step gets raised
+     for all the others; this one didn't need to wait for that. */
+  color: var(--dim);
+  border-bottom: 1px solid var(--line2);
 }
 
-.td { padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); }
+.td { padding: 10px 14px; border-bottom: 1px solid var(--line); }
 
 .mono { font-family: var(--font-mono); }

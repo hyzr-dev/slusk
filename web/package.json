@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "vitest run",
+    "test": "node scripts/check-css-tokens.mjs && vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {

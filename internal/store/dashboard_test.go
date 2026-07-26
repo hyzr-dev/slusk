@@ -57,7 +57,7 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate a1: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent a1: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate a2: found=%v (%v)", found, err)
 	}
-	tid2, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later)
+	tid2, _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent a2: %v", err)
 	}
@@ -138,13 +138,13 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	}
 
 	// First file of the album.
-	if _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent track1: %v", err)
 	}
 
 	// Second file of the same album, same candidate, enqueued slightly later.
 	later := now.Add(time.Minute)
-	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
+	tid2, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track2: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestListJobsWithTransferAggregatesAlbumBytes(t *testing.T) {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
 
-	tid1, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now)
+	tid1, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track1.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track1: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestListJobsWithTransferAggregatesAlbumBytes(t *testing.T) {
 	}
 
 	later := now.Add(time.Minute)
-	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
+	tid2, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "album_peer", "track2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track2: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestListJobsWithTransferAlbumBytesRemainingExcludesTerminal(t *testing.T) {
 	}
 
 	// A live transfer still in progress.
-	tid1, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track1.flac", now.Add(time.Hour), now)
+	tid1, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track1.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track1: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestListJobsWithTransferAlbumBytesRemainingExcludesTerminal(t *testing.T) {
 
 	// A terminal (errored) transfer with bytes left undone.
 	later := now.Add(time.Minute)
-	tid2, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track2.flac", later.Add(time.Hour), later)
+	tid2, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer", "track2.flac", later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent track2: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestListJobsWithTransferAlbumBytesRemainingNeverNegative(t *testing.T) {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
 
-	tid, err := s.RecordEnqueueIntent(ctx, attempt.ID, "overshoot_peer", "track1.flac", now.Add(time.Hour), now)
+	tid, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "overshoot_peer", "track1.flac", now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestJobWithTransferFound(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "solo_peer", "solo.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a1.ID, "solo_peer", "solo.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 
@@ -504,7 +504,7 @@ func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate a1: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a1.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent a1/f1: %v", err)
 	}
 	if err := s.FailCandidate(ctx, a1.ID, "transfer failed", now); err != nil {
@@ -519,10 +519,10 @@ func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate a2: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f2.flac", later.Add(time.Hour), later); err != nil {
 		t.Fatalf("RecordEnqueueIntent a2/f2: %v", err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f3.flac", later.Add(time.Hour), later); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, a2.ID, "peer_two", "f3.flac", later.Add(time.Hour), later); err != nil {
 		t.Fatalf("RecordEnqueueIntent a2/f3: %v", err)
 	}
 
@@ -625,7 +625,7 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 	if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
@@ -687,7 +687,7 @@ func TestRetryFailedJobRevivesOrphanedJob(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateOrphaned, now); err != nil {
@@ -771,7 +771,7 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 	if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
@@ -868,7 +868,7 @@ func TestDeleteJobRemovesAllChildren(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	if _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+	if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
 	if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "", now); err != nil {

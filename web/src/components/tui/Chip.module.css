@@ -11,7 +11,7 @@
   cursor: pointer;
 }
 
-.active { border-color: var(--dim); background: #14181b; color: var(--fg); }
+.active { border-color: var(--dim); background: var(--btn); color: var(--fg); }
 
 .count { color: var(--text-dim); }
 .activeCount { color: var(--dim); }

@@ -54,7 +54,7 @@ func TestCandidatesAndTransfersForJob(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	_, _ = s.RecordEnqueueIntent(ctx, candidate.ID, "bob", "f.flac", now.Add(time.Hour), now)
+	_, _, _ = s.RecordEnqueueIntent(ctx, candidate.ID, "bob", "f.flac", now.Add(time.Hour), now)
 
 	candidates, err := s.CandidatesForJob(ctx, job.ID)
 	if err != nil || len(candidates) != 1 || candidates[0].Username != "bob" {
