@@ -76,12 +76,32 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # internal/store, internal/pipeline and cmd/sqlite2pg each start their own
-      # embedded Postgres via internal/store/storetest, so no service container
-      # is needed. Uncached, the first run of each downloads the Postgres
-      # binaries.
+      # Runs as an unprivileged user, not as root. Two independent reasons, both
+      # observed failing on the first real run of this workflow:
+      #
+      #   - internal/store, internal/pipeline and cmd/sqlite2pg each start their
+      #     own embedded Postgres via internal/store/storetest (so no service
+      #     container is needed). initdb refuses to run as root — a Postgres
+      #     rule, not an environment quirk — and act_runner's job container is
+      #     root by default.
+      #   - internal/config's TestApplySettingsReadOnlyDirReturnsErrNotWritable
+      #     asserts a read-only directory cannot be written. Root ignores the
+      #     directory mode, so the write succeeds and the assertion fails.
+      #
+      # su resets the environment, so the toolchain PATH and the Go caches are
+      # passed explicitly; HOME comes from su itself and must be writable
+      # because embedded-postgres caches its binaries under
+      # $HOME/.embedded-postgres-go. The caches live outside the workspace so
+      # chown only has to touch the checkout.
       - name: go test
-        run: go test ./...
+        env:
+          GOCACHE: /tmp/ci-gocache
+          GOMODCACHE: /tmp/ci-gomodcache
+        run: |
+          useradd -m ci
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
+          chown -R ci:ci "$GOCACHE" "$GOMODCACHE" .
+          su ci -c "PATH=$PATH GOCACHE=$GOCACHE GOMODCACHE=$GOMODCACHE go test ./..."
 
   web:
     runs-on: ubuntu-latest
