@@ -24,7 +24,9 @@ import type {
 // unchanged by the migration.
 const JOBS_INTERVAL = 3000;
 const EVENTS_INTERVAL = 3000;
-const STATUS_INTERVAL = 5000;
+// Exported because the top bar derives its staleness threshold from it: a
+// hardcoded copy there would silently stop matching if this changed.
+export const STATUS_INTERVAL = 5000;
 const PEERS_INTERVAL = 5000;
 const CHARTS_INTERVAL = 15000; // passes change at most every discovery tick (~30s)
 const SHARES_INTERVAL = 15000;

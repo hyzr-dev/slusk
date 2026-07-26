@@ -1,0 +1,23 @@
+.bar {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+  font-size: 10.5px;
+}
+
+.spacer { flex: 1; }
+
+.flash {
+  padding: 7px 13px;
+  color: var(--ok);
+  letter-spacing: 0.4px;
+  border-left: 1px solid var(--line);
+}
+
+.clock {
+  padding: 7px 14px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  border-left: 1px solid var(--line);
+}

@@ -7,13 +7,31 @@ export const t = {
     mark: 'sl',
   },
   nav: {
-    overview: 'Overview',
-    jobs: 'Jobs',
-    events: 'Events',
-    peers: 'Peers',
-    shares: 'Shares',
-    health: 'Health',
-    settings: 'Settings',
+    overview: 'overview',
+    jobs: 'jobs',
+    events: 'events',
+    peers: 'peers',
+    health: 'health',
+    search: 'search',
+    shares: 'shares',
+    chat: 'chat',
+    setup: 'setup',
+    settings: 'config',
+    groupMonitor: 'MONITOR',
+    groupSoulseek: 'SOULSEEK',
+    groupSystem: 'SYSTEM',
+  },
+  chrome: {
+    live: 'LIVE',
+    // Shown in place of LIVE once polling has visibly stopped keeping up, so a
+    // number in this cell always means something is wrong. While healthy the
+    // cell carries no digits at all — a counter that resets every few seconds
+    // is noise 99% of the time and trains the eye to ignore it.
+    stale: (age: string) => `STALE ${age}`,
+    reconcile: 'RECONCILE',
+    reconcileNever: '—',
+    down: 'DOWN',
+    idle: 'idle',
   },
   status: {
     queued: 'Queued',
@@ -22,6 +40,31 @@ export const t = {
     done: 'Done',
     failed: 'Failed',
     orphaned: 'Orphaned',
+  },
+  // Two-letter status tags in the TUI job grid. The long labels in `status`
+  // and `state` are still used wherever there is room for them.
+  tag: {
+    DL: 'DL',
+    QU: 'QU',
+    ST: 'ST',
+    OR: 'OR',
+    FA: 'FA',
+    OK: 'OK',
+    IM: 'IM',
+    // Uploads panel marker, not a JobStatus/JobState — the map already
+    // serves as a general two-letter tag vocabulary, so it's added here
+    // rather than duplicated in its own small map.
+    UL: 'UL',
+  },
+  tagTitle: {
+    DL: 'Downloading',
+    QU: 'Queued',
+    ST: 'Stalled',
+    OR: 'Orphaned',
+    FA: 'Failed',
+    OK: 'Done',
+    IM: 'Importing',
+    UL: 'Uploading',
   },
   state: {
     WANTED: 'Wanted',
@@ -51,35 +94,21 @@ export const t = {
     import_rejected: 'Import rejected',
     job_failed: 'Job failed',
   },
+  // The generic column-label object that predates this reskin. Each reskinned
+  // view now owns its own `gridHead` map matching the mock's column names;
+  // only the labels still shared by not-yet-reskinned views remain here.
   columns: {
-    album: 'Album / Artist',
-    peer: 'Peer',
-    progress: 'Progress',
     status: 'Status',
     time: 'Time',
     job: 'Job',
     event: 'Event',
     detail: 'Detail',
-    module: 'Module',
-    lastRun: 'Last attempt / status',
-    score: 'Score',
-    succeeded: 'Succeeded',
-    failed: 'Failed',
-    format: 'Format',
-    speed: 'Speed',
-    eta: 'ETA',
-    retries: 'Retries',
-    path: 'Path',
-    files: 'Files',
-    size: 'Size',
-    lastIndexed: 'Last indexed',
   },
   source: {
     manual: 'Manual',
     lidarr: 'Lidarr',
   },
   jobs: {
-    detail: 'Job detail',
     searchPlaceholder: 'Search artist, album, peer…',
     noMatch: 'No jobs match the filter.',
     back: '← Back',
@@ -103,32 +132,75 @@ export const t = {
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
-    inPeerQueue: "In peer's queue",
-    // Distinct from inPeerQueue: that's the status pill's text, this is the
-    // progress bar's sub-state line right below it — showing the same phrase
-    // twice in adjacent lines reads as a copy-paste rather than two facts.
-    queuedAtPeer: 'queued at peer',
+    // The attempt header's file count (job detail page) and a transfer's own
+    // retry count — both were inline template strings before this reskin.
+    fileCount: (n: number) => `${n} files`,
+    transferRetries: (n: number) => `${n} retries`,
     verifying: 'verifying',
     showDetails: 'Show details',
     hideDetails: 'Hide details',
     moreFiles: (n: number) => `+${n} more files`,
-    // Chip filter row labels (Source / Status) and the "clear filters"
-    // affordance. Both chip rows' "all" option and the label for a plain
-    // status/source share this single 'All', rather than three copies of the
-    // same word; source-specific labels reuse t.source instead of
-    // duplicating "Manual"/"Lidarr" here.
-    all: 'All',
-    statusImporting: 'Importing',
-    clearFilters: (summary: string) => `Clear · ${summary}`,
-    peerAndTransfer: 'Peer & transfer',
-    files: 'Files',
-    peerLabel: 'Peer',
-    sourceLabel: 'Source',
-    queuePositionLabel: 'Queue position',
-    qualityLabel: 'Quality',
-    sizeLabel: 'Size',
-    downloadedLabel: 'Downloaded',
-    jobIdLabel: 'Job ID',
+    // FILES is the only titled column in the TUI expansion (mock,
+    // docs/design/slskdarr-tui.dc.html:190) — the meta column on the left has
+    // no heading of its own.
+    files: 'FILES',
+    // The expansion's left-column meta tree (mock line ~1069): lowercase,
+    // terminal-style labels rather than the Title Case used elsewhere in the
+    // app, matching that mock's wording exactly.
+    peerLabel: 'peer',
+    sourceLabel: 'source',
+    queuePositionLabel: 'queue pos',
+    // The meta row's value when a job is genuinely waiting in a peer's queue
+    // (mock: '#'+queuePos+' in peer queue').
+    queuePositionMeta: (n: number) => `#${n} in peer queue`,
+    timeInStateLabel: 'time in state',
+    qualityLabel: 'quality',
+    transferredLabel: 'transferred',
+    jobIdLabel: 'job id',
+    // The TUI job grid's column headers (mock line 162) — short forms
+    // distinct from the generic Title Case labels in `columns`, which other
+    // (not yet reskinned) views still use.
+    gridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      peer: 'PEER',
+      format: 'FMT',
+      progress: 'PROGRESS',
+      speed: 'SPEED',
+      eta: 'ETA',
+      tries: 'TRY',
+    },
+    // Filter chip labels (mock line 1089). ORPHAN, not ORPHANED — the chip is
+    // narrower than the status pill it echoes.
+    chipLabel: {
+      all: 'ALL',
+      active: 'ACTIVE',
+      queued: 'QUEUED',
+      stalled: 'STALLED',
+      failed: 'FAILED',
+      orphaned: 'ORPHAN',
+      done: 'DONE',
+    },
+    // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
+    // the mock, but jobFilter.ts's SourceFilter needs a UI to reach it from;
+    // see Jobs.tsx's SOURCE_CHIP_ORDER. The group's own accessible name —
+    // distinct from sourceLabel above, which is the expansion meta-tree's
+    // (lowercase) row label and must stay free to reword independently.
+    sourceFilterLabel: 'Source',
+    sourceChipLabel: {
+      all: 'ALL',
+      manual: 'MANUAL',
+      lidarr: 'LIDARR',
+    },
+    // Compact peer-queue position for the dense PROGRESS cell, where "queue
+    // #4" (queuePosition above) would overflow the column.
+    queueShort: (n: number) => `P${n}`,
+    // Flash confirmations (see FlashContext) for the three row actions —
+    // mutations the row itself won't visibly reflect before the next poll.
+    retryFlash: (id: number) => `retried #${id}`,
+    cancelFlash: (id: number) => `cancelled #${id}`,
+    forceSearchFlash: (id: number) => `search forced for #${id}`,
+    deleteFlash: (id: number) => `deleted #${id}`,
   },
   events: {
     filterPlaceholder: 'Filter events…',
@@ -136,8 +208,6 @@ export const t = {
   },
   overview: {
     empty: 'No active downloads.',
-    chartPasses: 'Matched albums per pass · last 20',
-    chartCompleted: 'Completed downloads · last 24 h',
     noChartData: 'No pass history yet',
     chartRangeStart: '−24 h',
     chartRangeEnd: 'now',
@@ -146,17 +216,62 @@ export const t = {
     completedAriaLabel: (total: number) =>
       `${total} completed downloads over the last 24 hours`,
     passTooltip: (time: string, matched: number) => `${time} — ${matched} matched`,
+    // TUI Overview page (#198): the section headers above the TRANSFERS and
+    // THROUGHPUT panels. Uppercase in source, per SectionHeader's contract —
+    // RECONCILE reuses t.chrome.reconcile rather than a third copy of the word.
+    transfersHeading: 'TRANSFERS',
+    throughputHeading: 'THROUGHPUT',
+    activeCountMeta: (n: number) => `${n} active`,
+    // The peer-queue special case: an "active" job with no bytes moving.
+    queuePos: (n: number) => `queue pos ${n}`,
+    noThroughputData: 'No throughput data yet',
+    throughputAriaLabel: (peak: string) => `Peak download throughput ${peak} over the recent samples`,
+    reconcileMatched: (n: number) => `${n} matched`,
+    reconcileNoMatch: 'no match',
   },
   peers: {
     empty: 'No peers recorded yet.',
     noArtistHistory: 'No artist-specific history.',
     artistLine: (id: number, score: string, ok: number, fail: number) =>
       `Artist #${id} — score ${score}, ${ok} succeeded, ${fail} failed`,
+    // The TUI peers grid's column headers, short forms in the same idiom as
+    // jobs.gridHead (#198) — SCORE/OK/FAIL rather than the generic Title Case
+    // labels in `columns`, which predate this reskin.
+    gridHead: {
+      peer: 'PEER',
+      score: 'SCORE',
+      ok: 'OK',
+      fail: 'FAIL',
+      lastSeen: 'LAST SEEN',
+    },
   },
   health: {
     neverRun: 'Never run',
     consecutiveFailures: (n: number) => `${n} consecutive failures`,
     empty: 'No modules reported.',
+    // TUI Health page (#198): short state word on a dependency card, colored
+    // by ModuleStatus.ready.
+    ready: 'OK',
+    notReady: 'ERROR',
+    reconcileRateHeading: 'RECONCILE RATE',
+    reconcileRateMeta: 'matched / pass · 20',
+    completedHeading: 'COMPLETED',
+    completedMeta: 'cumulative · 24h',
+    // The mock's METRICS section names six slskdarr_* Prometheus metrics, but
+    // only four exist in internal/observ and only two of those (reconcile_total,
+    // album_releases_errors_total) are Prometheus-only with no JSON equivalent.
+    // Rather than invent metric names for a row, these are human-readable
+    // counters sourced from the same JSON the rest of this page already reads
+    // (useStatus/useUploads/useShares) — the real Prometheus surface is linked
+    // via metricsMeta instead of being named row by row.
+    metricsHeading: 'METRICS',
+    metricsMeta: 'full set at /metrics',
+    metricActive: 'active downloads',
+    metricQueued: 'queued',
+    metricStalled: 'stalled',
+    metricOrphaned: 'orphaned transfers',
+    metricUploads: 'active uploads',
+    metricShared: 'shared files',
   },
   shares: {
     disabledNotice: 'Native Soulseek sharing is not enabled in the configuration.',
@@ -170,16 +285,26 @@ export const t = {
     // for a user in exactly the state this warning card is shown to. Shown as
     // the fallback for a read-only config mount; Settings is the primary path.
     emptyConfigSnippet: '[[soulseek.shared_folders]]\nname = "Library"\npath = "/music/library"',
-    statFiles: 'Shared files',
-    statSize: 'Shared size',
     statNever: 'Never',
-    panelTitle: 'Shared folders',
+    panelTitle: 'SHARED FOLDERS',
+    summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,
+    // Report-level (SharesReport.indexedAt), not per-folder — see the
+    // STALE_INDEX_MS comment in Shares.tsx for why this lives in the header
+    // summary rather than as a folder-grid column.
+    indexedAt: (label: string) => `indexed ${label}`,
+    gridHead: {
+      path: 'PATH',
+      files: 'FILES',
+      size: 'SIZE',
+    },
+    // The word next to the header's spinner while a scan is running.
+    // SharesReport carries only `scanning: boolean`, no progress figure, so
+    // there is deliberately no percentage or tick bar here (spec, Shares
+    // section) — unlike the mock, which fakes both.
+    indexing: 'indexing',
     empty: 'Nothing is being shared.',
     rescan: 'Rescan',
-    rescanning: 'Scanning…',
-    footerNotePrefix: 'Add or remove shared folders in',
-    footerNoteReadOnlyFallback: 'If the configuration file is mounted read-only, edit',
-    footerNoteConfigFile: 'config.toml',
+    rescanStarted: 'rescan started',
     rescanConflict: 'A share scan is already in progress.',
     rescanUnavailable: 'Soulseek sharing is not enabled, so a rescan cannot be started.',
     rescanFailed: 'Could not start the share rescan. Please try again.',
@@ -193,6 +318,45 @@ export const t = {
     toPeerPrefix: 'to',
     queuePlace: (n: number) => `queue #${n}`,
     truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
+  },
+  placeholder: {
+    searchTitle: 'SEARCH',
+    searchBody:
+      'Manual Soulseek search is not built yet. When it lands, results will group per peer and folder, and anything downloaded can be matched and imported into Lidarr.',
+    searchIssue: 'Tracked as issue #58.',
+    chatTitle: 'CHAT',
+    chatBody:
+      'The native Soulseek client can send and receive private messages, but there is no HTTP surface for them yet, so this view has nothing to read.',
+    chatIssue: 'Tracked as issue #183.',
+  },
+  setup: {
+    title: 'GUIDED SETUP',
+    // The mock says slskdarr never writes the config file. That stopped being
+    // true with issue #134 — the Config view writes it. This copy points there
+    // instead of describing a workflow we no longer have.
+    intro:
+      'Check that each dependency answers before letting the pipeline run. Anything that fails can be corrected in the Config view, or in the configuration file directly.',
+    stepSoulseek: 'Soulseek login',
+    stepLidarr: 'Lidarr connection',
+    stepShares: 'Shared folders',
+    test: 'TEST',
+    testing: 'TESTING',
+    stateOk: 'OK',
+    stateFailed: 'FAILED',
+    stateUntested: 'UNTESTED',
+    stateDisabled: 'NOT ENABLED',
+    fieldUrl: 'url',
+    fieldApiKey: 'api key',
+    fieldUsername: 'username',
+    fieldPassword: 'password',
+    fieldFolders: 'folders',
+    fieldIndex: 'index',
+    secretSet: 'configured',
+    secretUnset: 'not set',
+    foldersCount: (n: number) => `${n} configured`,
+    indexCount: (n: number) => `${n} files`,
+    sharesNoTest:
+      'There is no connection test for shares. The state is derived from whether the index has found any files.',
   },
   settings: {
     notWritableNotice:

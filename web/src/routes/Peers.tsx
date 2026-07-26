@@ -1,13 +1,20 @@
 import { Fragment, useState } from 'react';
 import { usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
-import PageHeading from '../components/PageHeading';
-import table from '../components/Table.module.css';
-import { formatScore } from '../format';
+import EmptyState from '../components/tui/EmptyState';
+import { formatScore, formatShortTime } from '../format';
 import { t } from '../strings';
 import styles from './Peers.module.css';
 
 type SortKey = 'score' | 'successCount' | 'failCount';
+
+// lastSuccessAt and lastFailAt are recorded independently (each only touched
+// by its own outcome), so neither alone tells you when a peer was last seen
+// at all — take whichever is more recent. Empty strings (never happened)
+// sort before any real timestamp lexicographically, which is what we want.
+function lastSeenAt(p: Peer): string {
+  return p.lastSuccessAt > p.lastFailAt ? p.lastSuccessAt : p.lastFailAt;
+}
 
 export default function Peers() {
   const { data: peers = [] } = usePeers();
@@ -31,67 +38,89 @@ export default function Peers() {
     return desc ? -d : d;
   });
 
-  const header = (key: SortKey, label: string) => (
-    <th className={`${table.th} ${table.thSortable}`} onClick={() => sortBy(key)}>
+  function toggle(username: string) {
+    setExpanded((prev) => (prev === username ? null : username));
+  }
+
+  const sortHead = (key: SortKey, label: string) => (
+    <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
       {label}
-    </th>
+    </button>
   );
 
   return (
     <>
-      <PageHeading>{t.nav.peers}</PageHeading>
+      <div className={`${styles.grid} ${styles.head}`}>
+        <span>{t.peers.gridHead.peer}</span>
+        {sortHead('score', t.peers.gridHead.score)}
+        {sortHead('successCount', t.peers.gridHead.ok)}
+        {sortHead('failCount', t.peers.gridHead.fail)}
+        <span className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
+      </div>
 
-      <table className={table.table}>
-        <thead>
-          <tr>
-            <th className={table.th}>{t.columns.peer}</th>
-            {header('score', t.columns.score)}
-            {header('successCount', t.columns.succeeded)}
-            {header('failCount', t.columns.failed)}
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.length === 0 ? (
-            <tr><td className={table.empty} colSpan={4}>{t.peers.empty}</td></tr>
-          ) : (
-            sorted.map((p: Peer) => (
-              // A keyed Fragment is required here: the shorthand <> cannot take
-              // a key, and each peer renders two sibling rows.
-              <Fragment key={p.username}>
-                <tr
-                  className={table.rowClickable}
-                  onClick={() => setExpanded(expanded === p.username ? null : p.username)}
-                >
-                  <td className={table.td}>{p.username}</td>
-                  <td className={`${table.td} ${table.mono}`}>{formatScore(p.score)}</td>
-                  <td className={`${table.td} ${table.mono}`}>{p.successCount}</td>
-                  <td className={`${table.td} ${table.mono}`}>{p.failCount}</td>
-                </tr>
-                {expanded === p.username && (
-                  <tr className={styles.detailRow}>
-                    <td className={table.td} colSpan={4}>
-                      {p.artists.length === 0 ? (
-                        <div className={styles.artist}>{t.peers.noArtistHistory}</div>
-                      ) : (
-                        p.artists.map((a) => (
-                          <div key={a.artistId} className={styles.artist}>
-                            {t.peers.artistLine(
-                              a.artistId,
-                              formatScore(a.score),
-                              a.successCount,
-                              a.failCount,
-                            )}
-                          </div>
-                        ))
-                      )}
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))
-          )}
-        </tbody>
-      </table>
+      {sorted.length === 0 ? (
+        <EmptyState message={t.peers.empty} />
+      ) : (
+        sorted.map((p) => {
+          const isExpanded = expanded === p.username;
+          const expansionId = `peer-expansion-${p.username}`;
+
+          return (
+            // A keyed Fragment is required here: the shorthand <> cannot take
+            // a key, and each peer renders a row plus its (conditional)
+            // expansion as siblings.
+            <Fragment key={p.username}>
+              <div
+                className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
+                onClick={() => toggle(p.username)}
+              >
+                <div className={styles.peerCell}>
+                  <button
+                    type="button"
+                    className={styles.caretButton}
+                    onClick={(e) => {
+                      // Without stopPropagation the click also reaches the
+                      // row handler above and toggles a second time.
+                      e.stopPropagation();
+                      toggle(p.username);
+                    }}
+                    aria-expanded={isExpanded}
+                    aria-controls={expansionId}
+                    aria-label={isExpanded ? t.jobs.hideDetails : t.jobs.showDetails}
+                  >
+                    <span aria-hidden className={styles.caret}>{isExpanded ? '▾' : '▸'}</span>
+                  </button>
+                  <span className={styles.username}>{p.username}</span>
+                </div>
+                <span className={styles.mono}>{formatScore(p.score)}</span>
+                <span className={styles.mono}>{p.successCount}</span>
+                <span className={styles.mono}>{p.failCount}</span>
+                <span className={`${styles.mono} ${styles.right}`}>
+                  {formatShortTime(lastSeenAt(p))}
+                </span>
+              </div>
+              {isExpanded && (
+                <div id={expansionId} className={styles.expansionWrap}>
+                  {p.artists.length === 0 ? (
+                    <div className={styles.artist}>{t.peers.noArtistHistory}</div>
+                  ) : (
+                    p.artists.map((a) => (
+                      <div key={a.artistId} className={styles.artist}>
+                        {t.peers.artistLine(
+                          a.artistId,
+                          formatScore(a.score),
+                          a.successCount,
+                          a.failCount,
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </Fragment>
+          );
+        })
+      )}
     </>
   );
 }

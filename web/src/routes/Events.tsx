@@ -1,12 +1,11 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useEvents } from '../api/queries';
-import PageHeading from '../components/PageHeading';
-import table from '../components/Table.module.css';
-import { formatDateTime } from '../format';
+import EmptyState from '../components/tui/EmptyState';
+import { formatShortTime } from '../format';
 import { eventLabel, t } from '../strings';
 import { matchesFilter } from './eventFilter';
-import styles from './Jobs.module.css';
+import styles from './Events.module.css';
 
 export default function Events() {
   const { data: events = [] } = useEvents();
@@ -16,44 +15,40 @@ export default function Events() {
 
   return (
     <>
-      <PageHeading>{t.nav.events}</PageHeading>
-
-      <div className={styles.controls}>
-        <input
-          className={styles.input}
-          type="text"
-          placeholder={t.events.filterPlaceholder}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+      <div className={styles.controlsRow}>
+        <div className={styles.filterBox}>
+          <span aria-hidden className={styles.filterSlash}>/</span>
+          <input
+            className={styles.filterInput}
+            type="text"
+            placeholder={t.events.filterPlaceholder}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        </div>
       </div>
 
-      <table className={table.table}>
-        <thead>
-          <tr>
-            <th className={table.th}>{t.columns.time}</th>
-            <th className={table.th}>{t.columns.job}</th>
-            <th className={table.th}>{t.columns.event}</th>
-            <th className={table.th}>{t.columns.detail}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.length === 0 ? (
-            <tr><td className={table.empty} colSpan={4}>{t.events.empty}</td></tr>
-          ) : (
-            filtered.map((e) => (
-              <tr key={e.id}>
-                <td className={`${table.td} ${table.mono}`}>{formatDateTime(e.createdAt)}</td>
-                <td className={`${table.td} ${table.mono}`}>
-                  <Link to={`/jobs/${e.jobId}`} className={styles.link}>#{e.jobId}</Link>
-                </td>
-                <td className={table.td}>{eventLabel(e.event)}</td>
-                <td className={table.td}>{e.detail}</td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+      <div className={`${styles.grid} ${styles.head}`}>
+        <span>{t.columns.time}</span>
+        <span>{t.columns.job}</span>
+        <span>{t.columns.event}</span>
+        <span>{t.columns.detail}</span>
+      </div>
+
+      {filtered.length === 0 ? (
+        <EmptyState message={t.events.empty} />
+      ) : (
+        filtered.map((e) => (
+          <div key={e.id} className={`${styles.grid} ${styles.row}`}>
+            <span className={styles.mono}>{formatShortTime(e.createdAt)}</span>
+            <Link to={`/jobs/${e.jobId}`} className={`${styles.mono} ${styles.link}`}>
+              #{e.jobId}
+            </Link>
+            <span>{eventLabel(e.event)}</span>
+            <span className={styles.detail}>{e.detail}</span>
+          </div>
+        ))
+      )}
     </>
   );
 }

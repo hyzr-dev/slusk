@@ -7,6 +7,8 @@ import {
 } from '../api/queries';
 import { ApiError } from '../api/client';
 import type { JobState } from '../api/types';
+import { useFlash } from './chrome/FlashContext';
+import Button from './tui/Button';
 import { t } from '../strings';
 import styles from './JobActions.module.css';
 
@@ -42,6 +44,7 @@ export default function JobActions({ jobId, state, onDeleted }: Props) {
   const retry = useRetryJob(jobId);
   const forceSearch = useForceSearchJob(jobId);
   const del = useDeleteJob(jobId);
+  const flash = useFlash();
 
   // Two-click inline confirm for delete: the first click arms it, the second
   // fires. Reset on blur so a stray click elsewhere doesn't leave the button
@@ -55,7 +58,10 @@ export default function JobActions({ jobId, state, onDeleted }: Props) {
       return;
     }
     del.mutate(undefined, {
-      onSuccess: () => onDeleted?.(),
+      onSuccess: () => {
+        onDeleted?.();
+        flash(t.jobs.deleteFlash(jobId));
+      },
       onError: () => setDeleteArmed(false),
     });
   }
@@ -67,38 +73,39 @@ export default function JobActions({ jobId, state, onDeleted }: Props) {
     <div>
       <div className={styles.actions}>
         {canRetry && (
-          <button
-            className={styles.retry}
+          <Button
+            variant="primary"
             disabled={retry.isPending}
-            onClick={() => retry.mutate()}
+            onClick={() => retry.mutate(undefined, { onSuccess: () => flash(t.jobs.retryFlash(jobId)) })}
           >
             {t.jobs.retry}
-          </button>
+          </Button>
         )}
-        <button
-          className={styles.neutral}
+        <Button
+          variant="ghost"
           disabled={forceSearch.isPending}
-          onClick={() => forceSearch.mutate()}
+          onClick={() => forceSearch.mutate(undefined, { onSuccess: () => flash(t.jobs.forceSearchFlash(jobId)) })}
         >
           {t.jobs.forceSearch}
-        </button>
+        </Button>
         {canCancel && (
-          <button
-            className={styles.neutral}
+          <Button
+            variant="ghost"
             disabled={cancel.isPending}
-            onClick={() => cancel.mutate()}
+            onClick={() => cancel.mutate(undefined, { onSuccess: () => flash(t.jobs.cancelFlash(jobId)) })}
           >
             {t.jobs.cancel}
-          </button>
+          </Button>
         )}
-        <button
-          className={styles.delete}
+        <span className={styles.spacer} />
+        <Button
+          variant="danger"
           disabled={del.isPending}
           onBlur={() => setDeleteArmed(false)}
           onClick={handleDeleteClick}
         >
           {deleteArmed ? t.jobs.deleteConfirm : t.jobs.delete}
-        </button>
+        </Button>
       </div>
 
       {/* Every action can 409 (e.g. retry on a non-failed job, force search on

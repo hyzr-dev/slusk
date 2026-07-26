@@ -1,0 +1,30 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 9.5px;
+  letter-spacing: 1.4px;
+  color: var(--faint);
+}
+
+.spacer { flex: 1; }
+.meta { color: var(--dim); letter-spacing: 0.4px; }
+
+/* Page-subject variant (see the `prominent` prop). Both halves go to --fg:
+   on a detail page the meta is the artist, which is part of the title, not
+   an aside about it. */
+.prominent { color: var(--fg); }
+.prominent .meta { color: var(--fg); }
+
+/* Neutralize the browser's default <h2> styling (bold, larger font, block
+   margins) so the heading reads exactly like the plain text it replaces —
+   every visual property comes from .header instead. */
+.label {
+  margin: 0;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}

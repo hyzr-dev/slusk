@@ -1,0 +1,160 @@
+import { useConfig, useShares, useTestConnection } from '../api/queries';
+import type { UseMutationResult } from '@tanstack/react-query';
+import type { ConnectionTestResult } from '../api/types';
+import Button from '../components/tui/Button';
+import SectionHeader from '../components/tui/SectionHeader';
+import { t } from '../strings';
+import styles from './Setup.module.css';
+
+type StepState = 'ok' | 'failed' | 'untested' | 'testing' | 'disabled';
+
+const STATE_LABEL: Record<StepState, string> = {
+  ok: t.setup.stateOk,
+  failed: t.setup.stateFailed,
+  untested: t.setup.stateUntested,
+  testing: t.setup.testing,
+  disabled: t.setup.stateDisabled,
+};
+
+// Built as an explicit map rather than a computed `styles[\`state${x}\`]`
+// lookup: CSS Modules' ambient type is an index signature, so a typo in a
+// computed key would still type-check as `string` and only fail silently at
+// render (no class applied). A literal map fails loudly instead — a renamed
+// or removed class here is a compile error.
+const STATE_CLASS: Record<StepState, string> = {
+  ok: styles.stateOk,
+  failed: styles.stateFailed,
+  untested: styles.stateUntested,
+  testing: styles.stateTesting,
+  disabled: styles.stateDisabled,
+};
+
+function secretValue(configured: boolean): string {
+  return configured ? t.setup.secretSet : t.setup.secretUnset;
+}
+
+// Maps a useTestConnection() mutation's state onto the four states the
+// pipeline brief distinguishes for a probed dependency (the fifth state,
+// 'disabled', only applies to Soulseek and is decided by the caller from
+// config, not from this mutation). A failed *request* (the endpoint itself
+// unreachable) and a failed *test* (200 with ok:false) both read as
+// 'failed' — the distinction only changes which fallback message is shown,
+// since a returned error string always wins when one exists.
+function connectionState(
+  test: UseMutationResult<ConnectionTestResult, Error, void>,
+): { state: StepState; error?: string } {
+  if (test.isPending) return { state: 'testing' };
+  if (test.isError) return { state: 'failed', error: t.settings.testUnreachable };
+  if (test.data) {
+    return test.data.ok
+      ? { state: 'ok' }
+      : { state: 'failed', error: test.data.error ?? t.settings.testFailed };
+  }
+  return { state: 'untested' };
+}
+
+function StepHeader({ num, title, state, onTest }: { num: number; title: string; state: StepState; onTest?: () => void }) {
+  return (
+    <SectionHeader
+      label={`${num}  ${title}`}
+      meta={
+        <span className={styles.stepMeta}>
+          <span className={STATE_CLASS[state]}>{STATE_LABEL[state]}</span>
+          {onTest && (
+            <Button disabled={state === 'testing'} onClick={onTest}>
+              {t.setup.test}
+            </Button>
+          )}
+        </span>
+      }
+    />
+  );
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div className={styles.errorCard}>
+      <div className={styles.errorBody}>{message}</div>
+    </div>
+  );
+}
+
+export default function Setup() {
+  const { data: config } = useConfig();
+  const { data: shares } = useShares();
+  const soulseekTest = useTestConnection('soulseek');
+  const lidarrTest = useTestConnection('lidarr');
+
+  // Config only changes when the file changes (staleTime: Infinity), so
+  // there is nothing meaningful to render before the first response — a
+  // brief loading placeholder beats flashing every step as NOT ENABLED.
+  if (!config) {
+    return <div className={styles.wrap}>{t.jobs.loading}</div>;
+  }
+
+  const soulseekEnabled = config.soulseek.enabled;
+  const soulseek = soulseekEnabled ? connectionState(soulseekTest) : { state: 'disabled' as StepState };
+  const lidarr = connectionState(lidarrTest);
+  const sharesState: StepState = (shares?.files ?? 0) > 0 ? 'ok' : 'untested';
+
+  return (
+    <div className={styles.wrap}>
+      <div className={styles.header}>
+        <div className={styles.title}>{t.setup.title}</div>
+        <div className={styles.intro}>{t.setup.intro}</div>
+      </div>
+
+      <div className={styles.step}>
+        <StepHeader
+          num={1}
+          title={t.setup.stepSoulseek}
+          state={soulseek.state}
+          onTest={soulseekEnabled ? () => soulseekTest.mutate() : undefined}
+        />
+        <div className={styles.fields}>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldUsername}</span>
+            <span className={styles.fieldValue}>{config.soulseek.username}</span>
+          </div>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldPassword}</span>
+            <span className={styles.fieldValue}>{secretValue(config.soulseek.passwordConfigured)}</span>
+          </div>
+          {soulseek.state === 'failed' && soulseek.error && <ErrorCard message={soulseek.error} />}
+        </div>
+      </div>
+
+      <div className={styles.step}>
+        <StepHeader num={2} title={t.setup.stepLidarr} state={lidarr.state} onTest={() => lidarrTest.mutate()} />
+        <div className={styles.fields}>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldUrl}</span>
+            <span className={styles.fieldValue}>{config.lidarr.url}</span>
+          </div>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldApiKey}</span>
+            <span className={styles.fieldValue}>{secretValue(config.lidarr.apiKeyConfigured)}</span>
+          </div>
+          {lidarr.state === 'failed' && lidarr.error && <ErrorCard message={lidarr.error} />}
+        </div>
+      </div>
+
+      <div className={styles.step}>
+        <StepHeader num={3} title={t.setup.stepShares} state={sharesState} />
+        <div className={styles.fields}>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldFolders}</span>
+            <span className={styles.fieldValue}>{t.setup.foldersCount(config.soulseek.sharedFolders.length)}</span>
+          </div>
+          <div className={styles.field}>
+            <span className={styles.fieldKey}>{t.setup.fieldIndex}</span>
+            <span className={styles.fieldValue}>{t.setup.indexCount(shares?.files ?? 0)}</span>
+          </div>
+          <div className={styles.field}>
+            <span className={styles.fieldValue}>{t.setup.sharesNoTest}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -46,12 +46,12 @@ function renderPeers() {
   );
 }
 
-// First cell of each body row, in document order — the cheapest way to read
-// back the current sort order without depending on row structure.
+// Every username, in document order — the cheapest way to read back the
+// current sort order now that rows are grid divs rather than a <table>. Each
+// username is a unique text node, and testing-library's getAllByText returns
+// matches in DOM order, so this needs no assumption about row structure.
 function bodyUsernames() {
-  return [...document.querySelectorAll('tbody tr')].map(
-    (row) => row.querySelector('td')?.textContent,
-  );
+  return screen.getAllByText(/^(alice|bob|carol)$/).map((el) => el.textContent);
 }
 
 describe('Peers sorting', () => {
@@ -62,7 +62,7 @@ describe('Peers sorting', () => {
 
   it('toggles direction when the active column is clicked again', () => {
     renderPeers();
-    fireEvent.click(screen.getByText(t.columns.score));
+    fireEvent.click(screen.getByText(t.peers.gridHead.score));
     expect(bodyUsernames()).toEqual(['carol', 'alice', 'bob']);
   });
 
@@ -70,8 +70,8 @@ describe('Peers sorting', () => {
     renderPeers();
     // First flip score to ascending, so a naive "remember last direction"
     // implementation would carry ascending over to the new column.
-    fireEvent.click(screen.getByText(t.columns.score));
-    fireEvent.click(screen.getByText(t.columns.succeeded));
+    fireEvent.click(screen.getByText(t.peers.gridHead.score));
+    fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(bodyUsernames()).toEqual(['carol', 'alice', 'bob']);
   });
 
@@ -85,7 +85,7 @@ describe('Peers sorting', () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    fireEvent.click(screen.getByText(t.columns.succeeded));
+    fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(peers.map((p) => p.username)).toEqual(['alice', 'bob', 'carol']);
   });
 });
@@ -115,7 +115,7 @@ describe('Peers row expansion', () => {
   it('keeps a peer expanded across re-sorting, since expansion is keyed by username', () => {
     renderPeers();
     fireEvent.click(screen.getByText('alice'));
-    fireEvent.click(screen.getByText(t.columns.succeeded));
+    fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(screen.getByText(t.peers.artistLine(1, '1.50', 2, 0))).toBeInTheDocument();
   });
 });
