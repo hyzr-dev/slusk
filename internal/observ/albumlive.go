@@ -41,18 +41,21 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 // cancelled, completed) lingers in ListDownloads until the pipeline's next
 // reconcile pass, and its speed would misrepresent current throughput.
 // Returns the summed instantaneous speed and EWMA-smoothed average speed
-// (for ETA), and the minimum queue position among matched transfers that
-// report one (the album's download effectively starts once its first file
-// starts). candidate == nil (a job with no candidate yet) yields all zeros /
+// (for ETA), the minimum queue position among matched transfers that report
+// one (the album's download effectively starts once its first file starts),
+// and liveBytesDone: the summed live BytesDone across those same matched,
+// non-terminal transfers — used by toJobDTO to overlay fresh in-memory bytes
+// on top of the persisted, up-to-15s-stale AlbumBytesDone (issue #161).
+// candidate == nil (a job with no candidate yet) yields all zeros /
 // hasQueuePosition false.
 //
 // Remaining bytes are not computed here: callers get them from
 // core.JobView.AlbumBytesRemaining (store-computed — see
 // internal/store/dashboard.go's jobViewSelect and the field comment on
 // AlbumBytesRemaining).
-func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool) {
+func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool, liveBytesDone int64) {
 	if candidate == nil {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, 0
 	}
 	for _, f := range candidate.Files {
 		lt, ok := idx.byFallback[candidate.Username+"\x00"+f.Filename]
@@ -64,10 +67,29 @@ func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed
 		}
 		speed += lt.Speed
 		speedAvg += lt.SpeedAverage
+		liveBytesDone += lt.BytesDone
 		if lt.QueuePosition > 0 && (!hasQueuePosition || lt.QueuePosition < queuePosition) {
 			queuePosition = lt.QueuePosition
 			hasQueuePosition = true
 		}
 	}
-	return speed, speedAvg, queuePosition, hasQueuePosition
+	return speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone
+}
+
+// overlayBytesDone applies the monotone live-bytes overlay described on
+// jobDTO.BytesDone (issue #161): persistedDone's contribution from
+// still-in-flight transfers (persistedNonTerminalDone, itself a part of
+// persistedDone) is replaced by their live in-memory counterpart (liveDone).
+// max() with persistedDone keeps the result from ever regressing when a
+// non-terminal transfer has no live match (the backend just restarted, or
+// the transfer hasn't been enqueued to the peer yet) — the persisted figure
+// is always at least as fresh as what the overlay could compute in that
+// case. Shared by toJobDTO (observ.go) and the SSE stream (stream.go) so the
+// two transports can never disagree about a given job's BytesDone.
+func overlayBytesDone(persistedDone, persistedNonTerminalDone, liveDone int64) int64 {
+	overlaid := persistedDone - persistedNonTerminalDone + liveDone
+	if overlaid > persistedDone {
+		return overlaid
+	}
+	return persistedDone
 }

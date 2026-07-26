@@ -87,6 +87,14 @@ type jobDTO struct {
 	// the frontend's progress bar doesn't jump backwards each time a new
 	// file in a multi-track album starts. Zero when the job has no
 	// candidate, matching AlbumBytesDone/Total's own zero value.
+	//
+	// BytesDone is overlaid with live in-memory bytes where a live match
+	// exists (issue #161): AlbumBytesDone is only as fresh as the last
+	// Downloading reconcile (default 15s), so without the overlay the number
+	// visibly jumps once every 15s instead of moving continuously. BytesTotal
+	// is deliberately NOT overlaid — it is written ahead from candidate file
+	// sizes at activation and does not drift, and overlaying the live
+	// counterpart's Size would risk the progress bar's denominator moving.
 	BytesDone  int64 `json:"bytesDone"`
 	BytesTotal int64 `json:"bytesTotal"`
 	// CreatedAt is when the job was first inserted — unlike UpdatedAt it never
@@ -156,12 +164,13 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
-		speed, speedAvg, queuePosition, hasQueuePosition := aggregateLiveAlbum(v.Attempt, live)
+		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone := aggregateLiveAlbum(v.Attempt, live)
 		d.Speed = speed
 		if hasQueuePosition {
 			d.QueuePosition = queuePosition
 		}
 		d.ETASeconds = etaSeconds(v.AlbumBytesRemaining, speedAvg)
+		d.BytesDone = overlayBytesDone(v.AlbumBytesDone, v.AlbumBytesDoneNonTerminal, liveBytesDone)
 	}
 	if v.Job.NotBefore != nil {
 		d.NotBefore = v.Job.NotBefore.Format(timeFormat)
@@ -318,6 +327,14 @@ type ServerDeps struct {
 	Thread        ThreadFunc
 	Send          SendMessageFunc
 	MarkRead      MarkReadFunc
+	// Shutdown closes GET /api/stream's open SSE connections when the server
+	// is stopping (issue #161): without it an open stream keeps its request
+	// context alive until the client disconnects, which can block graceful
+	// shutdown until lifecycleShutdownTimeout expires. nil (as in every
+	// existing test's ServerDeps) simply means "never signal shutdown" — the
+	// connection then only ends when the client disconnects, matching
+	// today's behavior for every other endpoint.
+	Shutdown <-chan struct{}
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -329,6 +346,12 @@ func NewServer(deps ServerDeps) http.Handler {
 		ready = live
 	}
 	mux := http.NewServeMux()
+	// jobIndex caches the job<->candidate correlation GET /api/jobs already
+	// computes on every poll (see the handler below), so GET /api/stream's
+	// shared broadcaster (registerStream) can turn deps.LiveTransfers into
+	// per-job numbers without ever running a DB query of its own — see
+	// jobLiveIndex's doc comment in stream.go.
+	jobIndex := &jobLiveIndex{}
 	mux.Handle("/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/debug/pprof/", http.StatusTemporaryRedirect)
@@ -446,6 +469,9 @@ func NewServer(deps ServerDeps) http.Handler {
 			for i, v := range views {
 				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx)
 			}
+			// Side effect: feeds the SSE stream's job<->candidate cache — see
+			// jobIndex's doc comment above and jobLiveIndex in stream.go.
+			jobIndex.set(views)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(dtos)
 		case http.MethodPost:
@@ -614,6 +640,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
+	registerStream(mux, deps, jobIndex, deps.Shutdown, streamInterval, streamHeartbeatInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }

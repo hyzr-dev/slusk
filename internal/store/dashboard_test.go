@@ -266,8 +266,8 @@ func TestListJobsWithTransferAlbumBytesZeroWithoutAttempt(t *testing.T) {
 	if v.Transfer != nil {
 		t.Errorf("expected nil Transfer, got %+v", v.Transfer)
 	}
-	if v.AlbumBytesDone != 0 || v.AlbumBytesTotal != 0 || v.AlbumBytesRemaining != 0 {
-		t.Errorf("AlbumBytes* = %d/%d/%d, want all zero for a job with no candidate", v.AlbumBytesDone, v.AlbumBytesTotal, v.AlbumBytesRemaining)
+	if v.AlbumBytesDone != 0 || v.AlbumBytesTotal != 0 || v.AlbumBytesRemaining != 0 || v.AlbumBytesDoneNonTerminal != 0 {
+		t.Errorf("AlbumBytes* = %d/%d/%d/%d, want all zero for a job with no candidate", v.AlbumBytesDone, v.AlbumBytesTotal, v.AlbumBytesRemaining, v.AlbumBytesDoneNonTerminal)
 	}
 }
 
@@ -327,6 +327,60 @@ func TestListJobsWithTransferAlbumBytesRemainingExcludesTerminal(t *testing.T) {
 	// leftover (2000-200=1800) is excluded.
 	if v.AlbumBytesRemaining != 900 {
 		t.Errorf("AlbumBytesRemaining = %d, want 900 (only the non-terminal track1's leftover)", v.AlbumBytesRemaining)
+	}
+}
+
+// TestListJobsWithTransferAlbumBytesDoneNonTerminalExcludesTerminal covers
+// the new bytes_done_nonterminal aggregate (issue #161, part 1): like
+// AlbumBytesRemaining it must exclude a terminal (ERRORED) transfer's bytes,
+// even though AlbumBytesDone itself still counts them.
+func TestListJobsWithTransferAlbumBytesDoneNonTerminalExcludesTerminal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 54, now)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "flaky_peer2", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	attempt, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+
+	// A live transfer still in progress.
+	tid1, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer2", "track1.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track1: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid1, core.TransferInProgress, 100, 1000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress track1: %v", err)
+	}
+
+	// A terminal (errored) transfer with bytes done.
+	later := now.Add(time.Minute)
+	tid2, _, err := s.RecordEnqueueIntent(ctx, attempt.ID, "flaky_peer2", "track2.flac", later.Add(time.Hour), later)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent track2: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferErrored, 200, 2000, later); err != nil {
+		t.Fatalf("UpdateTransferProgress track2: %v", err)
+	}
+
+	views, err := s.ListJobsWithTransfer(ctx)
+	if err != nil {
+		t.Fatalf("ListJobsWithTransfer: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("expected 1 view, got %d", len(views))
+	}
+	v := views[0]
+
+	if v.AlbumBytesDone != 300 {
+		t.Errorf("AlbumBytesDone = %d, want 300 (100+200, errored transfer's bytes still counted)", v.AlbumBytesDone)
+	}
+	if v.AlbumBytesDoneNonTerminal != 100 {
+		t.Errorf("AlbumBytesDoneNonTerminal = %d, want 100 (only track1's non-terminal bytes)", v.AlbumBytesDoneNonTerminal)
 	}
 }
 

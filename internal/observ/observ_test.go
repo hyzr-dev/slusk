@@ -368,6 +368,85 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 	}
 }
 
+// TestToJobDTOOverlaysLiveBytesForNonTerminalMatch is issue #161, part 1b:
+// the live in-memory BytesDone for a matched, non-terminal transfer must
+// win over the persisted, up-to-15s-stale AlbumBytesDone.
+func TestToJobDTOOverlaysLiveBytesForNonTerminalMatch(t *testing.T) {
+	candidate := &core.Candidate{
+		Username: "alice",
+		Files:    []core.CandidateFile{{Filename: "01.flac", Size: 1000}},
+	}
+	view := core.JobView{
+		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:                   candidate,
+		AlbumBytesDone:            300,
+		AlbumBytesDoneNonTerminal: 300,
+		AlbumBytesTotal:           1000,
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
+	})
+
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live)
+	if dto.BytesDone != 750 {
+		t.Errorf("BytesDone = %d, want 750 (live overlay)", dto.BytesDone)
+	}
+	if dto.BytesTotal != 1000 {
+		t.Errorf("BytesTotal = %d, want 1000 (never overlaid, see jobDTO.BytesTotal)", dto.BytesTotal)
+	}
+}
+
+// TestToJobDTOFallsBackToPersistedWithoutLiveMatch covers a candidate with
+// no live data at all (e.g. LiveTransfers failed, or the peer backend
+// restarted): the persisted AlbumBytesDone must be served unmodified.
+func TestToJobDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
+	candidate := &core.Candidate{
+		Username: "alice",
+		Files:    []core.CandidateFile{{Filename: "01.flac", Size: 1000}},
+	}
+	view := core.JobView{
+		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:                   candidate,
+		AlbumBytesDone:            300,
+		AlbumBytesDoneNonTerminal: 300,
+		AlbumBytesTotal:           1000,
+	}
+
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{})
+	if dto.BytesDone != 300 {
+		t.Errorf("BytesDone = %d, want 300 (persisted fallback, no live match)", dto.BytesDone)
+	}
+}
+
+// TestToJobDTOBytesDoneMonotoneWithoutLiveMatchForOneFile covers the
+// monotone-max guard directly: one file is still non-terminal but has no
+// live match (backend just restarted, or not yet enqueued), while another
+// file of the same album is already terminal and persisted-final. The
+// overlay computation alone (AlbumBytesDone - AlbumBytesDoneNonTerminal +
+// liveBytesDone) would understate the total here; max() with the persisted
+// AlbumBytesDone must keep BytesDone from regressing.
+func TestToJobDTOBytesDoneMonotoneWithoutLiveMatchForOneFile(t *testing.T) {
+	candidate := &core.Candidate{
+		Username: "alice",
+		Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000}, // non-terminal, no live match
+			{Filename: "02.flac", Size: 1000}, // terminal (completed), persisted-final
+		},
+	}
+	view := core.JobView{
+		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:                   candidate,
+		AlbumBytesDone:            1500, // 500 (file1, non-terminal) + 1000 (file2, terminal)
+		AlbumBytesDoneNonTerminal: 500,
+		AlbumBytesTotal:           2000,
+	}
+
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{})
+	if dto.BytesDone != 1500 {
+		t.Errorf("BytesDone = %d, want 1500 (overlay alone computes 1000; max() keeps the persisted 1500)", dto.BytesDone)
+	}
+}
+
 // TestJobsEndpointReturnsCandidateMetadata verifies year/tracks/format
 // serialize when set (a job past selection) and as JSON null when unset (a
 // job with no candidate yet), see issue #156.

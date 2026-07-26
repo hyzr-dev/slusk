@@ -13,8 +13,16 @@ import (
 // transferDetailDTO is one file transfer within an attempt, as shown in the
 // job detail panel.
 type transferDetailDTO struct {
-	Filename       string `json:"filename"`
-	State          string `json:"state"`
+	Filename string `json:"filename"`
+	State    string `json:"state"`
+	// BytesDone is overlaid with the live in-memory value when a live match
+	// exists AND that match is still non-terminal (issue #161) — mirroring
+	// jobDTO.BytesDone's album-level overlay in observ.go, and for the same
+	// reason: the persisted value is only as fresh as the last Downloading
+	// reconcile. A lingering terminal live entry (errored/cancelled/completed,
+	// not yet reconciled away) must not overwrite an already-higher persisted
+	// value with a stale or zero live one. BytesTotal is never overlaid — see
+	// jobDTO.BytesTotal's comment; the same rationale applies per-file.
 	BytesDone      int64  `json:"bytesDone"`
 	BytesTotal     int64  `json:"bytesTotal"`
 	Retries        int    `json:"retries"`
@@ -87,6 +95,11 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 			if lt, ok := live.match(tr); ok {
 				t.QueuePosition = lt.QueuePosition
 				t.Speed = lt.Speed
+				// Only overlay BytesDone while the live match is itself
+				// non-terminal — see transferDetailDTO.BytesDone's comment.
+				if lt.State == core.TransferQueued || lt.State == core.TransferInProgress {
+					t.BytesDone = lt.BytesDone
+				}
 			}
 			a.Transfers[j] = t
 		}

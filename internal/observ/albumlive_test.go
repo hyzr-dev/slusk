@@ -50,7 +50,7 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, queuePos, hasQueue := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, queuePos, hasQueue, liveBytesDone := aggregateLiveAlbum(candidate, idx)
 	if speed != 150 {
 		t.Errorf("speed = %d, want 150", speed)
 	}
@@ -60,15 +60,18 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 	if !hasQueue || queuePos != 3 {
 		t.Errorf("queuePos = %d, hasQueue = %v, want 3, true", queuePos, hasQueue)
 	}
+	if liveBytesDone != 0 {
+		t.Errorf("liveBytesDone = %d, want 0 (no BytesDone set on the live fixtures)", liveBytesDone)
+	}
 }
 
 // TestAggregateLiveAlbumNilCandidateYieldsZero covers a job with no candidate
 // yet.
 func TestAggregateLiveAlbumNilCandidateYieldsZero(t *testing.T) {
 	idx := newLiveTransferIndex([]core.RemoteTransfer{{Username: "alice", Filename: "x", State: core.TransferInProgress, Speed: 100}})
-	speed, speedAvg, queuePos, hasQueue := aggregateLiveAlbum(nil, idx)
-	if speed != 0 || speedAvg != 0 || queuePos != 0 || hasQueue {
-		t.Errorf("nil candidate aggregate = (%d, %d, %d, %v), want all zero/false", speed, speedAvg, queuePos, hasQueue)
+	speed, speedAvg, queuePos, hasQueue, liveBytesDone := aggregateLiveAlbum(nil, idx)
+	if speed != 0 || speedAvg != 0 || queuePos != 0 || hasQueue || liveBytesDone != 0 {
+		t.Errorf("nil candidate aggregate = (%d, %d, %d, %v, %d), want all zero/false", speed, speedAvg, queuePos, hasQueue, liveBytesDone)
 	}
 }
 
@@ -91,8 +94,8 @@ func TestAggregateLiveAlbumTwoAlbumsSamePeerDoNotContaminate(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speedA, avgA, _, _ := aggregateLiveAlbum(albumA, idx)
-	speedB, avgB, _, _ := aggregateLiveAlbum(albumB, idx)
+	speedA, avgA, _, _, _ := aggregateLiveAlbum(albumA, idx)
+	speedB, avgB, _, _, _ := aggregateLiveAlbum(albumB, idx)
 
 	if speedA != 111 || avgA != 100 {
 		t.Errorf("album A aggregate = (speed %d, avg %d), want (111, 100)", speedA, avgA)
@@ -121,7 +124,7 @@ func TestAggregateLiveAlbumOnlyEnqueuedFileContributesSpeed(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, _, hasQueue := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, _, hasQueue, _ := aggregateLiveAlbum(candidate, idx)
 	if speed != 100 || speedAvg != 90 {
 		t.Errorf("aggregate = (speed %d, avg %d), want (100, 90) — only the enqueued file counted", speed, speedAvg)
 	}
@@ -153,8 +156,38 @@ func TestAggregateLiveAlbumIgnoresTerminalTransfers(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, _, _ := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, _, _, liveBytesDone := aggregateLiveAlbum(candidate, idx)
 	if speed != 1000 || speedAvg != 1000 {
 		t.Errorf("speed/avg = (%d, %d), want (1000, 1000) — only file 04's still-progressing transfer counted", speed, speedAvg)
+	}
+	if liveBytesDone != 0 {
+		t.Errorf("liveBytesDone = %d, want 0 (no BytesDone set on the live fixtures)", liveBytesDone)
+	}
+}
+
+// TestAggregateLiveAlbumSumsLiveBytesDoneOfNonTerminalOnly is issue #161's
+// live-bytes overlay: liveBytesDone must sum BytesDone only for the matched,
+// non-terminal transfers (same filter as speed/speedAvg above), so a
+// terminal-but-not-yet-reconciled transfer's stale BytesDone can't be
+// double-counted on top of its already-final persisted contribution.
+func TestAggregateLiveAlbumSumsLiveBytesDoneOfNonTerminalOnly(t *testing.T) {
+	candidate := &core.Candidate{
+		Username: "alice",
+		Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000}, // in progress
+			{Filename: "02.flac", Size: 1000}, // queued
+			{Filename: "03.flac", Size: 1000}, // completed, excluded
+		},
+	}
+	live := []core.RemoteTransfer{
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 400},
+		{Username: "alice", Filename: "02.flac", State: core.TransferQueued, BytesDone: 0},
+		{Username: "alice", Filename: "03.flac", State: core.TransferCompleted, BytesDone: 1000},
+	}
+	idx := newLiveTransferIndex(live)
+
+	_, _, _, _, liveBytesDone := aggregateLiveAlbum(candidate, idx)
+	if liveBytesDone != 400 {
+		t.Errorf("liveBytesDone = %d, want 400 (only the in-progress file's live bytes)", liveBytesDone)
 	}
 }

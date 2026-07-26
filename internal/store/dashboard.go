@@ -43,7 +43,7 @@ const jobViewSelect = `
 		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
-		agg.bytes_done, agg.bytes_total, agg.bytes_remaining
+		agg.bytes_done, agg.bytes_total, agg.bytes_remaining, agg.bytes_done_nonterminal
 	FROM album_jobs j
 	LEFT JOIN candidates a ON a.id = (
 		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
@@ -67,7 +67,15 @@ const jobViewSelect = `
 			-- here would claim $1-$3 and shift every caller's own params (see the
 			-- StateCancelled and jobID binds below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
-				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
+				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining,
+			-- bytes_done_nonterminal is bytes_done under the same non-terminal
+			-- filter as bytes_remaining above, not bytes_done itself: it lets
+			-- observ.toJobDTO know exactly how much of AlbumBytesDone came from
+			-- transfers that are still in flight (and so may be superseded by a
+			-- live in-memory value) versus already-terminal ones (whose
+			-- persisted figure is final) — see core.JobView.AlbumBytesDoneNonTerminal.
+			COALESCE(SUM(bytes_done)
+				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_done_nonterminal
 		FROM transfers
 		WHERE candidate_id = a.id
 	) agg ON true`
@@ -92,7 +100,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
-		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
+		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining, &v.AlbumBytesDoneNonTerminal,
 	)
 	if err != nil {
 		return core.JobView{}, err
