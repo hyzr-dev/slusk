@@ -445,6 +445,46 @@ func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 	}
 }
 
+// CreatedAt must reflect core.AlbumJob.CreatedAt distinctly from UpdatedAt —
+// the frontend sorts the TRANSFERS panel by createdAt specifically because it
+// does NOT change on progress/state updates (#233), so this guards against
+// the two fields accidentally being wired to the same source timestamp.
+func TestJobsEndpointReturnsCreatedAtDistinctFromUpdatedAt(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	createdAt := time.Date(2026, 7, 1, 8, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job: core.AlbumJob{
+					ID: 10, Title: "Started Earlier", ArtistName: "Someone",
+					State: core.StateDownloading, CreatedAt: createdAt, UpdatedAt: updatedAt,
+				},
+			},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	wantCreatedAt := createdAt.Format(timeFormat)
+	wantUpdatedAt := updatedAt.Format(timeFormat)
+	if got[0].CreatedAt != wantCreatedAt {
+		t.Errorf("CreatedAt = %q, want %q", got[0].CreatedAt, wantCreatedAt)
+	}
+	if got[0].UpdatedAt != wantUpdatedAt {
+		t.Errorf("UpdatedAt = %q, want %q", got[0].UpdatedAt, wantUpdatedAt)
+	}
+}
+
 func TestJobsEndpointReturnsRetriesAndNotBeforeForWantedJob(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	notBefore := time.Date(2026, 7, 1, 13, 0, 0, 0, time.UTC)

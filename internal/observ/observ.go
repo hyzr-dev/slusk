@@ -87,8 +87,13 @@ type jobDTO struct {
 	// the frontend's progress bar doesn't jump backwards each time a new
 	// file in a multi-track album starts. Zero when the job has no
 	// candidate, matching AlbumBytesDone/Total's own zero value.
-	BytesDone       int64   `json:"bytesDone"`
-	BytesTotal      int64   `json:"bytesTotal"`
+	BytesDone  int64 `json:"bytesDone"`
+	BytesTotal int64 `json:"bytesTotal"`
+	// CreatedAt is when the job was first inserted — unlike UpdatedAt it never
+	// changes on progress/state updates, so the frontend uses it (not
+	// UpdatedAt) to sort the TRANSFERS panel by start order (#233): sorting by
+	// UpdatedAt reorders the panel on every progress tick.
+	CreatedAt       string  `json:"createdAt"`
 	UpdatedAt       string  `json:"updatedAt"`
 	State           string  `json:"state"`
 	CandidatesTried int     `json:"candidatesTried"`
@@ -136,6 +141,7 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 		Artist:          v.Job.ArtistName,
 		Status:          dashboardStatus(v),
 		Peer:            v.Peer,
+		CreatedAt:       v.Job.CreatedAt.Format(timeFormat),
 		UpdatedAt:       v.Job.UpdatedAt.Format(timeFormat),
 		State:           string(v.Job.State),
 		CandidatesTried: v.Job.CandidatesTried,

@@ -9,10 +9,16 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
+import { sortJobs } from './jobSort';
 import styles from './Overview.module.css';
 
 // At most this many rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:102) rather than the full jobs list.
+// Jobs are ranked active-before-stalled, oldest-first within each group,
+// before slicing (#233, 'transferOrder' in jobSort.ts) — max_active defaults
+// to 30 (config.example.toml), so the active|stalled set routinely exceeds
+// this cap, and this ranking is what decides who gets cut: a stalled job
+// never displaces an active one, however long it's been stalled.
 const MAX_TRANSFER_ROWS = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
@@ -66,9 +72,16 @@ export default function Overview() {
   const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
   const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
 
-  const transferRows = jobs
-    .filter((j) => j.status === 'active' || j.status === 'stalled')
-    .slice(0, MAX_TRANSFER_ROWS);
+  // Ranked active-before-stalled, then createdAt ascending within each group
+  // (see 'transferOrder' in jobSort.ts) — rather than the backend's own
+  // updated_at DESC ordering, so a row stays in place for its whole lifetime
+  // instead of jumping to the top on every progress update, and a long-stalled
+  // job can never permanently occupy a slot that an active transfer needs (#233).
+  const transferRows = sortJobs(
+    jobs.filter((j) => j.status === 'active' || j.status === 'stalled'),
+    'transferOrder',
+    'asc',
+  ).slice(0, MAX_TRANSFER_ROWS);
 
   // SearchPass carries no id of its own, and the window this slices from is
   // capped at 20 and slides — a position-based number would look like a

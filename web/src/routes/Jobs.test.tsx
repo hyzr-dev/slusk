@@ -21,7 +21,10 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     peer: 'flac_hoarder',
     bytesDone: 50,
     bytesTotal: 100,
-    updatedAt: '',
+    // A realistic ISO-8601 value, not '' — this route doesn't sort on it,
+    // but an empty string is not something the backend ever actually sends.
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
     state: 'DOWNLOADING',
     candidatesTried: 1,
     maxCandidates: 3,
