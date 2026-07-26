@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
@@ -439,5 +439,27 @@ describe('uploads panel', () => {
     renderShares(client);
     expect(await screen.findByText(t.uploads.panelTitle)).toBeInTheDocument();
     expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+  });
+});
+
+describe('folder table semantics', () => {
+  it('exposes three column headers and three cells per folder row', async () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    const table = await screen.findByRole('table');
+    expect(within(table).getAllByRole('columnheader')).toHaveLength(3);
+    // Two folders plus the header row.
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    expect(within(table).getAllByRole('cell')).toHaveLength(6);
+  });
+
+  it('keeps the empty state outside the table, which admits only rows', async () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [] }));
+    renderShares(client);
+    // EmptyState wraps the message in decorative dashes ("── … ──").
+    const empty = await screen.findByText(new RegExp(t.shares.empty));
+    expect(empty.closest('[role="table"]')).toBeNull();
   });
 });
