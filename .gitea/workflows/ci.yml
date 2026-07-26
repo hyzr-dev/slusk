@@ -13,14 +13,20 @@ name: CI
 # version to inherit conventions from, and go.mod requires a recent Go.
 #
 # Deliberately uncached, everywhere. No existing workflow uses caching, so this
-# instance's act_runner has never been shown to provide a cache backend — and a
-# missing one is not a warning: setup-go's and setup-node's cache paths call
-# @actions/cache, which throws "Cache Service Url not found" when
-# ACTIONS_CACHE_URL is unset and surfaces it through core.setFailed. That would
-# make the first PR red for reasons unrelated to the code, which is exactly how
-# a gate loses its credibility. Caching (Go modules, npm, the embedded-Postgres
-# binaries under ~/.embedded-postgres-go, docker layers) belongs in its own PR
-# once a green run has proved the backend exists.
+# instance's act_runner has never been shown to provide a cache backend.
+#
+# An absent backend on its own is only a warning: setup-node's `cache` input has
+# no default, so leaving it out never enters that path at all, and setup-go
+# wraps its restore in `catch (error) { core.warning(...) }` — cache trouble
+# cannot fail that job. The path that *can* hard-fail is `actions/cache` used
+# directly: its run() calls core.setFailed against a cache service that is
+# present but speaks only the v1 API, which is the act_runner version-mismatch
+# case and is unknown for this instance.
+#
+# Since nothing here needs caching to be correct, all of it (Go modules, npm,
+# the embedded-Postgres binaries under ~/.embedded-postgres-go, docker layers)
+# waits for its own PR, once a green run has proved a backend exists. That keeps
+# the first run unambiguous and costs only wall-clock.
 
 on:
   pull_request:
