@@ -523,3 +523,49 @@ describe('query state', () => {
     expect(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.all) })).toBeInTheDocument();
   });
 });
+
+describe('table semantics', () => {
+  it('exposes the eight column headers on a row inside the table', () => {
+    renderJobs([]);
+    const table = screen.getByRole('table');
+    expect(within(table).getAllByRole('columnheader')).toHaveLength(8);
+    expect(within(table).getByRole('columnheader', { name: t.jobs.gridHead.album })).toBeInTheDocument();
+  });
+
+  it('gives every job row eight cells', () => {
+    renderJobs([makeJob({ id: 1 }), makeJob({ id: 2 })]);
+    const table = screen.getByRole('table');
+    // Two data rows plus the header row.
+    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    expect(within(table).getAllByRole('cell')).toHaveLength(16);
+  });
+
+  it('keeps the album link a link rather than absorbing it into the cell role', () => {
+    renderJobs([makeJob({ id: 7, title: 'Kind of Blue' })]);
+    // The regression this guards is invisible: role="cell" on the <a> itself
+    // would still look and click the same, but the anchor would stop being a
+    // link to a screen reader.
+    const link = screen.getByRole('link', { name: 'Kind of Blue' });
+    expect(link.closest('[role="cell"]')).not.toBe(link);
+    expect(link.closest('[role="cell"]')).toBeInTheDocument();
+  });
+
+  it('renders an expanded row as one cell spanning all eight columns', async () => {
+    const user = userEvent.setup();
+    renderJobs([makeJob({ id: 3 })]);
+    await user.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+    const table = screen.getByRole('table');
+    const spanning = within(table)
+      .getAllByRole('cell')
+      .filter((c) => c.getAttribute('aria-colspan') === '8');
+    expect(spanning).toHaveLength(1);
+  });
+
+  it('keeps the empty state outside the table, which admits only rows', async () => {
+    renderJobs([]);
+    // EmptyState wraps the message in decorative dashes ("── … ──"), so an
+    // exact-text match never hits — same convention as line 214 above.
+    const empty = await screen.findByText(new RegExp(t.jobs.noMatch));
+    expect(empty.closest('[role="table"]')).toBeNull();
+  });
+});

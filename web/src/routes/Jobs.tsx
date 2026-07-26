@@ -87,11 +87,18 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
   return (
     <Fragment>
       <div
+        role="row"
         className={`${styles.grid} ${styles.row} ${expanded ? styles.rowExpanded : ''}`}
         onClick={() => onToggle(job.id)}
       >
-        <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} bare />
-        <div className={styles.albumCell}>
+        {/* Tag renders its own inline span, so the cell role needs a wrapper —
+            which then becomes the grid item in its place. Harmless for a
+            28px column holding two glyphs, but see .albumCell below for the
+            case where it is not. */}
+        <span role="cell">
+          <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} bare />
+        </span>
+        <div role="cell" className={styles.albumCell}>
           <button
             type="button"
             className={styles.caretButton}
@@ -119,23 +126,28 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
             <span className={styles.sourceDot} title={t.source.manual}>●</span>
           )}
         </div>
-        <span className={`${styles.mono} ${styles.peerCell}`}>{job.peer || '—'}</span>
-        <span className={`${styles.mono} ${styles.formatCell}`}>{job.format ?? '—'}</span>
-        <div className={styles.progressCell}>
+        <span role="cell" className={`${styles.mono} ${styles.peerCell}`}>{job.peer || '—'}</span>
+        <span role="cell" className={`${styles.mono} ${styles.formatCell}`}>{job.format ?? '—'}</span>
+        <div role="cell" className={styles.progressCell}>
           <div className={styles.ticksWrap}>
             <Ticks percent={pct} count={ROW_TICKS} tone={tone} live={downloading} height={9} />
           </div>
           <span className={`${styles.pct} ${toneClass(tone)}`}>{pctLabel}</span>
         </div>
-        <span className={`${styles.mono} ${styles.right}`}>{downloading ? formatSpeed(job.speed) : '—'}</span>
-        <span className={`${styles.mono} ${styles.right}`}>{downloading ? formatEta(job.etaSeconds) : '—'}</span>
-        <span className={`${styles.right} ${job.retries > 0 ? styles.triesActive : styles.triesDim}`}>
+        <span role="cell" className={`${styles.mono} ${styles.right}`}>{downloading ? formatSpeed(job.speed) : '—'}</span>
+        <span role="cell" className={`${styles.mono} ${styles.right}`}>{downloading ? formatEta(job.etaSeconds) : '—'}</span>
+        <span role="cell" className={`${styles.right} ${job.retries > 0 ? styles.triesActive : styles.triesDim}`}>
           {job.retries > 0 ? job.retries : '·'}
         </span>
       </div>
       {expanded && (
-        <div id={expansionId} className={styles.expansionWrap}>
-          <JobExpansion job={job} onCollapse={() => onToggle(job.id)} />
+        <div id={expansionId} role="row" className={styles.expansionWrap}>
+          {/* One cell spanning all eight columns — an expansion is a row in
+              the table, not a sibling of it, and a row with a single cell in
+              an 8-column table has to say so. */}
+          <div role="cell" aria-colspan={8}>
+            <JobExpansion job={job} onCollapse={() => onToggle(job.id)} />
+          </div>
         </div>
       )}
     </Fragment>
@@ -249,26 +261,28 @@ export default function Jobs() {
         </div>
       </div>
 
-      <div className={`${styles.grid} ${styles.head}`}>
-        <span>{t.jobs.gridHead.status}</span>
-        <span>{t.jobs.gridHead.album}</span>
-        <span>{t.jobs.gridHead.peer}</span>
-        <span>{t.jobs.gridHead.format}</span>
-        <span>{t.jobs.gridHead.progress}</span>
-        <span className={styles.headRight}>{t.jobs.gridHead.speed}</span>
-        <span className={styles.headRight}>{t.jobs.gridHead.eta}</span>
-        <span className={styles.headRight}>{t.jobs.gridHead.tries}</span>
-      </div>
+      <div role="table">
+        <div role="row" className={`${styles.grid} ${styles.head}`}>
+          <span role="columnheader">{t.jobs.gridHead.status}</span>
+          <span role="columnheader">{t.jobs.gridHead.album}</span>
+          <span role="columnheader">{t.jobs.gridHead.peer}</span>
+          <span role="columnheader">{t.jobs.gridHead.format}</span>
+          <span role="columnheader">{t.jobs.gridHead.progress}</span>
+          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.speed}</span>
+          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.eta}</span>
+          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.tries}</span>
+        </div>
 
-      <QueryNotice phase={phase} />
-      {hasData(phase) &&
-        (filtered.length === 0 ? (
-          <EmptyState message={t.jobs.noMatch} />
-        ) : (
+        {hasData(phase) &&
           filtered.map((j) => (
             <JobRow key={j.id} job={j} expanded={expandedId === j.id} onToggle={toggleExpanded} />
-          ))
-        ))}
+          ))}
+      </div>
+
+      {/* Both of these sit outside the table: `role="table"` admits only rows,
+          so a notice or an empty state nested inside would be invalid ARIA. */}
+      <QueryNotice phase={phase} />
+      {hasData(phase) && filtered.length === 0 && <EmptyState message={t.jobs.noMatch} />}
     </>
   );
 }

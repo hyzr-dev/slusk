@@ -128,22 +128,23 @@ export default function Shares() {
         {rescanMessage}
       </div>
 
-      <div className={styles.folderGridHead}>
-        <span>{t.shares.gridHead.path}</span>
-        <span className={styles.alignRight}>{t.shares.gridHead.files}</span>
-        <span className={styles.alignRight}>{t.shares.gridHead.size}</span>
-      </div>
-      {data.folders.length === 0 ? (
-        <EmptyState message={t.shares.empty} />
-      ) : (
-        data.folders.map((f) => (
-          <div key={f.path} className={styles.folderRow}>
-            <span className={styles.folderPath}>{f.path}</span>
-            <span className={styles.folderDim}>{f.files}</span>
-            <span className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
+      <div role="table">
+        <div role="row" className={styles.folderGridHead}>
+          <span role="columnheader">{t.shares.gridHead.path}</span>
+          <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.files}</span>
+          <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.size}</span>
+        </div>
+        {data.folders.map((f) => (
+          <div key={f.path} role="row" className={styles.folderRow}>
+            <span role="cell" className={styles.folderPath}>{f.path}</span>
+            <span role="cell" className={styles.folderDim}>{f.files}</span>
+            <span role="cell" className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
           </div>
-        ))
-      )}
+        ))}
+      </div>
+      {/* Outside the table: `role="table"` admits only rows, so an empty
+          state nested inside would be invalid ARIA. */}
+      {data.folders.length === 0 && <EmptyState message={t.shares.empty} />}
 
       <UploadsPanel />
     </>
