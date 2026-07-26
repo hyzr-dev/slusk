@@ -54,7 +54,7 @@ eller `docker exec` in i Postgres-containern.)
 - [ ] `curl $STATUS/healthz` svarar utan autentisering och utan intern statusdata.
 - [ ] `curl $STATUS/readyz` svarar utan autentisering (`200` när modulerna hinner med, annars `503`).
 - [ ] Anrop utan token till `/`, `/status`, `/api/*` och `/metrics` svarar `401`.
-- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`).
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"parked":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`). `parked` är det auktoritativa fältet; det utfasade aliaset `orphaned` ska alltid ha samma värde.
       `modules` behåller den kompatibla kartan med senast avslutad tick för varje
       pipeline-modul (`wanted_sync`, `discovery`, `selecting`, `downloading`, `importing`).
       `moduleDetails` innehåller dessutom `lastAttempt`, `lastCompleted`, felstatus,

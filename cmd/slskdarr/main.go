@@ -248,11 +248,11 @@ func main() {
 		if err != nil {
 			return observ.StatusReport{}, err
 		}
-		orphaned, err := st.CountJobsInStates(ctx, core.StateOrphaned)
+		parked, err := st.CountJobsInStates(ctx, core.StateParked, core.StateOrphaned)
 		if err != nil {
 			return observ.StatusReport{}, err
 		}
-		return observ.StatusReport{Active: len(active), Orphaned: orphaned}, nil
+		return observ.StatusReport{Active: len(active), Parked: parked}, nil
 	}
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)

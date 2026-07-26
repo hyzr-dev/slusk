@@ -23,14 +23,14 @@ type MetricsSink interface {
 
 // ReconcileStats summarizes one reconciliation pass. Ported from the legacy
 // engine's ReconcileStats (engine/reconciler.go:13-21), with Lost renamed to
-// Orphaned: the retry-budget-exhausted "still in our DB, gone from slskd's
-// live list" case now parks the owning job in ORPHANED for manual operator
+// Parked: the retry-budget-exhausted "still in our DB, gone from the backend's
+// live list" case now parks the owning job in PARKED for manual operator
 // action (issue #158) rather than silently erroring the transfer.
 type ReconcileStats struct {
 	Adopted   int
 	Completed int
 	Cancelled int
-	Orphaned  int
+	Parked    int
 	Retried   int
 	Stalled   int
 	Unknown   int
@@ -52,10 +52,10 @@ type DownloadingStore interface {
 	// AttachTransferID is shared by the reconcile and top-up phases. false means
 	// the owning job's cancellation barrier won.
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
-	// OrphanJobForCandidate parks a DOWNLOADING job in ORPHANED once its active
-	// transfer's retry budget for a lost (vanished-from-slskd) transfer is
+	// ParkJobForCandidate parks a DOWNLOADING job in PARKED once its active
+	// transfer's retry budget for a lost (vanished-from-backend) transfer is
 	// exhausted, so an operator can manually retry or delete it (issue #158).
-	OrphanJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error)
+	ParkJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error)
 
 	// --- Resolve phase (port of resolveDownloadingJob) ---
 	// RunnableJobsInState is used with StateDownloading to pick this tick's
@@ -232,10 +232,10 @@ func (d *Downloading) Tick(ctx context.Context, now time.Time) error {
 	// Log a heartbeat only when the pass actually changed something, so a quiet
 	// tick stays silent but real transfer activity is visible. Ported from the
 	// legacy reconcileOnce heartbeat (engine/engine.go:205-210).
-	if (stats.Adopted + stats.Completed + stats.Cancelled + stats.Orphaned + stats.Stalled) > 0 {
+	if (stats.Adopted + stats.Completed + stats.Cancelled + stats.Parked + stats.Stalled) > 0 {
 		d.log().Info("reconciled transfers",
 			"adopted", stats.Adopted, "completed", stats.Completed,
-			"cancelled", stats.Cancelled, "orphaned", stats.Orphaned,
+			"cancelled", stats.Cancelled, "parked", stats.Parked,
 			"stalled", stats.Stalled, "unknown", stats.Unknown)
 	}
 
@@ -397,25 +397,25 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// transfer to ERRORED first so ActiveTransfers stops returning this row
 			// (it only selects QUEUED/IN_PROGRESS/STALLED) - otherwise every later
 			// tick would see it "lost" again and re-run this branch, producing a
-			// false orphaned heartbeat forever even though the job was already
-			// parked. Then park the owning job in ORPHANED instead of silently
+			// false parked heartbeat forever even though the job was already
+			// parked. Then park the owning job in PARKED instead of silently
 			// erroring the transfer alone - an operator can inspect and manually
 			// retry or delete it (issue #158). The candidate's own error path is
-			// skipped: OrphanJobForCandidate takes the job out of DOWNLOADING
+			// skipped: ParkJobForCandidate takes the job out of DOWNLOADING
 			// directly, so resolve() will not see this candidate again.
 			if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
 				return stats, fmt.Errorf("mark lost transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
 			}
-			ok, err := d.p.Store.OrphanJobForCandidate(ctx, tr.CandidateID, now)
+			ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.CandidateID, now)
 			if err != nil {
-				return stats, fmt.Errorf("orphan job for lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
+				return stats, fmt.Errorf("park job for lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
 			}
-			// Only count an orphan when this call actually flipped the job to
-			// ORPHANED. On a race where the job already left DOWNLOADING (e.g.
+			// Only count a parked job when this call actually flipped the job to
+			// PARKED. On a race where the job already left DOWNLOADING (e.g.
 			// WantedSync cancelled it), the transfer is still correctly marked
-			// ERRORED above, but there is no new orphan to report.
+			// ERRORED above, but there is no newly parked job to report.
 			if ok {
-				stats.Orphaned++
+				stats.Parked++
 			}
 			continue
 		}

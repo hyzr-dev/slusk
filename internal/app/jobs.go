@@ -22,8 +22,8 @@ import (
 var ErrJobNotFound = errors.New("job not found")
 
 // ErrJobNotRetryable is returned by Retry when the job exists but is not
-// currently FAILED or ORPHANED - the caller raced a state change (e.g.
-// WantedSync revived it, or a pipeline module already advanced it).
+// currently FAILED, PARKED, or legacy ORPHANED - the caller raced a state
+// change (e.g. WantedSync revived it, or a pipeline module already advanced it).
 var ErrJobNotRetryable = errors.New("job is not in a retryable state")
 
 // ErrRemoteFileBusy is returned by Create when another live candidate already
@@ -108,9 +108,9 @@ func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
 	return nil
 }
 
-// Retry manually revives one FAILED or ORPHANED job by id: ErrJobNotFound if
-// no such job exists, ErrJobNotRetryable if it exists but is not currently
-// FAILED/ORPHANED (the caller raced a state change).
+// Retry manually revives one FAILED, PARKED, or legacy ORPHANED job by id:
+// ErrJobNotFound if no such job exists, ErrJobNotRetryable if it exists but is
+// not currently retryable (the caller raced a state change).
 func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 	_, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {

@@ -401,12 +401,12 @@ func TestSetJobTrackBand(t *testing.T) {
 	}
 }
 
-// TestOrphanJobForCandidate covers Downloading.reconcile's retry-budget-
+// TestParkJobForCandidate covers Downloading.reconcile's retry-budget-
 // exhausted path (issue #158): a DOWNLOADING job whose candidate's transfer
-// keeps vanishing from slskd is parked ORPHANED, and the flip is a no-op when
-// the job has already left DOWNLOADING (guards a race with another
-// transition landing first).
-func TestOrphanJobForCandidate(t *testing.T) {
+// keeps vanishing from the backend is PARKED, and the flip is a no-op when the
+// job has already left DOWNLOADING (guards a race with another transition
+// landing first).
+func TestParkJobForCandidate(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
@@ -426,12 +426,12 @@ func TestOrphanJobForCandidate(t *testing.T) {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 
-	changed, err := s.OrphanJobForCandidate(ctx, cand.ID, now)
+	changed, err := s.ParkJobForCandidate(ctx, cand.ID, now)
 	if err != nil {
-		t.Fatalf("OrphanJobForCandidate: %v", err)
+		t.Fatalf("ParkJobForCandidate: %v", err)
 	}
 	if !changed {
-		t.Fatal("expected OrphanJobForCandidate to return true for a DOWNLOADING job")
+		t.Fatal("expected ParkJobForCandidate to return true for a DOWNLOADING job")
 	}
 	jobs, err := s.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
 	if err != nil {
@@ -444,16 +444,16 @@ func TestOrphanJobForCandidate(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
 	}
-	if view.Job.State != core.StateOrphaned {
-		t.Errorf("State = %q, want ORPHANED", view.Job.State)
+	if view.Job.State != core.StateParked {
+		t.Errorf("State = %q, want PARKED", view.Job.State)
 	}
 
-	// Already ORPHANED (not DOWNLOADING): the guard bounces, no-op.
-	changed, err = s.OrphanJobForCandidate(ctx, cand.ID, now)
+	// Already PARKED (not DOWNLOADING): the guard bounces, no-op.
+	changed, err = s.ParkJobForCandidate(ctx, cand.ID, now)
 	if err != nil {
-		t.Fatalf("OrphanJobForCandidate (already orphaned): %v", err)
+		t.Fatalf("ParkJobForCandidate (already parked): %v", err)
 	}
 	if changed {
-		t.Error("expected OrphanJobForCandidate to no-op when the job is not DOWNLOADING")
+		t.Error("expected ParkJobForCandidate to no-op when the job is not DOWNLOADING")
 	}
 }

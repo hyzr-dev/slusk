@@ -63,9 +63,14 @@ func TestDashboardStatus(t *testing.T) {
 			want: "failed",
 		},
 		{
-			name: "job orphaned is orphaned",
+			name: "job parked is parked",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateParked}},
+			want: "parked",
+		},
+		{
+			name: "legacy orphaned job is canonically parked",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateOrphaned}},
-			want: "orphaned",
+			want: "parked",
 		},
 		{
 			name: "transfer errored is failed",
