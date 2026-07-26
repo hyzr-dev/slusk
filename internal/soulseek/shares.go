@@ -396,6 +396,10 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 	paths := make(map[string]struct{}, len(c.cfg.SharedFolders))
 	start := time.Now()
 	lastLog := start
+
+	cached, cacheActive := c.loadShareMetaCache(ctx)
+	observed := make(map[string]ShareFileMeta, len(cached))
+	var pending []ShareFileMeta
 	for _, configured := range c.cfg.SharedFolders {
 		name := strings.TrimSpace(configured.Name)
 		if name == "" || name != configured.Name || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
@@ -506,7 +510,20 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 			}
 			dirVirtual := virtualDirectory(virtual)
 			wire := peer.File{Name: virtual, Size: uint64(info.Size()), Extension: extensionOf(filepath.Base(path))}
-			wire.Attributes = extractTechnicalMetadata(path, info.Size(), c.logger)
+			if audioFormatOf(path) == "" {
+				// Not an audio format: extractTechnicalMetadata returns nil without
+				// opening anything, so a cache row would be pure table growth.
+			} else if hit, ok := cached[path]; ok && sameShareFileMeta(hit, info.Size(), info.ModTime()) {
+				wire.Attributes = attributesFromCache(hit)
+				observed[path] = hit
+			} else {
+				wire.Attributes = extractTechnicalMetadata(path, info.Size(), c.logger)
+				bitrate, duration := attributeValues(wire.Attributes)
+				entry := ShareFileMeta{Path: path, Size: info.Size(), ModTime: info.ModTime(),
+					Bitrate: bitrate, Duration: duration}
+				observed[path] = entry
+				pending = append(pending, entry)
+			}
 			resolvedAfter, err := filepath.EvalSymlinks(path)
 			if err != nil {
 				return fmt.Errorf("re-resolve share %q file: %w", configured.Name, err)
@@ -545,6 +562,11 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		s.folders = append(s.folders, folder)
 	}
 
+	// Only reached once every configured root has walked successfully, so a
+	// failed scan never prunes cache rows for a root it did not finish -
+	// they would otherwise be reloaded and re-verified on the next attempt.
+	c.flushShareMetaCache(ctx, cached, observed, pending, cacheActive, len(s.files))
+
 	for _, directory := range s.byDirectory {
 		sort.Slice(directory.Files, func(i, j int) bool {
 			return strings.ToLower(directory.Files[i].Name) < strings.ToLower(directory.Files[j].Name)
@@ -580,6 +602,77 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 	}
 	s.sharedFrame = frame
 	return s, nil
+}
+
+// loadShareMetaCache loads every cached row up front, before the scan starts
+// touching the filesystem, and reports whether the cache is active
+// (c.cfg.ShareMetaCache != nil AND the load succeeded). On any failure - no
+// cache configured, or a load error - it returns (nil, false); scanShares
+// then reads every audio file exactly as it did before this cache existed,
+// and flushShareMetaCache below skips writing back.
+func (c *Client) loadShareMetaCache(ctx context.Context) (map[string]ShareFileMeta, bool) {
+	if c.cfg.ShareMetaCache == nil {
+		return nil, false
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, c.cfg.shareMetaCacheTimeout)
+	defer cancel()
+	entries, err := c.cfg.ShareMetaCache.LoadShareMeta(loadCtx)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("load share metadata cache failed; reading every shared audio file this scan", "err", err)
+		}
+		return nil, false
+	}
+	cached := make(map[string]ShareFileMeta, len(entries))
+	for _, e := range entries {
+		cached[e.Path] = e
+	}
+	if c.logger != nil {
+		c.logger.Debug("share metadata cache loaded", "rows", len(cached))
+	}
+	return cached, true
+}
+
+// flushShareMetaCache writes back this scan's cache results: pending is every
+// entry freshly computed this scan (a miss or a stale hit), and stale is
+// every path in cached that this scan did not observe - which is deleted so
+// the cache never grows unboundedly stale as files are removed or renamed.
+// It is a no-op if the cache was not active for this scan, and never returns
+// an error: a save failure only costs the next scan a re-read, never
+// correctness.
+//
+// totalFiles is the count of every file the walk actually indexed this scan
+// (audio and non-audio alike, i.e. len(shareSnapshot.files)), not len(observed)
+// - observed only ever gains entries for audio files, so a share containing
+// files but no mp3/flac would otherwise look indistinguishable from an empty
+// mount and permanently disable pruning. If totalFiles is zero while cached
+// held rows, the scan almost certainly saw a share root that is present but
+// (transiently) empty - e.g. a mount that dropped mid-walk without erroring.
+// Pruning in that case would delete the entire cache for one bad tick, so it
+// is skipped with a warning instead.
+func (c *Client) flushShareMetaCache(ctx context.Context, cached, observed map[string]ShareFileMeta, pending []ShareFileMeta, cacheActive bool, totalFiles int) {
+	if !cacheActive {
+		return
+	}
+	var stale []string
+	if totalFiles == 0 && len(cached) > 0 {
+		if c.logger != nil {
+			c.logger.Warn("share metadata cache: scan observed zero files while the cache held rows; skipping prune",
+				"cached_rows", len(cached))
+		}
+	} else {
+		for path := range cached {
+			if _, ok := observed[path]; !ok {
+				stale = append(stale, path)
+			}
+		}
+	}
+
+	saveCtx, cancel := context.WithTimeout(ctx, c.cfg.shareMetaCacheTimeout)
+	defer cancel()
+	if err := c.cfg.ShareMetaCache.SaveShareMeta(saveCtx, pending, stale); err != nil && c.logger != nil {
+		c.logger.Warn("save share metadata cache failed", "err", err)
+	}
 }
 
 func virtualDirectory(name string) string {

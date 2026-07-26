@@ -60,6 +60,9 @@ const (
 	// defaultShareScanLogInterval is how often scanShares logs progress
 	// during a share rescan.
 	defaultShareScanLogInterval = 30 * time.Second
+	// defaultShareMetaCacheTimeout bounds a single ShareMetaCache Load/Save
+	// call (issue #197).
+	defaultShareMetaCacheTimeout = 60 * time.Second
 	// defaultUploadMinThroughput is the minimum sustained upload throughput,
 	// in bytes/second, an upload slot's peer must maintain (see #108).
 	defaultUploadMinThroughput = 1024
@@ -127,6 +130,12 @@ type Config struct {
 	// redelivers at the next login rather than the client silently destroying mail it has
 	// nowhere to put.
 	MessageSink MessageSink
+
+	// ShareMetaCache, when non-nil, lets scanShares skip reopening an
+	// unchanged audio file's technical metadata across restarts (issue #197).
+	// Left nil, every mp3/flac is read on every scan, matching the client's
+	// behavior before this cache existed.
+	ShareMetaCache ShareMetaCache
 
 	// AllowPrivatePeerAddresses permits dialing server-supplied peer
 	// addresses in RFC 1918 / ULA private ranges (threat T12: the central
@@ -218,6 +227,10 @@ type Config struct {
 	// shareScanLogInterval is how often scan progress is logged during a
 	// share rescan. Default 30s; test seam.
 	shareScanLogInterval time.Duration
+	// shareMetaCacheTimeout bounds a single ShareMetaCache Load/Save call, so
+	// a stalled store cannot hang a share scan indefinitely. Default 60s;
+	// test seam.
+	shareMetaCacheTimeout time.Duration
 	// shareScanHook, when non-nil, is invoked at the start of every share
 	// scan (see scanShares) instead of nothing, letting tests block or fail
 	// the scan deterministically without touching the filesystem. Always nil
@@ -418,6 +431,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.shareScanLogInterval <= 0 {
 		cfg.shareScanLogInterval = defaultShareScanLogInterval
+	}
+	if cfg.shareMetaCacheTimeout <= 0 {
+		cfg.shareMetaCacheTimeout = defaultShareMetaCacheTimeout
 	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2
