@@ -73,6 +73,34 @@ the Postgres database — `album_jobs` is the pipeline's only contact surface be
 modules, so `SELECT state, count(*) FROM album_jobs GROUP BY state` is a literal
 snapshot of the state machine, and `job_events` is the per-job history.
 
+## Running the UI against the lab
+
+The dashboard the lab serves on `:9090` is the *embedded* build — `lab.sh up` rebuilds the
+image from the checkout, so seeing a frontend change there costs a full rebuild and a fresh
+Soulseek login. That is far too slow to iterate on, and only one lab can run at a time.
+
+For frontend work, run Vite from the checkout and let the lab be the backend:
+
+```bash
+./testenv/lab.sh up          # backend, once
+make dev                     # http://localhost:5173, /api and /status proxied to :9090
+```
+
+`web/vite.config.ts` proxies `/api` and `/status` to `SLSKDARR_DEV_API` (default
+`http://localhost:9090`) and injects the observ bearer token from `SLSKDARR_DEV_TOKEN`
+(default: the lab's fixed token), so the browser never sees an auth prompt. The token is read
+via `process.env` in the config file, which runs in Node — it never reaches the client bundle.
+Keep it that way; a `VITE_` prefix would ship it to the browser.
+
+Point `SLSKDARR_DEV_API` at another port when verifying a git worktree whose backend runs
+somewhere else, and give Vite its own `--port` per worktree — two dev servers on one port
+silently serve the same code and you verify the wrong branch.
+
+Frontend changes need a browser before they are believable: `web/`'s tests run in jsdom, which
+computes no layout and paints nothing, so overflow, popover placement, contrast and tap-target
+size cannot fail the suite. Render the change and look at it. Agents should follow the
+`verifying-ui-in-browser` skill.
+
 ## Configuration is strict
 
 `internal/config` rejects unknown keys at startup (`unknown config keys: ...`) and has

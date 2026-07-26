@@ -3,6 +3,26 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
+// The dev server has no backend of its own — /api and /status are proxied to a
+// running slskdarr, normally the testenv lab. The lab publishes the observ
+// listener on 9090 and requires a bearer token, so the proxy injects the
+// Authorization header and the browser never sees an auth prompt.
+//
+// Both values are read from Node's process.env rather than import.meta.env or a
+// VITE_ prefix: vite.config.ts runs in Node, so the token stays on the dev
+// server instead of being baked into the client bundle. The default token is the
+// lab's fixed value from testenv/render_config.py, which makes `make dev` work
+// against a running lab with no configuration. Point SLSKDARR_DEV_API elsewhere
+// when verifying a worktree that serves the backend on another port.
+const apiTarget = process.env.SLSKDARR_DEV_API ?? 'http://localhost:9090';
+const apiToken = process.env.SLSKDARR_DEV_TOKEN ?? 'slskdarr-pr-lab-observ-token-0001';
+
+const backendProxy = {
+  target: apiTarget,
+  changeOrigin: true,
+  headers: { Authorization: `Bearer ${apiToken}` },
+};
+
 // Build output lands inside internal/observ/web/ because go:embed cannot read
 // files outside its own package directory.
 export default defineConfig({
@@ -22,8 +42,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:8080',
-      '/status': 'http://localhost:8080',
+      '/api': backendProxy,
+      '/status': backendProxy,
     },
   },
   test: {
