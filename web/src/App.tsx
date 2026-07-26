@@ -42,7 +42,7 @@ export default function App() {
             <Route path="shares" element={<Shares />} />
             <Route path="health" element={<Health />} />
             <Route path="search" element={<Search />} />
-            <Route path="chat" element={<Chat />} />
+            <Route path="chat/:username?" element={<Chat />} />
             <Route path="setup" element={<Setup />} />
             <Route path="settings" element={<Settings />} />
           </Route>

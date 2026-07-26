@@ -11,14 +11,16 @@ import Peers from './routes/Peers';
 import Shares from './routes/Shares';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
+import Chat from './routes/Chat';
+import { queryKeys } from './api/queries';
+import type { Conversation } from './api/types';
 import { t } from './strings';
 
 // Renders the real route tree (mirroring App.tsx) at each path with a
-// MemoryRouter, proving every one of the eight routes mounts without
+// MemoryRouter, proving every one of the nine routes mounts without
 // crashing. BrowserRouter itself is exercised implicitly by the build
 // (the SPA is served by the Go backend, which handles history fallback).
-function renderAt(path: string) {
-  const queryClient = new QueryClient();
+function renderAt(path: string, queryClient: QueryClient = new QueryClient()) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[path]}>
@@ -31,6 +33,7 @@ function renderAt(path: string) {
             <Route path="peers" element={<Peers />} />
             <Route path="shares" element={<Shares />} />
             <Route path="health" element={<Health />} />
+            <Route path="chat/:username?" element={<Chat />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
@@ -133,5 +136,25 @@ describe('route tree', () => {
     renderAt('/jobs/42');
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.getByRole('heading', { level: 1, name: t.nav.jobs })).toBeInTheDocument();
+  });
+
+  it('renders /chat without crashing', () => {
+    // No seeded query data, so useConversations() never resolves and Chat
+    // renders only its loading state.
+    renderAt('/chat');
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+  });
+
+  it('shows the chat nav badge as the sum of unread across conversations', () => {
+    const queryClient = new QueryClient();
+    const conversations: Conversation[] = [
+      { username: 'alice', lastMessage: 'hi', lastMessageAt: '', lastDirection: 'IN', unread: 2, total: 5 },
+      { username: 'bob', lastMessage: 'yo', lastMessageAt: '', lastDirection: 'OUT', unread: 1, total: 3 },
+    ];
+    queryClient.setQueryData(queryKeys.conversations, conversations);
+    renderAt('/jobs', queryClient);
+    // The badge digit is a second span inside the same <a>, so its accessible
+    // name is "chat3", not "chat" — match by prefix rather than exact string.
+    expect(screen.getByRole('link', { name: new RegExp(`^${t.nav.chat}`) })).toHaveTextContent('3');
   });
 });

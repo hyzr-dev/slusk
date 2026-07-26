@@ -1,5 +1,5 @@
 import { Outlet, useLocation } from 'react-router-dom';
-import { useStatus } from '../api/queries';
+import { useConversations, useStatus } from '../api/queries';
 import { t } from '../strings';
 import { FlashProvider } from './chrome/FlashContext';
 import SideNav from './chrome/SideNav';
@@ -10,11 +10,12 @@ import styles from './Layout.module.css';
 
 export default function Layout() {
   const status = useStatus();
+  const conversations = useConversations();
 
   const s = status.data;
   const inFlight = (s?.active ?? 0) + (s?.queued ?? 0) + (s?.stalled ?? 0);
   const needsAttention = (s?.stalled ?? 0) + (s?.orphaned ?? 0);
-  const unreadChat = 0; // no messages API yet; see #183
+  const unreadChat = (conversations.data ?? []).reduce((sum, c) => sum + c.unread, 0);
 
   const groups: NavGroup[] = [
     {

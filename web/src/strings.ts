@@ -339,10 +339,28 @@ export const t = {
     searchBody:
       'Manual Soulseek search is not built yet. When it lands, results will group per peer and folder, and anything downloaded can be matched and imported into Lidarr.',
     searchIssue: 'Tracked as issue #58.',
-    chatTitle: 'CHAT',
-    chatBody:
-      'The native Soulseek client can send and receive private messages, but there is no HTTP surface for them yet, so this view has nothing to read.',
-    chatIssue: 'Tracked as issue #183.',
+  },
+  chat: {
+    railHeading: 'PEERS',
+    disabledNotice: 'Native Soulseek messaging is not enabled in the configuration.',
+    empty: 'No conversations yet.',
+    threadEmpty: 'No messages yet.',
+    // Announced on each rail row so the unread count reaches a screen reader
+    // even though it renders as a bare digit next to the name (issue #183).
+    threadLabel: (username: string, unread: number) =>
+      unread > 0 ? `${username}, ${unread} unread` : username,
+    you: '<you>',
+    peer: (username: string) => `<${username}>`,
+    loadOlder: 'Load older messages',
+    composerLabel: 'Message',
+    composerPlaceholder: 'message',
+    send: '[⏎] SEND',
+    tooLong: 'Message is too long.',
+    // Learned only by trying — see the doc comment atop Chat.tsx for why
+    // there is no way to know this in advance.
+    sendDisabled: 'Sending private messages is not enabled in the configuration.',
+    sendFailed: 'Could not send the message. Please try again.',
+    sendRejected: 'Message was rejected by the server.',
   },
   setup: {
     title: 'GUIDED SETUP',
