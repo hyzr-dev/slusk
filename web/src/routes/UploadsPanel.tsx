@@ -1,8 +1,14 @@
 import { useUploads } from '../api/queries';
-import ProgressBar from '../components/ProgressBar';
-import { formatSize, formatVirtualPath } from '../format';
+import EmptyState from '../components/tui/EmptyState';
+import SectionHeader from '../components/tui/SectionHeader';
+import Ticks from '../components/tui/Ticks';
+import tagStyles from '../components/tui/Tag.module.css';
+import { formatSize, formatVirtualPath, percent } from '../format';
 import { t } from '../strings';
 import styles from './Shares.module.css';
+
+// Per-row tick resolution, matching Overview's TRANSFERS panel and the mock exactly.
+const UPLOAD_TICKS = 104;
 
 // A separate component rather than inline JSX in Shares, deliberately: hooks
 // cannot be conditional, so a useUploads() call at the top of Shares would
@@ -15,48 +21,60 @@ export default function UploadsPanel() {
   if (!data || !data.enabled) return null;
 
   return (
-    <div className={`${styles.panel} ${styles.uploadsPanel}`}>
-      <div className={styles.panelHeader}>
-        <div className={styles.panelTitle}>{t.uploads.panelTitle}</div>
-        <div className={styles.slotsBadge}>{t.uploads.slotsInUse(data.active, data.slots)}</div>
-      </div>
+    <div className={styles.uploadsSection}>
+      <SectionHeader
+        label={t.uploads.panelTitle}
+        meta={<span className={styles.slotsBadge}>{t.uploads.slotsInUse(data.active, data.slots)}</span>}
+      />
 
-      {data.uploads.length === 0 && <div className={styles.uploadsEmpty}>{t.uploads.empty}</div>}
+      {data.uploads.length === 0 && <EmptyState message={t.uploads.empty} />}
 
-      {data.uploads.map((u, i) => (
+      {data.uploads.map((u, i) => {
+        // UploadEntry (internal/observ/uploads.go) carries no speed field —
+        // unlike a download job there is nothing truthful to show there, so
+        // the head line carries only the marker, filename and a real,
+        // computed percentage. A queued entry is not transferring at all: it
+        // gets tone="queued" and no `live`, so its bar never flares as if
+        // bytes were moving.
+        const pct = u.active ? percent(u.bytesWritten, u.size) : 0;
         // Filename is not a stable per-row key on its own: the same peer can
         // requeue the same file, and truncation can put two distinct entries
         // momentarily side by side with equal (username, filename). Position
         // in the already-ordered list (active first, then queue order) is
         // stable enough for a polled, append-only-looking list like this.
-        <div className={styles.uploadRow} key={`${u.username}-${u.filename}-${i}`}>
-          <span className={`${styles.uploadDot} ${u.active ? '' : styles.uploadDotQueued}`} />
-          <div className={styles.uploadInfo}>
-            <div className={styles.uploadFile} title={u.filename}>
-              {formatVirtualPath(u.filename)}
+        return (
+          <div className={styles.uploadRow} key={`${u.username}-${u.filename}-${i}`}>
+            <div className={styles.uploadHead}>
+              <span className={`${tagStyles.tag} ${u.active ? tagStyles.neutral : tagStyles.quiet}`}>
+                {u.active ? t.tag.UL : t.tag.QU}
+              </span>
+              <span className={styles.uploadFile} title={u.filename}>
+                {formatVirtualPath(u.filename)}
+              </span>
+              <span className={`${styles.uploadPct} ${u.active ? styles.pctBar : styles.pctQueued}`}>
+                {u.active ? `${pct}%` : '—'}
+              </span>
             </div>
-            <div className={styles.uploadPeer}>
-              {t.uploads.toPeerPrefix} <span className={styles.mono}>{u.username}</span>
+            <div className={styles.uploadTicks}>
+              <Ticks percent={pct} count={UPLOAD_TICKS} tone={u.active ? 'bar' : 'queued'} live={u.active} height={12} />
+            </div>
+            <div className={styles.uploadSub}>
+              <span>
+                {t.uploads.toPeerPrefix} <span className={styles.mono}>{u.username}</span>
+              </span>
+              <span>
+                {u.active
+                  ? // size is 0 between dispatch marking the job active and
+                    // runUpload resolving the share entry. Rendering that
+                    // window would claim a 0-byte file, so the caption is
+                    // suppressed until size resolves — the bar itself stays.
+                    u.size > 0 && `${formatSize(u.bytesWritten)} / ${formatSize(u.size)}`
+                  : t.uploads.queuePlace(u.position)}
+              </span>
             </div>
           </div>
-          {u.active ? (
-            <div className={styles.uploadMeter}>
-              <ProgressBar done={u.bytesWritten} total={u.size} />
-              {/* size is 0 between dispatch marking the job active and
-                  runUpload resolving the share entry. Rendering that window
-                  would claim a 0-byte file; gated the same way Jobs.tsx gates
-                  its byte caption on bytesTotal. */}
-              {u.size > 0 && (
-                <div className={styles.uploadMeterCaption}>
-                  {formatSize(u.bytesWritten)} / {formatSize(u.size)}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className={styles.uploadQueuePlace}>{t.uploads.queuePlace(u.position)}</div>
-          )}
-        </div>
-      ))}
+        );
+      })}
 
       {data.truncated > 0 && <div className={styles.footerNote}>{t.uploads.truncated(data.truncated)}</div>}
     </div>

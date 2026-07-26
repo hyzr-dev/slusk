@@ -1,18 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  basename,
-  formatBytes,
-  formatBytesOrDash,
-  formatSpeed,
-  formatEta,
-  formatSize,
-  formatVirtualPath,
-  percent,
-  formatDateTime,
-  formatShortTime,
-  formatTime,
-  formatScore,
-} from './format';
+import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, percent } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -193,5 +180,66 @@ describe('formatScore', () => {
   it('always shows two decimals', () => {
     expect(formatScore(1)).toBe('1.00');
     expect(formatScore(0.456)).toBe('0.46');
+  });
+});
+
+describe('formatAge', () => {
+  it('counts seconds below a minute', () => {
+    expect(formatAge(0)).toBe('0s');
+    expect(formatAge(59)).toBe('59s');
+  });
+
+  it('switches to whole minutes rather than counting to hundreds of seconds', () => {
+    expect(formatAge(60)).toBe('1m');
+    expect(formatAge(3599)).toBe('59m');
+  });
+
+  it('carries hours, and drops a zero minute remainder', () => {
+    expect(formatAge(3600)).toBe('1h');
+    expect(formatAge(3600 + 4 * 60)).toBe('1h 4m');
+  });
+});
+
+describe('compareFileNames', () => {
+  const sorted = (names: string[]) => [...names].sort(compareFileNames);
+
+  it('orders track numbers numerically, not as text', () => {
+    // The bug this exists to prevent: plain string sort puts 10 before 2.
+    expect(sorted(['10 Ten.flac', '2 Two.flac', '01 One.flac'])).toEqual([
+      '01 One.flac',
+      '2 Two.flac',
+      '10 Ten.flac',
+    ]);
+  });
+
+  it('falls back to alphabetical when there is no track number', () => {
+    expect(sorted(['Zebra.flac', 'Apple.flac', 'Mango.flac'])).toEqual([
+      'Apple.flac',
+      'Mango.flac',
+      'Zebra.flac',
+    ]);
+  });
+
+  it('keeps discs in order when the number is a prefix', () => {
+    expect(sorted(['2-01 B.flac', '1-02 A.flac', '1-01 A.flac'])).toEqual([
+      '1-01 A.flac',
+      '1-02 A.flac',
+      '2-01 B.flac',
+    ]);
+  });
+
+  it('sorts on the leaf name, ignoring the directories the reader cannot see', () => {
+    expect(sorted(['zzz\\01 First.flac', 'aaa\\02 Second.flac'])).toEqual([
+      'zzz\\01 First.flac',
+      'aaa\\02 Second.flac',
+    ]);
+  });
+
+  it('places the Swedish vowels after z rather than folding them into a and o', () => {
+    expect(sorted(['Ost.flac', 'Apple.flac', 'Ähre.flac'])).toEqual([
+      'Apple.flac',
+      'Ost.flac',
+      'Ähre.flac',
+    ]);
   });
 });

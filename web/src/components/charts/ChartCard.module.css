@@ -1,7 +1,0 @@
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 15px;
-}
-.title { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }

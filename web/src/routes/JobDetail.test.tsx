@@ -271,6 +271,34 @@ describe('transfer live progress', () => {
     expect(screen.getByText(new RegExp(t.jobs.queuePosition(5)))).toBeInTheDocument();
   });
 
+  // A transfer waiting in the peer's queue moves no bytes, so its tick bar
+  // must never flare — a flashing bar on an idle transfer would read as data
+  // arriving when none is. Pins that guarantee via the DOM marker Ticks sets
+  // on the one tick that's allowed to flare (mirrors the same assertion in
+  // Jobs.test.tsx / JobExpansion.test.tsx for the other views, #198).
+  it('flares the tick bar for a transferring file but not for a queued one', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      detailWithTransfers([
+        makeTransfer({ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 100, bytesTotal: 200 }),
+        makeTransfer({ filename: '02.flac', state: 'PENDING', queuePosition: 5, bytesDone: 0, bytesTotal: 200 }),
+      ]),
+    );
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    // Each transfer's filename span is a direct child of its own row div, so
+    // the nearest ancestor <div> is exactly that row.
+    const transferringRow = screen.getByText('01.flac').closest('div')!;
+    const queuedRow = screen.getByText('02.flac').closest('div')!;
+    expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
+    expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
   it('omits speed and queue markers when the fields are absent', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -370,6 +398,59 @@ describe('placeholder-data guard', () => {
 
     resolveJob2Detail(makeDetail({ id: 2, attempts: [] }));
 
-    await waitFor(() => expect(screen.getByText(t.jobs.noAttempts)).toBeInTheDocument());
+    // EmptyState wraps the message in decorative dashes ("── … ──"), so match
+    // by substring rather than the exact string (markup change, not content).
+    await waitFor(() =>
+      expect(screen.getByText(new RegExp(t.jobs.noAttempts))).toBeInTheDocument(),
+    );
+  });
+});
+
+describe('file ordering', () => {
+  function transfer(filename: string): TransferDetail {
+    return { filename, state: 'DONE', bytesDone: 1, bytesTotal: 1, retries: 0, lastProgressAt: '' };
+  }
+
+  it('lists files in track order regardless of the order the API returned them', () => {
+    // The API hands transfers back in insertion order, which for a Soulseek
+    // folder is arbitrary. A plain string sort would also put 10 before 2, so
+    // this pins the numeric collation end to end, not just the comparator.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, placeholderData: keepPreviousData } },
+    });
+    client.setQueryData(queryKeys.jobs, [makeJob()]);
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      makeDetail({
+        attempts: [
+          {
+            id: 1,
+            username: 'lossless_lars',
+            fileCount: 3,
+            state: 'ACTIVE',
+            failReason: '',
+            createdAt: '',
+            updatedAt: '',
+            transfers: [
+              transfer('music\\10 Flamenco Sketches.flac'),
+              transfer('music\\02 Freddie Freeloader.flac'),
+              transfer('music\\01 So What.flac'),
+            ],
+          },
+        ],
+      }),
+    );
+
+    renderJobDetail('/jobs/1', client);
+
+    const shown = screen
+      .getAllByText(/\.flac$/)
+      .map((el) => el.textContent);
+    expect(shown).toEqual([
+      '01 So What.flac',
+      '02 Freddie Freeloader.flac',
+      '10 Flamenco Sketches.flac',
+    ]);
   });
 });

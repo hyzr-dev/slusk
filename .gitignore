@@ -25,3 +25,6 @@ __pycache__/
 /internal/observ/web/dist/*
 !/internal/observ/web/dist/placeholder.html
 /web/node_modules/
+
+# Superpowers subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/

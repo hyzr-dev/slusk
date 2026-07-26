@@ -41,6 +41,31 @@ function renderHealth(moduleDetails: StatusReport['moduleDetails']) {
   );
 }
 
+describe('Health loading vs empty', () => {
+  it('shows the loading placeholder, not the empty message, before the first fetch resolves', () => {
+    // No setQueryData call: useStatus() has never resolved, matching the
+    // real state during the first fetch. Rendering the empty message here
+    // would assert "no modules reported" about a system that simply hasn't
+    // answered yet.
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <Health />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
+    expect(screen.queryByText(t.health.empty, { exact: false })).not.toBeInTheDocument();
+  });
+
+  it('shows the empty message once the fetch resolves with no modules', () => {
+    renderHealth({});
+    expect(screen.getByText(t.health.empty, { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText(t.jobs.loading)).not.toBeInTheDocument();
+  });
+});
+
 describe('Health module states', () => {
   it('shows the never-run label for a module with no lastAttempt, not a formatted date', () => {
     renderHealth({ importer: makeModule({ lastAttempt: '' }) });

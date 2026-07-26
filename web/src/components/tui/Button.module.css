@@ -1,0 +1,15 @@
+.btn {
+  padding: 5px 11px;
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.btn:disabled { cursor: default; opacity: 0.45; }
+
+.primary { border: 1px solid var(--dim); background: var(--btn); color: var(--fg); }
+.ghost { border: 1px solid var(--line2); color: var(--dim); }
+.ghost:hover:not(:disabled) { border-color: var(--dim); color: var(--fg); }
+.danger { border: 1px solid rgba(181, 89, 92, 0.4); color: var(--bad); }
+.danger:hover:not(:disabled) { border-color: var(--bad); }

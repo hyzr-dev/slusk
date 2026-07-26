@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { ChartsReport, Job, JobStatus } from '../api/types';
+import type { ChartsReport, Job, JobStatus, StatusReport } from '../api/types';
 import Overview from './Overview';
 
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
@@ -30,11 +30,22 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
   };
 }
 
+const baseJob = makeJob(1, 'Kind of Blue', 'Miles Davis', 'active');
+
 const jobs: Job[] = [
-  makeJob(1, 'Kind of Blue', 'Miles Davis', 'active'),
+  baseJob,
   makeJob(2, 'Song A', 'Artist B', 'queued'),
   makeJob(3, 'Song C', 'Artist D', 'done'),
 ];
+
+const status: StatusReport = {
+  queued: 1,
+  active: 1,
+  stalled: 0,
+  orphaned: 0,
+  modules: {},
+  moduleDetails: {},
+};
 
 const charts: ChartsReport = {
   passes: [
@@ -44,9 +55,14 @@ const charts: ChartsReport = {
   throughput: [],
 };
 
-function renderOverview(chartsData: ChartsReport | undefined = charts) {
+function renderOverview(
+  jobsData: Job[] = jobs,
+  chartsData: ChartsReport | undefined = charts,
+  statusData: StatusReport | undefined = status,
+) {
   const queryClient = new QueryClient();
-  queryClient.setQueryData(queryKeys.jobs, jobs);
+  queryClient.setQueryData(queryKeys.jobs, jobsData);
+  queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
     <QueryClientProvider client={queryClient}>
@@ -58,34 +74,63 @@ function renderOverview(chartsData: ChartsReport | undefined = charts) {
 }
 
 describe('Overview', () => {
-  it('renders all five status cards, including failed', () => {
+  it('renders the five stat cells, with no failed cell', () => {
     renderOverview();
-    expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByText('Stalled')).toBeInTheDocument();
+    expect(screen.getByText('Orphaned')).toBeInTheDocument();
     expect(screen.getByText('Done')).toBeInTheDocument();
-    expect(screen.getByText('Failed')).toBeInTheDocument();
+    // Unlike the old dashboard, failed jobs have no stat cell here — the
+    // mock and spec only cover active/queued/stalled/orphaned/done.
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
-  it('shows only active jobs in the table, ignoring other statuses', () => {
+  it('shows only active and stalled jobs in TRANSFERS, ignoring queued and done', () => {
     renderOverview();
     expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
     expect(screen.queryByText('Song A')).not.toBeInTheDocument();
     expect(screen.queryByText('Song C')).not.toBeInTheDocument();
   });
 
-  it('renders both chart titles with seeded chart data', () => {
+  it('renders the TRANSFERS, THROUGHPUT and RECONCILE panels with seeded data', () => {
     renderOverview();
-    expect(screen.getByText('Matched albums per pass · last 20')).toBeInTheDocument();
-    expect(screen.getByText('Completed downloads · last 24 h')).toBeInTheDocument();
+    expect(screen.getByText('TRANSFERS')).toBeInTheDocument();
+    expect(screen.getByText('THROUGHPUT')).toBeInTheDocument();
+    expect(screen.getByText('RECONCILE')).toBeInTheDocument();
+    // Proves status and chart data actually reach the new markup, not just
+    // that the section headers render.
+    expect(screen.getByText('1 active')).toBeInTheDocument();
+    expect(screen.getByText('1 matched')).toBeInTheDocument();
   });
 
-  it('shows the empty pass-history state when the charts report has no passes', () => {
-    // completedByHour is seeded (as it always is in real operation - the
-    // backend zero-fills it to 24 buckets) so only the pass chart's empty
-    // state renders here; an empty completedByHour is CumulativeAreaChart's
-    // own, separately-covered empty state.
-    renderOverview({ passes: [], completedByHour: charts.completedByHour, throughput: [] });
-    expect(screen.getByText('No pass history yet')).toBeInTheDocument();
+  it('shows the empty reconcile state when the charts report has no passes', () => {
+    renderOverview(jobs, { passes: [], completedByHour: charts.completedByHour, throughput: [] });
+    expect(screen.getByText('── No pass history yet ──')).toBeInTheDocument();
+  });
+
+  it('shows a peer-queued job as queued rather than downloading', () => {
+    // Job is active but has queuePosition 4 — no bytes are moving.
+    renderOverview([
+      { ...baseJob, status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
+    ]);
+    expect(screen.getByText('QU')).toBeInTheDocument();
+    expect(screen.queryByText('DL')).not.toBeInTheDocument();
+  });
+
+  it('flares the tick bar for a genuinely transferring row but not a peer-queued one', () => {
+    // Pinned the same way as Jobs/JobDetail/Shares: a job waiting in a peer's
+    // queue is moving no bytes, so its tick bar must never flare as though
+    // data were arriving — the one failure mode here that actively misinforms.
+    // Scoped per row so one row's state can't be mistaken for the other's.
+    renderOverview([
+      { ...baseJob, id: 1, title: 'Transferring Album', status: 'active', state: 'DOWNLOADING', queuePosition: 0, speed: 1000 },
+      { ...baseJob, id: 2, title: 'Queued Album', status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
+    ]);
+
+    const transferringRow = screen.getByText('Transferring Album').closest('[class*="transferRow"]') as HTMLElement;
+    const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;
+    expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
+    expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
   });
 });

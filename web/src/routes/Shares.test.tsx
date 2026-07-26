@@ -60,10 +60,14 @@ function renderShares(client: QueryClient) {
 }
 
 describe('loading state', () => {
-  it('renders only the heading before data arrives', () => {
+  it('renders only a loading placeholder before data arrives', () => {
+    // PageHeading is gone from this view (TUI reskin, #198); Layout supplies
+    // the route's <h1> instead, outside this component, so it isn't a
+    // signal this test can use — the loading placeholder text is the only
+    // one available before the query settles.
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     renderShares(newClient());
-    expect(screen.getByRole('heading', { name: t.nav.shares })).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
     expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
     expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.shares.rescan })).not.toBeInTheDocument();
@@ -94,30 +98,46 @@ describe('no shares configured', () => {
 });
 
 describe('loaded state', () => {
-  it('renders stat cards and the folder table', () => {
+  it('renders the header summary and the folder grid', () => {
+    // The header no longer carries individual stat cards (StatCard is
+    // deleted in #198 task 15) — folders/files/size are one combined
+    // summary string, per the mock's shareSummary.
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
-    expect(screen.getByText(t.shares.statFiles)).toBeInTheDocument();
-    expect(screen.getByText('61443')).toBeInTheDocument();
-    expect(screen.getByText('2.1 TB')).toBeInTheDocument();
+    expect(screen.getByText(t.shares.summary(2, 61443, '2.1 TB'))).toBeInTheDocument();
     expect(screen.getByText('/music/library')).toBeInTheDocument();
     expect(screen.getByText('/music/incoming')).toBeInTheDocument();
     expect(screen.getByText('742.0 GB')).toBeInTheDocument();
   });
 
-  it('shows "Never" when indexedAt is empty', () => {
+  it('shows "Never" in the header summary when indexedAt is empty', () => {
+    // indexedAt is a SharesReport-level aggregate, not a per-folder value
+    // (ShareFolder carries no equivalent field) — it belongs in the header
+    // summary, not as a folder-grid column, so this asserts on the summary.
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport({ indexedAt: '' }));
     renderShares(client);
-    expect(screen.getAllByText(t.shares.statNever).length).toBeGreaterThan(0);
+    expect(screen.getByText(t.shares.indexedAt(t.shares.statNever))).toBeInTheDocument();
   });
 
-  it('shows the scanning state and disables the button', () => {
+  it('does not render an INDEXED column in the folder grid', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.queryByText('INDEXED')).not.toBeInTheDocument();
+  });
+
+  it('shows the scanning indicator and disables the button', () => {
+    // The mock's RESCAN button never changes its own label (scanning is
+    // communicated by the separate spinner + "indexing" text next to it,
+    // not by relabelling the button) — only the disabled attribute reflects
+    // the pending mutation the same way it always did.
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport({ scanning: true }));
     renderShares(client);
-    expect(screen.getByRole('button', { name: t.shares.rescanning })).toBeDisabled();
+    expect(screen.getByRole('button', { name: t.shares.rescan })).toBeDisabled();
+    expect(screen.getByText(t.shares.indexing)).toBeInTheDocument();
   });
 });
 
@@ -139,7 +159,8 @@ describe('rescan action', () => {
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
     fireEvent.click(screen.getByRole('button', { name: t.shares.rescan }));
-    await waitFor(() => expect(screen.getByRole('button', { name: t.shares.rescanning })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: t.shares.rescan })).toBeDisabled());
+    expect(screen.getByText(t.shares.indexing)).toBeInTheDocument();
   });
 
   it('shows the conflict string on 409, not the generic failure string', async () => {
@@ -299,11 +320,49 @@ describe('uploads panel', () => {
   });
 
   it('shows the empty-state copy when there are no uploads', () => {
+    // EmptyState wraps the message in decorative dashes (`── … ──`), so the
+    // exact string no longer appears as its own text node — match it as a
+    // substring instead, the same way Jobs.test.tsx does for its EmptyState.
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport());
     client.setQueryData(queryKeys.uploads, makeUploadsReport({ enabled: true, slots: 2 }));
     renderShares(client);
-    expect(screen.getByText(t.uploads.empty)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(t.uploads.empty))).toBeInTheDocument();
+  });
+
+  it('flares the tick bar for an active upload but not a queued one', () => {
+    // Pinned per the task-11 brief: a queued upload is not transferring, so
+    // its row must carry no flared tick, while an active row carries
+    // exactly one (the tick at the fill boundary) — scoped to each row so
+    // one row's state can't be mistaken for the other's.
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    client.setQueryData(
+      queryKeys.uploads,
+      makeUploadsReport({
+        enabled: true,
+        slots: 2,
+        active: 1,
+        queued: 1,
+        uploads: [
+          {
+            username: 'ripper_78',
+            filename: 'active.flac',
+            active: true,
+            position: 0,
+            size: 100,
+            bytesWritten: 50,
+          },
+          { username: 'nordic_rip', filename: 'queued.flac', active: false, position: 1, size: 0, bytesWritten: 0 },
+        ],
+      }),
+    );
+    renderShares(client);
+
+    const activeRow = screen.getByText('active.flac').closest('[class*="uploadRow"]') as HTMLElement;
+    const queuedRow = screen.getByText('queued.flac').closest('[class*="uploadRow"]') as HTMLElement;
+    expect(activeRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
+    expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
   });
 
   it('shows a truncation footer when entries were omitted', () => {

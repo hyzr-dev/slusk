@@ -2,21 +2,35 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* The TUI is a fixed 100vh frame: the header, sidebar and status bar never
+   scroll, only <main> does. Locking overflow here stops a long view from
+   scrolling the whole frame out of sight. */
+html, body { height: 100%; overflow: hidden; }
+
 body {
   margin: 0;
   background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-sans);
+  color: var(--fg);
+  font-family: var(--font-mono);
   font-feature-settings: 'tnum' 1;
+  font-variant-numeric: tabular-nums;
 }
 
-::selection { background: rgba(53, 196, 143, 0.3); }
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb {
-  background: #2a2e37;
-  border-radius: 6px;
-  border: 2px solid var(--bg);
-}
-::-webkit-scrollbar-thumb:hover { background: #363b45; }
+::selection { background: rgba(255, 255, 255, 0.16); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #1e2226; }
+::-webkit-scrollbar-thumb:hover { background: #2c3237; }
 
 input, select, button { font-family: inherit; }
+
+/* The status dot in the top bar. Kept global because it is referenced from
+   two chrome components that have no other styling in common. */
+@keyframes tui-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* The newest filled tick in a live progress bar flashes white and stretches
+   for one beat, so a moving transfer is visible without reading the number. */
+@keyframes tui-flare {
+  0% { background: #ffffff; transform: scaleY(1.55); }
+  100% { transform: scaleY(1); }
+}
