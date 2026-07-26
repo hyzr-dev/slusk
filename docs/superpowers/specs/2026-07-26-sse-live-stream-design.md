@@ -232,6 +232,39 @@ vylagret. Det är också varför fallback blir gratis.
 - Verifiering i `testenv/`-labbet före merge, eftersom merge till `main` är
   en produktionsdeploy.
 
+## Regel för framtida händelsetyper: värden mot hintar
+
+Avgränsningen "in-memory strömmas, Postgres pollas" är en proxy, inte
+kriteriet. Det verkliga kriteriet är **hur ofta datan ändras jämfört med
+pollintervallet**. Proxyn håller för all data vi har idag, eftersom allt
+Postgres-backat skrivs av en pipelinetick — men den går sönder så fort något
+persisteras av en inkommande nätverkshändelse i stället.
+
+Privata meddelanden (#183) är det första sådana fallet: de skrivs till
+Postgres vid godtycklig tidpunkt, inte på en tick. De hör alltså hemma på
+strömmen trots att de är DB-backade.
+
+De kan däremot **inte** skickas som nyttolast. Prenumerantkanalen har
+kapacitet 1 och ersätter innehållet när den är full — säkert för `live`, som
+är ett tillståndsavtryck där ett överhoppat mellanläge korrigeras av nästa
+tick. Ett meddelande är motsatsen: en diskret händelse, som samma mekanism
+skulle tappa tyst hos varje klient som halkar efter. Det är exakt den felmod
+#183 beskriver i protokollet redan (offline-PM som aldrig ackas och tappas
+tyst vid varje inloggning).
+
+Därför gäller två former på samma endpoint:
+
+| Form | Innehåll | När | Varför säker |
+|---|---|---|---|
+| **Värde** | fältet självt (`live`) | in-memory, tickbunden | tillståndsavtryck — nästa tick korrigerar ett tapp |
+| **Hint** | bara "något ändrades" (`chat`) | DB-backad, godtycklig tidpunkt | idempotent — två hintar som slås ihop är harmlöst |
+
+En hint får klienten att invalidera motsvarande REST-query. Meddelandetexter
+går aldrig genom strömmen och kan därför aldrig tappas där. REST förblir
+sanningskällan i båda formerna.
+
+Chatthändelsen byggs i #183, inte här.
+
 ## Utanför scope
 
 CSS-transitions, stabil radsortering i TRANSFERS
