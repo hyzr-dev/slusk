@@ -1,18 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  basename,
-  formatBytes,
-  formatBytesOrDash,
-  formatSpeed,
-  formatEta,
-  formatSize,
-  formatVirtualPath,
-  percent,
-  formatDateTime,
-  formatShortTime,
-  formatTime,
-  formatScore,
-} from './format';
+import { basename, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, percent } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -193,5 +180,22 @@ describe('formatScore', () => {
   it('always shows two decimals', () => {
     expect(formatScore(1)).toBe('1.00');
     expect(formatScore(0.456)).toBe('0.46');
+  });
+});
+
+describe('formatAge', () => {
+  it('counts seconds below a minute', () => {
+    expect(formatAge(0)).toBe('0s');
+    expect(formatAge(59)).toBe('59s');
+  });
+
+  it('switches to whole minutes rather than counting to hundreds of seconds', () => {
+    expect(formatAge(60)).toBe('1m');
+    expect(formatAge(3599)).toBe('59m');
+  });
+
+  it('carries hours, and drops a zero minute remainder', () => {
+    expect(formatAge(3600)).toBe('1h');
+    expect(formatAge(3600 + 4 * 60)).toBe('1h 4m');
   });
 });

@@ -107,3 +107,14 @@ export function formatVirtualPath(path: string): string {
   const parts = path.split('\\');
   return parts[parts.length - 1];
 }
+
+// How long ago something happened, for spots where the value is only ever
+// shown once it has grown large enough to matter (the top bar's staleness
+// warning). Deliberately coarse above a minute — nobody reads "312s".
+export function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}

@@ -23,8 +23,11 @@ export const t = {
   },
   chrome: {
     live: 'LIVE',
-    updatedNow: 'now',
-    updatedAgo: (seconds: number) => `${seconds}s`,
+    // Shown in place of LIVE once polling has visibly stopped keeping up, so a
+    // number in this cell always means something is wrong. While healthy the
+    // cell carries no digits at all — a counter that resets every few seconds
+    // is noise 99% of the time and trains the eye to ignore it.
+    stale: (age: string) => `STALE ${age}`,
     reconcile: 'RECONCILE',
     reconcileNever: '—',
     down: 'DOWN',

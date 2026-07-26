@@ -27,3 +27,4 @@
 
 .value { color: var(--fg); }
 .quiet { color: var(--dim); }
+.bad { color: var(--bad); }

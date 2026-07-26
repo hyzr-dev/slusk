@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useCharts, useJobs, useStatus } from '../../api/queries';
-import { formatShortTime, formatSpeed } from '../../format';
+import { STATUS_INTERVAL, useCharts, useJobs, useStatus } from '../../api/queries';
+import { formatAge, formatShortTime, formatSpeed } from '../../format';
 import { t } from '../../strings';
 import styles from './TopBar.module.css';
 
@@ -16,34 +16,46 @@ function totalSpeed(jobs: { status: string; speed?: number; queuePosition?: numb
     .reduce((sum, j) => sum + (j.speed ?? 0), 0);
 }
 
+// Two missed polls. One late response is normal jitter and must not raise an
+// alarm; two in a row means the data on screen has genuinely stopped being
+// refreshed.
+const STALE_AFTER_MS = STATUS_INTERVAL * 2;
+
 /**
- * Pure derivation of the LIVE cell's label from TanStack Query's
- * `dataUpdatedAt` (ms since epoch of the last successful fetch) and the
- * current time, both as plain numbers so this is testable without waiting on
- * a real clock or mocking timers.
+ * The LIVE cell's label, or null while the poll is keeping up.
  *
- * `dataUpdatedAt` is 0 before the first successful fetch ever completes —
- * treated the same as "just updated" rather than computing a nonsense
- * multi-billion-second age from the epoch.
+ * Returns null rather than an age string in the healthy case on purpose: a
+ * counter that climbs to four and resets carries no information during normal
+ * operation, and a cell that only ever shows digits when something is wrong is
+ * one the eye can trust. Pure and taking `now` as an argument so it is
+ * testable without a real clock.
+ *
+ * `dataUpdatedAt` is 0 before the first successful fetch ever completes — that
+ * is "nothing to report yet", not "stale", so it also returns null.
  */
-export function elapsedLabel(dataUpdatedAt: number, now: number): string {
-  if (!dataUpdatedAt) return t.chrome.updatedNow;
-  const seconds = Math.floor((now - dataUpdatedAt) / 1000);
-  if (seconds < 1) return t.chrome.updatedNow;
-  return t.chrome.updatedAgo(seconds);
+export function stalenessLabel(
+  dataUpdatedAt: number,
+  now: number,
+  staleAfterMs: number = STALE_AFTER_MS,
+): string | null {
+  if (!dataUpdatedAt) return null;
+  const ageMs = now - dataUpdatedAt;
+  if (ageMs < staleAfterMs) return null;
+  return t.chrome.stale(formatAge(Math.floor(ageMs / 1000)));
 }
 
 /**
- * Ticks the LIVE cell's label once a second so a stalled poll is visible as
- * a number that keeps climbing, matching StatusBar's `useClock` shape.
+ * Re-evaluates the staleness label once a second, so a poll that stops
+ * answering surfaces on its own rather than waiting for some other render.
+ * Matches StatusBar's `useClock` shape.
  */
-function useElapsedLabel(dataUpdatedAt: number): string {
+function useStalenessLabel(dataUpdatedAt: number): string | null {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  return elapsedLabel(dataUpdatedAt, now);
+  return stalenessLabel(dataUpdatedAt, now);
 }
 
 /**
@@ -63,7 +75,7 @@ export default function TopBar() {
 
   const down = totalSpeed(jobs.data ?? []);
   const lastPass = charts.data?.passes?.at(-1);
-  const liveLabel = useElapsedLabel(status.dataUpdatedAt);
+  const stale = useStalenessLabel(status.dataUpdatedAt);
 
   return (
     <div className={styles.bar}>
@@ -72,9 +84,8 @@ export default function TopBar() {
       </div>
 
       <div className={styles.cell}>
-        <span className={status.isError ? styles.dotStale : styles.dot} />
-        <span className={styles.quiet}>{t.chrome.live}</span>
-        <span>{liveLabel}</span>
+        <span className={stale ? styles.dotStale : styles.dot} />
+        <span className={stale ? styles.bad : styles.quiet}>{stale ?? t.chrome.live}</span>
       </div>
 
       <div className={styles.cell}>
