@@ -405,3 +405,52 @@ describe('placeholder-data guard', () => {
     );
   });
 });
+
+describe('file ordering', () => {
+  function transfer(filename: string): TransferDetail {
+    return { filename, state: 'DONE', bytesDone: 1, bytesTotal: 1, retries: 0, lastProgressAt: '' };
+  }
+
+  it('lists files in track order regardless of the order the API returned them', () => {
+    // The API hands transfers back in insertion order, which for a Soulseek
+    // folder is arbitrary. A plain string sort would also put 10 before 2, so
+    // this pins the numeric collation end to end, not just the comparator.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, placeholderData: keepPreviousData } },
+    });
+    client.setQueryData(queryKeys.jobs, [makeJob()]);
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      makeDetail({
+        attempts: [
+          {
+            id: 1,
+            username: 'lossless_lars',
+            fileCount: 3,
+            state: 'ACTIVE',
+            failReason: '',
+            createdAt: '',
+            updatedAt: '',
+            transfers: [
+              transfer('music\\10 Flamenco Sketches.flac'),
+              transfer('music\\02 Freddie Freeloader.flac'),
+              transfer('music\\01 So What.flac'),
+            ],
+          },
+        ],
+      }),
+    );
+
+    renderJobDetail('/jobs/1', client);
+
+    const shown = screen
+      .getAllByText(/\.flac$/)
+      .map((el) => el.textContent);
+    expect(shown).toEqual([
+      '01 So What.flac',
+      '02 Freddie Freeloader.flac',
+      '10 Flamenco Sketches.flac',
+    ]);
+  });
+});

@@ -118,3 +118,20 @@ export function formatAge(seconds: number): string {
   const m = Math.floor((seconds % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
+
+// Collation for file listings. `numeric` makes "02" sort before "10" instead of
+// after it, which is the whole trick here: a Soulseek transfer carries no track
+// field — when a track number exists at all it is part of the filename — so one
+// numeric collation gives track order where there is a number and plain
+// alphabetical order where there is not, rather than two rules and a guess
+// about which applies.
+//
+// sv-SE because the reader is Swedish: å, ä and ö belong after z, not folded
+// into a and o the way an English collation would place them.
+const FILE_COLLATOR = new Intl.Collator('sv-SE', { numeric: true, sensitivity: 'base' });
+
+// Orders two paths by their leaf name, so the listing matches what is shown
+// rather than sorting on directories the reader cannot see.
+export function compareFileNames(a: string, b: string): number {
+  return FILE_COLLATOR.compare(basename(a), basename(b));
+}

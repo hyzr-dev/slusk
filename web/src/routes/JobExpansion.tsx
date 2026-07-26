@@ -1,7 +1,7 @@
 import { useJobDetail } from '../api/queries';
 import type { AttemptDetail, Job } from '../api/types';
 import JobActions from '../components/JobActions';
-import { basename, formatEta, formatSize } from '../format';
+import { basename, compareFileNames, formatEta, formatSize } from '../format';
 import { t } from '../strings';
 import styles from './JobExpansion.module.css';
 
@@ -95,7 +95,14 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
             <div className={styles.placeholder}>{t.jobs.noCandidate}</div>
           ) : (
             <div className={styles.fileList}>
-              {candidate.transfers.slice(0, MAX_FILES_SHOWN).map((tr) => (
+              {/* Sorted before truncating: the API returns transfers in
+                  arbitrary order, so "the first five" would otherwise be five
+                  arbitrary files rather than the first five tracks. Copied
+                  because the array belongs to the query cache. */}
+              {[...candidate.transfers]
+                .sort((x, y) => compareFileNames(x.filename, y.filename))
+                .slice(0, MAX_FILES_SHOWN)
+                .map((tr) => (
                 <div key={tr.filename} className={styles.fileRow}>
                   <span className={tr.state === 'COMPLETED' ? styles.markDone : styles.markPending}>
                     {tr.state === 'COMPLETED' ? '✓' : '·'}

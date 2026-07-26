@@ -7,7 +7,16 @@ import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import table from '../components/Table.module.css';
-import { basename, formatBytes, formatDateTime, formatShortTime, formatSize, formatSpeed, percent } from '../format';
+import {
+  basename,
+  compareFileNames,
+  formatBytes,
+  formatDateTime,
+  formatShortTime,
+  formatSize,
+  formatSpeed,
+  percent,
+} from '../format';
 import { candidateStateLabel, eventLabel, t } from '../strings';
 import styles from './JobDetail.module.css';
 
@@ -146,7 +155,11 @@ export default function JobDetail() {
                 {formatDateTime(a.createdAt)} — {t.jobs.fileCount(a.fileCount)}
               </span>
             </div>
-            {a.transfers.map((tr) => {
+            {/* Copied before sorting: this array belongs to the query cache,
+                and sorting in place would mutate it for every other reader. */}
+            {[...a.transfers]
+              .sort((x, y) => compareFileNames(x.filename, y.filename))
+              .map((tr) => {
               const { tone, live } = transferTone(tr);
               const pct = percent(tr.bytesDone, tr.bytesTotal);
               return (
