@@ -267,10 +267,14 @@ Chatthändelsen byggs i #183, inte här.
 
 ## Utanför scope
 
-CSS-transitions, stabil radsortering i TRANSFERS
-(`filter(active|stalled).slice(0, 8)` utan stabil sortering) och interpolerad
-progress. Egen UI-issue. Med 1 s-kadens rör sig baren i tio gånger mindre steg
-än idag, så den issuen blir polish snarare än en fix.
+Radordningen i TRANSFERS — **#233**. Orsaken visade sig inte vara avsaknad av
+stabil sortering utan en aktivt destabiliserande: `dashboard.go:160` sorterar
+på `updated_at DESC`, så ett jobb hoppar till toppen varje gång det skrivs,
+och `.slice(0, 8)` kan trycka ut en rad på grund av ett annat jobbs skrivning.
+
+Mjuka övergångar på progressbaren utgår helt. `Ticks` renderar 104 diskreta
+streck, inte en `width`-baserad bar, så det finns ingen bredd att
+transitionera. Vid 1 s-kadens rör sig baren ett streck (~1 %) i taget.
 
 Sökresultatströmmen (#129) — senare händelsetyp på samma endpoint.
 
