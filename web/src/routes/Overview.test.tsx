@@ -18,8 +18,13 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
     peer: status === 'active' ? 'someuser' : '',
     bytesDone: status === 'active' ? 50 : 0,
     bytesTotal: status === 'active' ? 100 : 0,
-    createdAt: '',
-    updatedAt: '',
+    // A realistic ISO-8601 timestamp, not '': an empty string would make
+    // every job compare equal on createdAt, collapsing the TRANSFERS sort to
+    // its id tie-break and hiding a broken or removed sortJobs call. Tests
+    // that care about ordering pass an explicit createdAt override instead
+    // of relying on this default.
+    createdAt: '2026-07-01T10:00:00Z',
+    updatedAt: '2026-07-01T10:00:00Z',
     state: 'DOWNLOADING',
     candidatesTried: 1,
     maxCandidates: 3,
@@ -123,6 +128,46 @@ describe('Overview', () => {
     ]);
     expect(screen.getByText('QU')).toBeInTheDocument();
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
+  });
+
+  it('ranks active above stalled in TRANSFERS, so an older stalled job never evicts an active one (#233)', () => {
+    // 7 active jobs (more than fit alongside any stalled ones once
+    // MAX_TRANSFER_ROWS (8) is applied) plus 3 stalled jobs. The stalled jobs'
+    // createdAt (2020) is far older than every active job's (2026) — if the
+    // panel sorted by age alone rather than status group first, the ancient
+    // stalled jobs would win every slot and every active job (including the
+    // one "created" most recently, job 1) would be evicted. Active createdAt
+    // is itself scrambled relative to array/id order, so the test also still
+    // proves the createdAt-ascending ordering *within* the active group.
+    const active: Job[] = Array.from({ length: 7 }, (_, i) => {
+      const n = i + 1;
+      return {
+        ...baseJob,
+        id: n,
+        title: `Active ${n}`,
+        status: 'active',
+        createdAt: `2026-07-01T10:${String(8 - n).padStart(2, '0')}:00Z`,
+      };
+    });
+    const stalled: Job[] = [
+      { ...baseJob, id: 8, title: 'Stalled 8', status: 'stalled', createdAt: '2020-01-01T00:03:00Z' },
+      { ...baseJob, id: 9, title: 'Stalled 9', status: 'stalled', createdAt: '2020-01-01T00:01:00Z' },
+      { ...baseJob, id: 10, title: 'Stalled 10', status: 'stalled', createdAt: '2020-01-01T00:02:00Z' },
+    ];
+    renderOverview([...active, ...stalled]);
+
+    const rowTitles = Array.from(
+      document.querySelectorAll(`[class*="transferRow"] [class*="transferTitle"]`),
+    ).map((el) => el.textContent);
+
+    // All 7 active jobs first, oldest-createdAt-first (Active 7 through
+    // Active 1), then the single remaining slot goes to the oldest stalled
+    // job (Stalled 9) — never to an active job being displaced.
+    expect(rowTitles).toEqual([
+      'Active 7', 'Active 6', 'Active 5', 'Active 4', 'Active 3', 'Active 2', 'Active 1', 'Stalled 9',
+    ]);
+    expect(screen.queryByText('Stalled 8')).not.toBeInTheDocument();
+    expect(screen.queryByText('Stalled 10')).not.toBeInTheDocument();
   });
 
   it('flares the tick bar for a genuinely transferring row but not a peer-queued one', () => {

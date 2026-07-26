@@ -77,4 +77,55 @@ describe('sortJobs', () => {
     expect(jobs).toEqual(original);
     expect(jobs.map((j) => j.id)).toEqual([1, 2]);
   });
+
+  describe('transferOrder', () => {
+    // The entire point of this key (#233): a stalled job is old by
+    // construction and stays stalled, so ranking by age alone would let it
+    // permanently occupy a slot in a capped panel. Status group must win
+    // over age, even when it's the stalled job that's far older.
+    it('ranks active before stalled regardless of age', () => {
+      const jobs: Job[] = [
+        { ...job, id: 1, status: 'stalled', createdAt: '2020-01-01T00:00:00Z' },
+        { ...job, id: 2, status: 'active', createdAt: '2026-07-01T12:00:00Z' },
+      ];
+      expect(sortJobs(jobs, 'transferOrder', 'asc').map((j) => j.id)).toEqual([2, 1]);
+    });
+
+    it('orders by createdAt ascending within the active group', () => {
+      const jobs: Job[] = [
+        { ...job, id: 1, status: 'active', createdAt: '2026-07-01T12:00:00Z' },
+        { ...job, id: 2, status: 'active', createdAt: '2026-07-01T10:00:00Z' },
+        { ...job, id: 3, status: 'active', createdAt: '2026-07-01T11:00:00Z' },
+      ];
+      expect(sortJobs(jobs, 'transferOrder', 'asc').map((j) => j.id)).toEqual([2, 3, 1]);
+    });
+
+    it('orders by createdAt ascending within the stalled group', () => {
+      const jobs: Job[] = [
+        { ...job, id: 1, status: 'stalled', createdAt: '2026-07-01T12:00:00Z' },
+        { ...job, id: 2, status: 'stalled', createdAt: '2026-07-01T10:00:00Z' },
+        { ...job, id: 3, status: 'stalled', createdAt: '2026-07-01T11:00:00Z' },
+      ];
+      expect(sortJobs(jobs, 'transferOrder', 'asc').map((j) => j.id)).toEqual([2, 3, 1]);
+    });
+
+    it('tie-breaks on id ascending within a group when createdAt is equal', () => {
+      const jobs: Job[] = [
+        { ...job, id: 5, status: 'active', createdAt: '2026-07-01T10:00:00Z' },
+        { ...job, id: 2, status: 'active', createdAt: '2026-07-01T10:00:00Z' },
+        { ...job, id: 8, status: 'active', createdAt: '2026-07-01T10:00:00Z' },
+      ];
+      expect(sortJobs(jobs, 'transferOrder', 'asc').map((j) => j.id)).toEqual([2, 5, 8]);
+    });
+
+    it('interleaves both rules: active-first, then age within each group', () => {
+      const jobs: Job[] = [
+        { ...job, id: 1, status: 'stalled', createdAt: '2026-07-01T09:00:00Z' },
+        { ...job, id: 2, status: 'active', createdAt: '2026-07-01T12:00:00Z' },
+        { ...job, id: 3, status: 'active', createdAt: '2026-07-01T11:00:00Z' },
+        { ...job, id: 4, status: 'stalled', createdAt: '2026-07-01T09:30:00Z' },
+      ];
+      expect(sortJobs(jobs, 'transferOrder', 'asc').map((j) => j.id)).toEqual([3, 2, 1, 4]);
+    });
+  });
 });

@@ -14,9 +14,11 @@ import styles from './Overview.module.css';
 
 // At most this many rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:102) rather than the full jobs list.
-// Jobs are sorted oldest-first before slicing (#233), so this caps the panel
-// to the eight transfers that have been running the longest, not an
-// arbitrary prefix of whatever order the backend happened to return.
+// Jobs are ranked active-before-stalled, oldest-first within each group,
+// before slicing (#233, 'transferOrder' in jobSort.ts) — max_active defaults
+// to 30 (config.example.toml), so the active|stalled set routinely exceeds
+// this cap, and this ranking is what decides who gets cut: a stalled job
+// never displaces an active one, however long it's been stalled.
 const MAX_TRANSFER_ROWS = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
@@ -70,13 +72,14 @@ export default function Overview() {
   const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
   const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
 
-  // Sorted by createdAt ascending — oldest first — rather than the backend's
-  // own updated_at DESC ordering, so a row stays in place for its whole
-  // lifetime instead of jumping to the top on every progress update and
-  // potentially pushing another job out of the slice below (#233).
+  // Ranked active-before-stalled, then createdAt ascending within each group
+  // (see 'transferOrder' in jobSort.ts) — rather than the backend's own
+  // updated_at DESC ordering, so a row stays in place for its whole lifetime
+  // instead of jumping to the top on every progress update, and a long-stalled
+  // job can never permanently occupy a slot that an active transfer needs (#233).
   const transferRows = sortJobs(
     jobs.filter((j) => j.status === 'active' || j.status === 'stalled'),
-    'createdAt',
+    'transferOrder',
     'asc',
   ).slice(0, MAX_TRANSFER_ROWS);
 
