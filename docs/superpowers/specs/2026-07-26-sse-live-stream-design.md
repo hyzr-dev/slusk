@@ -284,4 +284,5 @@ Sökresultatströmmen (#129) — senare händelsetyp på samma endpoint.
 3. **Räknarna (`/status`) strömmas inte.** De är DB-backade och faller under
    avgränsningen ovan.
 
-Båda de två första kommenteras på #161.
+Hela den här designen är postad som kommentar på #161, så att den går att
+implementera utan tillgång till den här filen.
