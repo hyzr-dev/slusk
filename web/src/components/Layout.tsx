@@ -1,4 +1,4 @@
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import { useStatus } from '../api/queries';
 import { t } from '../strings';
 import { FlashProvider } from './chrome/FlashContext';
@@ -44,6 +44,24 @@ export default function Layout() {
     },
   ];
 
+  // SectionHeader renders each panel's own label as an <h2>, but nothing
+  // upstream of that gave the document a top-level heading once PageHeading
+  // was removed from every route — Events and Peers use neither, so they had
+  // no heading at all. A single <h1> here, visually hidden but present in
+  // the accessibility tree, restores one correct, view-specific heading per
+  // route without adding a second <h1> on the routes that already have a
+  // SectionHeader. It is derived from the same nav definition the sidebar
+  // renders, so it can never name a view differently than the link that
+  // leads to it. Prefix items (e.g. /jobs matching /jobs/:id) are checked
+  // after exact/`end` matches so a nested route still resolves to its
+  // parent's label.
+  const location = useLocation();
+  const navItems = groups.flatMap((g) => g.items);
+  const currentItem =
+    navItems.find((item) => location.pathname === item.to) ??
+    navItems.find((item) => !item.end && location.pathname.startsWith(item.to)) ??
+    navItems[0];
+
   return (
     <FlashProvider>
       <div className={styles.app}>
@@ -51,6 +69,7 @@ export default function Layout() {
         <div className={styles.body}>
           <SideNav groups={groups} />
           <main className={styles.main}>
+            <h1 className={styles.visuallyHidden}>{currentItem.label}</h1>
             <Outlet />
           </main>
         </div>

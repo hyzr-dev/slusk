@@ -40,9 +40,11 @@ function renderAt(path: string) {
 }
 
 describe('route tree', () => {
-  // Every route below is asserted on stable visible text rather than an
-  // <h1>: the TUI reskin (#198) gives none of the eight routes a heading —
-  // PageHeading is gone everywhere now.
+  // Every route below is asserted on stable visible text. Layout renders a
+  // single visually-hidden <h1> per route (see the dedicated heading tests
+  // further down) — PageHeading is gone everywhere, but the heading itself
+  // isn't, so these checks focus on each route's own content instead of
+  // duplicating that coverage per route.
   it('renders /settings without crashing', () => {
     // No seeded query data, so useConfig() never resolves and the whole
     // ConfigForm stays unrendered — the static Connections section (which
@@ -103,5 +105,20 @@ describe('route tree', () => {
     renderAt('/jobs');
     // CSS Modules hash class names, so match by substring rather than exact class.
     expect(screen.getByRole('link', { name: t.nav.jobs }).className).toMatch(/itemActive/);
+  });
+
+  it('gives the route exactly one <h1>, named after the matching nav entry', () => {
+    // Events and Peers use neither PageHeading nor SectionHeader, so this is
+    // the only heading either view has. Layout derives it from the same nav
+    // definition the sidebar renders, so it can't drift from the link label.
+    renderAt('/peers');
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 1, name: t.nav.peers })).toBeInTheDocument();
+  });
+
+  it('names the nested job-detail route after its parent nav entry', () => {
+    renderAt('/jobs/42');
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 1, name: t.nav.jobs })).toBeInTheDocument();
   });
 });

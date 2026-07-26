@@ -10,3 +10,19 @@
 .body { display: flex; flex: 1; min-height: 0; }
 
 .main { flex: 1; min-width: 0; overflow-y: auto; }
+
+/* Standard clip-rect pattern: present in the accessibility tree and to
+   screen-reader navigation, but takes up no visual space. `display: none`
+   or `visibility: hidden` would remove it from the tree entirely, which
+   defeats the point of having an <h1> at all. */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
