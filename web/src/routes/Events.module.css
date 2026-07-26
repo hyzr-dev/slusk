@@ -15,8 +15,16 @@
   flex: 0 0 230px;
 }
 
+/* Same focus treatment as Jobs.module.css — see the rationale there. */
+.filterBox:focus-within {
+  border-color: var(--fg);
+  outline: 1px solid var(--fg);
+}
+
 .filterSlash { color: var(--dim); font-size: 12px; }
 
+/* outline: none is safe here only because .filterBox:focus-within above marks
+   the focus. Don't remove that rule without putting an indicator back. */
 .filterInput {
   flex: 1;
   background: transparent;

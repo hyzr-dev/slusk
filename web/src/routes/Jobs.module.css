@@ -19,6 +19,16 @@
   flex: 0 0 230px;
 }
 
+/* :focus-within on the box rather than :focus on the input — the `/` glyph and
+   the field read as one control, and the input itself is transparent and
+   borderless, so it has no shape of its own to mark. Border plus an adjacent
+   outline gives the 2px band 2.4.11 asks for; outline sits outside the box
+   model, so nothing in the flex row shifts. */
+.filterBox:focus-within {
+  border-color: var(--fg);
+  outline: 1px solid var(--fg);
+}
+
 .filterSlash { color: var(--dim); font-size: 12px; }
 
 .chipGroup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -27,6 +37,8 @@
    independent filter axes don't read as one longer list of statuses. */
 .chipDivider { width: 1px; align-self: stretch; background: var(--line2); margin: 0 2px; }
 
+/* outline: none is safe here only because .filterBox:focus-within above marks
+   the focus. Don't remove that rule without putting an indicator back. */
 .filterInput {
   flex: 1;
   background: transparent;
