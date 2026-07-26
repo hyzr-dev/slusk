@@ -14,12 +14,15 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-func newMessagesTestHandler(reg *prometheus.Registry, conversations ConversationsFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc) http.Handler {
+func newMessagesTestHandler(reg *prometheus.Registry, conversations ConversationsFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc, presence ...ConversationPresenceFunc) http.Handler {
 	deps := testServerDeps(reg)
 	deps.Conversations = conversations
 	deps.Thread = thread
 	deps.Send = send
 	deps.MarkRead = markRead
+	if len(presence) > 0 {
+		deps.ConversationPresence = presence[0]
+	}
 	return NewServer(deps)
 }
 
@@ -58,6 +61,56 @@ func TestConversationsEndpointServesShape(t *testing.T) {
 	}
 	if c.LastDirection != string(core.MessageIncoming) {
 		t.Errorf("LastDirection = %q, want %q", c.LastDirection, core.MessageIncoming)
+	}
+}
+
+func TestConversationsEndpointEnrichesOnlyKnownPresence(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	lastAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	conversations := func(context.Context) ([]core.Conversation, error) {
+		return []core.Conversation{
+			{Username: "alice", LastMessage: "a", LastMessageAt: lastAt, LastDirection: core.MessageIncoming, Total: 1},
+			{Username: "bob", LastMessage: "b", LastMessageAt: lastAt, LastDirection: core.MessageOutgoing, Total: 1},
+			{Username: "carol", LastMessage: "c", LastMessageAt: lastAt, LastDirection: core.MessageIncoming, Total: 1},
+		}, nil
+	}
+	var gotUsernames []string
+	presence := func(usernames []string) map[string]bool {
+		gotUsernames = append([]string(nil), usernames...)
+		return map[string]bool{"alice": true, "bob": false, "extra": true}
+	}
+	h := newMessagesTestHandler(reg, conversations, noopThread, noopSendMessage, noopMarkRead, presence)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/messages", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	wantUsers := []string{"alice", "bob", "carol"}
+	if len(gotUsernames) != len(wantUsers) {
+		t.Fatalf("presence usernames = %v, want %v", gotUsernames, wantUsers)
+	}
+	for i := range wantUsers {
+		if gotUsernames[i] != wantUsers[i] {
+			t.Fatalf("presence usernames = %v, want %v", gotUsernames, wantUsers)
+		}
+	}
+	want := `[{"username":"alice","lastMessage":"a","lastMessageAt":"2026-07-25T12:00:00Z","lastDirection":"IN","unread":0,"total":1,"online":true},{"username":"bob","lastMessage":"b","lastMessageAt":"2026-07-25T12:00:00Z","lastDirection":"OUT","unread":0,"total":1,"online":false},{"username":"carol","lastMessage":"c","lastMessageAt":"2026-07-25T12:00:00Z","lastDirection":"IN","unread":0,"total":1}]`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Fatalf("body = %s\nwant = %s", got, want)
+	}
+}
+
+func TestConversationsEndpointNilPresenceOmitsField(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	conversations := func(context.Context) ([]core.Conversation, error) {
+		return []core.Conversation{{Username: "alice"}}, nil
+	}
+	h := newMessagesTestHandler(reg, conversations, noopThread, noopSendMessage, noopMarkRead)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/messages", nil))
+	if strings.Contains(rec.Body.String(), `"online"`) {
+		t.Fatalf("nil provider response exposed presence: %s", rec.Body.String())
 	}
 }
 

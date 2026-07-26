@@ -315,9 +315,13 @@ type ServerDeps struct {
 	// nil when nothing can send (POST /api/messages/{username} then answers
 	// 503); MarkRead backs POST /api/messages/{username}/read.
 	Conversations ConversationsFunc
-	Thread        ThreadFunc
-	Send          SendMessageFunc
-	MarkRead      MarkReadFunc
+	// ConversationPresence optionally enriches conversation rows with known
+	// native Soulseek presence. Nil means unsupported or unknown, so the JSON
+	// field is omitted.
+	ConversationPresence ConversationPresenceFunc
+	Thread               ThreadFunc
+	Send                 SendMessageFunc
+	MarkRead             MarkReadFunc
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -604,7 +608,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
-	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
+	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }

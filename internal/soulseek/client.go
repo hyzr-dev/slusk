@@ -259,6 +259,10 @@ type Client struct {
 	serverCancel     context.CancelFunc
 	serverGeneration uint64
 
+	// presence owns the bounded, memory-only conversation watch set and the
+	// statuses learned for the current server generation.
+	presence *presenceTracker
+
 	// addrMu guards pendingAddrs, the GetPeerAddress waiters registered by
 	// in-flight ConnectPeer calls (see peers.go), keyed by username.
 	addrMu       sync.Mutex
@@ -451,6 +455,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 		logger:                 logger,
 		pendingAddrs:           make(map[string][]chan addrResult),
 		pending:                make(map[soul.Token]*pendingAttempt),
+		presence:               newPresenceTracker(),
 		tokens:                 newTokenAllocator(),
 		sessions:               newSessionRegistry(nil),
 		searches:               newSearchRegistry(),
@@ -487,7 +492,7 @@ func New(cfg Config, logger *slog.Logger) *Client {
 type serverMessage[M any] interface {
 	*server.Ping | *server.SetListenPort | *server.ConnectToPeer | *server.CantConnectToPeer | *server.GetPeerAddress | *server.GetUserStats |
 		*server.HaveNoParent | *server.AcceptChildren | *server.BranchLevel | *server.BranchRoot | *server.FileSearch | *server.SharedFoldersFiles |
-		*server.MessageUser | *server.MessageAcked
+		*server.MessageUser | *server.MessageAcked | *server.WatchUser | *server.UnwatchUser
 	Serialize(M) ([]byte, error)
 }
 
@@ -806,6 +811,10 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 	c.mu.Unlock()
 	c.serverWriteMu.Unlock()
 	defer func() {
+		// Presence learned from a dead session must become unknown immediately.
+		// The generation guard prevents delayed cleanup from touching a newer
+		// connection while retaining the desired set for reconnect replay.
+		c.presence.invalidate(generation)
 		// Invalidate generation-owned work before clearing its state. Closing
 		// the socket also unblocks an in-progress serialized write.
 		serverCancel()
@@ -851,6 +860,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 	if !c.startTracked(func() { readErrs <- c.readLoop(serverCtx, conn) }) {
 		return errors.New("soulseek: lifecycle stopping")
 	}
+	c.presence.activate(generation)
 
 	ticker := time.NewTicker(c.cfg.pingInterval)
 	defer ticker.Stop()
@@ -869,10 +879,34 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 				return fmt.Errorf("write ping: %w", err)
 			}
 
+		case <-c.presence.syncNeeded:
+			if err := c.syncConversationPresence(generation); err != nil {
+				_ = conn.Close()
+				<-readErrs
+				return fmt.Errorf("synchronize conversation presence: %w", err)
+			}
+
 		case err := <-readErrs:
 			return err
 		}
 	}
+}
+
+func (c *Client) syncConversationPresence(generation uint64) error {
+	actions := c.presence.syncActions(generation)
+	for _, username := range actions.unwatch {
+		if err := sendToServerGeneration(c, generation, &server.UnwatchUser{Username: username}); err != nil {
+			return err
+		}
+		c.presence.acknowledgeUnwatch(generation, username)
+	}
+	for _, username := range actions.watch {
+		if err := sendToServerGeneration(c, generation, &server.WatchUser{Username: username}); err != nil {
+			return err
+		}
+		c.presence.acknowledgeWatch(generation, username)
+	}
+	return nil
 }
 
 // readLoop reads messages from conn until it fails or handleMessage reports
@@ -990,9 +1024,19 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 		if err := msg.Deserialize(reader); err != nil {
 			return fmt.Errorf("deserialize watch user: %w", err)
 		}
+		generation := c.currentServerGeneration()
 		if msg.Username == c.cfg.Username && msg.Exists {
-			c.tree.updateUploadSpeed(c.currentServerGeneration(), msg.AverageSpeed)
+			c.tree.updateUploadSpeed(generation, msg.AverageSpeed)
 		}
+		c.presence.updateWatch(generation, *msg)
+		return nil
+
+	case server.CodeGetUserStatus:
+		msg := &server.GetUserStatus{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize get user status: %w", err)
+		}
+		c.presence.updateStatus(c.currentServerGeneration(), msg.Username, msg.Status)
 		return nil
 
 	case server.CodeGetUserStats:

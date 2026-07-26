@@ -42,6 +42,17 @@ type peerBackend interface {
 	pipeline.PeerNetwork
 }
 
+type conversationPresenceClient interface {
+	ConversationPresence(usernames []string) map[string]bool
+}
+
+func conversationPresenceForBackend(backend string, client conversationPresenceClient) observ.ConversationPresenceFunc {
+	if backend != config.BackendSoulseek || client == nil {
+		return nil
+	}
+	return client.ConversationPresence
+}
+
 // version is the build's identity, surfaced at GET /status and shown beside
 // the product name in the UI's top bar (issue #229).
 //
@@ -489,38 +500,39 @@ func main() {
 		}
 	}
 	handler := observ.NewServer(observ.ServerDeps{
-		Registry:         reg,
-		Version:          version,
-		Status:           statusFn,
-		Jobs:             jobsFn,
-		Cancel:           jobs.Cancel,
-		Retry:            jobs.Retry,
-		SearchJob:        jobs.ForceSearch,
-		DeleteJob:        jobs.Delete,
-		CreateJob:        createJobFn,
-		JobDetail:        jobDetailFn,
-		JobEvents:        jobEventsFn,
-		RecentEvents:     recentEventsFn,
-		Peers:            peersFn,
-		Live:             liveFn,
-		Ready:            readyFn,
-		Modules:          modulesFn,
-		FailedRetryAfter: cfg.Pipeline.FailedReviveAfter.Duration,
-		MaxCandidates:    cfg.Pipeline.MaxCandidatesPerAlbum,
-		Config:           configFn,
-		ConfigWriter:     configWriter,
-		Restart:          restartFn,
-		ConnectionTester: connectionTester,
-		LiveTransfers:    liveTransfersFn,
-		Charts:           chartsFn,
-		Shares:           sharesFn,
-		RescanShares:     rescanSharesFn,
-		Uploads:          uploadsFn,
-		Throughput:       throughputFn,
-		Conversations:    conversationsFn,
-		Thread:           threadFn,
-		Send:             sendMessageFn,
-		MarkRead:         markReadFn,
+		Registry:             reg,
+		Version:              version,
+		Status:               statusFn,
+		Jobs:                 jobsFn,
+		Cancel:               jobs.Cancel,
+		Retry:                jobs.Retry,
+		SearchJob:            jobs.ForceSearch,
+		DeleteJob:            jobs.Delete,
+		CreateJob:            createJobFn,
+		JobDetail:            jobDetailFn,
+		JobEvents:            jobEventsFn,
+		RecentEvents:         recentEventsFn,
+		Peers:                peersFn,
+		Live:                 liveFn,
+		Ready:                readyFn,
+		Modules:              modulesFn,
+		FailedRetryAfter:     cfg.Pipeline.FailedReviveAfter.Duration,
+		MaxCandidates:        cfg.Pipeline.MaxCandidatesPerAlbum,
+		Config:               configFn,
+		ConfigWriter:         configWriter,
+		Restart:              restartFn,
+		ConnectionTester:     connectionTester,
+		LiveTransfers:        liveTransfersFn,
+		Charts:               chartsFn,
+		Shares:               sharesFn,
+		RescanShares:         rescanSharesFn,
+		Uploads:              uploadsFn,
+		Throughput:           throughputFn,
+		Conversations:        conversationsFn,
+		ConversationPresence: conversationPresenceForBackend(cfg.Pipeline.Backend, soulClient),
+		Thread:               threadFn,
+		Send:                 sendMessageFn,
+		MarkRead:             markReadFn,
 	})
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
