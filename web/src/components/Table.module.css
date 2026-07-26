@@ -1,10 +1,13 @@
+/* The tokens this used before the #198 reskin (--panel, --border, --radius,
+   --border-subtle) no longer exist. --panel-inset recesses the event history
+   the same way Peers recesses its artist block, and the radius is gone because
+   nothing in the TUI has rounded corners. */
 .table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: var(--panel-inset);
+  border: 1px solid var(--line2);
   overflow: hidden;
 }
 
@@ -14,9 +17,9 @@
   font-size: 11px;
   text-transform: uppercase;
   color: #6b7280;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line2);
 }
 
-.td { padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); }
+.td { padding: 10px 14px; border-bottom: 1px solid var(--line); }
 
 .mono { font-family: var(--font-mono); }

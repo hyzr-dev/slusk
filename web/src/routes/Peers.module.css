@@ -72,9 +72,9 @@
 .mono { font-family: var(--font-mono); color: var(--dim); }
 .right { text-align: right; white-space: nowrap; }
 
-/* --panel-inset, not --panel: an expanded artist-history block is nested,
-   recessed content, not an active/elevated surface (that's --panel-raised,
-   e.g. the active nav item in Layout.module.css). */
+/* --panel-inset, not --bg: an expanded artist-history block is nested,
+   recessed content, not an active surface (that's --nav-active, e.g. the
+   active nav item in SideNav.module.css). */
 .expansionWrap {
   background: var(--panel-inset);
   border-bottom: 1px solid var(--line);
@@ -83,7 +83,7 @@
 
 .artist {
   font-size: 11.5px;
-  color: var(--text-detail);
+  color: var(--dim);
   padding: 3px 0 3px 12px;
   font-family: var(--font-mono);
 }

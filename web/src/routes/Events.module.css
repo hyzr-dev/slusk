@@ -53,8 +53,12 @@
 
 .mono { font-family: var(--font-mono); color: var(--dim); }
 
-.link { color: var(--active); text-decoration: none; }
-.link:hover { text-decoration: underline; }
+/* The mock has no link colour, so the underline carries the affordance on its
+   own — without it this sits on top of .mono and is indistinguishable from the
+   surrounding row text. Hover brightens rather than adding the underline;
+   hover is not available to keyboard or touch, so it can't be the only cue. */
+.link { text-decoration: underline; text-underline-offset: 2px; }
+.link:hover { color: var(--fg); }
 
 .detail {
   color: var(--faint);
