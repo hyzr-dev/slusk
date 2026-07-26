@@ -60,12 +60,6 @@
   flex-direction: column;
 }
 
-.paneHeaderWrap h2 {
-  /* Uppercase visually only — the DOM keeps the peer's actual case-sensitive
-     nick, so a screen reader and copy/paste both see the real name. */
-  text-transform: uppercase;
-}
-
 .messages {
   flex: 1;
   min-height: 0;
@@ -75,20 +69,10 @@
   flex-direction: column;
 }
 
-.loadOlder {
+.loadOlderWrap {
   align-self: center;
   margin-bottom: 10px;
-  padding: 5px 11px;
-  font-size: 10.5px;
-  letter-spacing: 0.5px;
-  color: var(--faint);
-  background: transparent;
-  border: 1px solid var(--line);
-  cursor: pointer;
 }
-
-.loadOlder:hover:not(:disabled) { color: var(--dim); border-color: var(--line2); }
-.loadOlder:disabled { cursor: default; opacity: 0.6; }
 
 .messageLine {
   display: flex;

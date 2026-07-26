@@ -68,7 +68,10 @@ export default function Chat() {
     [threadQuery.data],
   );
 
-  const markRead = useMarkConversationRead();
+  // TanStack Query v5's mutate is referentially stable across renders, so it
+  // can sit in the deps array below like any other value without re-firing
+  // the effect on every render.
+  const { mutate: markRead } = useMarkConversationRead();
   const markedKeyRef = useRef<string | null>(null);
   const newestIncomingId = messages.reduce(
     (max, m) => (m.direction === 'IN' && m.id > max ? m.id : max),
@@ -82,11 +85,8 @@ export default function Chat() {
     // thread switch) changes this key.
     if (markedKeyRef.current === key) return;
     markedKeyRef.current = key;
-    markRead.mutate(username);
-    // markRead.mutate is intentionally omitted from deps: it is a mutation
-    // function whose identity is not meaningful to this effect's guard.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username, newestIncomingId]);
+    markRead(username);
+  }, [username, newestIncomingId, markRead]);
 
   // /chat with no thread picked yet: once the conversation list has resolved
   // and is non-empty, land on the most recently active one. `replace` is
@@ -145,12 +145,16 @@ export default function Chat() {
   }
 
   if (status503) {
-    return <div role="status">{t.chat.disabledNotice}</div>;
+    return (
+      <div role="status">
+        <EmptyState message={t.chat.disabledNotice} />
+      </div>
+    );
   }
 
   return (
     <div className={styles.root}>
-      <div className={styles.rail} aria-label={t.chat.railHeading}>
+      <div className={styles.rail}>
         <SectionHeader label={t.chat.railHeading} />
         <QueryNotice phase={conversationsPhase} />
         {hasData(conversationsPhase) && conversations.length === 0 && (
@@ -183,9 +187,23 @@ export default function Chat() {
         // sibling's DOM node behind instead of removing it. One key on
         // their shared parent gets the same remount with no such risk.
         <div key={username} className={styles.pane}>
-          <div className={styles.paneHeaderWrap}>
-            <SectionHeader label={username} />
-          </div>
+          <SectionHeader label={username} />
+          {threadQuery.hasNextPage && (
+            // Outside the role="log" region below, deliberately: it is a
+            // pagination control, not a new-message announcement, and
+            // living inside aria-relevant="additions" would make a screen
+            // reader read the entire freshly-prepended page aloud.
+            <div className={styles.loadOlderWrap}>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={handleLoadOlder}
+                disabled={threadQuery.isFetchingNextPage}
+              >
+                {t.chat.loadOlder}
+              </Button>
+            </div>
+          )}
           <div
             ref={paneRef}
             role="log"
@@ -195,16 +213,6 @@ export default function Chat() {
             className={styles.messages}
             onScroll={handleScroll}
           >
-            {threadQuery.hasNextPage && (
-              <button
-                type="button"
-                className={styles.loadOlder}
-                onClick={handleLoadOlder}
-                disabled={threadQuery.isFetchingNextPage}
-              >
-                {t.chat.loadOlder}
-              </button>
-            )}
             <QueryNotice phase={threadPhase} />
             {hasData(threadPhase) && messages.length === 0 && (
               <EmptyState message={t.chat.threadEmpty} />
@@ -289,6 +297,10 @@ function Composer({ username }: { username: string }) {
           className={styles.input}
         />
         <Button type="submit" variant="primary" disabled={!canSend}>
+          {/* Decoration only — see strings.ts's comment on t.chat.send — so it
+              is hidden from the accessible name and the string carries only
+              the label. */}
+          <span aria-hidden="true">[⏎] </span>
           {t.chat.send}
         </Button>
       </div>

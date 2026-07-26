@@ -279,12 +279,13 @@ export function useConversations() {
 // page comes back empty despite claiming hasMore, which would otherwise loop
 // forever requesting the same empty page.
 export function useThread(username: string | undefined) {
+  // queryFn is never actually invoked while username is undefined (enabled
+  // below is false), so this fallback only satisfies the query key/URL
+  // builders' string type.
+  const key = username ?? '';
   return useInfiniteQuery({
-    queryKey: queryKeys.thread(username ?? ''),
-    queryFn: ({ pageParam }) =>
-      apiGet<ThreadPage>(
-        `/api/messages/${encodeURIComponent(username ?? '')}?before=${pageParam}`,
-      ),
+    queryKey: queryKeys.thread(key),
+    queryFn: ({ pageParam }) => apiGet<ThreadPage>(`/api/messages/${encodeURIComponent(key)}?before=${pageParam}`),
     enabled: username !== undefined,
     initialPageParam: 0,
     getNextPageParam: (lastPage) =>

@@ -354,7 +354,11 @@ export const t = {
     loadOlder: 'Load older messages',
     composerLabel: 'Message',
     composerPlaceholder: 'message',
-    send: '[⏎] SEND',
+    // The mock's "[⏎] SEND" glyph is decoration — see EmptyState's doc
+    // comment on the same principle — so it is rendered as its own
+    // aria-hidden span in Chat.tsx's Composer, and this string carries only
+    // the accessible label.
+    send: 'SEND',
     tooLong: 'Message is too long.',
     // Learned only by trying — see the doc comment atop Chat.tsx for why
     // there is no way to know this in advance.

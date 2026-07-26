@@ -93,7 +93,7 @@ describe('Chat query states', () => {
   it('shows the disabled notice on a 503, with no rail and no composer', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(errJson(503, { error: 'not enabled' }))));
     renderChat('/chat', newClient());
-    expect(await screen.findByText(t.chat.disabledNotice)).toBeInTheDocument();
+    expect(await screen.findByText(t.chat.disabledNotice, { exact: false })).toBeInTheDocument();
     expect(screen.queryByText(t.chat.railHeading)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(t.chat.composerLabel)).not.toBeInTheDocument();
   });
