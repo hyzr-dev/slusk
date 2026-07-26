@@ -28,9 +28,15 @@
 .attemptFail { color: var(--bad); }
 .attemptMeta { margin-left: auto; color: var(--text-dim); }
 
+/* The tick column is 207px because that is what TRANSFER_TICKS (104) needs:
+   each tick is min-width 1px and Ticks puts a 1px gap between them, so the
+   row cannot render narrower than 104 + 103 px. Below that the ticks stop
+   shrinking and the bar simply overflows across the byte counts to its
+   right. Count and column width are coupled — change one, recompute the
+   other as (n * 1px) + (n - 1) * 1px. */
 .transfer {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) 140px 150px 130px 70px;
+  grid-template-columns: minmax(0, 2fr) 207px 150px 130px 70px;
   align-items: center;
   gap: 10px;
   padding: 3px 0 3px 14px;
