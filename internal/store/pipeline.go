@@ -218,24 +218,53 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 	return true, nil
 }
 
-// ParkJobForCandidate marks a candidate's owning job PARKED (issue #158), but
-// only if it is still DOWNLOADING - guarding against a race with another
-// transition (e.g. WantedSync cancelling it, or resolve advancing it on a
-// concurrent tick) - so the UPDATE never clobbers a job that already moved on.
-// Returns whether a row changed.
-func (s *Store) ParkJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
+// ParkJobForCandidate atomically records a transfer's terminal state/progress
+// and marks its candidate's owning job PARKED (issue #158), but only if the job
+// is still DOWNLOADING. If another transition (for example WantedSync
+// cancellation) already moved the job, the transfer write still commits and
+// false is returned. A stale transfer that already became terminal is a no-op.
+func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE transfers SET state = $1, bytes_done = $2, bytes_total = $3,
+			last_progress_at = CASE WHEN $4 > bytes_done THEN $5 ELSE last_progress_at END,
+			updated_at = $6
+		 WHERE id = $7 AND candidate_id = $8 AND state IN ($9, $10, $11, $12)`,
+		string(transferState), bytesDone, bytesTotal, bytesDone, now, now,
+		transferID, candidateID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled))
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: update transfer: %w", err)
+	}
+	transferRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
+	}
+	if transferRows == 0 {
+		return false, nil
+	}
+
+	res, err = tx.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, updated_at = $2
 		 WHERE id = (SELECT album_job_id FROM candidates WHERE id = $3) AND state = $4`,
 		string(core.StateParked), now, candidateID, string(core.StateDownloading))
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: %w", err)
+		return false, fmt.Errorf("park job for candidate: update job: %w", err)
 	}
-	n, err := res.RowsAffected()
+	jobRows, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: rows affected: %w", err)
+		return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
 	}
-	return n > 0, nil
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("park job for candidate: commit: %w", err)
+	}
+	return jobRows > 0, nil
 }
 
 // AdvanceJobStateFrom is the conditional transition every module uses:

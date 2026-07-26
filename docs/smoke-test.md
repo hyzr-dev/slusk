@@ -60,6 +60,12 @@ eller `docker exec` in i Postgres-containern.)
       `moduleDetails` innehåller dessutom `lastAttempt`, `lastCompleted`, felstatus,
       serverns intervallbaserade `staleDeadline` samt dess auktoritativa `live`- och
       `ready`-värden; dashboarden använder dessa fält i stället för egna gränsvärden.
+- [ ] **PARKED-kompatibilitet:** den nya servern skickar `parked` i
+      `/api/jobs[].status` och `PARKED` i dess råa `.state`; dessa enumfält har inga
+      samtidiga gamla/nya alias. Den nya dashboarden accepterar både de gamla och nya
+      stavningarna, och `/status.orphaned` behålls. En gammal dashboard eller klient
+      måste uppgraderas tillsammans med servern; den kombinerade DB-migreringen
+      förutsätter att ingen gammal binär fortfarande kör mot databasen.
 - [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)

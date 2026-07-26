@@ -402,16 +402,117 @@ func TestSetJobTrackBand(t *testing.T) {
 }
 
 // TestParkJobForCandidate covers Downloading.reconcile's retry-budget-
-// exhausted path (issue #158): a DOWNLOADING job whose candidate's transfer
-// keeps vanishing from the backend is PARKED, and the flip is a no-op when the
-// job has already left DOWNLOADING (guards a race with another transition
-// landing first).
+// exhausted path (issue #158): terminalizing the transfer and parking its job
+// happen atomically, while a job that already left DOWNLOADING is not clobbered.
 func TestParkJobForCandidate(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertWantedJob(ctx, 500, now)
+	t.Run("parks job and terminalizes transfer", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := context.Background()
+		jobID, candID, transferID := seedParkJobFixture(t, s, 500, now)
+
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate: %v", err)
+		}
+		if !changed {
+			t.Fatal("expected ParkJobForCandidate to return true for a DOWNLOADING job")
+		}
+		view, found, err := s.JobWithTransfer(ctx, jobID)
+		if err != nil || !found {
+			t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+		}
+		if view.Job.State != core.StateParked {
+			t.Errorf("job state = %q, want PARKED", view.Job.State)
+		}
+		tr := transferForParkFixture(t, s, candID)
+		if tr.State != core.TransferErrored || tr.BytesDone != 25 || tr.BytesTotal != 100 {
+			t.Errorf("transfer = state %q progress %d/%d, want ERRORED 25/100", tr.State, tr.BytesDone, tr.BytesTotal)
+		}
+
+		// The transfer is already terminal, so a stale second call is a quiet no-op.
+		changed, err = s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 30, 100, now.Add(2*time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate (already terminal): %v", err)
+		}
+		if changed {
+			t.Error("expected ParkJobForCandidate to no-op for an already-terminal transfer")
+		}
+	})
+
+	t.Run("job race commits errored transfer without parking", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := context.Background()
+		jobID, candID, transferID := seedParkJobFixture(t, s, 501, now)
+		if _, err := s.AdvanceJobStateFrom(ctx, jobID, core.StateDownloading, core.StateCancelled, now.Add(time.Minute)); err != nil {
+			t.Fatalf("cancel job: %v", err)
+		}
+
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(2*time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate: %v", err)
+		}
+		if changed {
+			t.Error("expected guarded PARKED transition to no-op after cancellation")
+		}
+		if got := jobStateForStore(t, s, jobID); got != core.StateCancelled {
+			t.Errorf("job state = %q, want CANCELLED", got)
+		}
+		if got := transferForParkFixture(t, s, candID).State; got != core.TransferErrored {
+			t.Errorf("transfer state = %q, want ERRORED", got)
+		}
+	})
+}
+
+func TestParkJobForCandidateRollsBackOnEitherWriteFailure(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name    string
+		trigger string
+	}{
+		{
+			name: "transfer update failure",
+			trigger: `CREATE FUNCTION fail_park_transfer() RETURNS trigger AS $$
+				BEGIN RAISE EXCEPTION 'injected transfer failure'; END $$ LANGUAGE plpgsql;
+				CREATE TRIGGER fail_park_transfer BEFORE UPDATE ON transfers
+				FOR EACH ROW WHEN (NEW.state = 'ERRORED') EXECUTE FUNCTION fail_park_transfer()`,
+		},
+		{
+			name: "job update failure",
+			trigger: `CREATE FUNCTION fail_park_job() RETURNS trigger AS $$
+				BEGIN RAISE EXCEPTION 'injected job failure'; END $$ LANGUAGE plpgsql;
+				CREATE TRIGGER fail_park_job BEFORE UPDATE ON album_jobs
+				FOR EACH ROW WHEN (NEW.state = 'PARKED') EXECUTE FUNCTION fail_park_job()`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			jobID, candID, transferID := seedParkJobFixture(t, s, 502, now)
+			if _, err := s.db.ExecContext(ctx, tc.trigger); err != nil {
+				t.Fatalf("install failure trigger: %v", err)
+			}
+
+			if _, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute)); err == nil {
+				t.Fatal("ParkJobForCandidate unexpectedly succeeded")
+			}
+			if got := jobStateForStore(t, s, jobID); got != core.StateDownloading {
+				t.Errorf("job state after rollback = %q, want DOWNLOADING", got)
+			}
+			tr := transferForParkFixture(t, s, candID)
+			if tr.State != core.TransferInProgress || tr.BytesDone != 10 || tr.BytesTotal != 100 {
+				t.Errorf("transfer after rollback = state %q progress %d/%d, want IN_PROGRESS 10/100", tr.State, tr.BytesDone, tr.BytesTotal)
+			}
+		})
+	}
+}
+
+func seedParkJobFixture(t *testing.T, s *Store, albumID int64, now time.Time) (jobID, candidateID, transferID int64) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := s.UpsertWantedJob(ctx, albumID, now)
 	if err != nil {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
@@ -425,35 +526,24 @@ func TestParkJobForCandidate(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
+	transferID, ok, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "track.flac", now.Add(time.Hour), now)
+	if err != nil || !ok {
+		t.Fatalf("RecordEnqueueIntent: ok=%v (%v)", ok, err)
+	}
+	if err := s.UpdateTransferProgress(ctx, transferID, core.TransferInProgress, 10, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	return job.ID, cand.ID, transferID
+}
 
-	changed, err := s.ParkJobForCandidate(ctx, cand.ID, now)
+func transferForParkFixture(t *testing.T, s *Store, candidateID int64) core.Transfer {
+	t.Helper()
+	transfers, err := s.TransfersForCandidate(context.Background(), candidateID)
 	if err != nil {
-		t.Fatalf("ParkJobForCandidate: %v", err)
+		t.Fatalf("TransfersForCandidate: %v", err)
 	}
-	if !changed {
-		t.Fatal("expected ParkJobForCandidate to return true for a DOWNLOADING job")
+	if len(transfers) != 1 {
+		t.Fatalf("transfers = %d, want 1", len(transfers))
 	}
-	jobs, err := s.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
-	if err != nil {
-		t.Fatalf("RunnableJobsInState: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Fatalf("expected job to leave DOWNLOADING, got %+v", jobs)
-	}
-	view, found, err := s.JobWithTransfer(ctx, job.ID)
-	if err != nil || !found {
-		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
-	}
-	if view.Job.State != core.StateParked {
-		t.Errorf("State = %q, want PARKED", view.Job.State)
-	}
-
-	// Already PARKED (not DOWNLOADING): the guard bounces, no-op.
-	changed, err = s.ParkJobForCandidate(ctx, cand.ID, now)
-	if err != nil {
-		t.Fatalf("ParkJobForCandidate (already parked): %v", err)
-	}
-	if changed {
-		t.Error("expected ParkJobForCandidate to no-op when the job is not DOWNLOADING")
-	}
+	return transfers[0]
 }

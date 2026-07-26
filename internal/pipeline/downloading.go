@@ -52,10 +52,10 @@ type DownloadingStore interface {
 	// AttachTransferID is shared by the reconcile and top-up phases. false means
 	// the owning job's cancellation barrier won.
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
-	// ParkJobForCandidate parks a DOWNLOADING job in PARKED once its active
-	// transfer's retry budget for a lost (vanished-from-backend) transfer is
-	// exhausted, so an operator can manually retry or delete it (issue #158).
-	ParkJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error)
+	// ParkJobForCandidate atomically terminalizes an exhausted transfer and parks
+	// its DOWNLOADING job, so an operator can manually retry or delete it
+	// (issue #158). false means the job already left DOWNLOADING.
+	ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error)
 
 	// --- Resolve phase (port of resolveDownloadingJob) ---
 	// RunnableJobsInState is used with StateDownloading to pick this tick's
@@ -393,20 +393,12 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				continue
 			}
 			// Budget exhausted: this transfer keeps vanishing rather than
-			// recovering, so it is no longer a transient slskd restart. Drive the
-			// transfer to ERRORED first so ActiveTransfers stops returning this row
-			// (it only selects QUEUED/IN_PROGRESS/STALLED) - otherwise every later
-			// tick would see it "lost" again and re-run this branch, producing a
-			// false parked heartbeat forever even though the job was already
-			// parked. Then park the owning job in PARKED instead of silently
-			// erroring the transfer alone - an operator can inspect and manually
-			// retry or delete it (issue #158). The candidate's own error path is
-			// skipped: ParkJobForCandidate takes the job out of DOWNLOADING
-			// directly, so resolve() will not see this candidate again.
-			if err := d.p.Store.UpdateTransferProgress(ctx, tr.ID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now); err != nil {
-				return stats, fmt.Errorf("mark lost transfer errored: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
-			}
-			ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.CandidateID, now)
+			// recovering, so it is no longer a transient slskd restart. Atomically
+			// drive the transfer to ERRORED (so later ticks do not rediscover it)
+			// and park the owning job for manual action. The guarded job transition
+			// may bounce if another module already moved it, but the ERRORED transfer
+			// still commits; any database failure rolls both writes back.
+			ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 			if err != nil {
 				return stats, fmt.Errorf("park job for lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
 			}

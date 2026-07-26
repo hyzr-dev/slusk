@@ -492,7 +492,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		case errors.Is(err, app.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobNotRetryable):
-			http.Error(w, "job is not FAILED, PARKED, or ORPHANED", http.StatusConflict)
+			http.Error(w, "job is not FAILED or PARKED", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

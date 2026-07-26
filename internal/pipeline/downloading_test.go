@@ -179,6 +179,13 @@ func (s *failOnceDownloadingStore) UpdateTransferProgress(ctx context.Context, t
 	return s.DownloadingStore.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
 }
 
+func (s *failOnceDownloadingStore) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+	if err := s.fail("park"); err != nil {
+		return false, err
+	}
+	return s.DownloadingStore.ParkJobForCandidate(ctx, transferID, candidateID, state, bytesDone, bytesTotal, now)
+}
+
 func requireMutationContext(t *testing.T, err, injected error, transferID, candidateID int64, remoteID string) {
 	t.Helper()
 	if !errors.Is(err, injected) {
@@ -329,6 +336,32 @@ func TestDownloadingReconcileParksJobWhenRetriesExhausted(t *testing.T) {
 	}
 }
 
+func TestDownloadingReconcileParkFailureLeavesTransferAndJobLive(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p, st := newDownloadingParams(t, &fakeNetwork{downloads: nil}, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 2, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+	injected := errors.New("atomic park unavailable")
+	p.Store = &failOnceDownloadingStore{DownloadingStore: st, mutation: "park", err: injected}
+
+	stats, err := NewDownloading(p).reconcile(ctx, now)
+	requireMutationContext(t, err, injected, tid, candID, "g1")
+	if stats.Parked != 0 {
+		t.Errorf("Parked = %d, want 0", stats.Parked)
+	}
+	job, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if job.Job.State != core.StateDownloading {
+		t.Errorf("job state = %q, want DOWNLOADING", job.Job.State)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferInProgress {
+		t.Errorf("transfer state = %q, want IN_PROGRESS", got)
+	}
+}
+
 // A second reconcile tick after a job has been parked must be a quiet no-op:
 // the transfer was driven ERRORED (terminal) on the first tick, so
 // ActiveTransfers no longer returns it and the "lost" branch never re-runs.
@@ -353,6 +386,41 @@ func TestDownloadingReconcileSecondTickAfterParkIsQuiet(t *testing.T) {
 	}
 	if stats.Parked != 0 {
 		t.Errorf("Parked = %d on second tick, want 0 (quiet no-op, transfer already terminal)", stats.Parked)
+	}
+}
+
+func TestDownloadingReconcileParkRacePreservesMovedJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p, st := newDownloadingParams(t, &fakeNetwork{downloads: nil}, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 3, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+
+	guarded := &barrierAfterActiveSnapshotStore{DownloadingStore: st}
+	guarded.afterSnapshot = func([]core.Transfer) {
+		changed, err := st.AdvanceJobStateFrom(ctx, jobID, core.StateDownloading, core.StateCancelled, now.Add(time.Second))
+		if err != nil || !changed {
+			t.Fatalf("move job before park: changed=%v err=%v", changed, err)
+		}
+	}
+	p.Store = guarded
+
+	stats, err := NewDownloading(p).reconcile(ctx, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if stats.Parked != 0 {
+		t.Errorf("Parked = %d, want 0 after guarded transition bounced", stats.Parked)
+	}
+	job, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if job.Job.State != core.StateCancelled {
+		t.Errorf("job state = %q, want CANCELLED", job.Job.State)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferErrored {
+		t.Errorf("transfer state = %q, want ERRORED", got)
 	}
 }
 

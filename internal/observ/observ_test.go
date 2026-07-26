@@ -991,6 +991,9 @@ func TestRetryEndpointConflictWhenNotFailed(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status code = %d, want 409", rec.Code)
 	}
+	if got, want := rec.Body.String(), "job is not FAILED or PARKED\n"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
 }
 
 func TestRetryEndpointStoreFailure(t *testing.T) {
