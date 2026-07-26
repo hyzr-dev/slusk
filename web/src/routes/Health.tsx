@@ -37,7 +37,7 @@ export default function Health() {
     { key: t.health.metricActive, value: status?.active ?? 0, phase: statusPhase },
     { key: t.health.metricQueued, value: status?.queued ?? 0, phase: statusPhase },
     { key: t.health.metricStalled, value: status?.stalled ?? 0, phase: statusPhase },
-    { key: t.health.metricOrphaned, value: status?.orphaned ?? 0, phase: statusPhase },
+    { key: t.health.metricParked, value: status?.parked ?? 0, phase: statusPhase },
     { key: t.health.metricUploads, value: uploadsQuery.data?.active ?? 0, phase: queryPhase(uploadsQuery) },
     { key: t.health.metricShared, value: sharesQuery.data?.files ?? 0, phase: queryPhase(sharesQuery) },
   ];

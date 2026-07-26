@@ -14,7 +14,7 @@ export default function Layout() {
 
   const s = status.data;
   const inFlight = (s?.active ?? 0) + (s?.queued ?? 0) + (s?.stalled ?? 0);
-  const needsAttention = (s?.stalled ?? 0) + (s?.orphaned ?? 0);
+  const needsAttention = (s?.stalled ?? 0) + (s?.parked ?? 0);
   const unreadChat = (conversations.data ?? []).reduce((sum, c) => sum + c.unread, 0);
 
   const groups: NavGroup[] = [

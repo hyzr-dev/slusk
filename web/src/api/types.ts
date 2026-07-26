@@ -1,13 +1,14 @@
 // Hand-written mirrors of the Go DTOs in internal/observ. Kept in one file so
 // drift has a single place to be caught. See spec 2026-07-20.
 
-// dashboardStatus() in internal/observ/status.go returns these six values for
-// a job's own status. "orphaned" is also aggregated as a count on
-// StatusReport (issue #158).
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'orphaned';
+// Canonical UI values. Legacy wire values are kept separate below and
+// normalized before React Query caches a response.
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'parked';
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED' | 'ORPHANED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';
+export type WireJobStatus = JobStatus | 'orphaned';
+export type WireJobState = JobState | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 
 // JobSource distinguishes a Lidarr wanted-sync job from one created manually
@@ -54,6 +55,12 @@ export interface Job {
   etaSeconds?: number;
 }
 
+/** GET /api/jobs wire shape during the orphaned-to-parked transition. */
+export type WireJob = Omit<Job, 'status' | 'state'> & {
+  status: WireJobStatus;
+  state: WireJobState;
+};
+
 /** internal/observ/jobdetail.go transferDetailDTO */
 export interface TransferDetail {
   filename: string;
@@ -90,6 +97,9 @@ export interface JobDetail {
   state: JobState;
   attempts: AttemptDetail[];
 }
+
+/** GET /api/jobs/{id}/detail wire shape during the state-name transition. */
+export type WireJobDetail = Omit<JobDetail, 'state'> & { state: WireJobState };
 
 /** GET /api/events and /api/jobs/{id}/events — eventDTO */
 export interface JobEvent {
@@ -139,7 +149,7 @@ export interface StatusReport {
   queued: number;
   active: number;
   stalled: number;
-  orphaned: number;
+  parked: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
   /**
@@ -150,6 +160,12 @@ export interface StatusReport {
    */
   version?: string;
 }
+
+/** GET /status wire shape; old servers omit parked, new servers may omit orphaned. */
+export type WireStatusReport = Omit<StatusReport, 'parked'> & {
+  parked?: number;
+  orphaned?: number;
+};
 
 /** internal/observ/config.go LidarrView */
 export interface LidarrConfigDTO {

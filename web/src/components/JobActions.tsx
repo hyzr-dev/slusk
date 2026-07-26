@@ -21,10 +21,10 @@ interface Props {
 
 const TERMINAL_STATES: JobState[] = ['DONE', 'FAILED', 'CANCELLED'];
 
-/** FAILED or ORPHANED are the two states Retry is offered for; exported so
+/** FAILED or PARKED are the two states Retry is offered for; exported so
  * JobDetail can share this rule instead of re-declaring it. */
 export function isRetryEligible(state: JobState | undefined): boolean {
-  return state === 'FAILED' || state === 'ORPHANED';
+  return state === 'FAILED' || state === 'PARKED';
 }
 
 // Pulls the server's own message out of a 409 (or other) ApiError when one is

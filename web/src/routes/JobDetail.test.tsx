@@ -104,18 +104,19 @@ describe('retry visibility', () => {
     expect(screen.queryByRole('button', { name: t.jobs.retry })).not.toBeInTheDocument();
   });
 
-  // ORPHANED is the other retry-eligible state (issue #60) — JobDetail
+  // PARKED is the other retry-eligible state (issue #60) — JobDetail
   // previously only checked FAILED here.
-  it('shows Retry when the live job reports ORPHANED', () => {
+  it('shows Retry when the live job reports PARKED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'ORPHANED', status: 'orphaned' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'ORPHANED' }));
+    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'PARKED', status: 'parked' })]);
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'PARKED' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
 
     expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.parkedExplanation)).toBeInTheDocument();
   });
 });
 

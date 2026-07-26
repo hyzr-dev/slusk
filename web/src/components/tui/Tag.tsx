@@ -2,7 +2,7 @@ import type { JobState, JobStatus } from '../../api/types';
 import { t } from '../../strings';
 import styles from './Tag.module.css';
 
-export type TagKind = 'DL' | 'QU' | 'ST' | 'OR' | 'FA' | 'OK' | 'IM';
+export type TagKind = 'DL' | 'QU' | 'ST' | 'PA' | 'FA' | 'OK' | 'IM';
 
 const BY_STATUS: Record<JobStatus, TagKind> = {
   queued: 'QU',
@@ -10,7 +10,7 @@ const BY_STATUS: Record<JobStatus, TagKind> = {
   stalled: 'ST',
   done: 'OK',
   failed: 'FA',
-  orphaned: 'OR',
+  parked: 'PA',
 };
 
 const TONE: Record<TagKind, string> = {
@@ -20,7 +20,7 @@ const TONE: Record<TagKind, string> = {
   OK: styles.ok,
   ST: styles.bad,
   FA: styles.bad,
-  OR: styles.bad,
+  PA: styles.bad,
 };
 
 /**

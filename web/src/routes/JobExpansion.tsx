@@ -1,6 +1,7 @@
 import { useJobDetail } from '../api/queries';
 import type { AttemptDetail, Job } from '../api/types';
 import JobActions from '../components/JobActions';
+import ParkedExplanation from '../components/ParkedExplanation';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { basename, compareFileNames, formatEta, formatSize } from '../format';
 import { t } from '../strings';
@@ -48,6 +49,7 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
           <span className={styles.reasonTitle}>{t.status[job.status]}</span> — {job.failReason}
         </div>
       )}
+      <ParkedExplanation state={job.state} className={styles.reasonBox} />
 
       <div className={styles.columns}>
         {/* The meta tree only reads fields already on `job`, so it renders

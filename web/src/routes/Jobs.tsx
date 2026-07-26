@@ -19,7 +19,7 @@ import styles from './Jobs.module.css';
 // 'importing' StatusFilter value (used by other, not-yet-reskinned views'
 // tests) is simply never selected here.
 type ChipKey = Exclude<StatusFilter, 'importing'>;
-const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'orphaned', 'done'];
+const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
 // mock doesn't draw this control — its designer was working against a data
@@ -50,7 +50,7 @@ function inPeerQueue(job: Job): boolean {
 function rowTone(job: Job): TickTone {
   if (inPeerQueue(job)) return 'queued';
   if (job.status === 'done') return 'ok';
-  if (job.status === 'stalled' || job.status === 'failed' || job.status === 'orphaned') return 'bad';
+  if (job.status === 'stalled' || job.status === 'failed' || job.status === 'parked') return 'bad';
   return 'bar';
 }
 
