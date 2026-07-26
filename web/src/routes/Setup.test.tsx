@@ -125,3 +125,82 @@ describe('Setup', () => {
     expect(screen.getByText('lidarr unreachable: connection refused')).toBeInTheDocument();
   });
 });
+
+describe('Setup query state', () => {
+  it('shows the loading line while config has never resolved', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Setup />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+  });
+
+  it('shows the failed line when the config fetch never succeeds', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Setup />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+  });
+
+  it('shows a dash and the failed line for the index count when shares never resolves', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/config') {
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
+        }
+        return Promise.reject(new Error('boom'));
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Setup />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(t.setup.fieldIndex);
+    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+  });
+
+  it('suppresses the shares step badge rather than asserting UNTESTED when the shares fetch fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/config') {
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
+        }
+        return Promise.reject(new Error('boom'));
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Setup />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(t.setup.fieldIndex);
+    // Scoped to step 3's own header: steps 1/2 legitimately show NOT TESTED
+    // for their own untested connections, so asserting on the whole document
+    // would leave the badge's absence indistinguishable from those.
+    const sharesHeader = screen.getByText(new RegExp(t.setup.stepShares)).closest('div');
+    if (!sharesHeader) throw new Error('shares step header not found');
+    expect(within(sharesHeader).queryByText(t.setup.stateUntested)).not.toBeInTheDocument();
+    expect(within(sharesHeader).queryByText(t.setup.stateOk)).not.toBeInTheDocument();
+  });
+});

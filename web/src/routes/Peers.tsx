@@ -2,6 +2,7 @@ import { Fragment, useState } from 'react';
 import { usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { formatScore, formatShortTime } from '../format';
 import { t } from '../strings';
 import styles from './Peers.module.css';
@@ -17,7 +18,9 @@ function lastSeenAt(p: Peer): string {
 }
 
 export default function Peers() {
-  const { data: peers = [] } = usePeers();
+  const peersQuery = usePeers();
+  const peers = peersQuery.data ?? [];
+  const phase = queryPhase(peersQuery);
   const [sortKey, setSortKey] = useState<SortKey>('score');
   const [desc, setDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -58,69 +61,71 @@ export default function Peers() {
         <span className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
       </div>
 
-      {sorted.length === 0 ? (
-        <EmptyState message={t.peers.empty} />
-      ) : (
-        sorted.map((p) => {
-          const isExpanded = expanded === p.username;
-          const expansionId = `peer-expansion-${p.username}`;
+      <QueryNotice phase={phase} />
+      {hasData(phase) &&
+        (sorted.length === 0 ? (
+          <EmptyState message={t.peers.empty} />
+        ) : (
+          sorted.map((p) => {
+            const isExpanded = expanded === p.username;
+            const expansionId = `peer-expansion-${p.username}`;
 
-          return (
-            // A keyed Fragment is required here: the shorthand <> cannot take
-            // a key, and each peer renders a row plus its (conditional)
-            // expansion as siblings.
-            <Fragment key={p.username}>
-              <div
-                className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
-                onClick={() => toggle(p.username)}
-              >
-                <div className={styles.peerCell}>
-                  <button
-                    type="button"
-                    className={styles.caretButton}
-                    onClick={(e) => {
-                      // Without stopPropagation the click also reaches the
-                      // row handler above and toggles a second time.
-                      e.stopPropagation();
-                      toggle(p.username);
-                    }}
-                    aria-expanded={isExpanded}
-                    aria-controls={expansionId}
-                    aria-label={isExpanded ? t.jobs.hideDetails : t.jobs.showDetails}
-                  >
-                    <span aria-hidden className={styles.caret}>{isExpanded ? '▾' : '▸'}</span>
-                  </button>
-                  <span className={styles.username}>{p.username}</span>
+            return (
+              // A keyed Fragment is required here: the shorthand <> cannot take
+              // a key, and each peer renders a row plus its (conditional)
+              // expansion as siblings.
+              <Fragment key={p.username}>
+                <div
+                  className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
+                  onClick={() => toggle(p.username)}
+                >
+                  <div className={styles.peerCell}>
+                    <button
+                      type="button"
+                      className={styles.caretButton}
+                      onClick={(e) => {
+                        // Without stopPropagation the click also reaches the
+                        // row handler above and toggles a second time.
+                        e.stopPropagation();
+                        toggle(p.username);
+                      }}
+                      aria-expanded={isExpanded}
+                      aria-controls={expansionId}
+                      aria-label={isExpanded ? t.jobs.hideDetails : t.jobs.showDetails}
+                    >
+                      <span aria-hidden className={styles.caret}>{isExpanded ? '▾' : '▸'}</span>
+                    </button>
+                    <span className={styles.username}>{p.username}</span>
+                  </div>
+                  <span className={styles.mono}>{formatScore(p.score)}</span>
+                  <span className={styles.mono}>{p.successCount}</span>
+                  <span className={styles.mono}>{p.failCount}</span>
+                  <span className={`${styles.mono} ${styles.right}`}>
+                    {formatShortTime(lastSeenAt(p))}
+                  </span>
                 </div>
-                <span className={styles.mono}>{formatScore(p.score)}</span>
-                <span className={styles.mono}>{p.successCount}</span>
-                <span className={styles.mono}>{p.failCount}</span>
-                <span className={`${styles.mono} ${styles.right}`}>
-                  {formatShortTime(lastSeenAt(p))}
-                </span>
-              </div>
-              {isExpanded && (
-                <div id={expansionId} className={styles.expansionWrap}>
-                  {p.artists.length === 0 ? (
-                    <div className={styles.artist}>{t.peers.noArtistHistory}</div>
-                  ) : (
-                    p.artists.map((a) => (
-                      <div key={a.artistId} className={styles.artist}>
-                        {t.peers.artistLine(
-                          a.artistId,
-                          formatScore(a.score),
-                          a.successCount,
-                          a.failCount,
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </Fragment>
-          );
-        })
-      )}
+                {isExpanded && (
+                  <div id={expansionId} className={styles.expansionWrap}>
+                    {p.artists.length === 0 ? (
+                      <div className={styles.artist}>{t.peers.noArtistHistory}</div>
+                    ) : (
+                      p.artists.map((a) => (
+                        <div key={a.artistId} className={styles.artist}>
+                          {t.peers.artistLine(
+                            a.artistId,
+                            formatScore(a.score),
+                            a.successCount,
+                            a.failCount,
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </Fragment>
+            );
+          })
+        ))}
     </>
   );
 }

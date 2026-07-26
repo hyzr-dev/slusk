@@ -1,10 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { ChartsReport, Job, JobStatus, StatusReport } from '../api/types';
+import { t } from '../strings';
 import Overview from './Overview';
+
+afterEach(() => vi.unstubAllGlobals());
 
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
   return {
@@ -60,7 +63,10 @@ function renderOverview(
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
 ) {
-  const queryClient = new QueryClient();
+  // A real refetch on mount would otherwise hit the unmocked global fetch;
+  // keep it pending indefinitely so the seeded data is what's asserted on.
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobs, jobsData);
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
@@ -132,5 +138,24 @@ describe('Overview', () => {
     const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;
     expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
     expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+});
+
+describe('Overview query state', () => {
+  it('shows the failed line and dashes in the stat grid, not zeros, when nothing has ever loaded', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <Overview />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect((await screen.findAllByText(t.query.failed)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(t.overview.empty, { exact: false })).not.toBeInTheDocument();
+    // Every stat cell shows the "unknown" placeholder rather than a claimed 0.
+    expect(screen.queryByText('0')).not.toBeInTheDocument();
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 });

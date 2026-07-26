@@ -33,6 +33,21 @@ export const t = {
     down: 'DOWN',
     idle: 'idle',
   },
+  // Shared query-state copy. Every view renders the same three states for a
+  // GET — loading, failed, stale — so the two that are not view-specific live
+  // here instead of being borrowed from whichever namespace happened to
+  // declare one first (issue #201; this replaces jobs.loading, which five
+  // non-jobs views were reading).
+  query: {
+    loading: 'Loading…',
+    // No endpoint named on purpose: the region showing this line is already
+    // labelled, and a URL is not something the reader can act on.
+    failed: 'Could not load.',
+    // Distinct from `failed` because the two say different things: this one
+    // appears above data that is still on screen and still true as of the
+    // last successful poll (see App.tsx on keeping last-known data, #87).
+    stale: 'Could not refresh — showing last known data.',
+  },
   status: {
     queued: 'Queued',
     active: 'Active',
@@ -119,7 +134,6 @@ export const t = {
     deleteConfirm: 'Click again to delete',
     attemptHistory: 'Attempt history',
     events: 'Events',
-    loading: 'Loading…',
     noAttempts: 'No attempts yet.',
     noEvents: 'No events.',
     noCandidate: 'No candidate yet.',

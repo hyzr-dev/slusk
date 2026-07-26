@@ -41,6 +41,10 @@ function stubFetchIndefinitely() {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
 }
 
+function stubFetchFailing() {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+}
+
 // Chip buttons carry a count span (e.g. "ACTIVE 1"), so their accessible name
 // is the label plus a trailing count — match with a regex rather than the
 // bare label, and anchor + require the digit suffix so e.g. "ALL" never
@@ -447,5 +451,75 @@ describe('row expansion', () => {
     fireEvent.click(await screen.findByRole('button', { name: t.jobs.cancel }));
 
     expect(await screen.findByText(/cancelled/i)).toBeInTheDocument();
+  });
+});
+
+describe('query state', () => {
+  it('shows the loading line, not the empty message, before the first fetch resolves', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Jobs />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+    expect(screen.queryByText(t.jobs.noMatch)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(t.jobs.searchPlaceholder)).toBeInTheDocument();
+  });
+
+  it('shows the failed line when the fetch never succeeds', async () => {
+    stubFetchFailing();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Jobs />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.queryByText(t.jobs.noMatch)).not.toBeInTheDocument();
+  });
+
+  it('keeps showing the last-known jobs, plus a stale notice, when a refetch fails', async () => {
+    stubFetchFailing();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderJobs([makeJob({ id: 1, title: 'Kind of Blue' })], client);
+    expect(await screen.findByText(t.query.stale)).toBeInTheDocument();
+    expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
+  });
+
+  it('shows the empty message, and no notice, once the fetch resolves with no jobs', () => {
+    renderJobs([]);
+    expect(screen.getByText(new RegExp(t.jobs.noMatch))).toBeInTheDocument();
+    expect(screen.queryByText(t.query.loading)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.query.failed)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.query.stale)).not.toBeInTheDocument();
+  });
+
+  it('omits the filter chip counts, rather than asserting 0, while the first fetch is failing', async () => {
+    stubFetchFailing();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Jobs />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByText(t.query.failed);
+    // No chip anywhere in either group carries a count span while the query
+    // has never resolved — the bare label is the whole accessible name.
+    expect(statusGroup().getByRole('button', { name: t.jobs.chipLabel.all })).toBeInTheDocument();
+    expect(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.all })).toBeInTheDocument();
+  });
+
+  it('shows the filter chip counts once the jobs fetch resolves', () => {
+    renderJobs([makeJob({ id: 1, status: 'active' })]);
+    expect(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) })).toBeInTheDocument();
+    expect(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.all) })).toBeInTheDocument();
   });
 });

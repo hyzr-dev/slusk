@@ -3,6 +3,7 @@ import { useCharts, useJobs, useStatus } from '../api/queries';
 import type { Job } from '../api/types';
 import ThroughputAreaChart from '../components/charts/ThroughputAreaChart';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
@@ -33,9 +34,20 @@ function tickTone(job: Job): TickTone {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const { data: jobs = [] } = useJobs();
-  const { data: status } = useStatus();
-  const { data: charts } = useCharts();
+  const jobsQuery = useJobs();
+  const statusQuery = useStatus();
+  const chartsQuery = useCharts();
+  const jobs = jobsQuery.data ?? [];
+  const status = statusQuery.data;
+  const charts = chartsQuery.data;
+
+  // Three independent polls feeding three independent regions: a dead
+  // /api/charts must not blank the transfer list, and a dead /api/jobs must
+  // not blank the counters. So each region gates on what it actually reads
+  // rather than on one primary query (issue #201).
+  const statusPhase = queryPhase(statusQuery);
+  const jobsPhase = queryPhase(jobsQuery);
+  const chartsPhase = queryPhase(chartsQuery);
 
   // Sparklines are drawn only for ACTIVE: it's the one cell with a real
   // series to plot (charts.throughput). The other four stat cells have no
@@ -43,11 +55,11 @@ export default function Overview() {
   // for them are generated noise — omitted rather than faked (see spec,
   // Overview section).
   const statCells = [
-    { label: t.status.active, value: status?.active ?? 0 },
-    { label: t.status.queued, value: status?.queued ?? 0 },
-    { label: t.status.stalled, value: status?.stalled ?? 0 },
-    { label: t.status.orphaned, value: status?.orphaned ?? 0 },
-    { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length },
+    { label: t.status.active, value: status?.active ?? 0, phase: statusPhase },
+    { label: t.status.queued, value: status?.queued ?? 0, phase: statusPhase },
+    { label: t.status.stalled, value: status?.stalled ?? 0, phase: statusPhase },
+    { label: t.status.orphaned, value: status?.orphaned ?? 0, phase: statusPhase },
+    { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length, phase: jobsPhase },
   ];
 
   const throughput = charts?.throughput ?? [];
@@ -66,12 +78,13 @@ export default function Overview() {
 
   return (
     <>
+      <QueryNotice phase={statusPhase} />
       <div className={styles.statGrid}>
         {statCells.map((cell, i) => (
           <div key={cell.label} className={styles.statCell}>
             <div className={styles.statLabel}>{cell.label}</div>
-            <div className={styles.statValue}>{cell.value}</div>
-            {i === 0 && sparklineSamples.length > 0 && (
+            <div className={styles.statValue}>{hasData(cell.phase) ? cell.value : '—'}</div>
+            {i === 0 && hasData(chartsPhase) && sparklineSamples.length > 0 && (
               <div className={styles.sparkline}>
                 {sparklineSamples.map((sample, j) => (
                   <span
@@ -89,84 +102,90 @@ export default function Overview() {
         <div className={styles.transfers}>
           <SectionHeader
             label={t.overview.transfersHeading}
-            meta={t.overview.activeCountMeta(status?.active ?? 0)}
+            // "0 active" is a claim, not a placeholder — omit the meta until
+            // /status has answered. SectionHeader skips a falsy meta.
+            meta={hasData(statusPhase) ? t.overview.activeCountMeta(status?.active ?? 0) : undefined}
           />
-          {transferRows.length === 0 ? (
-            <EmptyState message={t.overview.empty} />
-          ) : (
-            transferRows.map((job) => {
-              // A non-zero queuePosition means the job is waiting in a peer's
-              // remote queue: it's still 'active' but no bytes are moving,
-              // so the byte counts below are replaced and the tick bar must
-              // not flare as if data were arriving.
-              const queued = Boolean(job.queuePosition);
-              const pct = percent(job.bytesDone, job.bytesTotal);
-              const tone = tickTone(job);
-              const live = job.status === 'active' && !job.queuePosition;
-              const right = queued
-                ? t.overview.queuePos(job.queuePosition ?? 0)
-                : job.state === 'IMPORTING'
-                  ? t.jobs.verifying
-                  : `${formatSize(job.bytesDone)} / ${formatSize(job.bytesTotal)}`;
+          <QueryNotice phase={jobsPhase} />
+          {hasData(jobsPhase) &&
+            (transferRows.length === 0 ? (
+              <EmptyState message={t.overview.empty} />
+            ) : (
+              transferRows.map((job) => {
+                // A non-zero queuePosition means the job is waiting in a peer's
+                // remote queue: it's still 'active' but no bytes are moving,
+                // so the byte counts below are replaced and the tick bar must
+                // not flare as if data were arriving.
+                const queued = Boolean(job.queuePosition);
+                const pct = percent(job.bytesDone, job.bytesTotal);
+                const tone = tickTone(job);
+                const live = job.status === 'active' && !job.queuePosition;
+                const right = queued
+                  ? t.overview.queuePos(job.queuePosition ?? 0)
+                  : job.state === 'IMPORTING'
+                    ? t.jobs.verifying
+                    : `${formatSize(job.bytesDone)} / ${formatSize(job.bytesTotal)}`;
 
-              return (
-                <div
-                  key={job.id}
-                  className={styles.transferRow}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
-                >
-                  <div className={styles.transferHead}>
-                    <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
-                    <span className={styles.transferTitle}>{job.title}</span>
-                    <span className={styles.transferSpeed}>{formatSpeed(job.speed)}</span>
-                    <span
-                      className={`${styles.transferPct} ${queued ? styles.pctQueued : tone === 'bad' ? styles.pctBad : styles.pctBar}`}
-                    >
-                      {pct}%
-                    </span>
+                return (
+                  <div
+                    key={job.id}
+                    className={styles.transferRow}
+                    onClick={() => navigate(`/jobs/${job.id}`)}
+                  >
+                    <div className={styles.transferHead}>
+                      <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
+                      <span className={styles.transferTitle}>{job.title}</span>
+                      <span className={styles.transferSpeed}>{formatSpeed(job.speed)}</span>
+                      <span
+                        className={`${styles.transferPct} ${queued ? styles.pctQueued : tone === 'bad' ? styles.pctBad : styles.pctBar}`}
+                      >
+                        {pct}%
+                      </span>
+                    </div>
+                    <div className={styles.transferTicks}>
+                      <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={12} />
+                    </div>
+                    <div className={styles.transferSub}>
+                      <span>{job.artist} · {job.peer || '—'}</span>
+                      <span>{right}</span>
+                    </div>
                   </div>
-                  <div className={styles.transferTicks}>
-                    <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={12} />
-                  </div>
-                  <div className={styles.transferSub}>
-                    <span>{job.artist} · {job.peer || '—'}</span>
-                    <span>{right}</span>
-                  </div>
-                </div>
-              );
-            })
-          )}
+                );
+              })
+            ))}
         </div>
 
         <div>
           <SectionHeader label={t.overview.throughputHeading} />
+          <QueryNotice phase={chartsPhase} />
           <div className={styles.throughputBody}>
-            <ThroughputAreaChart samples={throughput} />
+            {hasData(chartsPhase) && <ThroughputAreaChart samples={throughput} />}
           </div>
 
           <SectionHeader label={t.chrome.reconcile} />
-          {reconcileRows.length === 0 ? (
-            <EmptyState message={t.overview.noChartData} />
-          ) : (
-            <div className={styles.reconcileList}>
-              {reconcileRows.map((pass) => {
-                const matched = pass.matched > 0;
-                const durationSeconds = Math.round(
-                  (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000,
-                );
-                return (
-                  <div key={pass.startedAt} className={styles.reconcileRow}>
-                    <span className={styles.reconcileTime}>{formatShortTime(pass.finishedAt)}</span>
-                    <span className={styles.reconcileSpacer} />
-                    <span className={matched ? styles.reconcileMatch : styles.reconcileNoMatch}>
-                      {matched ? t.overview.reconcileMatched(pass.matched) : t.overview.reconcileNoMatch}
-                    </span>
-                    <span className={styles.reconcileDur}>{formatEta(durationSeconds)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          {hasData(chartsPhase) &&
+            (reconcileRows.length === 0 ? (
+              <EmptyState message={t.overview.noChartData} />
+            ) : (
+              <div className={styles.reconcileList}>
+                {reconcileRows.map((pass) => {
+                  const matched = pass.matched > 0;
+                  const durationSeconds = Math.round(
+                    (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000,
+                  );
+                  return (
+                    <div key={pass.startedAt} className={styles.reconcileRow}>
+                      <span className={styles.reconcileTime}>{formatShortTime(pass.finishedAt)}</span>
+                      <span className={styles.reconcileSpacer} />
+                      <span className={matched ? styles.reconcileMatch : styles.reconcileNoMatch}>
+                        {matched ? t.overview.reconcileMatched(pass.matched) : t.overview.reconcileNoMatch}
+                      </span>
+                      <span className={styles.reconcileDur}>{formatEta(durationSeconds)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
         </div>
       </div>
     </>

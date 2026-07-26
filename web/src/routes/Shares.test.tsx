@@ -67,10 +67,31 @@ describe('loading state', () => {
     // one available before the query settles.
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     renderShares(newClient());
-    expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
     expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
     expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.shares.rescan })).not.toBeInTheDocument();
+  });
+});
+
+describe('query state', () => {
+  it('shows the failed line before any data has arrived', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderShares(client);
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.shares.rescan })).not.toBeInTheDocument();
+  });
+
+  it('keeps showing the folder grid, plus a stale notice, when a refetch fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(await screen.findByText(t.query.stale)).toBeInTheDocument();
+    expect(screen.getByText('/music/library')).toBeInTheDocument();
   });
 });
 
@@ -390,5 +411,33 @@ describe('uploads panel', () => {
     );
     renderShares(client);
     expect(screen.getByText(t.uploads.truncated(5))).toBeInTheDocument();
+  });
+
+  it('shows the panel with a loading line, not returning null, while uploads has never resolved', () => {
+    // The regression this guards against: before #201, an unresolved
+    // useUploads() and a disabled one both rendered null, so a slow uploads
+    // fetch was indistinguishable from the feature being off.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.getByText(t.uploads.panelTitle)).toBeInTheDocument();
+    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+  });
+
+  it('shows the panel with a failed line when the uploads fetch never succeeds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/api/shares') {
+          return Promise.resolve(new Response(JSON.stringify(makeReport()), { status: 200 }));
+        }
+        return Promise.reject(new Error('boom'));
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderShares(client);
+    expect(await screen.findByText(t.uploads.panelTitle)).toBeInTheDocument();
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
   });
 });

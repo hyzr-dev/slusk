@@ -4,6 +4,7 @@ import type { Job } from '../api/types';
 import { useJobs } from '../api/queries';
 import Chip from '../components/tui/Chip';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatSpeed, percent } from '../format';
@@ -174,7 +175,9 @@ function jobRowPropsEqual(prev: JobRowProps, next: JobRowProps): boolean {
 const JobRow = memo(JobRowImpl, jobRowPropsEqual);
 
 export default function Jobs() {
-  const { data: jobs = [] } = useJobs();
+  const jobsQuery = useJobs();
+  const jobs = jobsQuery.data ?? [];
+  const phase = queryPhase(jobsQuery);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [source, setSource] = useState<SourceFilter>('all');
@@ -226,7 +229,7 @@ export default function Jobs() {
             <Chip
               key={key}
               label={t.jobs.chipLabel[key]}
-              count={key === 'all' ? allCount : counts[key]}
+              count={hasData(phase) ? (key === 'all' ? allCount : counts[key]) : undefined}
               active={status === key}
               onClick={() => setStatus(key)}
             />
@@ -238,7 +241,7 @@ export default function Jobs() {
             <Chip
               key={key}
               label={t.jobs.sourceChipLabel[key]}
-              count={sourceCounts[key]}
+              count={hasData(phase) ? sourceCounts[key] : undefined}
               active={source === key}
               onClick={() => setSource(key)}
             />
@@ -257,13 +260,15 @@ export default function Jobs() {
         <span className={styles.headRight}>{t.jobs.gridHead.tries}</span>
       </div>
 
-      {filtered.length === 0 ? (
-        <EmptyState message={t.jobs.noMatch} />
-      ) : (
-        filtered.map((j) => (
-          <JobRow key={j.id} job={j} expanded={expandedId === j.id} onToggle={toggleExpanded} />
-        ))
-      )}
+      <QueryNotice phase={phase} />
+      {hasData(phase) &&
+        (filtered.length === 0 ? (
+          <EmptyState message={t.jobs.noMatch} />
+        ) : (
+          filtered.map((j) => (
+            <JobRow key={j.id} job={j} expanded={expandedId === j.id} onToggle={toggleExpanded} />
+          ))
+        ))}
     </>
   );
 }
