@@ -11,6 +11,16 @@ name: CI
 # release.yml nor deploy.yml runs either toolchain on the runner — release only
 # tags in git, and deploy builds inside the container — so there is no runner
 # version to inherit conventions from, and go.mod requires a recent Go.
+#
+# Deliberately uncached, everywhere. No existing workflow uses caching, so this
+# instance's act_runner has never been shown to provide a cache backend — and a
+# missing one is not a warning: setup-go's and setup-node's cache paths call
+# @actions/cache, which throws "Cache Service Url not found" when
+# ACTIONS_CACHE_URL is unset and surfaces it through core.setFailed. That would
+# make the first PR red for reasons unrelated to the code, which is exactly how
+# a gate loses its credibility. Caching (Go modules, npm, the embedded-Postgres
+# binaries under ~/.embedded-postgres-go, docker layers) belongs in its own PR
+# once a green run has proved the backend exists.
 
 on:
   pull_request:
@@ -18,9 +28,17 @@ on:
       - main
 
 # A force-push to a PR branch supersedes the previous run; don't pay for both.
+# github.ref rather than gitea.ref: Gitea honours workflow-level concurrency
+# from 1.24, but the `gitea` alias is not documented as available in that
+# evaluator scope, and an empty group would put every PR in one bucket where
+# cancel-in-progress makes them cancel each other. `github.*` is documented
+# there and Gitea accepts it.
 concurrency:
-  group: ci-${{ gitea.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   go:
@@ -31,25 +49,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
-
-      # internal/store, internal/pipeline and cmd/sqlite2pg each start an
-      # embedded Postgres via internal/store/storetest — no service container is
-      # needed, but the first run downloads the Postgres binaries. Caching them
-      # keeps that cost to once per runner image rather than once per push.
-      - name: Cache embedded Postgres binaries
-        uses: actions/cache@v4
-        with:
-          path: ~/.embedded-postgres-go
-          key: embedded-postgres-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: |
-            embedded-postgres-${{ runner.os }}-
+          # setup-go caches by default; see the header note.
+          cache: false
 
       # gofmt -l prints offending files and exits 0 either way, so the file list
-      # itself has to be the failure condition.
+      # itself has to be the failure condition. The file set comes from git
+      # rather than `gofmt -l .` so that a developer running this command locally
+      # gets the same answer as CI: a bare `.` walks .claude/worktrees/ and other
+      # gitignored agent scratch dirs, which routinely contain full checkouts and
+      # produce a false red.
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l .)
+          unformatted=$(git ls-files '*.go' | xargs gofmt -l)
           if [ -n "$unformatted" ]; then
             echo "These files are not gofmt-clean:"
             echo "$unformatted"
@@ -59,6 +70,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # internal/store, internal/pipeline and cmd/sqlite2pg each start their own
+      # embedded Postgres via internal/store/storetest, so no service container
+      # is needed. Uncached, the first run of each downloads the Postgres
+      # binaries.
       - name: go test
         run: go test ./...
 
@@ -72,12 +87,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
 
       - name: Install
         working-directory: web
         run: npm ci
+
+      # This is where a type error should announce itself. `npm run build` is
+      # `tsc -b && vite build`, and the image job below runs it too — but buried
+      # inside a docker layer. Running it here first means a broken
+      # vite.config.ts prints its own TS error instead of surfacing as a failed
+      # RUN step in build output.
+      - name: Build
+        working-directory: web
+        run: npm run build
 
       # npm test is `node scripts/check-css-tokens.mjs && vitest run`, so this
       # covers the CSS-token check too.
@@ -90,19 +112,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
-
+      # Deliberately no docker/setup-buildx-action: deploy.yml runs
+      # build-push-action with no buildx setup and succeeds, so a builder is
+      # already present. Adding the action would introduce the docker-container
+      # driver and a moby/buildkit pull that the deploy path never needs — if
+      # that failed, this job would go red while the path it mirrors stayed
+      # green.
+      #
       # Builds the same Dockerfile deploy.yml ships, without pushing. This is
-      # the step that would have caught #232: `npm run build` (and therefore
-      # `tsc -b`) is only ever invoked from Dockerfile, so a type error in
-      # vite.config.ts was green in `make test` and red only in the image build
-      # — which nothing ran until a deploy. Building here rather than listing
-      # the Dockerfile's commands means the check cannot drift from what deploy
-      # actually does.
+      # the step that would have caught #240 (introduced in #232): `npm run
+      # build`, and therefore `tsc -b`, is invoked from Dockerfile:7, so a type
+      # error in vite.config.ts was green in `make test` and red only in the
+      # image build — which nothing ran until a deploy. Building the Dockerfile
+      # rather than listing its commands means this check cannot drift from what
+      # deploy actually does.
       - name: Build image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           build-args: |
-            VERSION=pr-${{ gitea.event.pull_request.number }}
+            VERSION=pr-${{ github.event.pull_request.number }}
