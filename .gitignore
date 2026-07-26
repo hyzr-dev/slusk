@@ -19,7 +19,16 @@ docker-compose.yml
 __pycache__/
 
 # Agent tooling state — local to each developer's machine, not shared.
+# These land in the repo root unasked, which is how a blanket `git add -A` once
+# swept 278 unrelated files into a commit. Listing them here is the backstop;
+# staging explicit paths is still the rule.
 .serena/
+.pi-subagents/
+.remnic/
+# Only the worktrees subdirectory: a shared .claude/ config (agents, settings)
+# is something this repo may want to track one day, and ignoring the whole
+# directory would quietly prevent that.
+.claude/worktrees/
 # Playwright MCP scratch: console logs and page snapshots from browser-driven
 # verification. Written into the repo root by the server, one file per run.
 .playwright-mcp/
