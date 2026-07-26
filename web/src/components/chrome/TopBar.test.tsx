@@ -34,7 +34,7 @@ describe('stalenessLabel', () => {
   });
 });
 
-describe('build version', () => {
+describe('TopBar', () => {
   function renderTopBar(status: Partial<StatusReport> | undefined) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     if (status) client.setQueryData(queryKeys.status, status);
@@ -46,6 +46,14 @@ describe('build version', () => {
       </QueryClientProvider>,
     );
   }
+
+  it('makes the status region keyboard reachable', () => {
+    renderTopBar({});
+    expect(screen.getByRole('region', { name: t.chrome.statusRegion })).toHaveAttribute(
+      'tabindex',
+      '0',
+    );
+  });
 
   it('shows the version the server reports, beside the product name', () => {
     renderTopBar({ version: 'v1.33.4' });

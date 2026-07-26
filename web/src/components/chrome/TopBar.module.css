@@ -32,3 +32,14 @@
 .value { color: var(--fg); }
 .quiet { color: var(--dim); }
 .bad { color: var(--bad); }
+
+/* Match the mobile navigation strip: keep the fixed-width status cells inside
+   their own bounded scroller rather than letting the document overflow. */
+@media (max-width: 640px) {
+  .bar {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+  }
+}

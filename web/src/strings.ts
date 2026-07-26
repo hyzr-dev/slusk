@@ -37,6 +37,7 @@ export const t = {
     reconcileNever: '—',
     down: 'DOWN',
     idle: 'idle',
+    statusRegion: 'Application status',
   },
   // Shared query-state copy. Every view renders the same three states for a
   // GET — loading, failed, stale — so the two that are not view-specific live
@@ -352,8 +353,6 @@ export const t = {
     threadEmpty: 'No messages yet.',
     online: CHAT_ONLINE,
     offline: CHAT_OFFLINE,
-    statusOnline: CHAT_STATUS_ONLINE,
-    statusOffline: CHAT_STATUS_OFFLINE,
     // Announced on each rail row so presence and the unread count reach a
     // screen reader even though they render as a color-coded dot and a bare
     // digit respectively. Unknown presence is deliberately omitted.
