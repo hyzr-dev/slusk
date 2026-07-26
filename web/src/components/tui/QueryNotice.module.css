@@ -17,3 +17,25 @@
   font-size: 11.5px;
   color: var(--bad);
 }
+
+/* The healthy case. The node stays mounted so its live region is registered
+   before it ever has something to announce, but it must cost nothing in
+   layout: an empty in-flow div would take a slot in every flex and grid
+   container that holds a notice, and `gap` would space it (Overview's stat
+   grid and right column, Health's .depGrid, Setup's .fields).
+
+   position: absolute is what does the work — an absolutely positioned child
+   is not a flex or grid item at all, so no gap applies to it. The rest is the
+   standard clip-rect pattern; display: none would drop it from the
+   accessibility tree and defeat the point of keeping it mounted. */
+.silent {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

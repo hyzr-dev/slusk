@@ -75,8 +75,28 @@ describe('QueryNotice', () => {
     expect(screen.getByText(t.query.stale)).toBeInTheDocument();
   });
 
-  it('renders nothing when ready', () => {
-    const { container } = render(<QueryNotice phase="ready" />);
-    expect(container.firstChild).toBeNull();
+  it('renders no text when ready', () => {
+    render(<QueryNotice phase="ready" />);
+    expect(screen.queryByText(t.query.loading)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.query.failed)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.query.stale)).not.toBeInTheDocument();
+  });
+
+  // The live region has to exist before it has anything to say. A role="status"
+  // node inserted at the same moment as its text is announced unreliably, so
+  // the healthy case keeps an empty container mounted rather than returning
+  // null (#208). Whether that container is visually out of flow is a CSS
+  // question jsdom cannot answer — see the PR for the measured check.
+  it.each(['ready', 'loading', 'error', 'stale'] as const)(
+    'keeps the live region mounted in the %s phase',
+    (phase) => {
+      render(<QueryNotice phase={phase} />);
+      expect(screen.getByRole('status')).toBeInTheDocument();
+    },
+  );
+
+  it('announces the failure through the live region rather than beside it', () => {
+    render(<QueryNotice phase="error" />);
+    expect(screen.getByRole('status')).toHaveTextContent(t.query.failed);
   });
 });

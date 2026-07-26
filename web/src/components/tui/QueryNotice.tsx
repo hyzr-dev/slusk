@@ -74,13 +74,28 @@ export function hasData(phase: QueryPhase): boolean {
  *   <QueryNotice phase={p} />
  *   {hasData(p) && ...the body, including its own EmptyState...}
  *
- * No role="status" here, deliberately. This node is mounted at the same
- * moment as its text, and a live region inserted together with its content is
- * announced unreliably — the same reason Shares.tsx keeps its rescan live
- * region permanently mounted instead.
+ * The node is always mounted, and role="status" with it. A live region
+ * inserted at the same moment as its text is announced unreliably — the same
+ * reason Shares.tsx keeps its rescan live region permanently mounted — so the
+ * healthy case renders an empty container rather than null. `.silent` takes
+ * that container out of flow entirely so it costs nothing in the flex and
+ * grid layouts every call site sits in; see the comment there.
  */
 export default function QueryNotice({ phase }: { phase: QueryPhase }) {
-  if (phase === 'ready') return null;
-  if (phase === 'loading') return <div className={styles.loading}>{t.query.loading}</div>;
-  return <div className={styles.failed}>{phase === 'error' ? t.query.failed : t.query.stale}</div>;
+  const className =
+    phase === 'ready' ? styles.silent : phase === 'loading' ? styles.loading : styles.failed;
+  const message =
+    phase === 'ready'
+      ? null
+      : phase === 'loading'
+        ? t.query.loading
+        : phase === 'error'
+          ? t.query.failed
+          : t.query.stale;
+
+  return (
+    <div role="status" className={className}>
+      {message}
+    </div>
+  );
 }
