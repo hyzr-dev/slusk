@@ -62,15 +62,25 @@
 .mono { font-family: var(--font-mono); color: var(--dim); }
 
 /* The mock has no link colour, so the underline carries the affordance on its
-   own — without it this sits on top of .mono and is indistinguishable from the
-   surrounding row text. Hover brightens rather than adding the underline;
-   hover is not available to keyboard or touch, so it can't be the only cue.
+   own and the colour matches the surrounding row. Hover brightens rather than
+   adding the underline; hover is not available to keyboard or touch, so it
+   can't be the only cue.
+
+   colour must be set on the <a> itself, not left to inherit from .mono on the
+   wrapper span. An inherited value loses to the UA stylesheet's
+   `a:-webkit-any-link { color: -webkit-link }`, which targets the element
+   directly — that is how this rendered in browser-default blue (#228).
 
    display: block because this was grid item #2 until the cell gained a
    `role="cell"` wrapper span; inline inside that span it would shrink to the
    width of the id, and the rest of the column would stop being clickable.
    The underline still tracks the text, not the box. */
-.link { display: block; text-decoration: underline; text-underline-offset: 2px; }
+.link {
+  display: block;
+  color: var(--dim);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .link:hover { color: var(--fg); }
 
 .detail {
