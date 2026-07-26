@@ -179,6 +179,13 @@ func (s *failOnceDownloadingStore) UpdateTransferProgress(ctx context.Context, t
 	return s.DownloadingStore.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
 }
 
+func (s *failOnceDownloadingStore) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+	if err := s.fail("park"); err != nil {
+		return false, err
+	}
+	return s.DownloadingStore.ParkJobForCandidate(ctx, transferID, candidateID, state, bytesDone, bytesTotal, now)
+}
+
 func requireMutationContext(t *testing.T, err, injected error, transferID, candidateID int64, remoteID string) {
 	t.Helper()
 	if !errors.Is(err, injected) {
@@ -286,8 +293,8 @@ func TestDownloadingReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if stats.Retried != 1 || stats.Orphaned != 0 {
-		t.Errorf("Retried=%d Orphaned=%d, want 1/0", stats.Retried, stats.Orphaned)
+	if stats.Retried != 1 || stats.Parked != 0 {
+		t.Errorf("Retried=%d Parked=%d, want 1/0", stats.Retried, stats.Parked)
 	}
 	states := transferStatesFor(t, st, candID)
 	if states["a.flac"].State != core.TransferPending {
@@ -298,10 +305,10 @@ func TestDownloadingReconcileRetriesLostWhenAbsentFromSlskd(t *testing.T) {
 	}
 }
 
-// Once a lost transfer's retry budget is exhausted, the owning job is parked
-// ORPHANED for manual operator action (issue #158) rather than silently
-// erroring the transfer.
-func TestDownloadingReconcileOrphansJobWhenRetriesExhausted(t *testing.T) {
+// Once a lost transfer's retry budget is exhausted, the owning job is PARKED
+// for manual operator action (issue #158) rather than silently erroring the
+// transfer.
+func TestDownloadingReconcileParksJobWhenRetriesExhausted(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{downloads: nil}
@@ -314,27 +321,53 @@ func TestDownloadingReconcileOrphansJobWhenRetriesExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if stats.Orphaned != 1 || stats.Retried != 0 {
-		t.Errorf("Orphaned=%d Retried=%d, want 1/0", stats.Orphaned, stats.Retried)
+	if stats.Parked != 1 || stats.Retried != 0 {
+		t.Errorf("Parked=%d Retried=%d, want 1/0", stats.Parked, stats.Retried)
 	}
 	job, found, err := st.JobWithTransfer(ctx, jobID)
 	if err != nil || !found {
 		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
 	}
-	if job.Job.State != core.StateOrphaned {
-		t.Errorf("job state = %q, want ORPHANED", job.Job.State)
+	if job.Job.State != core.StateParked {
+		t.Errorf("job state = %q, want PARKED", job.Job.State)
 	}
 	if states := transferStatesFor(t, st, candID); states["a.flac"].State != core.TransferErrored {
-		t.Errorf("orphaned job's transfer should be driven terminal (ERRORED) so it stops re-triggering reconcile, got %v", states["a.flac"].State)
+		t.Errorf("parked job's transfer should be driven terminal (ERRORED) so it stops re-triggering reconcile, got %v", states["a.flac"].State)
 	}
 }
 
-// A second reconcile tick after a job has been orphaned must be a quiet
-// no-op: the transfer was driven ERRORED (terminal) on the first tick, so
+func TestDownloadingReconcileParkFailureLeavesTransferAndJobLive(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p, st := newDownloadingParams(t, &fakeNetwork{downloads: nil}, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 2, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	tid := seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+	injected := errors.New("atomic park unavailable")
+	p.Store = &failOnceDownloadingStore{DownloadingStore: st, mutation: "park", err: injected}
+
+	stats, err := NewDownloading(p).reconcile(ctx, now)
+	requireMutationContext(t, err, injected, tid, candID, "g1")
+	if stats.Parked != 0 {
+		t.Errorf("Parked = %d, want 0", stats.Parked)
+	}
+	job, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if job.Job.State != core.StateDownloading {
+		t.Errorf("job state = %q, want DOWNLOADING", job.Job.State)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferInProgress {
+		t.Errorf("transfer state = %q, want IN_PROGRESS", got)
+	}
+}
+
+// A second reconcile tick after a job has been parked must be a quiet no-op:
+// the transfer was driven ERRORED (terminal) on the first tick, so
 // ActiveTransfers no longer returns it and the "lost" branch never re-runs.
-// Without this, an ORPHANED job would produce a false orphaned=1 heartbeat on
-// every subsequent tick for the remainder of TransferDeadline.
-func TestDownloadingReconcileSecondTickAfterOrphanIsQuiet(t *testing.T) {
+// Without this, a PARKED job would produce a false parked=1 heartbeat on every
+// subsequent tick for the remainder of TransferDeadline.
+func TestDownloadingReconcileSecondTickAfterParkIsQuiet(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	net := &fakeNetwork{downloads: nil}
@@ -351,8 +384,43 @@ func TestDownloadingReconcileSecondTickAfterOrphanIsQuiet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
-	if stats.Orphaned != 0 {
-		t.Errorf("Orphaned = %d on second tick, want 0 (quiet no-op, transfer already terminal)", stats.Orphaned)
+	if stats.Parked != 0 {
+		t.Errorf("Parked = %d on second tick, want 0 (quiet no-op, transfer already terminal)", stats.Parked)
+	}
+}
+
+func TestDownloadingReconcileParkRacePreservesMovedJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p, st := newDownloadingParams(t, &fakeNetwork{downloads: nil}, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 3, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferInProgress, slskdID: "g1", retries: 3, bytesDone: 10, bytesTotal: 100, deadline: now.Add(time.Hour), stampAt: now})
+
+	guarded := &barrierAfterActiveSnapshotStore{DownloadingStore: st}
+	guarded.afterSnapshot = func([]core.Transfer) {
+		changed, err := st.AdvanceJobStateFrom(ctx, jobID, core.StateDownloading, core.StateCancelled, now.Add(time.Second))
+		if err != nil || !changed {
+			t.Fatalf("move job before park: changed=%v err=%v", changed, err)
+		}
+	}
+	p.Store = guarded
+
+	stats, err := NewDownloading(p).reconcile(ctx, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if stats.Parked != 0 {
+		t.Errorf("Parked = %d, want 0 after guarded transition bounced", stats.Parked)
+	}
+	job, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if job.Job.State != core.StateCancelled {
+		t.Errorf("job state = %q, want CANCELLED", job.Job.State)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferErrored {
+		t.Errorf("transfer state = %q, want ERRORED", got)
 	}
 }
 
@@ -850,7 +918,7 @@ func TestDownloadingReconcileUpdateFailureDefersTerminalCleanup(t *testing.T) {
 
 			stats, err := d.reconcile(ctx, now)
 			requireMutationContext(t, err, injected, tid, candID, "g1")
-			if stats.Completed != 0 || stats.Cancelled != 0 || stats.Orphaned != 0 || stats.Stalled != 0 || stats.Adopted != 0 {
+			if stats.Completed != 0 || stats.Cancelled != 0 || stats.Parked != 0 || stats.Stalled != 0 || stats.Adopted != 0 {
 				t.Errorf("stats changed before persistence: %+v", stats)
 			}
 			if len(net.removed) != 0 {

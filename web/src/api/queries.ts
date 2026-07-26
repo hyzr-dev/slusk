@@ -5,6 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
+import { normalizeJobDetail, normalizeJobs, normalizeStatusReport } from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -12,17 +13,17 @@ import type {
   ConfigUpdateResult,
   ConnectionTestResult,
   Conversation,
-  Job,
-  JobDetail,
   JobEvent,
   MarkReadResult,
   Peer,
   PrivateMessage,
   ShareRescanResult,
   SharesReport,
-  StatusReport,
   ThreadPage,
   UploadsReport,
+  WireJob,
+  WireJobDetail,
+  WireStatusReport,
 } from './types';
 
 // Intervals match the legacy dashboard exactly so perceived freshness is
@@ -72,7 +73,7 @@ export const queryKeys = {
 export function useJobs() {
   return useQuery({
     queryKey: queryKeys.jobs,
-    queryFn: () => apiGet<Job[]>('/api/jobs'),
+    queryFn: () => apiGet<WireJob[]>('/api/jobs').then(normalizeJobs),
     refetchInterval: JOBS_INTERVAL,
   });
 }
@@ -80,7 +81,7 @@ export function useJobs() {
 export function useStatus() {
   return useQuery({
     queryKey: queryKeys.status,
-    queryFn: () => apiGet<StatusReport>('/status'),
+    queryFn: () => apiGet<WireStatusReport>('/status').then(normalizeStatusReport),
     refetchInterval: STATUS_INTERVAL,
   });
 }
@@ -112,7 +113,7 @@ export function usePeers() {
 export function useJobDetail(id: number) {
   return useQuery({
     queryKey: queryKeys.jobDetail(id),
-    queryFn: () => apiGet<JobDetail>(`/api/jobs/${id}/detail`),
+    queryFn: () => apiGet<WireJobDetail>(`/api/jobs/${id}/detail`).then(normalizeJobDetail),
     refetchInterval: JOBS_INTERVAL,
   });
 }

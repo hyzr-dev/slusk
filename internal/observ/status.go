@@ -1,7 +1,7 @@
 // Package observ: status.go maps internal job/transfer states to the small
 // display vocabulary the dashboard's Queue view uses (queued/active/
-// stalled/done/failed/orphaned), decoupling the UI from the pipeline's state
-// machine (internal/core.AlbumJobState has 8 states; the dashboard needs 6).
+// stalled/done/failed/parked), decoupling the UI from the pipeline's state
+// machine.
 package observ
 
 import "github.com/samuelenocsson/slskdarr/internal/core"
@@ -13,8 +13,8 @@ func dashboardStatus(v core.JobView) string {
 		return "done"
 	case core.StateFailed:
 		return "failed"
-	case core.StateOrphaned:
-		return "orphaned"
+	case core.StateParked, core.StateOrphaned:
+		return "parked"
 	// SELECTING is deliberately "queued", not "active": it is the pipeline's
 	// waiting room — candidates are cached but the job is waiting for a
 	// MaxActive slot (the cap only counts DOWNLOADING+IMPORTING). Counting it

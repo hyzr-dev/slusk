@@ -80,7 +80,7 @@ describe('countByStatus', () => {
       stalled: 0,
       done: 0,
       failed: 1,
-      orphaned: 0,
+      parked: 0,
       importing: 1,
     });
   });

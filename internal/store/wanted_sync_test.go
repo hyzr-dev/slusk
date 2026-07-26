@@ -149,6 +149,33 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	}
 }
 
+func TestSyncWantedJobsCancelsBothParkedSpellings(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	parked, _ := s.UpsertWantedJob(ctx, 20, now)
+	legacy, _ := s.UpsertWantedJob(ctx, 21, now)
+	if err := s.AdvanceJobState(ctx, parked.ID, core.StateParked, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdvanceJobState(ctx, legacy.ID, core.StateOrphaned, now); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, revived, err := s.SyncWantedJobs(ctx,
+		[]core.WantedRelease{{ID: 22, Title: "still wanted", ArtistName: "artist"}},
+		now.Add(-30*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	if cancelled != 2 || revived != 0 {
+		t.Fatalf("counts = cancelled %d, revived %d; want 2, 0", cancelled, revived)
+	}
+	assertWantedSyncState(t, s, parked.ID, core.StateCancelled)
+	assertWantedSyncState(t, s, legacy.ID, core.StateCancelled)
+}
+
 func TestSyncWantedJobsEmptyInputChangesNothing(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

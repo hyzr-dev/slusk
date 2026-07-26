@@ -177,11 +177,11 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 	return tx.Commit()
 }
 
-// RetryFailedJob manually revives one FAILED or ORPHANED job: retries 0,
-// not_before/failed_at cleared, candidates deleted, state WANTED. Returns
-// false when the job is not FAILED/ORPHANED (the dashboard button raced a
-// state change) or does not exist. Candidates/transfers must go with the
-// reset for the same ownership/FK and clean-slate reason as ResetJobToWanted.
+// RetryFailedJob manually revives one FAILED, PARKED, or legacy ORPHANED job:
+// retries 0, not_before/failed_at cleared, candidates deleted, state WANTED.
+// Returns false when the job is not retryable (the dashboard button raced a
+// state change) or does not exist. Candidates/transfers must go with the reset
+// for the same ownership/FK and clean-slate reason as ResetJobToWanted.
 func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -191,8 +191,9 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
-		 WHERE id = $3 AND state IN ($4, $5)`,
-		string(core.StateWanted), now, jobID, string(core.StateFailed), string(core.StateOrphaned))
+		 WHERE id = $3 AND state IN ($4, $5, $6)`,
+		string(core.StateWanted), now, jobID,
+		string(core.StateFailed), string(core.StateParked), string(core.StateOrphaned))
 	if err != nil {
 		return false, fmt.Errorf("retry failed job: update: %w", err)
 	}
@@ -217,24 +218,74 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 	return true, nil
 }
 
-// OrphanJobForCandidate marks a candidate's owning job ORPHANED (issue #158),
-// but only if it is still DOWNLOADING - guarding against a race with another
-// transition (e.g. WantedSync cancelling it, or resolve advancing it on a
-// concurrent tick) - so the UPDATE never clobbers a job that already moved on.
-// Returns whether a row changed.
-func (s *Store) OrphanJobForCandidate(ctx context.Context, candidateID int64, now time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2
-		 WHERE id = (SELECT album_job_id FROM candidates WHERE id = $3) AND state = $4`,
-		string(core.StateOrphaned), now, candidateID, string(core.StateDownloading))
+// ParkJobForCandidate atomically records a transfer's terminal state/progress
+// and marks its candidate's owning job PARKED (issue #158), but only if the job
+// is still DOWNLOADING. If another transition (for example WantedSync
+// cancellation) already moved the job, the transfer write still commits and
+// false is returned. A stale transfer that already became terminal is a no-op.
+func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("orphan job for candidate: %w", err)
+		return false, fmt.Errorf("park job for candidate: begin: %w", err)
 	}
-	n, err := res.RowsAffected()
+	defer tx.Rollback()
+
+	// Cancellation locks the job before its transfers. Use the same order here
+	// so parking and cancellation cannot deadlock while each holds one row.
+	var jobID int64
+	var jobState string
+	err = tx.QueryRowContext(ctx,
+		`SELECT j.id, j.state
+		 FROM album_jobs j
+		 JOIN candidates c ON c.album_job_id = j.id
+		 JOIN transfers t ON t.candidate_id = c.id
+		 WHERE c.id = $1 AND t.id = $2
+		 FOR UPDATE OF j`, candidateID, transferID).Scan(&jobID, &jobState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("orphan job for candidate: rows affected: %w", err)
+		return false, fmt.Errorf("park job for candidate: lock job: %w", err)
 	}
-	return n > 0, nil
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE transfers SET state = $1, bytes_done = $2, bytes_total = $3,
+			last_progress_at = CASE WHEN $4 > bytes_done THEN $5 ELSE last_progress_at END,
+			updated_at = $6
+		 WHERE id = $7 AND candidate_id = $8 AND state IN ($9, $10, $11, $12)`,
+		string(transferState), bytesDone, bytesTotal, bytesDone, now, now,
+		transferID, candidateID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled))
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: update transfer: %w", err)
+	}
+	transferRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
+	}
+	if transferRows == 0 {
+		return false, nil
+	}
+
+	var jobRows int64
+	if core.AlbumJobState(jobState) == core.StateDownloading {
+		res, err = tx.ExecContext(ctx,
+			`UPDATE album_jobs SET state = $1, updated_at = $2
+			 WHERE id = $3 AND state = $4`,
+			string(core.StateParked), now, jobID, string(core.StateDownloading))
+		if err != nil {
+			return false, fmt.Errorf("park job for candidate: update job: %w", err)
+		}
+		jobRows, err = res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("park job for candidate: commit: %w", err)
+	}
+	return jobRows > 0, nil
 }
 
 // AdvanceJobStateFrom is the conditional transition every module uses:
@@ -525,9 +576,9 @@ func (s *Store) SetJobTrackBand(ctx context.Context, jobID int64, minTracks, max
 // re-search: retries/not_before/candidates are wiped clean-slate, same as
 // RetryFailedJob, and the state is forced to WANTED so the next Discovery
 // tick picks it up. Guarded on state NOT IN (DOWNLOADING, IMPORTING) instead
-// of RetryFailedJob's FAILED/ORPHANED allowlist, since a force-search is
-// valid from almost any non-active state (WANTED, SELECTING, FAILED,
-// ORPHANED, CANCELLED, ...). Returns false when the job is actively
+// of RetryFailedJob's retryable-state allowlist, since a force-search is
+// valid from almost any non-active state (WANTED, SELECTING, FAILED, PARKED,
+// legacy ORPHANED, CANCELLED, ...). Returns false when the job is actively
 // transferring (the dashboard button raced a state change) or does not exist.
 func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)

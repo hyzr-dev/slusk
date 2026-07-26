@@ -98,10 +98,10 @@ func newTestHandler(reg *prometheus.Registry) http.Handler {
 	return NewServer(deps)
 }
 
-func TestStatusEndpointReturnsReport(t *testing.T) {
+func TestStatusEndpointReturnsParkedAndDeprecatedAlias(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	status := func(ctx context.Context) (StatusReport, error) {
-		return StatusReport{Queued: 3, Active: 1, Stalled: 0, Orphaned: 2}, nil
+		return StatusReport{Queued: 3, Active: 1, Stalled: 0, Parked: 2}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.Status = status
@@ -114,11 +114,25 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code = %d", rec.Code)
 	}
-	var got StatusReport
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("decode: %v", err)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw JSON: %v", err)
 	}
-	if got.Queued != 3 || got.Orphaned != 2 {
+	for _, key := range []string{"parked", "orphaned"} {
+		value, ok := raw[key]
+		if !ok {
+			t.Fatalf("raw JSON missing %q: %s", key, rec.Body.String())
+		}
+		var count int
+		if err := json.Unmarshal(value, &count); err != nil || count != 2 {
+			t.Errorf("%s = %s, want 2 (decode error %v)", key, value, err)
+		}
+	}
+	var got StatusReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode StatusReport: %v", err)
+	}
+	if got.Queued != 3 || got.Parked != 2 {
 		t.Errorf("unexpected report: %+v", got)
 	}
 }
@@ -976,6 +990,9 @@ func TestRetryEndpointConflictWhenNotFailed(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status code = %d, want 409", rec.Code)
+	}
+	if got, want := rec.Body.String(), "job is not FAILED or PARKED\n"; got != want {
+		t.Errorf("body = %q, want %q", got, want)
 	}
 }
 

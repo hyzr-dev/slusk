@@ -2,6 +2,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
 import type { JobState, TransferDetail } from '../api/types';
 import JobActions, { isRetryEligible } from '../components/JobActions';
+import ParkedExplanation from '../components/ParkedExplanation';
 import EmptyState from '../components/tui/EmptyState';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
@@ -61,7 +62,7 @@ export default function JobDetail() {
   // JobActions decides button visibility from a single `state`, but the
   // polled list and the detail response can disagree briefly and both are
   // authoritative enough — so pick whichever source reports a retry-eligible
-  // state (FAILED/ORPHANED) first. The detail side only counts once it's
+  // state (FAILED/PARKED) first. The detail side only counts once it's
   // confirmed to belong to this job (see detailReady above) — otherwise a
   // stale placeholder from a previously viewed failed job could show Retry
   // on an unrelated job.
@@ -70,6 +71,10 @@ export default function JobDetail() {
     : detailReady && isRetryEligible(detail?.state)
       ? detail!.state
       : (job?.state ?? detail?.state ?? 'WANTED');
+  const parkedState =
+    job?.state === 'PARKED' || (detailReady && detail?.state === 'PARKED')
+      ? 'PARKED'
+      : undefined;
 
   // A notBefore in the past has no display relevance.
   const sleepingUntil =
@@ -127,6 +132,8 @@ export default function JobDetail() {
       ) : (
         <QueryNotice phase={detailPhase} />
       )}
+
+      <ParkedExplanation state={parkedState} className={styles.failReason} />
 
       <div className={styles.actionsWrap}>
         <JobActions jobId={id} state={actionState} onDeleted={() => navigate('/jobs')} />

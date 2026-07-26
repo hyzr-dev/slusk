@@ -9,6 +9,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
 )
 
@@ -415,6 +416,71 @@ func TestMigrateAppliesEachVersionExactlyOnce(t *testing.T) {
 	}
 	if distinctCount != rowCount {
 		t.Errorf("schema_migrations has %d rows but only %d distinct versions - duplicates present", rowCount, distinctCount)
+	}
+}
+
+func TestMigration0008RenamesOrphanedJobs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	created := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	legacyAt := created.Add(time.Minute)
+	parkedAt := created.Add(2 * time.Minute)
+	doneAt := created.Add(3 * time.Minute)
+
+	legacy, _ := s.UpsertWantedJob(ctx, 8001, created)
+	parked, _ := s.UpsertWantedJob(ctx, 8002, created)
+	done, _ := s.UpsertWantedJob(ctx, 8003, created)
+	if err := s.AdvanceJobState(ctx, legacy.ID, core.StateOrphaned, legacyAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdvanceJobState(ctx, parked.ID, core.StateParked, parkedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdvanceJobState(ctx, done.ID, core.StateDone, doneAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 8`); err != nil {
+		t.Fatalf("remove migration record: %v", err)
+	}
+
+	if err := Migrate(ctx, s.db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	assertStateAndUpdatedAt := func(jobID int64, wantState core.AlbumJobState, wantUpdatedAt time.Time) {
+		t.Helper()
+		var state string
+		var updatedAt time.Time
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT state, updated_at FROM album_jobs WHERE id=$1`, jobID).Scan(&state, &updatedAt); err != nil {
+			t.Fatal(err)
+		}
+		if state != string(wantState) || !updatedAt.Equal(wantUpdatedAt) {
+			t.Errorf("job %d = state %q updated_at %v, want %q and %v", jobID, state, updatedAt, wantState, wantUpdatedAt)
+		}
+	}
+	assertStateAndUpdatedAt(legacy.ID, core.StateParked, legacyAt)
+	assertStateAndUpdatedAt(parked.ID, core.StateParked, parkedAt)
+	assertStateAndUpdatedAt(done.ID, core.StateDone, doneAt)
+
+	var recorded int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE version = 8`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Fatalf("migration 0008 records = %d, want 1", recorded)
+	}
+	if err := Migrate(ctx, s.db); err != nil {
+		t.Fatalf("idempotent Migrate: %v", err)
+	}
+	assertStateAndUpdatedAt(legacy.ID, core.StateParked, legacyAt)
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE version = 8`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Errorf("migration 0008 records after second run = %d, want 1", recorded)
 	}
 }
 

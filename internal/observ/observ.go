@@ -63,10 +63,10 @@ func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) 
 
 // StatusReport is the read-only snapshot served at /status.
 type StatusReport struct {
-	Queued   int `json:"queued"`
-	Active   int `json:"active"`
-	Stalled  int `json:"stalled"`
-	Orphaned int `json:"orphaned"`
+	Queued  int `json:"queued"`
+	Active  int `json:"active"`
+	Stalled int `json:"stalled"`
+	Parked  int `json:"parked"`
 }
 
 // StatusFunc produces a current StatusReport (typically backed by the store).
@@ -183,8 +183,8 @@ type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 // errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
 type CancelFunc func(ctx context.Context, jobID int64) error
 
-// RetryFunc manually revives one FAILED or ORPHANED job by id (typically
-// backed by app.Jobs.Retry). Errors are mapped to a status code by the
+// RetryFunc manually revives one FAILED, PARKED, or legacy ORPHANED job by id
+// (typically backed by app.Jobs.Retry). Errors are mapped to a status code by the
 // /api/jobs/{id}/retry handler: errors.Is(err, app.ErrJobNotFound) -> 404,
 // errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
 type RetryFunc func(ctx context.Context, jobID int64) error
@@ -410,10 +410,19 @@ func NewServer(deps ServerDeps) http.Handler {
 		}
 		resp := struct {
 			StatusReport
+			// Orphaned is a deprecated response alias derived from Parked so the
+			// two fields cannot disagree.
+			Orphaned      int                        `json:"orphaned"`
 			Modules       map[string]string          `json:"modules"`
 			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
 			Version       string                     `json:"version"`
-		}{report, moduleTicks, moduleDetails, deps.Version}
+		}{
+			StatusReport:  report,
+			Orphaned:      report.Parked,
+			Modules:       moduleTicks,
+			ModuleDetails: moduleDetails,
+			Version:       deps.Version,
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -483,7 +492,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		case errors.Is(err, app.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobNotRetryable):
-			http.Error(w, "job is not FAILED or ORPHANED", http.StatusConflict)
+			http.Error(w, "job is not FAILED or PARKED", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

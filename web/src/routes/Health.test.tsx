@@ -42,7 +42,7 @@ function renderHealth(moduleDetails: StatusReport['moduleDetails']) {
     queued: 0,
     active: 0,
     stalled: 0,
-    orphaned: 0,
+    parked: 0,
     modules: {},
     moduleDetails,
   } satisfies StatusReport);
@@ -108,7 +108,7 @@ describe('Health loading vs empty', () => {
                 queued: 2,
                 active: 1,
                 stalled: 0,
-                orphaned: 0,
+                parked: 0,
                 modules: {},
                 moduleDetails: {},
               } satisfies StatusReport),
