@@ -85,7 +85,7 @@ type txfOpts struct {
 func seedTransfer(t *testing.T, st *store.Store, candID int64, username, filename string, o txfOpts) int64 {
 	t.Helper()
 	ctx := context.Background()
-	tid, err := st.RecordEnqueueIntent(ctx, candID, username, filename, o.deadline, o.stampAt)
+	tid, _, err := st.RecordEnqueueIntent(ctx, candID, username, filename, o.deadline, o.stampAt)
 	if err != nil {
 		t.Fatalf("RecordEnqueueIntent: %v", err)
 	}
@@ -95,7 +95,7 @@ func seedTransfer(t *testing.T, st *store.Store, candID int64, username, filenam
 		}
 	}
 	if o.slskdID != "" {
-		if err := st.AttachTransferID(ctx, tid, o.slskdID, o.stampAt); err != nil {
+		if _, err := st.AttachTransferID(ctx, tid, o.slskdID, o.stampAt); err != nil {
 			t.Fatalf("AttachTransferID: %v", err)
 		}
 	}
@@ -118,6 +118,20 @@ func transferStatesFor(t *testing.T, st *store.Store, candID int64) map[string]c
 		out[tr.Filename] = tr
 	}
 	return out
+}
+
+type barrierAfterActiveSnapshotStore struct {
+	DownloadingStore
+	afterSnapshot func([]core.Transfer)
+}
+
+func (s *barrierAfterActiveSnapshotStore) ActiveTransfers(ctx context.Context) ([]core.Transfer, error) {
+	transfers, err := s.DownloadingStore.ActiveTransfers(ctx)
+	if err == nil && s.afterSnapshot != nil {
+		s.afterSnapshot(transfers)
+		s.afterSnapshot = nil
+	}
+	return transfers, err
 }
 
 // failOnceDownloadingStore decorates a real DownloadingStore and injects one
@@ -144,11 +158,11 @@ func (s *failOnceDownloadingStore) fail(mutation string) error {
 	return s.err
 }
 
-func (s *failOnceDownloadingStore) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
+func (s *failOnceDownloadingStore) AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error) {
 	if err := s.fail("attach"); err != nil {
-		return err
+		return false, err
 	}
-	return s.DownloadingStore.AttachTransferID(ctx, transferID, slskdID, now)
+	return s.DownloadingStore.AttachTransferID(ctx, transferID, remoteID, now)
 }
 
 func (s *failOnceDownloadingStore) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
@@ -344,6 +358,61 @@ func TestDownloadingReconcileSecondTickAfterOrphanIsQuiet(t *testing.T) {
 
 // A past-deadline transfer that ALSO appears live must be processed exactly
 // once: cancelled, not also adopted.
+func TestDownloadingReconcileStaleUpdateCannotResurrectCancelledTransfer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 50, Size: 100}}}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 801, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferQueued, slskdID: "g1", deadline: now.Add(time.Hour), stampAt: now})
+
+	guarded := &barrierAfterActiveSnapshotStore{DownloadingStore: st}
+	guarded.afterSnapshot = func(transfers []core.Transfer) {
+		captured, found, err := st.CancelJob(ctx, jobID, now.Add(time.Second))
+		if err != nil || !found || len(captured) != 1 {
+			t.Fatalf("CancelJob: captured=%v found=%v err=%v", captured, found, err)
+		}
+		if err := net.Cancel(ctx, captured[0].Username, captured[0].SlskdID); err != nil {
+			t.Fatalf("remote Cancel: %v", err)
+		}
+	}
+	p.Store = guarded
+
+	if _, err := NewDownloading(p).reconcile(ctx, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferCancelled {
+		t.Fatalf("stale reconcile update resurrected state %v, want CANCELLED", got)
+	}
+}
+
+func TestDownloadingReconcileCompensatesBouncedAttachment(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	net := &fakeNetwork{downloads: []core.RemoteTransfer{{ID: "late-g1", Username: "bob", Filename: "a.flac", State: core.TransferQueued, Size: 100}}}
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	jobID, candID := seedActiveCandidate(t, st, 802, "bob", []core.CandidateFile{{Filename: "a.flac", Size: 100}}, now)
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{state: core.TransferQueued, deadline: now.Add(time.Hour), stampAt: now})
+
+	guarded := &barrierAfterActiveSnapshotStore{DownloadingStore: st}
+	guarded.afterSnapshot = func([]core.Transfer) {
+		if _, found, err := st.CancelJob(ctx, jobID, now.Add(time.Second)); err != nil || !found {
+			t.Fatalf("CancelJob: found=%v err=%v", found, err)
+		}
+	}
+	p.Store = guarded
+
+	if _, err := NewDownloading(p).reconcile(ctx, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := transferStatesFor(t, st, candID)["a.flac"].State; got != core.TransferCancelled {
+		t.Fatalf("transfer state = %v, want CANCELLED", got)
+	}
+	if len(net.cancelled) != 1 || net.cancelled[0] != "late-g1" {
+		t.Fatalf("compensating cancellations = %v, want [late-g1]", net.cancelled)
+	}
+}
+
 func TestDownloadingReconcileOverlapCountedOnce(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)

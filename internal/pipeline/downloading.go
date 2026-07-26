@@ -49,8 +49,9 @@ type DownloadingStore interface {
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
 	// RetryTransfer is shared by the reconcile and top-up phases.
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
-	// AttachTransferID is shared by the reconcile and top-up phases.
-	AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error
+	// AttachTransferID is shared by the reconcile and top-up phases. false means
+	// the owning job's cancellation barrier won.
+	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
 	// OrphanJobForCandidate parks a DOWNLOADING job in ORPHANED once its active
 	// transfer's retry budget for a lost (vanished-from-slskd) transfer is
 	// exhausted, so an operator can manually retry or delete it (issue #158).
@@ -78,7 +79,7 @@ type DownloadingStore interface {
 	AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error
 
 	// --- Top-up phase (topUpDeps's store half; see selecting.go) ---
-	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error)
+	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
 }
 
 // DownloadingParams configures a Downloading.
@@ -109,7 +110,7 @@ func (p DownloadingParams) TransfersForCandidate(ctx context.Context, candidateI
 	return p.Store.TransfersForCandidate(ctx, candidateID)
 }
 
-func (p DownloadingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error) {
+func (p DownloadingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error) {
 	return p.Store.RecordEnqueueIntent(ctx, candidateID, username, filename, deadline, now)
 }
 
@@ -121,12 +122,16 @@ func (p DownloadingParams) UpdateTransferProgress(ctx context.Context, transferI
 	return p.Store.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
 }
 
-func (p DownloadingParams) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
-	return p.Store.AttachTransferID(ctx, transferID, slskdID, now)
+func (p DownloadingParams) AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error) {
+	return p.Store.AttachTransferID(ctx, transferID, remoteID, now)
 }
 
 func (p DownloadingParams) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
 	return p.Peers.Enqueue(ctx, username, filename, size)
+}
+
+func (p DownloadingParams) Cancel(ctx context.Context, username, id string) error {
+	return p.Peers.Cancel(ctx, username, id)
 }
 
 // Downloading owns every DOWNLOADING-state job. Each tick runs three phases in
@@ -320,8 +325,18 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			if effectiveID == "" && lt.ID != "" {
 				// Recover the id we lost in a crash so we can actually cancel it.
 				effectiveID = lt.ID
-				if err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now); err != nil {
+				attached, err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+				if err != nil {
 					return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+				}
+				if !attached {
+					// The cancellation barrier won after this stale reconcile
+					// snapshot. Compensate the newly discovered remote identity.
+					if err := d.p.Network.Cancel(ctx, tr.Username, lt.ID); err != nil {
+						d.log().Warn("compensating reconciled remote cancel failed", "transfer", tr.ID, "user", tr.Username, "remote_id", lt.ID, "err", err)
+					}
+					handled[tr.ID] = true
+					continue
 				}
 			}
 			// A failed local retry/error write may outlive the original deadline.
@@ -407,8 +422,17 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 		ourIDs[lt.ID] = true
 		if tr.SlskdID == "" && lt.ID != "" {
 			// Recover from a crash between RecordEnqueueIntent and AttachTransferID.
-			if err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now); err != nil {
+			attached, err := d.p.Store.AttachTransferID(ctx, tr.ID, lt.ID, now)
+			if err != nil {
 				return stats, fmt.Errorf("attach transfer id: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, lt.ID, err)
+			}
+			if !attached {
+				// The cancellation barrier won after ActiveTransfers returned this
+				// stale row. Do not let reconciliation bounce it back to live.
+				if err := d.p.Network.Cancel(ctx, tr.Username, lt.ID); err != nil {
+					d.log().Warn("compensating reconciled remote cancel failed", "transfer", tr.ID, "user", tr.Username, "remote_id", lt.ID, "err", err)
+				}
+				continue
 			}
 		}
 		newState := lt.State

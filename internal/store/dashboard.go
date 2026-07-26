@@ -17,16 +17,14 @@ import (
 // purposes:
 //
 //   - t is the candidate's single most recent transfer (by updated_at). It
-//     must stay a single row rather than becoming an aggregate:
-//     internal/app/jobs.go's Cancel and Delete need one concrete transfer's
-//     SlskdID/Username to act on the remote transfer (Retry and ForceSearch
-//     fetch the view but never read Transfer), observ.dashboardStatus derives
-//     a job's stalled/active/failed status from Transfer.State, and
-//     scanJobView copies t.username into JobView.Peer, which the jobs list
-//     renders. Note the latter two read one arbitrary file's row as if it
-//     spoke for the album — the same conflation issue #174 fixed for the byte
-//     columns, left in place here because changing it would change what those
-//     two values mean.
+//     must stay a single row rather than becoming an aggregate because
+//     observ.dashboardStatus derives a job's stalled/active/failed status from
+//     Transfer.State, and scanJobView copies t.username into JobView.Peer,
+//     which the jobs list renders. These read one arbitrary file's row as if
+//     it spoke for the album — the same conflation issue #174 fixed for the
+//     byte columns, left in place here because changing it would change what
+//     those two values mean. Manual cancellation does not use this projection;
+//     its store transaction captures every live transfer across all candidates.
 //   - agg sums bytes_done/bytes_total/remaining across every transfer of the
 //     candidate. ActivateCandidateWithTransfers and CreateManualJob insert a
 //     transfers row for every file of the album upfront (state PENDING,
@@ -177,8 +175,8 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 }
 
 // JobWithTransfer looks up a single job (regardless of state) with its most
-// recent transfer, for the cancel endpoint. found is false if no job has
-// that id.
+// recent transfer for dashboard-facing actions and detail. It is a one-row
+// projection, not a lifecycle work list. found is false if no job has that id.
 func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
 	row := s.db.QueryRowContext(ctx, jobViewSelect+` WHERE j.id = $1`, jobID)
 

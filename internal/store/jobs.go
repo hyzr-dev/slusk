@@ -42,12 +42,30 @@ func (s *Store) BackfillJobMetadataIfEmpty(ctx context.Context, jobID int64, tit
 }
 
 // RecordEnqueueIntent is step 1 of the write-ahead enqueue: it persists a QUEUED
-// transfer with no slskd id BEFORE slskd is called. It is idempotent within the
-// owning candidate; another job attempting the same remote file must retain its
-// own row rather than stealing this transfer's ownership.
-func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, error) {
-	var id int64
-	if err := s.db.QueryRowContext(ctx,
+// transfer with no remote id BEFORE the peer is called. It locks and re-checks
+// the owning job so cancellation cannot commit between this local intent and
+// the point at which enqueue is allowed to begin. ok is false when the job has
+// crossed its cancellation barrier or the transfer has already become terminal.
+func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (id int64, ok bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("upsert transfer intent: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var jobState string
+	err = tx.QueryRowContext(ctx,
+		`SELECT j.state FROM album_jobs j
+		 JOIN candidates c ON c.album_job_id = j.id
+		 WHERE c.id = $1 FOR UPDATE OF j`, candidateID).Scan(&jobState)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && core.AlbumJobState(jobState) == core.StateCancelled) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("upsert transfer intent: lock job: %w", err)
+	}
+
+	err = tx.QueryRowContext(ctx,
 		`INSERT INTO transfers (candidate_id, username, filename, state, deadline, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT(candidate_id, username, filename) DO UPDATE SET
@@ -56,11 +74,21 @@ func (s *Store) RecordEnqueueIntent(ctx context.Context, candidateID int64, user
 		   slskd_id = '',
 		   bytes_done = 0,
 		   updated_at = excluded.updated_at
+		 WHERE transfers.state IN ($7, $8, $9, $10)
 		 RETURNING id`,
-		candidateID, username, filename, string(core.TransferQueued), deadline, now).Scan(&id); err != nil {
-		return 0, fmt.Errorf("upsert transfer intent: %w", err)
+		candidateID, username, filename, string(core.TransferQueued), deadline, now,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
 	}
-	return id, nil
+	if err != nil {
+		return 0, false, fmt.Errorf("upsert transfer intent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("upsert transfer intent: commit: %w", err)
+	}
+	return id, true, nil
 }
 
 // RecordPendingTransfer persists a file the pipeline intends to download but
@@ -90,16 +118,50 @@ func (s *Store) RecordPendingTransfer(ctx context.Context, candidateID int64, us
 	return nil
 }
 
-// AttachTransferID is step 2 of the write-ahead enqueue: it records the id slskd
-// returned so future reconciliation can match on the strong key.
-func (s *Store) AttachTransferID(ctx context.Context, transferID int64, slskdID string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET slskd_id = $1, updated_at = $2 WHERE id = $3`,
-		slskdID, now, transferID)
+// AttachTransferID is step 2 of the write-ahead enqueue. It serializes with
+// the owning job's cancellation barrier; ok is false when cancellation or
+// deletion won while the remote enqueue was in flight, so the caller can
+// immediately compensate by cancelling the returned remote id.
+func (s *Store) AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (ok bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("attach slskd id: %w", err)
+		return false, fmt.Errorf("attach remote id: begin: %w", err)
 	}
-	return nil
+	defer tx.Rollback()
+
+	var jobState string
+	err = tx.QueryRowContext(ctx,
+		`SELECT j.state FROM album_jobs j
+		 JOIN candidates c ON c.album_job_id = j.id
+		 JOIN transfers t ON t.candidate_id = c.id
+		 WHERE t.id = $1 FOR UPDATE OF j`, transferID).Scan(&jobState)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && core.AlbumJobState(jobState) == core.StateCancelled) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("attach remote id: lock job: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE transfers SET slskd_id = $1, updated_at = $2
+		 WHERE id = $3 AND state IN ($4, $5, $6, $7)`,
+		remoteID, now, transferID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled))
+	if err != nil {
+		return false, fmt.Errorf("attach remote id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("attach remote id: rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("attach remote id: commit: %w", err)
+	}
+	return true, nil
 }
 
 // FindTransferByFallback recovers a candidate-owned transfer by its remote
@@ -129,6 +191,75 @@ func (s *Store) AdvanceJobState(ctx context.Context, jobID int64, to core.AlbumJ
 		return fmt.Errorf("advance job: %w", err)
 	}
 	return nil
+}
+
+// CancelJob establishes the local cancellation barrier and returns the
+// transfers that were live immediately before it. found is false if the job no
+// longer exists. The returned identities are cancelled remotely only after
+// this transaction commits.
+func (s *Store) CancelJob(ctx context.Context, jobID int64, now time.Time) (transfers []core.Transfer, found bool, err error) {
+	return s.prepareJobCancellation(ctx, jobID, now, false)
+}
+
+// PrepareDeleteJob establishes the same local cancellation barrier as
+// CancelJob, but refuses an IMPORTING job. A later hard-delete failure safely
+// leaves the already-prepared job CANCELLED.
+func (s *Store) PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) (transfers []core.Transfer, found bool, err error) {
+	return s.prepareJobCancellation(ctx, jobID, now, true)
+}
+
+func (s *Store) prepareJobCancellation(ctx context.Context, jobID int64, now time.Time, rejectImporting bool) ([]core.Transfer, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var state string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM album_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: select for update: %w", err)
+	}
+	if rejectImporting && core.AlbumJobState(state) == core.StateImporting {
+		return nil, false, ErrJobImporting
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		transferSelect+` WHERE candidate_id IN (
+			SELECT id FROM candidates WHERE album_job_id = $1
+		) AND state IN ($2, $3, $4, $5) ORDER BY id FOR UPDATE`,
+		jobID, string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled))
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: select transfers: %w", err)
+	}
+	transfers, err := scanTransfers(rows)
+	rows.Close()
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: scan transfers: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE transfers SET state = $1, updated_at = $2
+		 WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $3)
+		 AND state IN ($4, $5, $6, $7)`,
+		string(core.TransferCancelled), now, jobID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled)); err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: update transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3`,
+		string(core.StateCancelled), now, jobID); err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: update job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("prepare job cancellation: commit: %w", err)
+	}
+	return transfers, true, nil
 }
 
 // TransfersPastDeadline returns non-terminal transfers whose deadline has passed.
@@ -169,11 +300,20 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 				WHEN $4 > bytes_done THEN $5
 				WHEN $6::text = $7::text AND last_progress_at IS NULL THEN $8
 				ELSE last_progress_at END,
-			updated_at = $9 WHERE id = $10`,
+			updated_at = $9
+		 WHERE id = $10
+		 AND state IN ($11, $12, $13, $14)
+		 AND EXISTS (
+			SELECT 1 FROM candidates c JOIN album_jobs j ON j.id = c.album_job_id
+			WHERE c.id = transfers.candidate_id AND j.state != $15
+		)`,
 		string(state), bytesDone, bytesTotal,
 		bytesDone, now,
 		string(state), string(core.TransferInProgress), now,
-		now, transferID)
+		now, transferID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled),
+		string(core.StateCancelled))
 	if err != nil {
 		return fmt.Errorf("update transfer progress: %w", err)
 	}
@@ -192,8 +332,17 @@ func (s *Store) UpdateTransferProgress(ctx context.Context, transferID int64, st
 // re-sent transfer actually starts.
 func (s *Store) RetryTransfer(ctx context.Context, transferID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE transfers SET state = $1, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = $2 WHERE id = $3`,
-		string(core.TransferPending), now, transferID)
+		`UPDATE transfers SET state = $1, retries = retries + 1, slskd_id = '', bytes_done = 0, last_progress_at = NULL, updated_at = $2
+		 WHERE id = $3
+		 AND state IN ($4, $5, $6, $7)
+		 AND EXISTS (
+			SELECT 1 FROM candidates c JOIN album_jobs j ON j.id = c.album_job_id
+			WHERE c.id = transfers.candidate_id AND j.state != $8
+		)`,
+		string(core.TransferPending), now, transferID,
+		string(core.TransferPending), string(core.TransferQueued),
+		string(core.TransferInProgress), string(core.TransferStalled),
+		string(core.StateCancelled))
 	if err != nil {
 		return fmt.Errorf("retry transfer: %w", err)
 	}
