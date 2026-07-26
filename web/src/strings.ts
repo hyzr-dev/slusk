@@ -285,11 +285,14 @@ export const t = {
     statNever: 'Never',
     panelTitle: 'SHARED FOLDERS',
     summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,
+    // Report-level (SharesReport.indexedAt), not per-folder — see the
+    // STALE_INDEX_MS comment in Shares.tsx for why this lives in the header
+    // summary rather than as a folder-grid column.
+    indexedAt: (label: string) => `indexed ${label}`,
     gridHead: {
       path: 'PATH',
       files: 'FILES',
       size: 'SIZE',
-      indexed: 'INDEXED',
     },
     // The word next to the header's spinner while a scan is running.
     // SharesReport carries only `scanning: boolean`, no progress figure, so

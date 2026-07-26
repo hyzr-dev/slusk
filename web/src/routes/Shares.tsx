@@ -9,10 +9,13 @@ import { t } from '../strings';
 import styles from './Shares.module.css';
 import UploadsPanel from './UploadsPanel';
 
-// A folder's INDEXED cell reads --bad once the last scan is at least this
-// old, matching the mock's treatment of an overdue index
-// (docs/design/slskdarr-tui.dc.html:~430). A folder that has never been
-// indexed is at least as stale as one, so it gets the same treatment.
+// The header's INDEXED reading turns --bad once the last scan is at least
+// this old, matching the mock's treatment of an overdue index
+// (docs/design/slskdarr-tui.dc.html:~430). No scan having ever completed is
+// at least as stale as one, so it gets the same treatment. This is a
+// report-level timestamp (SharesReport.indexedAt) — ShareFolder carries no
+// per-folder equivalent, so it belongs only in the summary line, not in the
+// folder grid (see internal/observ/shares.go ShareFolderStats).
 const STALE_INDEX_MS = 24 * 60 * 60 * 1000;
 
 export default function Shares() {
@@ -87,6 +90,9 @@ export default function Shares() {
         meta={
           <span className={styles.headerActions}>
             <span>{t.shares.summary(data.folders.length, data.files, formatSize(data.totalBytes))}</span>
+            <span className={stale ? styles.indexedBad : styles.indexedOk}>
+              {t.shares.indexedAt(indexedLabel)}
+            </span>
             {scanning && (
               <span className={styles.indexing}>
                 <span className={styles.spinner} aria-hidden="true" />
@@ -118,7 +124,6 @@ export default function Shares() {
         <span>{t.shares.gridHead.path}</span>
         <span className={styles.alignRight}>{t.shares.gridHead.files}</span>
         <span className={styles.alignRight}>{t.shares.gridHead.size}</span>
-        <span className={styles.alignRight}>{t.shares.gridHead.indexed}</span>
       </div>
       {data.folders.length === 0 ? (
         <EmptyState message={t.shares.empty} />
@@ -128,7 +133,6 @@ export default function Shares() {
             <span className={styles.folderPath}>{f.path}</span>
             <span className={styles.folderDim}>{f.files}</span>
             <span className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
-            <span className={stale ? styles.folderIndexedBad : styles.folderIndexed}>{indexedLabel}</span>
           </div>
         ))
       )}

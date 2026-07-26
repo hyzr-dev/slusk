@@ -61,9 +61,10 @@ function renderShares(client: QueryClient) {
 
 describe('loading state', () => {
   it('renders only a loading placeholder before data arrives', () => {
-    // PageHeading is gone from this view (TUI reskin, #198), so there is no
-    // <h1> to assert on here — the loading placeholder text is the only
-    // signal available before the query settles.
+    // PageHeading is gone from this view (TUI reskin, #198); Layout supplies
+    // the route's <h1> instead, outside this component, so it isn't a
+    // signal this test can use — the loading placeholder text is the only
+    // one available before the query settles.
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     renderShares(newClient());
     expect(screen.getByText(t.jobs.loading)).toBeInTheDocument();
@@ -110,11 +111,21 @@ describe('loaded state', () => {
     expect(screen.getByText('742.0 GB')).toBeInTheDocument();
   });
 
-  it('shows "Never" when indexedAt is empty', () => {
+  it('shows "Never" in the header summary when indexedAt is empty', () => {
+    // indexedAt is a SharesReport-level aggregate, not a per-folder value
+    // (ShareFolder carries no equivalent field) — it belongs in the header
+    // summary, not as a folder-grid column, so this asserts on the summary.
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport({ indexedAt: '' }));
     renderShares(client);
-    expect(screen.getAllByText(t.shares.statNever).length).toBeGreaterThan(0);
+    expect(screen.getByText(t.shares.indexedAt(t.shares.statNever))).toBeInTheDocument();
+  });
+
+  it('does not render an INDEXED column in the folder grid', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.queryByText('INDEXED')).not.toBeInTheDocument();
   });
 
   it('shows the scanning indicator and disables the button', () => {

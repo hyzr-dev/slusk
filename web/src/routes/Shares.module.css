@@ -58,6 +58,9 @@
   gap: 14px;
 }
 
+.indexedOk { font-size: 11px; color: var(--dim); }
+.indexedBad { font-size: 11px; color: var(--bad); }
+
 .indexing {
   display: inline-flex;
   align-items: center;
@@ -104,7 +107,7 @@
 
 .folderGridHead {
   display: grid;
-  grid-template-columns: 1fr 80px 90px 110px;
+  grid-template-columns: 1fr 90px 100px;
   gap: 12px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--line);
@@ -115,7 +118,7 @@
 
 .folderRow {
   display: grid;
-  grid-template-columns: 1fr 80px 90px 110px;
+  grid-template-columns: 1fr 90px 100px;
   gap: 12px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--line);
@@ -132,8 +135,6 @@
 }
 
 .folderDim { color: var(--dim); text-align: right; font-family: var(--font-mono); }
-.folderIndexed { text-align: right; color: var(--dim); }
-.folderIndexedBad { text-align: right; color: var(--bad); }
 
 .uploadsSection { margin-top: 0; }
 
