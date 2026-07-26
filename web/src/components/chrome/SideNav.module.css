@@ -38,3 +38,30 @@
 .label { flex: 1; text-align: left; }
 .badge { font-size: 10px; color: var(--text-dim); }
 .badgeAlert { font-size: 10px; color: var(--bad); }
+
+/* On a phone the fixed desktop rail would consume nearly half the viewport.
+   Keep every destination available in a horizontally scrollable strip instead
+   of hiding the navigation; the taller links also provide a mobile-sized tap
+   target. Desktop retains the grouped rail above this breakpoint. */
+@media (max-width: 640px) {
+  .nav {
+    width: 100%;
+    flex: 0 0 auto;
+    flex-direction: row;
+    padding: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nav > div { display: contents; }
+  .group { display: none; }
+
+  .item,
+  .itemActive {
+    width: auto;
+    min-height: 44px;
+    flex: 0 0 auto;
+  }
+}

@@ -166,3 +166,26 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* Stack the peers above the thread once the shell becomes a mobile nav strip.
+   A bounded, scrolling rail leaves the active thread and composer most of the
+   viewport even when many conversations exist. */
+@media (max-width: 640px) {
+  .root { flex-direction: column; }
+
+  .rail {
+    width: 100%;
+    height: min(32%, 190px);
+    flex: 0 0 min(32%, 190px);
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .row,
+  .rowActive { min-height: 44px; }
+
+  .pane {
+    width: 100%;
+    min-height: 0;
+  }
+}
