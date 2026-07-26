@@ -68,10 +68,11 @@ cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test a
   issues or PRs.
 - `testenv/.env` and `testenv/runtime/` are gitignored and hold real credentials.
 
-The observable surfaces are the dashboard on `:9090`, `/status`, `/api/events` (SSE) and
-the Postgres database — `album_jobs` is the pipeline's only contact surface between
-modules, so `SELECT state, count(*) FROM album_jobs GROUP BY state` is a literal
-snapshot of the state machine, and `job_events` is the per-job history.
+The observable surfaces are the dashboard on `:9090`, `/status`, `/api/events` (plain
+JSON, polled — there is no SSE anywhere yet; that is #161) and the Postgres
+database — `album_jobs` is the pipeline's only contact surface between modules,
+so `SELECT state, count(*) FROM album_jobs GROUP BY state` is a literal snapshot
+of the state machine, and `job_events` is the per-job history.
 
 ## Configuration is strict
 
@@ -152,10 +153,16 @@ internal/app/        use cases shared between HTTP and pipeline (Jobs.Cancel etc
 web/                 React SPA source, built into internal/observ/web/dist
 ```
 
-Adapters map their wire types to `internal/core` at the boundary; `internal/pipeline`
-imports only `context`, `time` and `core`, so backends can be swapped without touching
-use cases. `internal/observ` deliberately does not import `internal/soulseek` — it
-declares its own transport types and `cmd/slskdarr/main.go` adapts between them.
+Adapters map their wire types to `internal/core` at the boundary. `internal/pipeline`
+owns every interface it consumes — `DownloadingStore`, `PeerSearcher`, `MetricsSink`
+and the rest are declared next to their consumer, and `cmd/slskdarr/main.go` injects
+the concrete types — so backends can be swapped without touching use cases. It never
+imports `internal/observ`, but the reverse wiring is normal and already in place:
+`observ.Metrics` satisfies `pipeline.MetricsSink`. A new observation port follows that
+same shape (nil sink = no-op), not a new import.
+
+`internal/observ` deliberately does not import `internal/soulseek` — it declares its
+own transport types and `main.go` adapts between them.
 
 ## Frontend build chain
 
