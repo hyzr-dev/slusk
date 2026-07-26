@@ -5,8 +5,10 @@ wanted albums, searches Soulseek, downloads candidates, and hands finished album
 to Lidarr for import. Unlike soularr it keeps persistent state, so a restart does not
 strand in-flight downloads.
 
-Go 1.26.3. React 19 + TypeScript in `web/`. Postgres or SQLite via `modernc.org/sqlite`
-(no cgo).
+Go 1.26.3. React 19 + TypeScript in `web/`. Postgres only — `internal/store` opens `pgx`
+and nothing else, and the migration runner takes a `pg_advisory_lock`. SQLite survives
+solely in `cmd/sqlite2pg`, the one-off tool that reads a legacy SQLite file and writes it
+into Postgres.
 
 ## Build and test
 
