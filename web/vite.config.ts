@@ -50,5 +50,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test-setup.ts',
+    // Vitest defaults to 5s per test. Several Settings.test.tsx cases drive
+    // fake timers through the save-then-restart-poll sequence and exceed that
+    // under a full parallel run — on a loaded machine or a CI runner they time
+    // out while passing comfortably in isolation. This raises the wall-clock
+    // allowance only; no assertion is relaxed and no test is skipped. A test
+    // that genuinely hangs still fails, just 15s later.
+    testTimeout: 15_000,
   },
 });
