@@ -4,6 +4,12 @@
   border-bottom: 1px solid var(--line);
 }
 
+.placeholder {
+  padding: 16px;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
 .depCard {
   padding: 15px 16px;
   border-right: 1px solid var(--line);

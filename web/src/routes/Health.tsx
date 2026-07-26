@@ -8,7 +8,7 @@ import { t } from '../strings';
 import styles from './Health.module.css';
 
 export default function Health() {
-  const { data: status } = useStatus();
+  const { data: status, isPending: statusPending } = useStatus();
   const { data: charts } = useCharts();
   const { data: uploads } = useUploads();
   const { data: shares } = useShares();
@@ -34,7 +34,14 @@ export default function Health() {
   return (
     <>
       <div className={styles.depGrid}>
-        {names.length === 0 ? (
+        {statusPending ? (
+          // The first fetch hasn't resolved yet, so `names` being empty here
+          // means "not established", not "there are no modules" — those are
+          // different facts and must not render the same message. Matches
+          // the placeholder idiom Shares.tsx and Setup.tsx use while their
+          // own first fetch is in flight.
+          <div className={styles.placeholder}>{t.jobs.loading}</div>
+        ) : names.length === 0 ? (
           <EmptyState message={t.health.empty} />
         ) : (
           names.map((name) => {
