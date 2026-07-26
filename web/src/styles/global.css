@@ -19,8 +19,8 @@ body {
 ::selection { background: rgba(255, 255, 255, 0.16); }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: #1e2226; }
-::-webkit-scrollbar-thumb:hover { background: #2c3237; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 
 input, select, button { font-family: inherit; }
 

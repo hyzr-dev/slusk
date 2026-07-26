@@ -33,5 +33,12 @@
   --tick-off: #1d2125;
   --tick-queued: #2a2f34;
 
+  /* Browser chrome rather than content, so the mock has nothing to say about
+     these. Named here anyway: a hex in global.css is invisible to any check
+     that reasons about the palette, and these two sit between --line and
+     --line2 without matching either. */
+  --scroll-thumb: #1e2226;
+  --scroll-thumb-hover: #2c3237;
+
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 }
