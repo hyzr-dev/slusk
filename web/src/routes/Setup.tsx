@@ -2,6 +2,7 @@ import { useConfig, useShares, useTestConnection } from '../api/queries';
 import type { UseMutationResult } from '@tanstack/react-query';
 import type { ConnectionTestResult } from '../api/types';
 import Button from '../components/tui/Button';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
 import styles from './Setup.module.css';
@@ -53,13 +54,17 @@ function connectionState(
   return { state: 'untested' };
 }
 
-function StepHeader({ num, title, state, onTest }: { num: number; title: string; state: StepState; onTest?: () => void }) {
+// `state` is optional: step 3's badge would otherwise have to assert 'ok' or
+// 'untested' before /api/shares has answered, which is a conclusion the page
+// cannot back up yet. Omitting the badge is preferred over inventing a
+// StepState for "unknown" — the step's own QueryNotice already says so.
+function StepHeader({ num, title, state, onTest }: { num: number; title: string; state?: StepState; onTest?: () => void }) {
   return (
     <SectionHeader
       label={`${num}  ${title}`}
       meta={
         <span className={styles.stepMeta}>
-          <span className={STATE_CLASS[state]}>{STATE_LABEL[state]}</span>
+          {state && <span className={STATE_CLASS[state]}>{STATE_LABEL[state]}</span>}
           {onTest && (
             <Button disabled={state === 'testing'} onClick={onTest}>
               {t.setup.test}
@@ -80,16 +85,26 @@ function ErrorCard({ message }: { message: string }) {
 }
 
 export default function Setup() {
-  const { data: config } = useConfig();
-  const { data: shares } = useShares();
+  const configQuery = useConfig();
+  const sharesQuery = useShares();
+  const config = configQuery.data;
+  const shares = sharesQuery.data;
+  // config gates the page: every step below reads it, so there is no useful
+  // partial render. shares feeds step 3 only and gates there.
+  const configPhase = queryPhase(configQuery);
+  const sharesPhase = queryPhase(sharesQuery);
   const soulseekTest = useTestConnection('soulseek');
   const lidarrTest = useTestConnection('lidarr');
 
   // Config only changes when the file changes (staleTime: Infinity), so
   // there is nothing meaningful to render before the first response — a
-  // brief loading placeholder beats flashing every step as NOT ENABLED.
+  // brief loading notice beats flashing every step as NOT ENABLED.
   if (!config) {
-    return <div className={styles.wrap}>{t.jobs.loading}</div>;
+    return (
+      <div className={styles.wrap}>
+        <QueryNotice phase={configPhase} />
+      </div>
+    );
   }
 
   const soulseekEnabled = config.soulseek.enabled;
@@ -103,6 +118,8 @@ export default function Setup() {
         <div className={styles.title}>{t.setup.title}</div>
         <div className={styles.intro}>{t.setup.intro}</div>
       </div>
+
+      <QueryNotice phase={configPhase} />
 
       <div className={styles.step}>
         <StepHeader
@@ -140,7 +157,8 @@ export default function Setup() {
       </div>
 
       <div className={styles.step}>
-        <StepHeader num={3} title={t.setup.stepShares} state={sharesState} />
+        <StepHeader num={3} title={t.setup.stepShares} state={hasData(sharesPhase) ? sharesState : undefined} />
+        <QueryNotice phase={sharesPhase} />
         <div className={styles.fields}>
           <div className={styles.field}>
             <span className={styles.fieldKey}>{t.setup.fieldFolders}</span>
@@ -148,7 +166,9 @@ export default function Setup() {
           </div>
           <div className={styles.field}>
             <span className={styles.fieldKey}>{t.setup.fieldIndex}</span>
-            <span className={styles.fieldValue}>{t.setup.indexCount(shares?.files ?? 0)}</span>
+            <span className={styles.fieldValue}>
+              {hasData(sharesPhase) ? t.setup.indexCount(shares?.files ?? 0) : '—'}
+            </span>
           </div>
           <div className={styles.field}>
             <span className={styles.fieldValue}>{t.setup.sharesNoTest}</span>

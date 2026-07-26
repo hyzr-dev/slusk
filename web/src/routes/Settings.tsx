@@ -4,15 +4,22 @@ import { apiGet, ApiError } from '../api/client';
 import { queryKeys, useConfig, useTestConnection, useUpdateConfig } from '../api/queries';
 import type { AppConfig, ConfigUpdateRequest, SharedFolderDTO } from '../api/types';
 import Button from '../components/tui/Button';
+import QueryNotice, { queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
 import styles from './Settings.module.css';
 
 export default function Settings() {
-  const { data: config } = useConfig();
+  const configQuery = useConfig();
+  const config = configQuery.data;
+  const phase = queryPhase(configQuery);
 
   return (
     <>
+      {/* The connections section below reads config only to decide whether to
+          offer the Soulseek test, so it renders throughout — but until #201
+          nothing said why the ~40-field form above it was missing. */}
+      <QueryNotice phase={phase} />
       {config && !config.writable && (
         <div className={styles.notice}>{t.settings.notWritableNotice}</div>
       )}

@@ -1,5 +1,6 @@
 import { useUploads } from '../api/queries';
 import EmptyState from '../components/tui/EmptyState';
+import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import Ticks from '../components/tui/Ticks';
 import tagStyles from '../components/tui/Tag.module.css';
@@ -16,20 +17,32 @@ const UPLOAD_TICKS = 104;
 // branch above it. Mounting <UploadsPanel /> only inside the enabled branch
 // ties this query's lifetime to the panel actually being on screen.
 export default function UploadsPanel() {
-  const { data } = useUploads();
+  const uploadsQuery = useUploads();
+  const { data } = uploadsQuery;
+  const phase = queryPhase(uploadsQuery);
 
-  if (!data || !data.enabled) return null;
+  // The one case that still renders nothing: the server has answered and
+  // said it is not serving uploads. That is a settled fact about a feature
+  // that is off, and Shares renders its own disabledNotice when the whole
+  // native-sharing feature is off. Unresolved and failed no longer land here
+  // (see the QueryNotice below), so an absent panel now means exactly this
+  // and nothing else (issue #201).
+  if (data && !data.enabled) return null;
 
   return (
     <div className={styles.uploadsSection}>
       <SectionHeader
         label={t.uploads.panelTitle}
-        meta={<span className={styles.slotsBadge}>{t.uploads.slotsInUse(data.active, data.slots)}</span>}
+        // active/slots are unknown until the report arrives; "0 of 0 slots"
+        // would be a claim rather than a placeholder.
+        meta={data && <span className={styles.slotsBadge}>{t.uploads.slotsInUse(data.active, data.slots)}</span>}
       />
 
-      {data.uploads.length === 0 && <EmptyState message={t.uploads.empty} />}
+      <QueryNotice phase={phase} />
 
-      {data.uploads.map((u, i) => {
+      {hasData(phase) && data && data.uploads.length === 0 && <EmptyState message={t.uploads.empty} />}
+
+      {hasData(phase) && data && data.uploads.map((u, i) => {
         // UploadEntry (internal/observ/uploads.go) carries no speed field —
         // unlike a download job there is nothing truthful to show there, so
         // the head line carries only the marker, filename and a real,
@@ -76,7 +89,7 @@ export default function UploadsPanel() {
         );
       })}
 
-      {data.truncated > 0 && <div className={styles.footerNote}>{t.uploads.truncated(data.truncated)}</div>}
+      {data && data.truncated > 0 && <div className={styles.footerNote}>{t.uploads.truncated(data.truncated)}</div>}
     </div>
   );
 }

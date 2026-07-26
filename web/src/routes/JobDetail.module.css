@@ -18,8 +18,6 @@
 
 .actionsWrap { padding: 14px 16px; border-bottom: 1px solid var(--line); }
 
-.placeholder { color: var(--faint); font-size: 11.5px; padding: 10px 16px; }
-
 .attempt { padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 11.5px; }
 .attempt:last-child { border-bottom: none; }
 

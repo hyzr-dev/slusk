@@ -1,0 +1,19 @@
+/* Same type scale as EmptyState — these are the same family of "no content
+   here" line — but left-aligned and tightly padded rather than centred in
+   40px of air, because this one can sit above real content instead of
+   replacing it, and because it lands inside containers as tight as
+   Overview's throughput body and a job expansion's file column. */
+.loading {
+  padding: 10px 16px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+/* --bad, not --faint: a fetch that failed is the one state here the eye must
+   not skim past. Matches the tone Shares.module.css .rescanError uses for a
+   failed write. */
+.failed {
+  padding: 10px 16px;
+  font-size: 11.5px;
+  color: var(--bad);
+}

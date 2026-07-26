@@ -394,7 +394,7 @@ describe('placeholder-data guard', () => {
     // isPlaceholderData: true) and the page would keep showing job 1's
     // attempt, silently mislabelled as job 2's.
     expect(screen.queryByText('peer-one')).not.toBeInTheDocument();
-    expect(screen.getAllByText(t.jobs.loading).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
 
     resolveJob2Detail(makeDetail({ id: 2, attempts: [] }));
 
