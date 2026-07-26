@@ -19,10 +19,13 @@ type transferDetailDTO struct {
 	// exists AND that match is still non-terminal (issue #161) — mirroring
 	// jobDTO.BytesDone's album-level overlay in observ.go, and for the same
 	// reason: the persisted value is only as fresh as the last Downloading
-	// reconcile. A lingering terminal live entry (errored/cancelled/completed,
-	// not yet reconciled away) must not overwrite an already-higher persisted
-	// value with a stale or zero live one. BytesTotal is never overlaid — see
-	// jobDTO.BytesTotal's comment; the same rationale applies per-file.
+	// reconcile. The overlay is max(persisted, live) so a lingering terminal
+	// live entry, or a re-queued transfer whose live BytesDone restarts at a
+	// smaller value than what's already persisted, can never regress the
+	// number backwards — and it is clamped to BytesTotal (clampBytesDone) so
+	// an overlapping live sample can never push the file past 100%.
+	// BytesTotal is never overlaid — see jobDTO.BytesTotal's comment; the same
+	// rationale applies per-file.
 	BytesDone      int64  `json:"bytesDone"`
 	BytesTotal     int64  `json:"bytesTotal"`
 	Retries        int    `json:"retries"`
@@ -98,7 +101,7 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 				// Only overlay BytesDone while the live match is itself
 				// non-terminal — see transferDetailDTO.BytesDone's comment.
 				if lt.State == core.TransferQueued || lt.State == core.TransferInProgress {
-					t.BytesDone = lt.BytesDone
+					t.BytesDone = clampBytesDone(max(tr.BytesDone, lt.BytesDone), tr.BytesTotal)
 				}
 			}
 			a.Transfers[j] = t
@@ -147,13 +150,22 @@ func newLiveTransferIndex(live []core.RemoteTransfer) liveTransferIndex {
 }
 
 // match resolves a store transfer to its live counterpart, preferring the
-// remote id and falling back to username+filename.
+// remote id and falling back to username+filename (matchFile).
 func (idx liveTransferIndex) match(tr core.Transfer) (core.RemoteTransfer, bool) {
 	if tr.SlskdID != "" {
 		if lt, ok := idx.byID[tr.SlskdID]; ok {
 			return lt, true
 		}
 	}
-	lt, ok := idx.byFallback[tr.Username+"\x00"+tr.Filename]
+	return idx.matchFile(tr.Username, tr.Filename)
+}
+
+// matchFile resolves a live transfer by (username, filename) alone — the
+// fallback half of match, factored out for callers that only ever have a
+// candidate file to match on (no persisted core.Transfer, hence no SlskdID
+// to try first): album-level aggregation (aggregateLiveAlbum, albumlive.go)
+// and the SSE stream's per-file view (buildStreamFiles, stream.go).
+func (idx liveTransferIndex) matchFile(username, filename string) (core.RemoteTransfer, bool) {
+	lt, ok := idx.byFallback[username+"\x00"+filename]
 	return lt, ok
 }

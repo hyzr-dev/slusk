@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,24 +17,23 @@ import (
 
 // --- pure function tests ---------------------------------------------------
 
-func TestBuildStreamJobsFiltersNoAttemptAndSorts(t *testing.T) {
-	candidateB := &core.Candidate{Username: "bob", Files: []core.CandidateFile{{Filename: "b.flac", Size: 500}}}
-	candidateA := &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}}
-	jobs := []core.JobView{
-		{Job: core.AlbumJob{ID: 5}, Attempt: candidateB, AlbumBytesTotal: 500, AlbumBytesRemaining: 500},
-		{Job: core.AlbumJob{ID: 1}, Attempt: nil}, // no candidate: excluded
-		{Job: core.AlbumJob{ID: 3}, Attempt: candidateA, AlbumBytesDone: 100, AlbumBytesDoneNonTerminal: 100, AlbumBytesTotal: 1000, AlbumBytesRemaining: 900},
+func TestBuildStreamJobsOnlyIncludesLiveMatchedAndSorts(t *testing.T) {
+	corr := []jobCorrelation{
+		{id: 5, username: "bob", files: []core.CandidateFile{{Filename: "b.flac", Size: 500}}, albumBytesTotal: 500, albumBytesRemaining: 500},
+		{id: 3, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}, albumBytesDone: 100, albumBytesDoneNonTerminal: 100, albumBytesTotal: 1000, albumBytesRemaining: 900},
 	}
 	live := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50, SpeedAverage: 40, BytesDone: 300, QueuePosition: 2},
 	})
 
-	got := buildStreamJobs(jobs, live)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 jobs (id 1 excluded, no candidate), got %d: %+v", len(got), got)
+	got := buildStreamJobs(corr, live)
+	// job 5 has no live match at all (bob never appears in `live`) and must
+	// be omitted entirely — see buildStreamJobs' absence contract.
+	if len(got) != 1 {
+		t.Fatalf("expected 1 job (job 5 has no live match), got %d: %+v", len(got), got)
 	}
-	if got[0].ID != 3 || got[1].ID != 5 {
-		t.Fatalf("expected sorted by id (3, 5), got (%d, %d)", got[0].ID, got[1].ID)
+	if got[0].ID != 3 {
+		t.Fatalf("expected job 3, got %d", got[0].ID)
 	}
 	if got[0].BytesDone != 300 {
 		t.Errorf("job 3 BytesDone = %d, want 300 (live overlay)", got[0].BytesDone)
@@ -44,19 +44,35 @@ func TestBuildStreamJobsFiltersNoAttemptAndSorts(t *testing.T) {
 	if got[0].Speed != 50 || got[0].QueuePosition != 2 {
 		t.Errorf("job 3 speed/queue = %d/%d, want 50/2", got[0].Speed, got[0].QueuePosition)
 	}
-	if got[1].BytesDone != 0 || got[1].Speed != 0 {
-		t.Errorf("job 5 (no live match) = %+v, want zero live fields", got[1])
+}
+
+// TestBuildStreamJobsDropsJobThatLosesItsLiveTransfer is the frontend
+// contract implied by the #161 review's finding #1: a job present in one
+// tick's `jobs` and absent in the next means "no live data right now" — the
+// client must clear its live overlay and fall back to REST-cached values.
+func TestBuildStreamJobsDropsJobThatLosesItsLiveTransfer(t *testing.T) {
+	corr := []jobCorrelation{
+		{id: 3, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}, albumBytesTotal: 1000, albumBytesRemaining: 1000},
+	}
+	withLive := newLiveTransferIndex([]core.RemoteTransfer{
+		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50, BytesDone: 300},
+	})
+	if got := buildStreamJobs(corr, withLive); len(got) != 1 {
+		t.Fatalf("expected job present while its transfer is live, got %d: %+v", len(got), got)
+	}
+
+	withoutLive := newLiveTransferIndex(nil)
+	if got := buildStreamJobs(corr, withoutLive); len(got) != 0 {
+		t.Fatalf("expected job absent once its transfer disappears from live, got %d: %+v", len(got), got)
 	}
 }
 
 func TestBuildStreamFilesOnlyIncludesLiveMatched(t *testing.T) {
-	job := core.JobView{
-		Attempt: &core.Candidate{
-			Username: "alice",
-			Files: []core.CandidateFile{
-				{Filename: "01.flac", Size: 1000},
-				{Filename: "02.flac", Size: 2000}, // not yet enqueued, no live entry
-			},
+	job := jobCorrelation{
+		username: "alice",
+		files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000},
+			{Filename: "02.flac", Size: 2000}, // not yet enqueued, no live entry
 		},
 	}
 	idx := newLiveTransferIndex([]core.RemoteTransfer{
@@ -72,9 +88,9 @@ func TestBuildStreamFilesOnlyIncludesLiveMatched(t *testing.T) {
 	}
 }
 
-func TestBuildStreamFilesNilAttemptYieldsNil(t *testing.T) {
-	if got := buildStreamFiles(core.JobView{}, liveTransferIndex{}); got != nil {
-		t.Errorf("expected nil, got %+v", got)
+func TestBuildStreamFilesNoFilesYieldsEmpty(t *testing.T) {
+	if got := buildStreamFiles(jobCorrelation{}, liveTransferIndex{}); len(got) != 0 {
+		t.Errorf("expected empty, got %+v", got)
 	}
 }
 
@@ -123,22 +139,20 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 	filesA := []streamFileDTO{{Filename: "a.flac", BytesDone: 10}}
 
 	cases := []struct {
-		name                 string
-		prevJobs, nextJobs   []streamJobDTO
-		prevFiles, nextFiles []streamFileDTO
-		prevDown, nextDown   int64
-		newThroughputCount   int
-		want                 bool
+		name               string
+		prev, next         livePayload
+		newThroughputCount int
+		want               bool
 	}{
-		{"nothing changed", jobsA, jobsA, filesA, filesA, 5, 5, 0, false},
-		{"jobs changed", jobsA, jobsB, nil, nil, 0, 0, 0, true},
-		{"down changed", jobsA, jobsA, nil, nil, 5, 6, 0, true},
-		{"files changed", nil, nil, filesA, nil, 0, 0, 0, true},
-		{"only new throughput, nothing else changed", jobsA, jobsA, filesA, filesA, 5, 5, 1, true},
+		{"nothing changed", livePayload{Jobs: jobsA, Files: filesA, Down: 5}, livePayload{Jobs: jobsA, Files: filesA, Down: 5}, 0, false},
+		{"jobs changed", livePayload{Jobs: jobsA}, livePayload{Jobs: jobsB}, 0, true},
+		{"down changed", livePayload{Jobs: jobsA, Down: 5}, livePayload{Jobs: jobsA, Down: 6}, 0, true},
+		{"files changed", livePayload{Files: filesA}, livePayload{}, 0, true},
+		{"only new throughput, nothing else changed", livePayload{Jobs: jobsA, Files: filesA, Down: 5}, livePayload{Jobs: jobsA, Files: filesA, Down: 5}, 1, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := changedSinceLast(tc.prevJobs, tc.nextJobs, tc.prevFiles, tc.nextFiles, tc.prevDown, tc.nextDown, tc.newThroughputCount)
+			got := changedSinceLast(tc.prev, tc.next, tc.newThroughputCount)
 			if got != tc.want {
 				t.Errorf("changedSinceLast(...) = %v, want %v", got, tc.want)
 			}
@@ -147,58 +161,68 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 }
 
 func TestBuildLivePayloadFileScopingByJobID(t *testing.T) {
-	candidate := &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}}
-	jobs := []core.JobView{{Job: core.AlbumJob{ID: 7}, Attempt: candidate, AlbumBytesTotal: 1000, AlbumBytesRemaining: 1000}}
+	corr := []jobCorrelation{{id: 7, username: "alice", files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}, albumBytesTotal: 1000, albumBytesRemaining: 1000}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 500}}
 
-	unscoped := buildLivePayload(jobs, live, 0)
+	unscoped := buildLivePayload(corr, live, 0)
 	if unscoped.Files != nil {
 		t.Errorf("expected nil Files without ?job=, got %+v", unscoped.Files)
 	}
 
-	scoped := buildLivePayload(jobs, live, 7)
+	scoped := buildLivePayload(corr, live, 7)
 	if len(scoped.Files) != 1 || scoped.Files[0].Filename != "01.flac" {
 		t.Errorf("expected 1 file for ?job=7, got %+v", scoped.Files)
 	}
 
-	missing := buildLivePayload(jobs, live, 999)
+	missing := buildLivePayload(corr, live, 999)
 	if missing.Files != nil {
 		t.Errorf("expected nil Files for unknown job id, got %+v", missing.Files)
 	}
 }
 
-// TestLivePayloadHasNoDBOnlyFields is the design's explicit requirement: the
-// stream must never carry DB-only fields like status/state/events/peers at
-// the job/top level. streamFileDTO's own "state" is exempt — it's a live,
-// in-memory RemoteTransfer.State, not a persisted job/candidate state.
-func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
-	payload := livePayload{
-		Jobs:       []streamJobDTO{{ID: 1, BytesDone: 10, BytesTotal: 20, Speed: 5, QueuePosition: 2, ETASeconds: 3}},
-		Files:      []streamFileDTO{{Filename: "a.flac", State: "IN_PROGRESS", BytesDone: 10, BytesTotal: 20, Speed: 5, QueuePosition: 1}},
-		Throughput: []streamThroughputDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}},
-		Down:       5,
+// TestSendLatestReplacesSnapshotButAccumulatesThroughput is issue #161
+// review finding #3: dropping an undelivered payload must not lose its
+// throughput samples, even though the rest of the payload (a full-set
+// snapshot) is freely superseded.
+func TestSendLatestReplacesSnapshotButAccumulatesThroughput(t *testing.T) {
+	ch := make(chan livePayload, 1)
+
+	first := livePayload{Jobs: []streamJobDTO{{ID: 1}}, Down: 10, Throughput: []throughputSampleDTO{{At: "t1"}}}
+	if got := sendLatest(ch, first); len(got.Throughput) != 1 {
+		t.Fatalf("first send: got %+v", got)
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+
+	// Second send while `first` is still sitting unread in ch: its
+	// throughput must survive, prepended to the new payload's.
+	second := livePayload{Jobs: []streamJobDTO{{ID: 2}}, Down: 20, Throughput: []throughputSampleDTO{{At: "t2"}}}
+	merged := sendLatest(ch, second)
+	if merged.Down != 20 || len(merged.Jobs) != 1 || merged.Jobs[0].ID != 2 {
+		t.Errorf("merged snapshot fields = %+v, want second's Jobs/Down (full-set fields are replaced, not merged)", merged)
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if len(merged.Throughput) != 2 || merged.Throughput[0].At != "t1" || merged.Throughput[1].At != "t2" {
+		t.Errorf("merged.Throughput = %+v, want [t1, t2] (first's sample preserved)", merged.Throughput)
 	}
-	for _, forbidden := range []string{"status", "state", "events", "peers"} {
-		if _, ok := raw[forbidden]; ok {
-			t.Errorf("payload top level must not contain %q (DB-only field)", forbidden)
+
+	queued := <-ch
+	if len(queued.Throughput) != 2 {
+		t.Errorf("what's actually queued in ch has %d throughput samples, want 2", len(queued.Throughput))
+	}
+}
+
+func TestSendLatestDeliversDirectlyToEmptyChannel(t *testing.T) {
+	ch := make(chan livePayload, 1)
+	payload := livePayload{Down: 5}
+	got := sendLatest(ch, payload)
+	if got.Down != 5 {
+		t.Errorf("got = %+v, want the payload unchanged", got)
+	}
+	select {
+	case queued := <-ch:
+		if queued.Down != 5 {
+			t.Errorf("queued = %+v, want Down=5", queued)
 		}
-	}
-	var jobsRaw []map[string]json.RawMessage
-	if err := json.Unmarshal(raw["jobs"], &jobsRaw); err != nil {
-		t.Fatalf("unmarshal jobs: %v", err)
-	}
-	for _, forbidden := range []string{"status", "state", "createdAt", "updatedAt", "artist", "title"} {
-		if _, ok := jobsRaw[0][forbidden]; ok {
-			t.Errorf("streamJobDTO must not contain %q (DB-only field)", forbidden)
-		}
+	default:
+		t.Fatal("expected a payload queued in ch")
 	}
 }
 
@@ -208,36 +232,127 @@ func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
 // broadcaster lifecycle directly: started on the first subscriber, still
 // running with two, and stopped only once the last one leaves.
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
-	jobIndex := &jobLiveIndex{}
-	hub := newStreamHub(noopLiveTransfers, noopThroughput, jobIndex, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, time.Hour, time.Hour)
 
 	id1, _, _ := hub.subscribe(context.Background(), 0)
-	if hub.cancel == nil {
+	if !hubRunning(hub) {
 		t.Fatal("expected ticker running after first subscribe")
 	}
 
 	id2, _, _ := hub.subscribe(context.Background(), 0)
-	if len(hub.subs) != 2 {
-		t.Fatalf("expected 2 subs, got %d", len(hub.subs))
+	if n := hubSubCount(hub); n != 2 {
+		t.Fatalf("expected 2 subs, got %d", n)
 	}
-	if hub.cancel == nil {
+	if !hubRunning(hub) {
 		t.Fatal("expected ticker still running with two subscribers")
 	}
 
 	hub.unsubscribe(id1)
-	if hub.cancel == nil {
+	if !hubRunning(hub) {
 		t.Fatal("expected ticker still running with one subscriber left")
 	}
-	if len(hub.subs) != 1 {
-		t.Fatalf("expected 1 sub left, got %d", len(hub.subs))
+	if n := hubSubCount(hub); n != 1 {
+		t.Fatalf("expected 1 sub left, got %d", n)
 	}
 
 	hub.unsubscribe(id2)
-	if hub.cancel != nil {
+	if hubRunning(hub) {
 		t.Fatal("expected ticker stopped after last unsubscribe")
 	}
-	if len(hub.subs) != 0 {
-		t.Fatalf("expected 0 subs left, got %d", len(hub.subs))
+	if n := hubSubCount(hub); n != 0 {
+		t.Fatalf("expected 0 subs left, got %d", n)
+	}
+}
+
+// hubRunning/hubSubCount read streamHub's mutex-guarded fields under its own
+// lock — a bare field read here would itself be a data race in a
+// concurrency test.
+func hubRunning(h *streamHub) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cancel != nil
+}
+
+func hubSubCount(h *streamHub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}
+
+// TestStreamHubTickNoOpAfterContextCancelled is issue #161 review finding #4:
+// a tick running against an already-cancelled context (the run goroutine was
+// parked on h.mu when unsubscribe cancelled it, and a new subscriber
+// registered before this stale tick got the lock) must not send anything or
+// touch subscriber state.
+func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, time.Hour, time.Hour)
+	_, ch, initial := hub.subscribe(context.Background(), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	hub.tick(ctx)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("tick with a cancelled context must not send a frame, got %+v", got)
+	default:
+	}
+
+	hub.mu.Lock()
+	sub := hub.subs[0]
+	hub.mu.Unlock()
+	if sub.last.Down != initial.Down {
+		t.Errorf("subscriber state changed after a no-op tick: last=%+v", sub.last)
+	}
+}
+
+// TestStreamHubTickSendsChangedDataAndSuppressesUnchanged drives the
+// broadcaster's tick() directly across multiple calls with changing and
+// unchanged live data, and asserts on what a subscriber actually receives —
+// covering the gap the #161 review's finding #10 called out: every prior
+// HTTP-level test used tick = time.Hour, so tick() itself was never
+// exercised on the non-empty path.
+func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
+	var down int64 = 100
+	liveFn := func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		return []core.RemoteTransfer{
+			{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, Speed: atomic.LoadInt64(&down)},
+		}, nil
+	}
+	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{{
+			Job:                 core.AlbumJob{ID: 7},
+			Attempt:             &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+			AlbumBytesTotal:     1000,
+			AlbumBytesRemaining: 1000,
+		}}, nil
+	}
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, time.Hour, time.Hour)
+	// subscribe() itself does a synchronous correlation refresh, so the
+	// fixture above is already loaded before the first tick.
+	_, ch, initial := hub.subscribe(context.Background(), 0)
+	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 100 {
+		t.Fatalf("initial payload = %+v, want job 7 at speed 100", initial)
+	}
+
+	// Unchanged data: tick must not enqueue a second frame.
+	hub.tick(context.Background())
+	select {
+	case got := <-ch:
+		t.Fatalf("unchanged tick must not send a frame, got %+v", got)
+	default:
+	}
+
+	// Changed data: tick must enqueue a frame reflecting it.
+	atomic.StoreInt64(&down, 250)
+	hub.tick(context.Background())
+	select {
+	case got := <-ch:
+		if len(got.Jobs) != 1 || got.Jobs[0].Speed != 250 {
+			t.Errorf("changed tick payload = %+v, want job 7 at speed 250", got)
+		}
+	default:
+		t.Fatal("changed tick must send a frame")
 	}
 }
 
@@ -296,12 +411,11 @@ func (r *testStreamRecorder) Code() int {
 
 // newStreamTestServer builds a bare mux with only GET /api/stream registered
 // (via registerStream directly, not NewServer), so tests can pass short
-// tick/heartbeat intervals instead of the real 1s/15s constants.
-func newStreamTestServer(deps ServerDeps, tick, heartbeat time.Duration) (http.Handler, *jobLiveIndex) {
+// tick/correlation/heartbeat intervals instead of the real constants.
+func newStreamTestServer(deps ServerDeps, tick, correlation, heartbeat time.Duration) http.Handler {
 	mux := http.NewServeMux()
-	jobIndex := &jobLiveIndex{}
-	registerStream(mux, deps, jobIndex, deps.Shutdown, tick, heartbeat)
-	return mux, jobIndex
+	registerStream(mux, deps, tick, correlation, heartbeat)
+	return mux
 }
 
 // waitForBody polls rec's recorded body until it contains substr or the
@@ -321,9 +435,9 @@ func waitForBody(t *testing.T, rec *testStreamRecorder, substr string) {
 func TestStreamEndpointSetsHeadersAndSendsFirstPayload(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
-	// Long tick/heartbeat: this test only cares about the immediate first
-	// frame sent at subscribe time, not the periodic ticker.
-	mux, _ := newStreamTestServer(deps, time.Hour, time.Hour)
+	// Long tick/correlation/heartbeat: this test only cares about the
+	// immediate first frame sent at subscribe time, not the periodic timers.
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -360,7 +474,7 @@ func TestStreamEndpointSetsHeadersAndSendsFirstPayload(t *testing.T) {
 func TestStreamEndpointSendsHeartbeatWhenIdle(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
-	mux, _ := newStreamTestServer(deps, time.Hour, 15*time.Millisecond)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, 15*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -384,7 +498,7 @@ func TestStreamEndpointNilLiveTransfersAndThroughputDoesNotPanic(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = nil
 	deps.Throughput = nil
-	mux, _ := newStreamTestServer(deps, 5*time.Millisecond, time.Hour)
+	mux := newStreamTestServer(deps, 5*time.Millisecond, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -405,14 +519,16 @@ func TestStreamEndpointNilLiveTransfersAndThroughputDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestStreamEndpointTwoClientsShareOneLoop is the HTTP-level counterpart of
-// TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe: two concurrent
-// connections against the same mux both get served (and both get their own
-// first payload) without either blocking the other.
-func TestStreamEndpointTwoClientsShareOneLoop(t *testing.T) {
+// TestStreamEndpointTwoClientsBothGetInitialFrame is the HTTP-level
+// counterpart of TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe: two
+// concurrent connections against the same mux both get served (and both get
+// their own first payload) without either blocking the other. It does not
+// itself prove loop sharing — that's TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe's
+// job — only that the HTTP layer doesn't serialize or drop either client.
+func TestStreamEndpointTwoClientsBothGetInitialFrame(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
-	mux, _ := newStreamTestServer(deps, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
@@ -442,7 +558,7 @@ func TestStreamEndpointShutdownClosesConnection(t *testing.T) {
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
 	shutdown := make(chan struct{})
 	deps.Shutdown = shutdown
-	mux, _ := newStreamTestServer(deps, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil)
 	rec := newTestStreamRecorder()
@@ -464,35 +580,42 @@ func TestStreamEndpointShutdownClosesConnection(t *testing.T) {
 
 func TestStreamEndpointInvalidJobIDReturns400(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
-	mux, _ := newStreamTestServer(deps, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/stream?job=not-a-number", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
+	for _, raw := range []string{"not-a-number", "0", "-5"} {
+		t.Run(raw, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/stream?job="+raw, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
 	}
 }
 
-// TestStreamEndpointFedByJobIndex covers the job<->candidate correlation
-// path end to end: seeding jobIndex (as GET /api/jobs would via its side
-// effect, see NewServer) makes ?job=<id> report live per-file data.
-func TestStreamEndpointFedByJobIndex(t *testing.T) {
+// TestStreamEndpointFedByOwnCorrelationRefresh covers the job<->candidate
+// correlation path end to end without any GET /api/jobs call: the hub's
+// deps.Jobs is queried directly by subscribe()'s synchronous refresh, so
+// ?job=<id> reports live per-file data on the very first frame.
+func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) {
 		return []core.RemoteTransfer{
 			{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 250},
 		}, nil
 	}
-	mux, jobIndex := newStreamTestServer(deps, time.Hour, time.Hour)
-	jobIndex.set([]core.JobView{
-		{
-			Job:                 core.AlbumJob{ID: 42},
-			Attempt:             &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
-			AlbumBytesTotal:     1000,
-			AlbumBytesRemaining: 1000,
-		},
-	})
+	deps.Jobs = func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:                 core.AlbumJob{ID: 42},
+				Attempt:             &core.Candidate{Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+				AlbumBytesTotal:     1000,
+				AlbumBytesRemaining: 1000,
+			},
+		}, nil
+	}
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream?job=42", nil).WithContext(ctx)
@@ -509,5 +632,78 @@ func TestStreamEndpointFedByJobIndex(t *testing.T) {
 
 	if !strings.Contains(rec.String(), `"bytesDone":250`) {
 		t.Errorf("expected the live bytesDone (250) in the first payload, got %q", rec.String())
+	}
+}
+
+// TestStreamEndpointRejectsOverCapacity is issue #161 review finding #7: past
+// streamMaxSubscribers open connections, a new one must get a proper 503
+// rather than an unbounded broadcaster fan-out.
+func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+
+	var cancels []context.CancelFunc
+	var dones []chan struct{}
+	for i := 0; i < streamMaxSubscribers; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
+		rec := newTestStreamRecorder()
+		done := make(chan struct{})
+		dones = append(dones, done)
+		go func() { mux.ServeHTTP(rec, req); close(done) }()
+		waitForBody(t, rec, "event: live")
+	}
+	defer func() {
+		for i, cancel := range cancels {
+			cancel()
+			<-dones[i]
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 once at streamMaxSubscribers", rec.Code)
+	}
+}
+
+// TestLivePayloadHasNoDBOnlyFields is the design's explicit requirement: the
+// stream must never carry DB-only fields like status/state/events/peers at
+// the job/top level. Asserted against buildLivePayload's real output (not a
+// hand-built literal) so it actually exercises the builder, not just the
+// struct tags. streamFileDTO's own "state" is exempt — it's a live,
+// in-memory RemoteTransfer.State, not a persisted job/candidate state.
+func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
+	corr := []jobCorrelation{{id: 1, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 20}}, albumBytesTotal: 20, albumBytesRemaining: 20}}
+	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
+	payload := buildLivePayload(corr, live, 1)
+	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, forbidden := range []string{"status", "state", "events", "peers"} {
+		if _, ok := raw[forbidden]; ok {
+			t.Errorf("payload top level must not contain %q (DB-only field)", forbidden)
+		}
+	}
+	var jobsRaw []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["jobs"], &jobsRaw); err != nil {
+		t.Fatalf("unmarshal jobs: %v", err)
+	}
+	if len(jobsRaw) != 1 {
+		t.Fatalf("expected 1 job in payload, got %d", len(jobsRaw))
+	}
+	for _, forbidden := range []string{"status", "state", "createdAt", "updatedAt", "artist", "title"} {
+		if _, ok := jobsRaw[0][forbidden]; ok {
+			t.Errorf("streamJobDTO must not contain %q (DB-only field)", forbidden)
+		}
 	}
 }

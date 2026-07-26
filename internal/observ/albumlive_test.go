@@ -50,7 +50,7 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, queuePos, hasQueue, liveBytesDone := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, queuePos, hasQueue, liveBytesDone, matched := aggregateLiveAlbum(candidate, idx)
 	if speed != 150 {
 		t.Errorf("speed = %d, want 150", speed)
 	}
@@ -63,15 +63,18 @@ func TestAggregateLiveAlbumMatchesOnUsernameAndFile(t *testing.T) {
 	if liveBytesDone != 0 {
 		t.Errorf("liveBytesDone = %d, want 0 (no BytesDone set on the live fixtures)", liveBytesDone)
 	}
+	if !matched {
+		t.Error("matched = false, want true (two files matched a non-terminal live transfer)")
+	}
 }
 
 // TestAggregateLiveAlbumNilCandidateYieldsZero covers a job with no candidate
 // yet.
 func TestAggregateLiveAlbumNilCandidateYieldsZero(t *testing.T) {
 	idx := newLiveTransferIndex([]core.RemoteTransfer{{Username: "alice", Filename: "x", State: core.TransferInProgress, Speed: 100}})
-	speed, speedAvg, queuePos, hasQueue, liveBytesDone := aggregateLiveAlbum(nil, idx)
-	if speed != 0 || speedAvg != 0 || queuePos != 0 || hasQueue || liveBytesDone != 0 {
-		t.Errorf("nil candidate aggregate = (%d, %d, %d, %v, %d), want all zero/false", speed, speedAvg, queuePos, hasQueue, liveBytesDone)
+	speed, speedAvg, queuePos, hasQueue, liveBytesDone, matched := aggregateLiveAlbum(nil, idx)
+	if speed != 0 || speedAvg != 0 || queuePos != 0 || hasQueue || liveBytesDone != 0 || matched {
+		t.Errorf("nil candidate aggregate = (%d, %d, %d, %v, %d, %v), want all zero/false", speed, speedAvg, queuePos, hasQueue, liveBytesDone, matched)
 	}
 }
 
@@ -94,8 +97,8 @@ func TestAggregateLiveAlbumTwoAlbumsSamePeerDoNotContaminate(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speedA, avgA, _, _, _ := aggregateLiveAlbum(albumA, idx)
-	speedB, avgB, _, _, _ := aggregateLiveAlbum(albumB, idx)
+	speedA, avgA, _, _, _, _ := aggregateLiveAlbum(albumA, idx)
+	speedB, avgB, _, _, _, _ := aggregateLiveAlbum(albumB, idx)
 
 	if speedA != 111 || avgA != 100 {
 		t.Errorf("album A aggregate = (speed %d, avg %d), want (111, 100)", speedA, avgA)
@@ -124,12 +127,15 @@ func TestAggregateLiveAlbumOnlyEnqueuedFileContributesSpeed(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, _, hasQueue, _ := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, _, hasQueue, _, matched := aggregateLiveAlbum(candidate, idx)
 	if speed != 100 || speedAvg != 90 {
 		t.Errorf("aggregate = (speed %d, avg %d), want (100, 90) — only the enqueued file counted", speed, speedAvg)
 	}
 	if hasQueue {
 		t.Errorf("hasQueue = true, want false (no matched transfer reports a queue position)")
+	}
+	if !matched {
+		t.Error("matched = false, want true (01.flac matched a non-terminal live transfer)")
 	}
 }
 
@@ -156,12 +162,15 @@ func TestAggregateLiveAlbumIgnoresTerminalTransfers(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	speed, speedAvg, _, _, liveBytesDone := aggregateLiveAlbum(candidate, idx)
+	speed, speedAvg, _, _, liveBytesDone, matched := aggregateLiveAlbum(candidate, idx)
 	if speed != 1000 || speedAvg != 1000 {
 		t.Errorf("speed/avg = (%d, %d), want (1000, 1000) — only file 04's still-progressing transfer counted", speed, speedAvg)
 	}
 	if liveBytesDone != 0 {
 		t.Errorf("liveBytesDone = %d, want 0 (no BytesDone set on the live fixtures)", liveBytesDone)
+	}
+	if !matched {
+		t.Error("matched = false, want true (file 04 matched a non-terminal live transfer)")
 	}
 }
 
@@ -186,8 +195,38 @@ func TestAggregateLiveAlbumSumsLiveBytesDoneOfNonTerminalOnly(t *testing.T) {
 	}
 	idx := newLiveTransferIndex(live)
 
-	_, _, _, _, liveBytesDone := aggregateLiveAlbum(candidate, idx)
+	_, _, _, _, liveBytesDone, _ := aggregateLiveAlbum(candidate, idx)
 	if liveBytesDone != 400 {
 		t.Errorf("liveBytesDone = %d, want 400 (only the in-progress file's live bytes)", liveBytesDone)
+	}
+}
+
+// TestOverlayBytesDoneClampsToBytesTotal is issue #161 review finding #6: an
+// overlaid value must never exceed bytesTotal, even if the live/persisted
+// arithmetic would otherwise push past it (a completed transfer persisted at
+// its full size reappearing live at a smaller in-progress value).
+func TestOverlayBytesDoneClampsToBytesTotal(t *testing.T) {
+	// persistedDone=1000 (all from a non-terminal transfer), liveDone=1300 >
+	// bytesTotal=1000: overlay alone would report 1300, past 100%.
+	if got := overlayBytesDone(1000, 1000, 1300, 1000); got != 1000 {
+		t.Errorf("overlayBytesDone(...) = %d, want 1000 (clamped)", got)
+	}
+}
+
+// TestOverlayBytesDoneUnknownTotalDisablesClamp covers bytesTotal == 0
+// (unknown, not empty — see clampBytesDone): the clamp must not force the
+// result down to 0.
+func TestOverlayBytesDoneUnknownTotalDisablesClamp(t *testing.T) {
+	if got := overlayBytesDone(500, 500, 700, 0); got != 700 {
+		t.Errorf("overlayBytesDone(...) = %d, want 700 (bytesTotal=0 disables the clamp)", got)
+	}
+}
+
+// TestOverlayBytesDoneNeverRegressesBelowPersisted covers the lower bound:
+// when the live term can't beat the persisted figure (no live match this
+// tick), the persisted value wins.
+func TestOverlayBytesDoneNeverRegressesBelowPersisted(t *testing.T) {
+	if got := overlayBytesDone(500, 500, 0, 1000); got != 500 {
+		t.Errorf("overlayBytesDone(...) = %d, want 500 (persisted floor)", got)
 	}
 }

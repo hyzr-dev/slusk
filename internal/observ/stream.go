@@ -4,8 +4,9 @@
 // ?job=<id> is set; recent throughput samples; and the aggregate current
 // download speed. Everything Postgres-backed keeps being served by REST as
 // today — see the design doc referenced from issue #161 for the full
-// rationale of that split, and jobLiveIndex below for how per-job
-// correlation is derived without the stream ever running its own DB query.
+// rationale of that split, and streamHub's correlation cache below for how
+// per-job correlation is derived without every tick running its own DB
+// query.
 package observ
 
 import (
@@ -13,7 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -32,11 +33,46 @@ import (
 // before the PR merges, which a 1s polling cadence isn't worth.
 const streamInterval = time.Second
 
-// streamHeartbeatInterval is how often an otherwise-idle stream (nothing
-// changed since the last tick) gets a bare SSE comment line, so a dead
-// connection can't be mistaken for a quiet one and so intermediary proxies
-// don't time out the idle connection.
+// streamCorrelationInterval is how often the hub refreshes its own
+// job<->candidate correlation cache (see jobCorrelation) from deps.Jobs,
+// independent of whether any client happens to be polling GET /api/jobs —
+// see the #161 review's finding that piggybacking the cache on that
+// handler's side effect made GET /api/stream silently degrade whenever
+// nobody was polling /api/jobs, and could serve a job's *wrong* candidate
+// for a full poll interval after Selecting activates a replacement. It is
+// deliberately slower than streamInterval: the correlation only needs to be
+// as fresh as the pipeline modules that write it (Selecting activates a new
+// candidate on its own multi-second tick), not per-second.
+const streamCorrelationInterval = 5 * time.Second
+
+// streamRetryInterval is the SSE `retry:` value the server suggests to
+// EventSource for reconnect delay. It is its own constant, distinct from
+// streamInterval, so a backend restart doesn't have every open tab
+// reconnecting once a second — see registerStream.
+const streamRetryInterval = 5 * time.Second
+
+// streamHeartbeatInterval is how often a bare SSE comment line is sent, so a
+// dead connection can't be mistaken for a live one and so intermediary
+// proxies don't time out the connection. The heartbeat ticker runs
+// unconditionally for the life of the connection — it is not reset by data
+// frames — so a busy connection also emits it alongside its live events.
 const streamHeartbeatInterval = 15 * time.Second
+
+// streamFetchTimeout bounds each tick's calls into deps.LiveTransfers,
+// deps.Throughput and deps.Jobs. Without it, a single hung call (the slskd
+// backend is HTTP; a stalled request blocks until its own client timeout)
+// would stall the shared broadcaster's one goroutine for every subscriber,
+// while heartbeats kept flowing on already-open connections — the stream
+// looks alive but is frozen. Well under streamInterval so a timed-out fetch
+// still leaves room for the next tick to run on schedule.
+const streamFetchTimeout = 500 * time.Millisecond
+
+// streamMaxSubscribers caps concurrent open GET /api/stream connections.
+// Reachable unauthenticated whenever cfg.Observ.AuthToken is empty (see
+// cmd/slskdarr/main.go's authenticator wiring) — this is not primarily an
+// abuse defense but a bound on the shared broadcaster's per-tick fan-out
+// work and memory.
+const streamMaxSubscribers = 200
 
 // streamJobDTO is one job's live aggregate, served in livePayload.Jobs.
 // Fields mirror jobDTO's own live fields (observ.go) exactly, computed via
@@ -65,83 +101,98 @@ type streamFileDTO struct {
 	QueuePosition uint32 `json:"queuePosition,omitempty"`
 }
 
-// streamThroughputDTO is one throughput sample, served in
-// livePayload.Throughput. Same shape as charts.go's throughputSampleDTO;
-// kept as its own type rather than reused so the two packages' JSON shapes
-// can evolve independently even though they start identical.
-type streamThroughputDTO struct {
-	At              string `json:"at"`
-	BytesPerSecond  int64  `json:"bytesPerSecond"`
-	ActiveTransfers int    `json:"activeTransfers"`
-}
-
 // livePayload is the JSON body of every `event: live` SSE frame. Every field
-// here must be answerable from in-memory data only — deps.LiveTransfers and
-// deps.Throughput, plus the job<->candidate correlation cached in
-// jobLiveIndex — never a fresh Postgres query. There is deliberately no
+// here is populated purely from in-memory data — deps.LiveTransfers and
+// deps.Throughput, plus the job<->candidate correlation cached by streamHub
+// (see jobCorrelation) — but that cache is itself refreshed from deps.Jobs
+// (Postgres) on its own slow timer (streamCorrelationInterval): the
+// broadcaster's per-tick loop never issues a query, though the correlation
+// it reads was itself last derived from one. There is deliberately no
 // status/state/events/peers field at the job level: that is exactly the
 // REST/stream split issue #161 draws (see this file's package comment).
 type livePayload struct {
 	Jobs       []streamJobDTO        `json:"jobs"`
 	Files      []streamFileDTO       `json:"files,omitempty"`
-	Throughput []streamThroughputDTO `json:"throughput,omitempty"`
+	Throughput []throughputSampleDTO `json:"throughput,omitempty"`
 	Down       int64                 `json:"down"`
 }
 
-// jobLiveIndex caches the job<->candidate correlation the SSE broadcaster
-// needs to turn deps.LiveTransfers (peer + filename, keyed on nothing a
-// stream client recognizes) into per-job/per-file numbers, without the
-// broadcaster ever running a DB query of its own: GET /api/jobs already
-// computes exactly this correlation on every poll (see NewServer's handler),
-// and set is called there as a side effect. Between process start (or a
-// server restart) and the first GET /api/jobs, the stream simply has an
-// empty job list to report — not an error, and never observed in practice
-// since the frontend always fetches the jobs list on mount before or
-// alongside opening the stream.
-type jobLiveIndex struct {
-	mu   sync.RWMutex
-	jobs []core.JobView
+// jobCorrelation is the minimal per-job data the stream hub needs to derive
+// live per-job/per-file numbers from deps.LiveTransfers: a projection of
+// core.JobView down to just what buildStreamJobs/buildStreamFiles read, so
+// the hub's correlation cache doesn't retain a job's full attempt history
+// (title, artist, state, every Attempt.Files down to metadata this endpoint
+// never serves) for the life of the process. Treat every field read-only —
+// files aliases the store's own candidate.Files slice.
+type jobCorrelation struct {
+	id                        int64
+	username                  string
+	files                     []core.CandidateFile
+	albumBytesDone            int64
+	albumBytesDoneNonTerminal int64
+	albumBytesTotal           int64
+	albumBytesRemaining       int64
 }
 
-func (idx *jobLiveIndex) set(jobs []core.JobView) {
-	idx.mu.Lock()
-	idx.jobs = jobs
-	idx.mu.Unlock()
-}
-
-func (idx *jobLiveIndex) snapshot() []core.JobView {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	return idx.jobs
-}
-
-func findJobView(jobs []core.JobView, id int64) (core.JobView, bool) {
-	for _, v := range jobs {
-		if v.Job.ID == id {
-			return v, true
-		}
-	}
-	return core.JobView{}, false
-}
-
-// buildStreamJobs computes one streamJobDTO per job that currently has a
-// candidate — a job with none has nothing live to report, matching jobDTO's
-// own omitempty rationale. Sorted by job ID so tick-to-tick comparison in
-// changedSinceLast is independent of jobLiveIndex's own ordering (GET
-// /api/jobs sorts by updated_at, which reorders on every write).
-func buildStreamJobs(cachedJobs []core.JobView, idx liveTransferIndex) []streamJobDTO {
-	out := make([]streamJobDTO, 0, len(cachedJobs))
-	for _, v := range cachedJobs {
+// projectJobCorrelation converts the store's full JobView down to
+// jobCorrelation, dropping jobs with no candidate — they have nothing live
+// to report until Selecting activates one, at which point the next refresh
+// (streamCorrelationInterval) picks it up.
+func projectJobCorrelation(views []core.JobView) []jobCorrelation {
+	out := make([]jobCorrelation, 0, len(views))
+	for _, v := range views {
 		if v.Attempt == nil {
 			continue
 		}
-		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone := aggregateLiveAlbum(v.Attempt, idx)
+		out = append(out, jobCorrelation{
+			id:                        v.Job.ID,
+			username:                  v.Attempt.Username,
+			files:                     v.Attempt.Files,
+			albumBytesDone:            v.AlbumBytesDone,
+			albumBytesDoneNonTerminal: v.AlbumBytesDoneNonTerminal,
+			albumBytesTotal:           v.AlbumBytesTotal,
+			albumBytesRemaining:       v.AlbumBytesRemaining,
+		})
+	}
+	return out
+}
+
+func findJobCorrelation(jobs []jobCorrelation, id int64) (jobCorrelation, bool) {
+	for _, v := range jobs {
+		if v.id == id {
+			return v, true
+		}
+	}
+	return jobCorrelation{}, false
+}
+
+// buildStreamJobs computes one streamJobDTO per job that currently has at
+// least one matched, non-terminal live transfer (aggregateLiveAlbum's
+// matched return) — a job with none has nothing live to report right now,
+// and is simply omitted from the set rather than sent with all-zero live
+// fields. That omission is a contract with the frontend: absent from `jobs`
+// means "no live data currently" and the client must fall back to its
+// REST-cached (persisted) bytes/speed/etc for that job, exactly as it would
+// before the job's first live tick or after its last one — see livePayload's
+// "absence = removed" semantics, and the #161 review's finding #1 for why
+// (the unfiltered set was unbounded by the number of jobs ever processed,
+// not the number of jobs with something to report). Sorted by job ID so
+// tick-to-tick comparison in changedSinceLast is independent of the
+// correlation cache's own ordering.
+func buildStreamJobs(corr []jobCorrelation, idx liveTransferIndex) []streamJobDTO {
+	out := make([]streamJobDTO, 0, len(corr))
+	for _, c := range corr {
+		candidate := &core.Candidate{Username: c.username, Files: c.files}
+		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone, matched := aggregateLiveAlbum(candidate, idx)
+		if !matched {
+			continue
+		}
 		dto := streamJobDTO{
-			ID:         v.Job.ID,
-			BytesDone:  overlayBytesDone(v.AlbumBytesDone, v.AlbumBytesDoneNonTerminal, liveBytesDone),
-			BytesTotal: v.AlbumBytesTotal,
+			ID:         c.id,
+			BytesDone:  overlayBytesDone(c.albumBytesDone, c.albumBytesDoneNonTerminal, liveBytesDone, c.albumBytesTotal),
+			BytesTotal: c.albumBytesTotal,
 			Speed:      speed,
-			ETASeconds: etaSeconds(v.AlbumBytesRemaining, speedAvg),
+			ETASeconds: etaSeconds(c.albumBytesRemaining, speedAvg),
 		}
 		if hasQueuePosition {
 			dto.QueuePosition = queuePosition
@@ -152,17 +203,14 @@ func buildStreamJobs(cachedJobs []core.JobView, idx liveTransferIndex) []streamJ
 	return out
 }
 
-// buildStreamFiles computes one streamFileDTO per file of job's current
-// candidate that has a live match. A file not yet enqueued (no live entry at
-// all) is simply absent — consistent with livePayload's "absence = removed"
+// buildStreamFiles computes one streamFileDTO per file of job's candidate
+// that has a live match. A file not yet enqueued (no live entry at all) is
+// simply absent — consistent with livePayload's "absence = removed"
 // semantics, same as every other live-set field.
-func buildStreamFiles(job core.JobView, idx liveTransferIndex) []streamFileDTO {
-	if job.Attempt == nil {
-		return nil
-	}
-	out := make([]streamFileDTO, 0, len(job.Attempt.Files))
-	for _, f := range job.Attempt.Files {
-		lt, ok := idx.byFallback[job.Attempt.Username+"\x00"+f.Filename]
+func buildStreamFiles(job jobCorrelation, idx liveTransferIndex) []streamFileDTO {
+	out := make([]streamFileDTO, 0, len(job.files))
+	for _, f := range job.files {
+		lt, ok := idx.matchFile(job.username, f.Filename)
 		if !ok {
 			continue
 		}
@@ -185,8 +233,8 @@ func buildStreamFiles(job core.JobView, idx liveTransferIndex) []streamFileDTO {
 // sumDownSpeed is the stream's `down` field: total live download throughput
 // summed across every non-terminal transfer, computed directly from
 // deps.LiveTransfers with no job correlation needed — unlike buildStreamJobs
-// it doesn't depend on jobLiveIndex, so it is accurate even before the first
-// GET /api/jobs poll has populated the cache. Non-terminal only, mirroring
+// it doesn't depend on the correlation cache, so it is accurate even before
+// the first correlation refresh has run. Non-terminal only, mirroring
 // aggregateLiveAlbum: a lingering terminal transfer's stale speed reading
 // must not inflate the header's total.
 func sumDownSpeed(live []core.RemoteTransfer) int64 {
@@ -202,32 +250,22 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 
 // buildLivePayload computes one subscriber's live snapshot (everything but
 // Throughput, which is merged in by the caller — see newThroughputSince)
-// from already-fetched inputs: cachedJobs (from jobLiveIndex), live (this
-// tick's deps.LiveTransfers), and jobID (0 for the unscoped dashboard
-// stream, >0 for a ?job= scoped subscriber). Pure and I/O-free by
+// from already-fetched inputs: cachedJobs (the hub's correlation cache),
+// live (this tick's deps.LiveTransfers), and jobID (0 for the unscoped
+// dashboard stream, >0 for a ?job= scoped subscriber). Pure and I/O-free by
 // construction, so it is table-testable without a server.
-func buildLivePayload(cachedJobs []core.JobView, live []core.RemoteTransfer, jobID int64) livePayload {
+func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64) livePayload {
 	idx := newLiveTransferIndex(live)
 	payload := livePayload{
 		Jobs: buildStreamJobs(cachedJobs, idx),
 		Down: sumDownSpeed(live),
 	}
 	if jobID > 0 {
-		if job, ok := findJobView(cachedJobs, jobID); ok {
+		if job, ok := findJobCorrelation(cachedJobs, jobID); ok {
 			payload.Files = buildStreamFiles(job, idx)
 		}
 	}
 	return payload
-}
-
-// toStreamThroughputDTO formats throughput samples for the wire, same
-// shape/format as charts.go's toThroughputDTO.
-func toStreamThroughputDTO(samples []core.ThroughputSample) []streamThroughputDTO {
-	out := make([]streamThroughputDTO, len(samples))
-	for i, s := range samples {
-		out[i] = streamThroughputDTO{At: s.At.Format(timeFormat), BytesPerSecond: s.BytesPerSecond, ActiveTransfers: s.ActiveTransfers}
-	}
-	return out
 }
 
 // newThroughputSince returns the suffix of samples (oldest-first, per
@@ -246,22 +284,23 @@ func newThroughputSince(samples []core.ThroughputSample, since time.Time) []core
 }
 
 // changedSinceLast decides whether a subscriber needs a fresh live frame:
-// either its per-job/per-file/down state differs from what it last
-// received, or there is at least one new throughput sample (newThroughputCount
-// > 0) — throughput can trigger a send even when nothing else changed, per
+// either its Jobs/Files/Down differ from what it last received (next vs
+// prev — Throughput is not part of the comparison; the caller decides that
+// via newThroughputCount), or there is at least one new throughput sample —
+// throughput can trigger a send even when nothing else changed, per
 // newThroughputSince's doc comment. Pure — no I/O — so it is table-testable
 // without a server or goroutines.
-func changedSinceLast(prevJobs, nextJobs []streamJobDTO, prevFiles, nextFiles []streamFileDTO, prevDown, nextDown int64, newThroughputCount int) bool {
+func changedSinceLast(prev, next livePayload, newThroughputCount int) bool {
 	if newThroughputCount > 0 {
 		return true
 	}
-	if prevDown != nextDown {
+	if prev.Down != next.Down {
 		return true
 	}
-	if !reflect.DeepEqual(prevJobs, nextJobs) {
+	if !slices.Equal(prev.Jobs, next.Jobs) {
 		return true
 	}
-	return !reflect.DeepEqual(prevFiles, nextFiles)
+	return !slices.Equal(prev.Files, next.Files)
 }
 
 // streamSubscriber is one open GET /api/stream connection's mailbox. ch has
@@ -272,24 +311,28 @@ func changedSinceLast(prevJobs, nextJobs []streamJobDTO, prevFiles, nextFiles []
 type streamSubscriber struct {
 	ch    chan livePayload
 	jobID int64
-	// last* remember what this subscriber last received, purely so the
-	// broadcaster can decide (via changedSinceLast) whether the next tick has
-	// anything new for it.
-	lastJobs         []streamJobDTO
-	lastFiles        []streamFileDTO
-	lastDown         int64
+	// last remembers the Jobs/Files/Down this subscriber last had queued for
+	// it (its own Throughput field is unused — see changedSinceLast), purely
+	// so the broadcaster can decide whether the next tick has anything new.
+	last             livePayload
 	lastThroughputAt time.Time
 }
 
 // streamHub is the shared broadcaster behind GET /api/stream: one ticking
 // goroutine feeds every open connection, started on the first subscriber and
 // stopped on the last (see subscribe/unsubscribe) rather than running for
-// the life of the process regardless of whether anyone is watching.
+// the life of the process regardless of whether anyone is watching. The same
+// goroutine also owns the job<->candidate correlation cache (see
+// refreshCorrelation), refreshed on its own slower timer.
 type streamHub struct {
-	liveTransfers LiveTransfersFunc
-	throughput    ThroughputFunc
-	jobIndex      *jobLiveIndex
-	tickInterval  time.Duration
+	jobs                JobsFunc
+	liveTransfers       LiveTransfersFunc
+	throughput          ThroughputFunc
+	tickInterval        time.Duration
+	correlationInterval time.Duration
+
+	corrMu      sync.RWMutex
+	correlation []jobCorrelation
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -297,13 +340,14 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(liveTransfers LiveTransfersFunc, throughput ThroughputFunc, jobIndex *jobLiveIndex, tickInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, tickInterval, correlationInterval time.Duration) *streamHub {
 	return &streamHub{
-		liveTransfers: liveTransfers,
-		throughput:    throughput,
-		jobIndex:      jobIndex,
-		tickInterval:  tickInterval,
-		subs:          make(map[uint64]*streamSubscriber),
+		jobs:                jobs,
+		liveTransfers:       liveTransfers,
+		throughput:          throughput,
+		tickInterval:        tickInterval,
+		correlationInterval: correlationInterval,
+		subs:                make(map[uint64]*streamSubscriber),
 	}
 }
 
@@ -333,24 +377,62 @@ func (h *streamHub) fetchThroughput(ctx context.Context) []core.ThroughputSample
 	return samples
 }
 
+// refreshCorrelation re-derives the job<->candidate correlation cache from
+// h.jobs (deps.Jobs) — the only place GET /api/stream ever queries Postgres,
+// and only on correlationInterval, never on the 1Hz tick. A nil func or an
+// error leaves the existing cache in place rather than clearing it: a
+// transient Postgres hiccup should degrade to slightly-stale correlation,
+// not to no live data at all.
+func (h *streamHub) refreshCorrelation(ctx context.Context) {
+	if h.jobs == nil {
+		return
+	}
+	views, err := h.jobs(ctx)
+	if err != nil {
+		return
+	}
+	corr := projectJobCorrelation(views)
+	h.corrMu.Lock()
+	h.correlation = corr
+	h.corrMu.Unlock()
+}
+
+func (h *streamHub) correlationSnapshot() []jobCorrelation {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.correlation
+}
+
+// atCapacity reports whether streamMaxSubscribers open connections are
+// already registered. Checked by registerStream before committing to a 200
+// response, so a rejection can still be a proper 503 rather than a stream
+// that opens and is then immediately torn down.
+func (h *streamHub) atCapacity() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs) >= streamMaxSubscribers
+}
+
 // subscribe registers a new subscriber (jobID 0 for the unscoped stream)
 // and starts the shared ticker if this is the first one. Returns the
 // subscriber's id (for unsubscribe), its channel, and an immediate snapshot
 // computed synchronously against ctx, so the connection's very first frame
-// doesn't wait for the next tick.
+// doesn't wait for the next tick — including a synchronous correlation
+// refresh, so a subscriber connecting right after process start (or a long
+// idle period with no subscribers, hence no correlation refresh — see run)
+// doesn't have to wait up to correlationInterval for its first useful frame.
 func (h *streamHub) subscribe(ctx context.Context, jobID int64) (id uint64, ch chan livePayload, initial livePayload) {
+	h.refreshCorrelation(ctx)
 	live := h.fetchLive(ctx)
 	throughputSamples := h.fetchThroughput(ctx)
 
-	initial = buildLivePayload(h.jobIndex.snapshot(), live, jobID)
-	initial.Throughput = toStreamThroughputDTO(throughputSamples)
+	initial = buildLivePayload(h.correlationSnapshot(), live, jobID)
+	initial.Throughput = toThroughputDTO(throughputSamples)
 
 	sub := &streamSubscriber{
-		ch:        make(chan livePayload, 1),
-		jobID:     jobID,
-		lastJobs:  initial.Jobs,
-		lastFiles: initial.Files,
-		lastDown:  initial.Down,
+		ch:    make(chan livePayload, 1),
+		jobID: jobID,
+		last:  livePayload{Jobs: initial.Jobs, Files: initial.Files, Down: initial.Down},
 	}
 	if n := len(throughputSamples); n > 0 {
 		sub.lastThroughputAt = throughputSamples[n-1].At
@@ -382,16 +464,22 @@ func (h *streamHub) unsubscribe(id uint64) {
 }
 
 // run is the shared broadcaster goroutine, alive only while at least one
-// subscriber is registered (see subscribe/unsubscribe).
+// subscriber is registered (see subscribe/unsubscribe). It ticks two
+// independent timers: the live-data tick (tickInterval) and the much slower
+// correlation refresh (correlationInterval) — see refreshCorrelation.
 func (h *streamHub) run(ctx context.Context) {
 	ticker := time.NewTicker(h.tickInterval)
 	defer ticker.Stop()
+	corrTicker := time.NewTicker(h.correlationInterval)
+	defer corrTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			h.tick(ctx)
+		case <-corrTicker.C:
+			h.refreshCorrelation(ctx)
 		}
 	}
 }
@@ -400,40 +488,65 @@ func (h *streamHub) run(ctx context.Context) {
 // livePayload's doc comment) and fans it out to every subscriber, each
 // filtered to its own jobID and diffed against its own last-known state.
 func (h *streamHub) tick(ctx context.Context) {
-	live := h.fetchLive(ctx)
-	throughputSamples := h.fetchThroughput(ctx)
-	cachedJobs := h.jobIndex.snapshot()
+	fetchCtx, cancel := context.WithTimeout(ctx, streamFetchTimeout)
+	defer cancel()
+	live := h.fetchLive(fetchCtx)
+	throughputSamples := h.fetchThroughput(fetchCtx)
+	cachedJobs := h.correlationSnapshot()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// ctx is the tick-loop context started by subscribe and stopped by
+	// unsubscribe (h.cancel). If the last subscriber left and a new one
+	// registered while this tick was parked waiting for h.mu — subscribe
+	// starts a new run goroutine on a fresh context the moment the old one's
+	// stop overlaps a new subscribe — this tick belongs to the now-defunct
+	// goroutine: ctx is already cancelled, fetchLive/fetchThroughput above
+	// already returned nil/empty for it, and sending would hand the new
+	// subscriber a spurious all-zero frame and clobber its watermarks. See
+	// the #161 review's finding #4.
+	if ctx.Err() != nil {
+		return
+	}
 	for _, sub := range h.subs {
 		payload := buildLivePayload(cachedJobs, live, sub.jobID)
 		fresh := newThroughputSince(throughputSamples, sub.lastThroughputAt)
-		if !changedSinceLast(sub.lastJobs, payload.Jobs, sub.lastFiles, payload.Files, sub.lastDown, payload.Down, len(fresh)) {
+		next := livePayload{Jobs: payload.Jobs, Files: payload.Files, Down: payload.Down}
+		if !changedSinceLast(sub.last, next, len(fresh)) {
 			continue
 		}
 		if len(fresh) > 0 {
-			payload.Throughput = toStreamThroughputDTO(fresh)
-			sub.lastThroughputAt = fresh[len(fresh)-1].At
+			payload.Throughput = toThroughputDTO(fresh)
 		}
-		sub.lastJobs, sub.lastFiles, sub.lastDown = payload.Jobs, payload.Files, payload.Down
-		sendLatest(sub.ch, payload)
+		sub.last = next
+		queued := sendLatest(sub.ch, payload)
+		if n := len(queued.Throughput); n > 0 {
+			if at, err := time.Parse(timeFormat, queued.Throughput[n-1].At); err == nil {
+				sub.lastThroughputAt = at
+			}
+		}
 	}
 }
 
-// sendLatest delivers payload to ch without ever blocking: ch has capacity
-// 1, and when it's already holding an undelivered payload, that stale
-// payload is dropped in favor of the fresh one rather than queuing or
-// blocking the shared broadcaster on one slow client (see streamSubscriber's
-// doc comment).
-func sendLatest(ch chan livePayload, payload livePayload) {
+// sendLatest delivers payload to ch without ever blocking. ch has capacity
+// 1; when it already holds an undelivered payload, that payload's
+// Jobs/Files/Down are a full snapshot that the fresh payload's own
+// Jobs/Files/Down simply supersede — but its Throughput is not a snapshot,
+// it's a delta-encoded time series (see newThroughputSince), and a sample
+// dropped here can never be resent. So the old payload's Throughput is
+// prepended to payload's rather than discarded, and the caller (tick)
+// advances its watermark from whatever this function actually leaves
+// queued — not from what was merely computed this tick — so a slow reader
+// accumulates un-acked samples across ticks instead of silently losing them.
+func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 	for {
 		select {
 		case ch <- payload:
-			return
+			return payload
 		default:
 			select {
-			case <-ch:
+			case old := <-ch:
+				payload.Throughput = append(old.Throughput, payload.Throughput...)
 			default:
 			}
 		}
@@ -461,21 +574,27 @@ func writeLiveEvent(w http.ResponseWriter, rc *http.ResponseController, payload 
 // expected to land as `event: search` on this same endpoint later, and named
 // events let it do so without touching anything here.
 //
-// tickInterval/heartbeatInterval are parameters rather than reading the
-// streamInterval/streamHeartbeatInterval constants directly so tests can use
-// short durations instead of the real 1s/15s cadence; NewServer's call site
-// passes the real constants.
-func registerStream(mux *http.ServeMux, deps ServerDeps, jobIndex *jobLiveIndex, shutdown <-chan struct{}, tickInterval, heartbeatInterval time.Duration) {
-	hub := newStreamHub(deps.LiveTransfers, deps.Throughput, jobIndex, tickInterval)
+// tickInterval/correlationInterval/heartbeatInterval are parameters rather
+// than reading the streamInterval/streamCorrelationInterval/
+// streamHeartbeatInterval constants directly so tests can use short
+// durations instead of the real cadences; NewServer's call site passes the
+// real constants.
+func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval time.Duration) {
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, tickInterval, correlationInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {
 			id, err := strconv.ParseInt(raw, 10, 64)
-			if err != nil {
+			if err != nil || id <= 0 {
 				http.Error(w, "invalid job id", http.StatusBadRequest)
 				return
 			}
 			jobID = id
+		}
+
+		if hub.atCapacity() {
+			http.Error(w, "too many open streams", http.StatusServiceUnavailable)
+			return
 		}
 
 		rc := http.NewResponseController(w)
@@ -498,7 +617,7 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, jobIndex *jobLiveIndex,
 		// connection means never.
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
-		if _, err := fmt.Fprintf(w, "retry: %d\n\n", tickInterval.Milliseconds()); err != nil || rc.Flush() != nil {
+		if _, err := fmt.Fprintf(w, "retry: %d\n\n", streamRetryInterval.Milliseconds()); err != nil || rc.Flush() != nil {
 			return
 		}
 
@@ -515,7 +634,7 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, jobIndex *jobLiveIndex,
 			select {
 			case <-r.Context().Done():
 				return
-			case <-shutdown:
+			case <-deps.Shutdown:
 				return
 			case payload := <-ch:
 				if !writeLiveEvent(w, rc, payload) {

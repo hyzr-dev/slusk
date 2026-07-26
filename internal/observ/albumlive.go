@@ -33,7 +33,7 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 
 // aggregateLiveAlbum sums the live transfers belonging to candidate's own
 // files — matched exactly on (username, filename ∈ candidate.Files), via
-// idx.byFallback (see liveTransferIndex in jobdetail.go), never on username
+// idx.matchFile (see liveTransferIndex in jobdetail.go), never on username
 // alone, since a peer serving files for two different albums at once would
 // otherwise have both counted on both album rows. Only transfers in a state
 // that can still make progress (core.TransferQueued, core.TransferInProgress)
@@ -43,28 +43,34 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 // Returns the summed instantaneous speed and EWMA-smoothed average speed
 // (for ETA), the minimum queue position among matched transfers that report
 // one (the album's download effectively starts once its first file starts),
-// and liveBytesDone: the summed live BytesDone across those same matched,
+// liveBytesDone: the summed live BytesDone across those same matched,
 // non-terminal transfers — used by toJobDTO to overlay fresh in-memory bytes
-// on top of the persisted, up-to-15s-stale AlbumBytesDone (issue #161).
-// candidate == nil (a job with no candidate yet) yields all zeros /
-// hasQueuePosition false.
+// on top of the persisted, up-to-15s-stale AlbumBytesDone (issue #161) — and
+// matched: whether at least one file matched a non-terminal live transfer at
+// all, independent of whether that transfer happened to report zero
+// speed/bytes. The SSE stream (buildStreamJobs, stream.go) uses matched to
+// decide whether this job belongs in the live set at all; toJobDTO
+// (observ.go) ignores it, since REST always reports every job regardless of
+// live data. candidate == nil (a job with no candidate yet) yields all
+// zeros / false.
 //
 // Remaining bytes are not computed here: callers get them from
 // core.JobView.AlbumBytesRemaining (store-computed — see
 // internal/store/dashboard.go's jobViewSelect and the field comment on
 // AlbumBytesRemaining).
-func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool, liveBytesDone int64) {
+func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed, speedAvg int64, queuePosition uint32, hasQueuePosition bool, liveBytesDone int64, matched bool) {
 	if candidate == nil {
-		return 0, 0, 0, false, 0
+		return 0, 0, 0, false, 0, false
 	}
 	for _, f := range candidate.Files {
-		lt, ok := idx.byFallback[candidate.Username+"\x00"+f.Filename]
+		lt, ok := idx.matchFile(candidate.Username, f.Filename)
 		if !ok {
 			continue
 		}
 		if lt.State != core.TransferQueued && lt.State != core.TransferInProgress {
 			continue
 		}
+		matched = true
 		speed += lt.Speed
 		speedAvg += lt.SpeedAverage
 		liveBytesDone += lt.BytesDone
@@ -73,23 +79,44 @@ func aggregateLiveAlbum(candidate *core.Candidate, idx liveTransferIndex) (speed
 			hasQueuePosition = true
 		}
 	}
-	return speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone
+	return speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone, matched
 }
 
-// overlayBytesDone applies the monotone live-bytes overlay described on
-// jobDTO.BytesDone (issue #161): persistedDone's contribution from
-// still-in-flight transfers (persistedNonTerminalDone, itself a part of
-// persistedDone) is replaced by their live in-memory counterpart (liveDone).
-// max() with persistedDone keeps the result from ever regressing when a
-// non-terminal transfer has no live match (the backend just restarted, or
+// clampBytesDone bounds an overlaid bytes-done value to at most bytesTotal,
+// so a stale or overlapping live sample can never render a progress bar past
+// 100% — e.g. a transfer persisted COMPLETED at bytesTotal that briefly
+// reappears live (a re-queue) at a smaller in-progress value would otherwise
+// sum past its own total via overlayBytesDone's max(). bytesTotal == 0 means
+// "unknown", not "empty" (a candidate file's size can be legitimately
+// unreported), so it disables the clamp rather than forcing done to 0.
+func clampBytesDone(done, bytesTotal int64) int64 {
+	if bytesTotal > 0 && done > bytesTotal {
+		return bytesTotal
+	}
+	return done
+}
+
+// overlayBytesDone applies the monotone-below, clamped-above live-bytes
+// overlay described on jobDTO.BytesDone (issue #161): persistedDone's
+// contribution from still-in-flight transfers (persistedNonTerminalDone,
+// itself a part of persistedDone) is replaced by their live in-memory
+// counterpart (liveDone), then bounded to bytesTotal (see clampBytesDone).
+// max() with persistedDone keeps the *lower* bound from ever regressing when
+// a non-terminal transfer has no live match (the backend just restarted, or
 // the transfer hasn't been enqueued to the peer yet) — the persisted figure
 // is always at least as fresh as what the overlay could compute in that
-// case. Shared by toJobDTO (observ.go) and the SSE stream (stream.go) so the
-// two transports can never disagree about a given job's BytesDone.
-func overlayBytesDone(persistedDone, persistedNonTerminalDone, liveDone int64) int64 {
+// case. That guarantee is one-sided, though: the live term itself is free to
+// drop between ticks (a transfer that reached 500 B can error out of
+// ListDownloads and vanish from the live set before persistedNonTerminalDone
+// catches up), so the overlay as a whole is not monotone tick-to-tick, only
+// bounded below by persistedDone. Shared by toJobDTO (observ.go) and the SSE
+// stream (stream.go) so the two transports can never disagree about a given
+// job's BytesDone.
+func overlayBytesDone(persistedDone, persistedNonTerminalDone, liveDone, bytesTotal int64) int64 {
 	overlaid := persistedDone - persistedNonTerminalDone + liveDone
+	result := persistedDone
 	if overlaid > persistedDone {
-		return overlaid
+		result = overlaid
 	}
-	return persistedDone
+	return clampBytesDone(result, bytesTotal)
 }

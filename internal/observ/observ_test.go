@@ -33,6 +33,7 @@ func noopModules() map[string]ModuleStatus                                     {
 func noopRetry(ctx context.Context, jobID int64) error                         { return nil }
 func noopConfig() AppConfig                                                    { return AppConfig{} }
 func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     { return nil, nil }
+func noopJobs(ctx context.Context) ([]core.JobView, error)                     { return nil, nil }
 func noopCharts(ctx context.Context) (ChartsData, error)                       { return ChartsData{}, nil }
 func noopShares() ShareStatsReport                                             { return ShareStatsReport{} }
 func noopRescanShares() error                                                  { return nil }

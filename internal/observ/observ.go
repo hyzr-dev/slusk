@@ -164,13 +164,17 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
-		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone := aggregateLiveAlbum(v.Attempt, live)
+		// matched (whether any file has a live counterpart at all) is a
+		// stream-only concern — see aggregateLiveAlbum's doc comment. REST
+		// always reports every job regardless of live data, so it's ignored
+		// here.
+		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone, _ := aggregateLiveAlbum(v.Attempt, live)
 		d.Speed = speed
 		if hasQueuePosition {
 			d.QueuePosition = queuePosition
 		}
 		d.ETASeconds = etaSeconds(v.AlbumBytesRemaining, speedAvg)
-		d.BytesDone = overlayBytesDone(v.AlbumBytesDone, v.AlbumBytesDoneNonTerminal, liveBytesDone)
+		d.BytesDone = overlayBytesDone(v.AlbumBytesDone, v.AlbumBytesDoneNonTerminal, liveBytesDone, v.AlbumBytesTotal)
 	}
 	if v.Job.NotBefore != nil {
 		d.NotBefore = v.Job.NotBefore.Format(timeFormat)
@@ -346,12 +350,6 @@ func NewServer(deps ServerDeps) http.Handler {
 		ready = live
 	}
 	mux := http.NewServeMux()
-	// jobIndex caches the job<->candidate correlation GET /api/jobs already
-	// computes on every poll (see the handler below), so GET /api/stream's
-	// shared broadcaster (registerStream) can turn deps.LiveTransfers into
-	// per-job numbers without ever running a DB query of its own — see
-	// jobLiveIndex's doc comment in stream.go.
-	jobIndex := &jobLiveIndex{}
 	mux.Handle("/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /debug/pprof", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/debug/pprof/", http.StatusTemporaryRedirect)
@@ -469,9 +467,6 @@ func NewServer(deps ServerDeps) http.Handler {
 			for i, v := range views {
 				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx)
 			}
-			// Side effect: feeds the SSE stream's job<->candidate cache — see
-			// jobIndex's doc comment above and jobLiveIndex in stream.go.
-			jobIndex.set(views)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(dtos)
 		case http.MethodPost:
@@ -640,7 +635,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
-	registerStream(mux, deps, jobIndex, deps.Shutdown, streamInterval, streamHeartbeatInterval)
+	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
