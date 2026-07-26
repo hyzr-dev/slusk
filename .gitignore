@@ -20,6 +20,9 @@ __pycache__/
 
 # Agent tooling state — local to each developer's machine, not shared.
 .serena/
+# Playwright MCP scratch: console logs and page snapshots from browser-driven
+# verification. Written into the repo root by the server, one file per run.
+.playwright-mcp/
 
 # Vite build output; only the checked-in placeholder index.html is tracked.
 /internal/observ/web/dist/*
