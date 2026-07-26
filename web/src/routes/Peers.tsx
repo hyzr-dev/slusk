@@ -45,67 +45,70 @@ export default function Peers() {
     setExpanded((prev) => (prev === username ? null : username));
   }
 
-  const sortHead = (key: SortKey, label: string) => (
-    <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
-      {label}
-    </button>
-  );
+  const sortHead = (key: SortKey, label: string) => {
+    const dir = sortKey === key ? (desc ? 'descending' : 'ascending') : 'none';
+    return (
+      <span role="columnheader" aria-sort={dir}>
+        <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
+          {label}
+        </button>
+      </span>
+    );
+  };
 
   return (
     <>
-      <div className={`${styles.grid} ${styles.head}`}>
-        <span>{t.peers.gridHead.peer}</span>
-        {sortHead('score', t.peers.gridHead.score)}
-        {sortHead('successCount', t.peers.gridHead.ok)}
-        {sortHead('failCount', t.peers.gridHead.fail)}
-        <span className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
-      </div>
+      <div role="table">
+        <div role="row" className={`${styles.grid} ${styles.head}`}>
+          <span role="columnheader">{t.peers.gridHead.peer}</span>
+          {sortHead('score', t.peers.gridHead.score)}
+          {sortHead('successCount', t.peers.gridHead.ok)}
+          {sortHead('failCount', t.peers.gridHead.fail)}
+          <span role="columnheader" className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
+        </div>
 
-      <QueryNotice phase={phase} />
-      {hasData(phase) &&
-        (sorted.length === 0 ? (
-          <EmptyState message={t.peers.empty} />
-        ) : (
-          sorted.map((p) => {
-            const isExpanded = expanded === p.username;
-            const expansionId = `peer-expansion-${p.username}`;
+        {hasData(phase) && sorted.map((p) => {
+          const isExpanded = expanded === p.username;
+          const expansionId = `peer-expansion-${p.username}`;
 
-            return (
-              // A keyed Fragment is required here: the shorthand <> cannot take
-              // a key, and each peer renders a row plus its (conditional)
-              // expansion as siblings.
-              <Fragment key={p.username}>
-                <div
-                  className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
-                  onClick={() => toggle(p.username)}
-                >
-                  <div className={styles.peerCell}>
-                    <button
-                      type="button"
-                      className={styles.caretButton}
-                      onClick={(e) => {
-                        // Without stopPropagation the click also reaches the
-                        // row handler above and toggles a second time.
-                        e.stopPropagation();
-                        toggle(p.username);
-                      }}
-                      aria-expanded={isExpanded}
-                      aria-controls={expansionId}
-                      aria-label={isExpanded ? t.jobs.hideDetails : t.jobs.showDetails}
-                    >
-                      <span aria-hidden className={styles.caret}>{isExpanded ? '▾' : '▸'}</span>
-                    </button>
-                    <span className={styles.username}>{p.username}</span>
-                  </div>
-                  <span className={styles.mono}>{formatScore(p.score)}</span>
-                  <span className={styles.mono}>{p.successCount}</span>
-                  <span className={styles.mono}>{p.failCount}</span>
-                  <span className={`${styles.mono} ${styles.right}`}>
-                    {formatShortTime(lastSeenAt(p))}
-                  </span>
+          return (
+            // A keyed Fragment is required here: the shorthand <> cannot take
+            // a key, and each peer renders a row plus its (conditional)
+            // expansion as siblings.
+            <Fragment key={p.username}>
+              <div
+                role="row"
+                className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
+                onClick={() => toggle(p.username)}
+              >
+                <div role="cell" className={styles.peerCell}>
+                  <button
+                    type="button"
+                    className={styles.caretButton}
+                    onClick={(e) => {
+                      // Without stopPropagation the click also reaches the
+                      // row handler above and toggles a second time.
+                      e.stopPropagation();
+                      toggle(p.username);
+                    }}
+                    aria-expanded={isExpanded}
+                    aria-controls={expansionId}
+                    aria-label={isExpanded ? t.jobs.hideDetails : t.jobs.showDetails}
+                  >
+                    <span aria-hidden className={styles.caret}>{isExpanded ? '▾' : '▸'}</span>
+                  </button>
+                  <span className={styles.username}>{p.username}</span>
                 </div>
-                {isExpanded && (
-                  <div id={expansionId} className={styles.expansionWrap}>
+                <span role="cell" className={styles.mono}>{formatScore(p.score)}</span>
+                <span role="cell" className={styles.mono}>{p.successCount}</span>
+                <span role="cell" className={styles.mono}>{p.failCount}</span>
+                <span role="cell" className={`${styles.mono} ${styles.right}`}>
+                  {formatShortTime(lastSeenAt(p))}
+                </span>
+              </div>
+              {isExpanded && (
+                <div id={expansionId} role="row" className={styles.expansionWrap}>
+                  <div role="cell" aria-colspan={5}>
                     {p.artists.length === 0 ? (
                       <div className={styles.artist}>{t.peers.noArtistHistory}</div>
                     ) : (
@@ -121,11 +124,17 @@ export default function Peers() {
                       ))
                     )}
                   </div>
-                )}
-              </Fragment>
-            );
-          })
-        ))}
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
+      </div>
+
+      {/* Both of these sit outside the table: `role="table"` admits only rows,
+          so a notice or an empty state nested inside would be invalid ARIA. */}
+      <QueryNotice phase={phase} />
+      {hasData(phase) && sorted.length === 0 && <EmptyState message={t.peers.empty} />}
     </>
   );
 }

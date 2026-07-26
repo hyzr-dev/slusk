@@ -132,8 +132,9 @@ export const t = {
     forceSearch: 'Force search',
     delete: 'Delete',
     deleteConfirm: 'Click again to delete',
-    attemptHistory: 'Attempt history',
-    events: 'Events',
+    // Upper-cased here rather than in CSS — see SectionHeader.
+    attemptHistory: 'ATTEMPT HISTORY',
+    events: 'EVENTS',
     noAttempts: 'No attempts yet.',
     noEvents: 'No events.',
     noCandidate: 'No candidate yet.',
@@ -324,7 +325,7 @@ export const t = {
     rescanFailed: 'Could not start the share rescan. Please try again.',
   },
   uploads: {
-    panelTitle: 'Active uploads',
+    panelTitle: 'ACTIVE UPLOADS',
     empty: 'No active uploads. Peers download from you when they queue your shared files.',
     slotsInUse: (active: number, slots: number) => `${active} / ${slots} slots`,
     // Split rather than interpolated so the peer nick can carry the mono
@@ -350,9 +351,9 @@ export const t = {
     // instead of describing a workflow we no longer have.
     intro:
       'Check that each dependency answers before letting the pipeline run. Anything that fails can be corrected in the Config view, or in the configuration file directly.',
-    stepSoulseek: 'Soulseek login',
-    stepLidarr: 'Lidarr connection',
-    stepShares: 'Shared folders',
+    stepSoulseek: 'SOULSEEK LOGIN',
+    stepLidarr: 'LIDARR CONNECTION',
+    stepShares: 'SHARED FOLDERS',
     test: 'TEST',
     testing: 'TESTING',
     stateOk: 'OK',
@@ -590,7 +591,7 @@ export const t = {
       slskdCompleteDir:
         "Directory where finished downloads land, as seen by both slskdarr and Lidarr. With the slskd backend it must also point at the same location as slskd's completed-downloads directory, so all containers must mount it consistently.",
     },
-    connections: 'Connections',
+    connections: 'CONNECTIONS',
     testConnection: 'Test',
     testStatus: {
       untested: 'Not tested',

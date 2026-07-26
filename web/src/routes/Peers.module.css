@@ -19,7 +19,10 @@
 
 /* A sortable column header. Buttons don't inherit font/color from their
    container the way a <span> would, so both are set explicitly to match the
-   plain header cells beside it. */
+   plain header cells beside it. The button sits inside a `columnheader`-role
+   wrapper span rather than being the grid item itself, so it no longer
+   stretches to fill the column on its own — width is set back to 100% to
+   keep the whole header cell clickable. */
 .sortHead {
   background: none;
   border: none;
@@ -29,6 +32,7 @@
   font: inherit;
   letter-spacing: inherit;
   text-align: left;
+  width: 100%;
 }
 
 .row {

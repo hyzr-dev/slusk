@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
@@ -60,9 +60,10 @@ function renderPeers() {
 }
 
 // Every username, in document order — the cheapest way to read back the
-// current sort order now that rows are grid divs rather than a <table>. Each
-// username is a unique text node, and testing-library's getAllByText returns
-// matches in DOM order, so this needs no assumption about row structure.
+// current sort order now that rows are grid divs carrying an ARIA row role
+// rather than a native <table>. Each username is a unique text node, and
+// testing-library's getAllByText returns matches in DOM order, so this needs
+// no assumption about row structure.
 function bodyUsernames() {
   return screen.getAllByText(/^(alice|bob|carol)$/).map((el) => el.textContent);
 }
@@ -100,6 +101,21 @@ describe('Peers sorting', () => {
     );
     fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(peers.map((p) => p.username)).toEqual(['alice', 'bob', 'carol']);
+  });
+
+  it('exposes the grid as an ARIA table with a sortable, announced sort column', () => {
+    renderPeers();
+    const table = screen.getByRole('table');
+    // Five columns, seeded rows — the count would silently drop if a cell
+    // span went missing, since nothing else in this suite asserts it exists.
+    expect(within(table).getAllByRole('cell')).toHaveLength(peers.length * 5);
+    const scoreHeader = within(table).getByRole('columnheader', { name: t.peers.gridHead.score });
+    expect(scoreHeader).toHaveAttribute('aria-sort', 'descending');
+    const okHeader = within(table).getByRole('columnheader', { name: t.peers.gridHead.ok });
+    expect(okHeader).toHaveAttribute('aria-sort', 'none');
+
+    fireEvent.click(screen.getByText(t.peers.gridHead.score));
+    expect(scoreHeader).toHaveAttribute('aria-sort', 'ascending');
   });
 });
 

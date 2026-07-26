@@ -31,29 +31,34 @@ export default function Events() {
         </div>
       </div>
 
-      <div className={`${styles.grid} ${styles.head}`}>
-        <span>{t.columns.time}</span>
-        <span>{t.columns.job}</span>
-        <span>{t.columns.event}</span>
-        <span>{t.columns.detail}</span>
+      <div role="table">
+        <div role="row" className={`${styles.grid} ${styles.head}`}>
+          <span role="columnheader">{t.columns.time}</span>
+          <span role="columnheader">{t.columns.job}</span>
+          <span role="columnheader">{t.columns.event}</span>
+          <span role="columnheader">{t.columns.detail}</span>
+        </div>
+
+        {hasData(phase) &&
+          filtered.map((e) => (
+            <div key={e.id} role="row" className={`${styles.grid} ${styles.row}`}>
+              <span role="cell" className={styles.mono}>{formatShortTime(e.createdAt)}</span>
+              {/* role="cell" goes on the span, not the <a>, so the link keeps its own link role */}
+              <span role="cell" className={styles.mono}>
+                <Link to={`/jobs/${e.jobId}`} className={styles.link}>
+                  #{e.jobId}
+                </Link>
+              </span>
+              <span role="cell">{eventLabel(e.event)}</span>
+              <span role="cell" className={styles.detail}>{e.detail}</span>
+            </div>
+          ))}
       </div>
 
+      {/* Both of these sit outside the table: `role="table"` admits only rows,
+          so a notice or an empty state nested inside would be invalid ARIA. */}
       <QueryNotice phase={phase} />
-      {hasData(phase) &&
-        (filtered.length === 0 ? (
-          <EmptyState message={t.events.empty} />
-        ) : (
-          filtered.map((e) => (
-            <div key={e.id} className={`${styles.grid} ${styles.row}`}>
-              <span className={styles.mono}>{formatShortTime(e.createdAt)}</span>
-              <Link to={`/jobs/${e.jobId}`} className={`${styles.mono} ${styles.link}`}>
-                #{e.jobId}
-              </Link>
-              <span>{eventLabel(e.event)}</span>
-              <span className={styles.detail}>{e.detail}</span>
-            </div>
-          ))
-        ))}
+      {hasData(phase) && filtered.length === 0 && <EmptyState message={t.events.empty} />}
     </>
   );
 }
