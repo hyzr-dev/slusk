@@ -13,7 +13,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /internal/observ/web/dist ./internal/observ/web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/slskdarr ./cmd/slskdarr
+# Left at "dev" for a local `docker build`; deploy.yml passes the v* tag that
+# triggered the build, so a running container can report which release it is.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/slskdarr ./cmd/slskdarr
 
 # Runtime stage: distroless, non-root, fixed UID.
 FROM gcr.io/distroless/static-debian12:nonroot

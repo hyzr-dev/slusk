@@ -235,6 +235,11 @@ type ModulesFunc func() map[string]ModuleStatus
 type ServerDeps struct {
 	// Registry backs /metrics.
 	Registry *prometheus.Registry
+	// Version is the build's identity, echoed at GET /status and shown beside
+	// the product name in the UI (issue #229). Empty in tests and in any
+	// caller that has nothing to report; the UI treats empty as "say nothing"
+	// rather than rendering a blank slot.
+	Version string
 	// Status reports the pipeline snapshot served at /status.
 	Status StatusFunc
 	// Jobs lists the job views served at GET /api/jobs.
@@ -401,7 +406,8 @@ func NewServer(deps ServerDeps) http.Handler {
 			StatusReport
 			Modules       map[string]string          `json:"modules"`
 			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
-		}{report, moduleTicks, moduleDetails}
+			Version       string                     `json:"version"`
+		}{report, moduleTicks, moduleDetails, deps.Version}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})

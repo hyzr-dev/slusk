@@ -42,6 +42,15 @@ type peerBackend interface {
 	pipeline.PeerNetwork
 }
 
+// version is the build's identity, surfaced at GET /status and shown beside
+// the product name in the UI's top bar (issue #229).
+//
+// The default is the whole dev story: a binary built without the ldflag says
+// "dev" on its own, so nothing downstream has to detect an environment. The
+// Dockerfile overrides it with -X main.version=$VERSION, and deploy.yml passes
+// the v* tag that triggered the build.
+var version = "dev"
+
 const (
 	startupTimeout           = 30 * time.Second
 	lifecycleShutdownTimeout = 10 * time.Second
@@ -481,6 +490,7 @@ func main() {
 	}
 	handler := observ.NewServer(observ.ServerDeps{
 		Registry:         reg,
+		Version:          version,
 		Status:           statusFn,
 		Jobs:             jobsFn,
 		Cancel:           jobs.Cancel,

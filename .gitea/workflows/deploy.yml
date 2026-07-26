@@ -29,6 +29,10 @@ jobs:
         with:
           context: .
           push: true
+          # Baked into the binary as main.version and reported at /status, so
+          # the running container can say which release it is.
+          build-args: |
+            VERSION=${{ gitea.ref_name }}
           tags: |
             gitea.shcizo.se/shcizo/slskdarr:${{ gitea.ref_name }}
             gitea.shcizo.se/shcizo/slskdarr:latest

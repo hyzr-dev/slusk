@@ -81,6 +81,12 @@ export default function TopBar() {
     <div className={styles.bar}>
       <div className={`${styles.cell} ${styles.brand}`}>
         <span className={styles.brandName}>{t.app.name.toUpperCase()}</span>
+        {/* Rendered only when the server reports one. A server predating
+            issue #229 omits the field, and an empty slot next to the name
+            reads as a bug rather than as absent information. */}
+        {status.data?.version && (
+          <span className={styles.brandVersion}>{status.data.version}</span>
+        )}
       </div>
 
       <div className={styles.cell}>
