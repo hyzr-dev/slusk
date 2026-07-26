@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigationType } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { Conversation, PrivateMessage, ThreadPage } from '../api/types';
+import { localDayKey } from '../format';
 import { t } from '../strings';
 import Chat from './Chat';
 
@@ -530,5 +531,75 @@ describe('Chat username encoding', () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(`/api/messages/${encoded}?before=0`),
     );
+  });
+});
+
+describe('Chat day dividers', () => {
+  // Timestamps are derived from a pinned clock by local calendar arithmetic,
+  // never by subtracting a fixed number of hours: the assertions are about
+  // which local day a message falls on, and a 24h subtraction lands on the
+  // wrong day across a DST transition. Deriving from the same instant the
+  // component reads also keeps these green under any runner TZ, the same
+  // hazard format.test.ts documents.
+  const NOW = new Date('2026-07-20T12:00:00Z');
+
+  function daysAgo(n: number): string {
+    const d = new Date(NOW);
+    d.setDate(d.getDate() - n);
+    return d.toISOString();
+  }
+
+  function renderThread(sentAts: string[]) {
+    const username = 'alice';
+    const messages = sentAts
+      .map((sentAt, i) => makeMessage({ id: i + 1, sentAt }))
+      // The API serves newest-first; the view reverses it.
+      .reverse();
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username })]);
+    seedThread(client, username, [{ username, messages, hasMore: false }]);
+    renderChat(`/chat/${username}`, client);
+    return screen.getByRole('log');
+  }
+
+  beforeEach(() => vi.setSystemTime(NOW));
+  afterEach(() => vi.useRealTimers());
+
+  it('opens a single-day thread with one divider, so an old thread still shows its date', () => {
+    const log = renderThread([daysAgo(30), daysAgo(30)]);
+    const dividers = within(log).getAllByRole('separator');
+    expect(dividers).toHaveLength(1);
+    expect(dividers[0]).toHaveAccessibleName(localDayKey(daysAgo(30)));
+  });
+
+  it('names the two most recent days in words and older ones by date', () => {
+    const log = renderThread([daysAgo(5), daysAgo(1), daysAgo(0)]);
+    const names = within(log)
+      .getAllByRole('separator')
+      .map((el) => el.getAttribute('aria-label'));
+    expect(names).toEqual([localDayKey(daysAgo(5)), t.chat.yesterday, t.chat.today]);
+  });
+
+  it('emits one divider per day, not one per message', () => {
+    const log = renderThread([daysAgo(1), daysAgo(1), daysAgo(1), daysAgo(0)]);
+    expect(within(log).getAllByRole('separator')).toHaveLength(2);
+  });
+
+  it('places each divider directly above the first message of its day', () => {
+    const log = renderThread([daysAgo(1), daysAgo(0)]);
+    // Only the separators and message lines, in document order.
+    const rows = Array.from(log.children).filter((el) => el.textContent);
+    expect(rows[0]).toHaveAttribute('role', 'separator');
+    expect(rows[0]).toHaveAccessibleName(t.chat.yesterday);
+    expect(rows[1]).not.toHaveAttribute('role', 'separator');
+    expect(rows[2]).toHaveAccessibleName(t.chat.today);
+  });
+
+  it('gives the divider a role that is not read as a message in the live region', () => {
+    const log = renderThread([daysAgo(0)]);
+    const divider = within(log).getByRole('separator');
+    // The dashes are decoration; the day is what must reach a screen reader.
+    expect(divider).toHaveTextContent(t.chat.today);
+    expect(divider).toHaveAccessibleName(t.chat.today);
   });
 });

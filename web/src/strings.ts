@@ -351,6 +351,12 @@ export const t = {
       unread > 0 ? `${username}, ${unread} unread` : username,
     you: '<you>',
     peer: (username: string) => `<${username}>`,
+    // Day-divider labels (issue #247). Only the two nameable days get words;
+    // anything older is shown as its sv-SE date, which needs no string. The
+    // dividing rules themselves are decoration and live in Chat.tsx, the same
+    // split EmptyState's doc comment describes.
+    today: 'today',
+    yesterday: 'yesterday',
     loadOlder: 'Load older messages',
     composerLabel: 'Message',
     composerPlaceholder: 'message',

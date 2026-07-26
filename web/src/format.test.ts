@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, percent } from './format';
+import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, localDayKey, percent } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -162,6 +162,34 @@ describe('date formatting', () => {
   it('returns an em dash for empty input rather than "Invalid Date"', () => {
     expect(formatDateTime('')).toBe('—');
     expect(formatShortTime('')).toBe('—');
+  });
+});
+
+describe('localDayKey', () => {
+  // Shape only, for the same TZ-rollover reason as formatDateTime above.
+  it('returns a sv-SE calendar date', () => {
+    expect(localDayKey('2026-07-20T14:32:05Z')).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('gives one key per calendar day, whatever the runner TZ', () => {
+    // Built by local calendar arithmetic rather than by subtracting 24h, so
+    // the two instants are exactly one local day apart even across a DST
+    // transition — which is the property the day dividers rely on.
+    const a = new Date('2026-07-20T12:00:00Z');
+    const b = new Date(a);
+    b.setDate(b.getDate() - 1);
+    expect(localDayKey(a.toISOString())).not.toBe(localDayKey(b.toISOString()));
+  });
+
+  it('groups two instants on the same local day under one key', () => {
+    const morning = new Date('2026-07-20T12:00:00Z');
+    const later = new Date(morning.getTime() + 60_000);
+    expect(localDayKey(later.toISOString())).toBe(localDayKey(morning.toISOString()));
+  });
+
+  it('returns an empty key for empty or unparseable input rather than "Invalid Date"', () => {
+    expect(localDayKey('')).toBe('');
+    expect(localDayKey('not a date')).toBe('');
   });
 });
 

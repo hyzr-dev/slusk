@@ -52,6 +52,25 @@ export function formatShortTime(iso: string): string {
   return d.toLocaleTimeString(DATE_LOCALE, { hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * The local calendar day an instant falls on, as `YYYY-MM-DD`.
+ *
+ * Deliberately local rather than UTC: a message sent at 00:30 in Stockholm
+ * carries `…T22:30:00Z` from the previous UTC day, and grouping on the UTC date
+ * would file it under yesterday for every reader east of Greenwich. Returns ''
+ * for input that is missing or unparseable, so a caller can group those
+ * together instead of crashing.
+ *
+ * `sv-SE` already renders dates as `YYYY-MM-DD`, so the key doubles as the
+ * display label for any day too old to name (see Chat's day dividers, #247).
+ */
+export function localDayKey(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(DATE_LOCALE);
+}
+
 export function formatScore(n: number): string {
   return n.toFixed(2);
 }
