@@ -15,6 +15,45 @@
   border-right: 1px solid var(--line);
 }
 
+.newConversation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.newConversationInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--line2);
+  outline: 1px solid transparent;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.newConversationInput:focus-visible {
+  border-color: var(--dim);
+  outline-color: var(--dim);
+}
+
+.newConversationInput:disabled { color: var(--dim); }
+
+.newConversationActions { align-self: stretch; }
+.newConversationActions button { box-sizing: border-box; width: 100%; }
+
+.newConversationError {
+  color: var(--fg);
+  font-size: 10.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 /* Rail rows are full-width links, not ARIA list items — an inline-demoted
    wrapper around a link halves its already-narrow click target (see repo
    memory aria-wrapper-shrinks-grid-click-targets). */

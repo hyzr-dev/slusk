@@ -297,17 +297,19 @@ export function useThread(username: string | undefined) {
   });
 }
 
-// The 201 body is discarded on purpose: invalidating the thread and
-// conversations queries already refetches both with the new message in
-// place, in the correct newest-first order and paging state — hand-splicing
-// the mutation's own response into the cache would just duplicate that work
-// and risks getting the ordering wrong.
-export function useSendMessage(username: string) {
+// Username travels with the body as a mutation variable so a send paused
+// before its POST cannot be retargeted by a rerender. The 201 body is
+// discarded on purpose: invalidating the thread and conversations queries
+// already refetches both with the new message in place, in the correct
+// newest-first order and paging state — hand-splicing the mutation's own
+// response into the cache would just duplicate that work and risks getting
+// the ordering wrong.
+export function useSendMessage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: string) =>
+    mutationFn: ({ username, body }: { username: string; body: string }) =>
       apiPostJson<PrivateMessage>(`/api/messages/${encodeURIComponent(username)}`, { body }),
-    onSuccess: () => {
+    onSuccess: (_message, { username }) => {
       void qc.invalidateQueries({ queryKey: queryKeys.thread(username) });
       void qc.invalidateQueries({ queryKey: queryKeys.conversations });
     },

@@ -359,6 +359,11 @@ export const t = {
     today: 'today',
     yesterday: 'yesterday',
     loadOlder: 'Load older messages',
+    newConversationUsernameLabel: 'Peer username',
+    newConversationUsernamePlaceholder: 'username',
+    newConversationMessageLabel: 'First message',
+    newConversationMessagePlaceholder: 'first message',
+    newConversationSubmit: 'START',
     composerLabel: 'Message',
     composerPlaceholder: 'message',
     // The mock's "[⏎] SEND" glyph is decoration — see EmptyState's doc
