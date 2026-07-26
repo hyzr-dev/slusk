@@ -1,6 +1,10 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { queryKeys } from '../../api/queries';
+import type { StatusReport } from '../../api/types';
 import { t } from '../../strings';
-import { stalenessLabel } from './TopBar';
+import TopBar, { stalenessLabel } from './TopBar';
 
 const STALE_AFTER = 10_000;
 
@@ -27,5 +31,36 @@ describe('stalenessLabel', () => {
   it('coarsens the age past a minute rather than counting seconds forever', () => {
     expect(stalenessLabel(1_000_000, 1_090_000, STALE_AFTER)).toBe(t.chrome.stale('1m'));
     expect(stalenessLabel(1_000, 3_601_000, STALE_AFTER)).toBe(t.chrome.stale('1h'));
+  });
+});
+
+describe('build version', () => {
+  function renderTopBar(status: Partial<StatusReport> | undefined) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    if (status) client.setQueryData(queryKeys.status, status);
+    client.setQueryData(queryKeys.jobs, []);
+    client.setQueryData(queryKeys.charts, { passes: [], throughput: [], cumulative: [] });
+    return render(
+      <QueryClientProvider client={client}>
+        <TopBar />
+      </QueryClientProvider>,
+    );
+  }
+
+  it('shows the version the server reports, beside the product name', () => {
+    renderTopBar({ version: 'v1.33.4' });
+    expect(screen.getByText('v1.33.4')).toBeInTheDocument();
+  });
+
+  it('shows dev for a binary built without the ldflag', () => {
+    renderTopBar({ version: 'dev' });
+    expect(screen.getByText('dev')).toBeInTheDocument();
+  });
+
+  it('renders no version slot at all when the server omits the field', () => {
+    // A server predating #229 sends no `version`. An empty span beside the
+    // name would read as a bug rather than as absent information.
+    const { container } = renderTopBar({});
+    expect(container.querySelector('[class*="brandVersion"]')).toBeNull();
   });
 });

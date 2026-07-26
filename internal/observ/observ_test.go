@@ -123,6 +123,52 @@ func TestStatusEndpointReturnsReport(t *testing.T) {
 	}
 }
 
+func TestStatusEndpointReportsBuildVersion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	deps := testServerDeps(reg)
+	deps.Version = "v1.2.3"
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var got struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Version != "v1.2.3" {
+		t.Errorf("version = %q, want v1.2.3", got.Version)
+	}
+}
+
+// A caller with nothing to report must still produce valid JSON with the key
+// present — the UI distinguishes "" (say nothing) from a missing field only by
+// treating both as absent, and an omitted key would make that distinction
+// depend on the encoder rather than on the deps.
+func TestStatusEndpointVersionIsEmptyWhenUnset(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	h := NewServer(testServerDeps(reg))
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	v, ok := got["version"]
+	if !ok {
+		t.Fatal("version key missing from /status")
+	}
+	if v != "" {
+		t.Errorf("version = %v, want empty", v)
+	}
+}
+
 func TestStatusEndpointIncludesModuleRuntimeState(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	attempted := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)

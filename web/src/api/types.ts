@@ -138,6 +138,13 @@ export interface StatusReport {
   orphaned: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
+  /**
+   * The running build: a `v*` tag in a deployed container, `dev` for a binary
+   * built without the ldflag. Optional because an older server predating
+   * issue #229 omits it entirely, and the top bar then shows nothing rather
+   * than an empty slot.
+   */
+  version?: string;
 }
 
 /** internal/observ/config.go LidarrView */
