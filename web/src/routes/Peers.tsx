@@ -42,26 +42,29 @@ export default function Peers() {
     setExpanded((prev) => (prev === username ? null : username));
   }
 
-  const sortHead = (key: SortKey, label: string) => (
-    <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
-      {label}
-    </button>
-  );
+  const sortHead = (key: SortKey, label: string) => {
+    const dir = sortKey === key ? (desc ? 'descending' : 'ascending') : 'none';
+    return (
+      <span role="columnheader" aria-sort={dir}>
+        <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
+          {label}
+        </button>
+      </span>
+    );
+  };
 
   return (
     <>
-      <div className={`${styles.grid} ${styles.head}`}>
-        <span>{t.peers.gridHead.peer}</span>
-        {sortHead('score', t.peers.gridHead.score)}
-        {sortHead('successCount', t.peers.gridHead.ok)}
-        {sortHead('failCount', t.peers.gridHead.fail)}
-        <span className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
-      </div>
+      <div role="table">
+        <div role="row" className={`${styles.grid} ${styles.head}`}>
+          <span role="columnheader">{t.peers.gridHead.peer}</span>
+          {sortHead('score', t.peers.gridHead.score)}
+          {sortHead('successCount', t.peers.gridHead.ok)}
+          {sortHead('failCount', t.peers.gridHead.fail)}
+          <span role="columnheader" className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
+        </div>
 
-      {sorted.length === 0 ? (
-        <EmptyState message={t.peers.empty} />
-      ) : (
-        sorted.map((p) => {
+        {sorted.map((p) => {
           const isExpanded = expanded === p.username;
           const expansionId = `peer-expansion-${p.username}`;
 
@@ -71,10 +74,11 @@ export default function Peers() {
             // expansion as siblings.
             <Fragment key={p.username}>
               <div
+                role="row"
                 className={`${styles.grid} ${styles.row} ${isExpanded ? styles.rowExpanded : ''}`}
                 onClick={() => toggle(p.username)}
               >
-                <div className={styles.peerCell}>
+                <div role="cell" className={styles.peerCell}>
                   <button
                     type="button"
                     className={styles.caretButton}
@@ -92,35 +96,39 @@ export default function Peers() {
                   </button>
                   <span className={styles.username}>{p.username}</span>
                 </div>
-                <span className={styles.mono}>{formatScore(p.score)}</span>
-                <span className={styles.mono}>{p.successCount}</span>
-                <span className={styles.mono}>{p.failCount}</span>
-                <span className={`${styles.mono} ${styles.right}`}>
+                <span role="cell" className={styles.mono}>{formatScore(p.score)}</span>
+                <span role="cell" className={styles.mono}>{p.successCount}</span>
+                <span role="cell" className={styles.mono}>{p.failCount}</span>
+                <span role="cell" className={`${styles.mono} ${styles.right}`}>
                   {formatShortTime(lastSeenAt(p))}
                 </span>
               </div>
               {isExpanded && (
-                <div id={expansionId} className={styles.expansionWrap}>
-                  {p.artists.length === 0 ? (
-                    <div className={styles.artist}>{t.peers.noArtistHistory}</div>
-                  ) : (
-                    p.artists.map((a) => (
-                      <div key={a.artistId} className={styles.artist}>
-                        {t.peers.artistLine(
-                          a.artistId,
-                          formatScore(a.score),
-                          a.successCount,
-                          a.failCount,
-                        )}
-                      </div>
-                    ))
-                  )}
+                <div id={expansionId} role="row" className={styles.expansionWrap}>
+                  <div role="cell" aria-colspan={5}>
+                    {p.artists.length === 0 ? (
+                      <div className={styles.artist}>{t.peers.noArtistHistory}</div>
+                    ) : (
+                      p.artists.map((a) => (
+                        <div key={a.artistId} className={styles.artist}>
+                          {t.peers.artistLine(
+                            a.artistId,
+                            formatScore(a.score),
+                            a.successCount,
+                            a.failCount,
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
             </Fragment>
           );
-        })
-      )}
+        })}
+      </div>
+
+      {sorted.length === 0 && <EmptyState message={t.peers.empty} />}
     </>
   );
 }

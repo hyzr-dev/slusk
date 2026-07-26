@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Layout from './components/Layout';
@@ -77,6 +77,18 @@ describe('route tree', () => {
     expect(screen.getByText(t.peers.gridHead.peer)).toBeInTheDocument();
   });
 
+  it('exposes the events grid as an ARIA table with four column headers', () => {
+    // No seeded query data, so the header row's columnheaders are the only
+    // thing this test can honestly assert; the table is unnamed (Layout's
+    // own <h1> already names the page), so getByRole('table') is unambiguous
+    // on its own. Cell coverage with actual rows lives in Peers.test.tsx,
+    // which has seeded data to assert against.
+    renderAt('/events');
+    const table = screen.getByRole('table');
+    expect(within(table).getAllByRole('columnheader')).toHaveLength(4);
+    expect(within(table).queryAllByRole('cell')).toHaveLength(0);
+  });
+
   it('renders /health without crashing', () => {
     // No seeded query data — the METRICS SectionHeader label is static and
     // renders regardless of what useStatus/useCharts/useUploads/useShares
@@ -108,8 +120,9 @@ describe('route tree', () => {
   });
 
   it('gives the route exactly one <h1>, named after the matching nav entry', () => {
-    // Events and Peers use neither PageHeading nor SectionHeader, so this is
-    // the only heading either view has. Layout derives it from the same nav
+    // Events and Peers use neither PageHeading nor SectionHeader for a page
+    // title — their ARIA tables above are unnamed too — so this <h1> is the
+    // only heading either view has. Layout derives it from the same nav
     // definition the sidebar renders, so it can't drift from the link label.
     renderAt('/peers');
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
