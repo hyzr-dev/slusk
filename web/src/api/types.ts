@@ -427,6 +427,53 @@ export interface UploadsReport {
   uploads: UploadEntry[];
 }
 
+/** internal/observ/messages.go messageDTO direction field. */
+export type MessageDirection = 'IN' | 'OUT';
+
+/** GET /api/messages — internal/observ/messages.go conversationDTO */
+export interface Conversation {
+  username: string;
+  lastMessage: string;
+  lastMessageAt: string;
+  lastDirection: MessageDirection;
+  unread: number;
+  total: number;
+}
+
+/**
+ * internal/observ/messages.go messageDTO — one private message in a thread.
+ *
+ * `body` is served verbatim from the peer, never sanitized or escaped on the
+ * server (see the Go doc comment on messageDTO) — render it only as a text
+ * child, NEVER via dangerouslySetInnerHTML.
+ */
+export interface PrivateMessage {
+  id: number;
+  username: string;
+  direction: MessageDirection;
+  body: string;
+  sentAt: string;
+  read: boolean;
+  admin: boolean;
+}
+
+/**
+ * GET /api/messages/{username} — internal/observ/messages.go threadResponse.
+ * messages is newest-first, matching how ThreadFunc pages backwards through
+ * history; hasMore signals whether an older page exists behind the oldest
+ * (i.e. last) message in this page.
+ */
+export interface ThreadPage {
+  username: string;
+  messages: PrivateMessage[];
+  hasMore: boolean;
+}
+
+/** POST /api/messages/{username}/read — internal/observ/messages.go markReadResponse. */
+export interface MarkReadResult {
+  marked: number;
+}
+
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
 export interface SearchPass {
   startedAt: string;
