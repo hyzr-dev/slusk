@@ -255,8 +255,16 @@ pollLoop:
 	if final.BytesDone != size {
 		t.Errorf("BytesDone = %d, want %d", final.BytesDone, size)
 	}
-	if final.QueuePosition != queuePlace {
-		t.Errorf("QueuePosition = %d, want %d", final.QueuePosition, queuePlace)
+	// Cleared the moment the peer started sending (issue #256): a finished
+	// transfer is not waiting in anyone's queue, and reporting the place it
+	// held right before pickup rendered the file as simultaneously downloading
+	// and queued. This assertion used to require queuePlace here, which
+	// encoded the bug. That the place is delivered *while* the transfer waits
+	// is covered deterministically by TestDownloadHooksClaimAndDispatch —
+	// asserting it here would depend on the poll loop happening to sample the
+	// queued window.
+	if final.QueuePosition != 0 {
+		t.Errorf("QueuePosition = %d, want 0 (cleared when the transfer started)", final.QueuePosition)
 	}
 
 	destPath := downloadDestPath(c.cfg.DownloadDir, filename)

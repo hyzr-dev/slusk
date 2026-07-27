@@ -51,7 +51,7 @@ const status: StatusReport = {
   queued: 1,
   active: 1,
   stalled: 0,
-  orphaned: 0,
+  parked: 0,
   modules: {},
   moduleDetails: {},
 };
@@ -91,10 +91,10 @@ describe('Overview', () => {
     expect(screen.getByText('Active')).toBeInTheDocument();
     expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByText('Stalled')).toBeInTheDocument();
-    expect(screen.getByText('Orphaned')).toBeInTheDocument();
+    expect(screen.getByText('Parked')).toBeInTheDocument();
     expect(screen.getByText('Done')).toBeInTheDocument();
     // Unlike the old dashboard, failed jobs have no stat cell here — the
-    // mock and spec only cover active/queued/stalled/orphaned/done.
+    // mock and spec only cover active/queued/stalled/parked/done.
     expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 

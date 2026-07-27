@@ -60,10 +60,10 @@ const jobViewSelect = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
-			-- These three literals are hardcoded, unlike every other transfer-state bind
-			-- in this package (e.g. string(core.TransferPending)). The reason is that
+			-- This literal is hardcoded, unlike every other transfer-state bind in
+			-- this package (e.g. string(core.TransferPending)). The reason is that
 			-- jobViewSelect is a const prefix its callers concatenate their own WHERE
-			-- clause onto, so the placeholder numbering space is shared: binding these
+			-- clause onto, so the placeholder numbering space is shared: binding it
 			-- here would claim $1-$3 and shift every caller's own params (see the
 			-- StateCancelled and jobID binds below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
@@ -229,6 +229,46 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 		details[i], details[j] = details[j], details[i]
 	}
 	return core.JobDetail{Job: job, Attempts: details}, true, nil
+}
+
+// TransferBytesByCandidate returns each candidate's per-file persisted
+// bytes-done, keyed by candidate id then filename, for exactly the given
+// candidate ids — never the whole transfers table. It exists for
+// internal/observ's live-bytes overlay (issue #161's backwards-jump/freeze
+// fix): a job whose current candidate has at least one file with a live
+// in-memory match still needs the OTHER, unmatched files' persisted bytes to
+// build a correct album total, and jobViewSelect's own per-candidate
+// aggregate doesn't break bytes out per file. Callers should only pass
+// candidate ids that actually have a live match (see the observ package's
+// anyLiveMatch) — a candidate with none needs no query at all, since its
+// per-file sum trivially equals the AlbumBytesDone jobViewSelect already
+// computed. An empty or nil ids yields an empty, non-nil map.
+func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
+	out := make(map[int64]map[string]int64, len(candidateIDs))
+	if len(candidateIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT candidate_id, filename, bytes_done FROM transfers WHERE candidate_id = ANY($1)`,
+		candidateIDs)
+	if err != nil {
+		return nil, fmt.Errorf("transfer bytes by candidate: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var candidateID, bytesDone int64
+		var filename string
+		if err := rows.Scan(&candidateID, &filename, &bytesDone); err != nil {
+			return nil, fmt.Errorf("transfer bytes by candidate: scan: %w", err)
+		}
+		byFilename, ok := out[candidateID]
+		if !ok {
+			byFilename = make(map[string]int64)
+			out[candidateID] = byFilename
+		}
+		byFilename[filename] = bytesDone
+	}
+	return out, rows.Err()
 }
 
 // Peers returns every known Soulseek peer's global reliability plus their

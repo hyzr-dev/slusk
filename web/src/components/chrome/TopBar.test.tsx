@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { queryKeys } from '../../api/queries';
 import type { StatusReport } from '../../api/types';
+import { formatSpeed } from '../../format';
 import { t } from '../../strings';
 import TopBar, { stalenessLabel } from './TopBar';
 
@@ -70,5 +71,45 @@ describe('TopBar', () => {
     // name would read as a bug rather than as absent information.
     const { container } = renderTopBar({});
     expect(container.querySelector('[class*="brandVersion"]')).toBeNull();
+  });
+});
+
+// The header's download figure prefers the SSE stream's `down` but must
+// survive the stream not being there — see the comment on `down` in
+// TopBar.tsx. These guard the two non-obvious cases: a dead stream writes
+// null (not undefined) into the live cache, and a healthy but idle stream
+// legitimately reports 0.
+describe('download speed source', () => {
+  function renderWithLive(live: unknown, jobs: unknown[]) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.status, {});
+    client.setQueryData(queryKeys.jobs, jobs);
+    client.setQueryData(queryKeys.charts, { passes: [], throughput: [], cumulative: [] });
+    if (live !== undefined) client.setQueryData(queryKeys.live, live);
+    return render(
+      <QueryClientProvider client={client}>
+        <TopBar />
+      </QueryClientProvider>,
+    );
+  }
+
+  const activeJob = { id: 1, status: 'active', speed: 2048 };
+
+  it('prefers the stream figure over the jobs-derived sum', () => {
+    renderWithLive({ jobs: [], down: 4096 }, [activeJob]);
+    expect(screen.getByText(formatSpeed(4096))).toBeInTheDocument();
+  });
+
+  it('falls back to the jobs sum when the stream has died', () => {
+    // clearLive writes null rather than undefined; reading `.down` off that
+    // would throw, so this asserts the header still renders at all.
+    renderWithLive(null, [activeJob]);
+    expect(screen.getByText(formatSpeed(2048))).toBeInTheDocument();
+  });
+
+  it('trusts a healthy stream reporting zero rather than falling back', () => {
+    // A ?? that mistook 0 for "no data" would show the stale jobs sum here.
+    renderWithLive({ jobs: [], down: 0 }, [activeJob]);
+    expect(screen.getByText(t.chrome.idle)).toBeInTheDocument();
   });
 });

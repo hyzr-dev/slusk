@@ -556,6 +556,87 @@ func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 	}
 }
 
+// TestTransferBytesByCandidateReturnsPerFileBytes covers the per-file byte
+// query backing internal/observ's live-bytes overlay (issue #161): given a
+// set of candidate ids, it returns each candidate's own files keyed by
+// filename, and does not leak another candidate's files into the result.
+func TestTransferBytesByCandidateReturnsPerFileBytes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	jobA, _ := s.UpsertWantedJob(ctx, 61, now)
+	if err := s.InsertCandidates(ctx, jobA.ID, []NewCandidate{{Username: "peer_a", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates a: %v", err)
+	}
+	a, found, err := s.NextNewCandidate(ctx, jobA.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a: found=%v (%v)", found, err)
+	}
+	tid1, _, err := s.RecordEnqueueIntent(ctx, a.ID, "peer_a", "01.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent a/01: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid1, core.TransferInProgress, 400, 1000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress a/01: %v", err)
+	}
+	tid2, _, err := s.RecordEnqueueIntent(ctx, a.ID, "peer_a", "02.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent a/02: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferCompleted, 2000, 2000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress a/02: %v", err)
+	}
+
+	jobB, _ := s.UpsertWantedJob(ctx, 62, now)
+	if err := s.InsertCandidates(ctx, jobB.ID, []NewCandidate{{Username: "peer_b", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates b: %v", err)
+	}
+	b, found, err := s.NextNewCandidate(ctx, jobB.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate b: found=%v (%v)", found, err)
+	}
+	// Same filename as candidate a's first file, to prove results are keyed
+	// per-candidate rather than colliding on filename alone.
+	if _, _, err := s.RecordEnqueueIntent(ctx, b.ID, "peer_b", "01.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent b/01: %v", err)
+	}
+
+	got, err := s.TransferBytesByCandidate(ctx, []int64{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate: %v", err)
+	}
+	if got[a.ID]["01.flac"] != 400 || got[a.ID]["02.flac"] != 2000 {
+		t.Errorf("candidate a bytes = %+v, want 01.flac=400, 02.flac=2000", got[a.ID])
+	}
+	if got[b.ID]["01.flac"] != 0 {
+		t.Errorf("candidate b bytes = %+v, want 01.flac=0 (never enqueued progress)", got[b.ID])
+	}
+}
+
+// TestTransferBytesByCandidateEmptyAndUnknownIDs covers the two degenerate
+// inputs: no ids at all, and ids that don't match any candidate.
+func TestTransferBytesByCandidateEmptyAndUnknownIDs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	got, err := s.TransferBytesByCandidate(ctx, nil)
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate(nil): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map for nil ids, got %+v", got)
+	}
+
+	got, err = s.TransferBytesByCandidate(ctx, []int64{999999})
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate(unknown): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map for unknown candidate id, got %+v", got)
+	}
+}
+
 func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -670,48 +751,59 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	}
 }
 
-// TestRetryFailedJobRevivesOrphanedJob mirrors
-// TestRetryFailedJobRevivesFailedJob for the other retryable terminal-ish
-// state: a job parked ORPHANED by Downloading's reconcile (issue #158) must
-// also come back to WANTED with a clean slate via the same dashboard button.
-func TestRetryFailedJobRevivesOrphanedJob(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+// TestRetryFailedJobRevivesParkedSpellings verifies that both the canonical
+// PARKED state and its legacy ORPHANED spelling remain manually retryable and
+// receive the same clean-slate reset.
+func TestRetryFailedJobRevivesParkedSpellings(t *testing.T) {
+	for i, state := range []core.AlbumJobState{core.StateParked, core.StateOrphaned} {
+		t.Run(string(state), func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, _ := s.UpsertWantedJob(ctx, 22, now)
-	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
-		t.Fatalf("InsertCandidates: %v", err)
-	}
-	cand, found, err := s.NextNewCandidate(ctx, job.ID)
-	if err != nil || !found {
-		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
-	}
-	if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
-		t.Fatalf("RecordEnqueueIntent: %v", err)
-	}
-	if err := s.AdvanceJobState(ctx, job.ID, core.StateOrphaned, now); err != nil {
-		t.Fatalf("AdvanceJobState: %v", err)
-	}
+			job, _ := s.UpsertWantedJob(ctx, int64(22+i), now)
+			if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "peer_one", Score: 1.0}}, now); err != nil {
+				t.Fatalf("InsertCandidates: %v", err)
+			}
+			cand, found, err := s.NextNewCandidate(ctx, job.ID)
+			if err != nil || !found {
+				t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+			}
+			if _, _, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "f1.flac", now.Add(time.Hour), now); err != nil {
+				t.Fatalf("RecordEnqueueIntent: %v", err)
+			}
+			if _, err := s.db.ExecContext(ctx,
+				`UPDATE album_jobs SET retries=3, not_before=$1, failed_at=$2 WHERE id=$3`,
+				now.Add(time.Hour), now, job.ID); err != nil {
+				t.Fatalf("seed retry metadata: %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, state, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
 
-	later := now.Add(time.Minute)
-	ok, err := s.RetryFailedJob(ctx, job.ID, later)
-	if err != nil {
-		t.Fatalf("RetryFailedJob: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected RetryFailedJob to return true for an ORPHANED job")
-	}
+			later := now.Add(time.Minute)
+			ok, err := s.RetryFailedJob(ctx, job.ID, later)
+			if err != nil {
+				t.Fatalf("RetryFailedJob: %v", err)
+			}
+			if !ok {
+				t.Fatalf("expected RetryFailedJob to return true for a %s job", state)
+			}
 
-	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, later.Add(time.Hour), 10)
-	if err != nil || len(jobs) != 1 {
-		t.Fatalf("RunnableJobsInState: %v %+v", err, jobs)
-	}
-	if got := jobs[0]; got.State != core.StateWanted {
-		t.Errorf("State = %q, want WANTED", got.State)
-	}
-	if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
-		t.Fatalf("expected zero candidates after RetryFailedJob, found=%v (%v)", found, err)
+			view, found, err := s.JobWithTransfer(ctx, job.ID)
+			if err != nil || !found {
+				t.Fatalf("JobWithTransfer: found=%v err=%v", found, err)
+			}
+			if got := view.Job; got.State != core.StateWanted || got.Retries != 0 || got.NotBefore != nil || got.FailedAt != nil {
+				t.Errorf("job after retry = state %q retries %d not_before %v failed_at %v", got.State, got.Retries, got.NotBefore, got.FailedAt)
+			}
+			if _, found, err := s.NextNewCandidate(ctx, job.ID); err != nil || found {
+				t.Fatalf("expected zero candidates after RetryFailedJob, found=%v (%v)", found, err)
+			}
+			if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+				t.Fatalf("expected zero transfers after RetryFailedJob, got %d (%v)", len(trs), err)
+			}
+		})
 	}
 }
 
@@ -850,6 +942,36 @@ func TestForceSearchJobUnknownID(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected ForceSearchJob to return false for an unknown job id")
+	}
+}
+
+func TestParkedSpellingsSupportForceSearchAndDelete(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	for i, state := range []core.AlbumJobState{core.StateParked, core.StateOrphaned} {
+		searchJob, _ := s.UpsertWantedJob(ctx, int64(40+i*2), now)
+		if err := s.AdvanceJobState(ctx, searchJob.ID, state, now); err != nil {
+			t.Fatalf("AdvanceJobState(%s): %v", state, err)
+		}
+		if ok, err := s.ForceSearchJob(ctx, searchJob.ID, now.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("ForceSearchJob(%s): ok=%v err=%v", state, ok, err)
+		}
+		if got := jobStateForStore(t, s, searchJob.ID); got != core.StateWanted {
+			t.Errorf("ForceSearchJob(%s) state = %s, want WANTED", state, got)
+		}
+
+		deleteJob, _ := s.UpsertWantedJob(ctx, int64(41+i*2), now)
+		if err := s.AdvanceJobState(ctx, deleteJob.ID, state, now); err != nil {
+			t.Fatalf("AdvanceJobState(%s): %v", state, err)
+		}
+		if ok, err := s.DeleteJob(ctx, deleteJob.ID); err != nil || !ok {
+			t.Fatalf("DeleteJob(%s): ok=%v err=%v", state, ok, err)
+		}
+		if _, found, err := s.JobWithTransfer(ctx, deleteJob.ID); err != nil || found {
+			t.Fatalf("deleted %s job still present: found=%v err=%v", state, found, err)
+		}
 	}
 }
 

@@ -13,8 +13,19 @@ import (
 // transferDetailDTO is one file transfer within an attempt, as shown in the
 // job detail panel.
 type transferDetailDTO struct {
-	Filename       string `json:"filename"`
-	State          string `json:"state"`
+	Filename string `json:"filename"`
+	State    string `json:"state"`
+	// BytesDone is overlaid with the live in-memory value whenever a live
+	// match exists, regardless of that match's state (issue #161) — mirroring
+	// jobDTO.BytesDone's album-level per-file overlay in observ.go (see
+	// jobBytesDone's doc comment for why terminal states must be included: a
+	// just-completed transfer still carries the most accurate byte count
+	// available, more accurate than the persisted row until the next
+	// Downloading reconcile writes it). It is clamped to BytesTotal
+	// (clampBytesDone) so a peer momentarily reporting more bytes than the
+	// file's own known size can't push the file past 100%.
+	// BytesTotal is never overlaid — see jobDTO.BytesTotal's comment; the same
+	// rationale applies per-file.
 	BytesDone      int64  `json:"bytesDone"`
 	BytesTotal     int64  `json:"bytesTotal"`
 	Retries        int    `json:"retries"`
@@ -51,6 +62,15 @@ type jobDetailDTO struct {
 	Attempts []attemptDetailDTO `json:"attempts"`
 }
 
+// terminalTransferState reports whether a persisted transfer state is one the
+// pipeline treats as final — the same three that gate reconcile's purge of a
+// transfer from the live backend (internal/pipeline/downloading.go). STALLED is
+// deliberately excluded: it is a durable retry intent the next pass acts on,
+// not an end state, and such a transfer is still genuinely in flight.
+func terminalTransferState(s core.TransferState) bool {
+	return s == core.TransferCompleted || s == core.TransferErrored || s == core.TransferCancelled
+}
+
 // toJobDetailDTO flattens a core.JobDetail into the detail panel's
 // display-ready shape, enriching each transfer with live queue-position/speed
 // from the peer backend where a match exists (see liveTransferIndex).
@@ -85,8 +105,24 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 				t.LastProgressAt = tr.LastProgressAt.Format(timeFormat)
 			}
 			if lt, ok := live.match(tr); ok {
-				t.QueuePosition = lt.QueuePosition
-				t.Speed = lt.Speed
+				// Queue position and speed describe work still in flight, so
+				// they are gated on the PERSISTED state rather than the live
+				// one. Reconcile commits the terminal state before purging the
+				// transfer from the live backend
+				// (internal/pipeline/downloading.go), so a persisted-terminal
+				// row can still match a lingering live entry — one that keeps
+				// reporting IN_PROGRESS at a speed that stays nonzero for up to
+				// speedStaleAfter. Reading either field off it renders a
+				// finished file as still downloading. Gating on lt.State
+				// instead would not help: it is precisely the field that has
+				// not caught up yet.
+				if !terminalTransferState(tr.State) {
+					t.QueuePosition = lt.QueuePosition
+					t.Speed = lt.Speed
+				}
+				// A matched live transfer supplies bytes regardless of its
+				// state — see transferDetailDTO.BytesDone's comment.
+				t.BytesDone = clampBytesDone(lt.BytesDone, tr.BytesTotal)
 			}
 			a.Transfers[j] = t
 		}
@@ -106,6 +142,12 @@ type JobDetailFunc func(ctx context.Context, jobID int64) (core.JobDetail, bool,
 // func, or one wired to the slskd backend (which leaves the fields zero), just
 // yields no enrichment.
 type LiveTransfersFunc func(ctx context.Context) ([]core.RemoteTransfer, error)
+
+// TransferBytesFunc returns per-candidate, per-filename persisted bytes-done
+// for exactly the given candidate ids (typically backed by
+// Store.TransferBytesByCandidate). See ServerDeps.TransferBytes and
+// jobBytesDone (albumlive.go, issue #161).
+type TransferBytesFunc func(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error)
 
 // liveTransferIndex correlates persisted store transfers to their live
 // ListDownloads counterpart the same way the reconcile loop does
@@ -134,13 +176,22 @@ func newLiveTransferIndex(live []core.RemoteTransfer) liveTransferIndex {
 }
 
 // match resolves a store transfer to its live counterpart, preferring the
-// remote id and falling back to username+filename.
+// remote id and falling back to username+filename (matchFile).
 func (idx liveTransferIndex) match(tr core.Transfer) (core.RemoteTransfer, bool) {
 	if tr.SlskdID != "" {
 		if lt, ok := idx.byID[tr.SlskdID]; ok {
 			return lt, true
 		}
 	}
-	lt, ok := idx.byFallback[tr.Username+"\x00"+tr.Filename]
+	return idx.matchFile(tr.Username, tr.Filename)
+}
+
+// matchFile resolves a live transfer by (username, filename) alone — the
+// fallback half of match, factored out for callers that only ever have a
+// candidate file to match on (no persisted core.Transfer, hence no SlskdID
+// to try first): album-level aggregation (aggregateLiveAlbum, albumlive.go)
+// and the SSE stream's per-file view (buildStreamFiles, stream.go).
+func (idx liveTransferIndex) matchFile(username, filename string) (core.RemoteTransfer, bool) {
+	lt, ok := idx.byFallback[username+"\x00"+filename]
 	return lt, ok
 }

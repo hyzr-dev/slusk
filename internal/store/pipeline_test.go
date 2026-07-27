@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
@@ -401,17 +403,260 @@ func TestSetJobTrackBand(t *testing.T) {
 	}
 }
 
-// TestOrphanJobForCandidate covers Downloading.reconcile's retry-budget-
-// exhausted path (issue #158): a DOWNLOADING job whose candidate's transfer
-// keeps vanishing from slskd is parked ORPHANED, and the flip is a no-op when
-// the job has already left DOWNLOADING (guards a race with another
-// transition landing first).
-func TestOrphanJobForCandidate(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
+// TestParkJobForCandidate covers Downloading.reconcile's retry-budget-
+// exhausted path (issue #158): terminalizing the transfer and parking its job
+// happen atomically, while a job that already left DOWNLOADING is not clobbered.
+func TestParkJobForCandidate(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.UpsertWantedJob(ctx, 500, now)
+	t.Run("parks job and terminalizes transfer", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := context.Background()
+		jobID, candID, transferID := seedParkJobFixture(t, s, 500, now)
+
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate: %v", err)
+		}
+		if !changed {
+			t.Fatal("expected ParkJobForCandidate to return true for a DOWNLOADING job")
+		}
+		view, found, err := s.JobWithTransfer(ctx, jobID)
+		if err != nil || !found {
+			t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+		}
+		if view.Job.State != core.StateParked {
+			t.Errorf("job state = %q, want PARKED", view.Job.State)
+		}
+		tr := transferForParkFixture(t, s, candID)
+		if tr.State != core.TransferErrored || tr.BytesDone != 25 || tr.BytesTotal != 100 {
+			t.Errorf("transfer = state %q progress %d/%d, want ERRORED 25/100", tr.State, tr.BytesDone, tr.BytesTotal)
+		}
+
+		// The transfer is already terminal, so a stale second call is a quiet no-op.
+		changed, err = s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 30, 100, now.Add(2*time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate (already terminal): %v", err)
+		}
+		if changed {
+			t.Error("expected ParkJobForCandidate to no-op for an already-terminal transfer")
+		}
+	})
+
+	t.Run("job race commits errored transfer without parking", func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := context.Background()
+		jobID, candID, transferID := seedParkJobFixture(t, s, 501, now)
+		if _, err := s.AdvanceJobStateFrom(ctx, jobID, core.StateDownloading, core.StateCancelled, now.Add(time.Minute)); err != nil {
+			t.Fatalf("cancel job: %v", err)
+		}
+
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(2*time.Minute))
+		if err != nil {
+			t.Fatalf("ParkJobForCandidate: %v", err)
+		}
+		if changed {
+			t.Error("expected guarded PARKED transition to no-op after cancellation")
+		}
+		if got := jobStateForStore(t, s, jobID); got != core.StateCancelled {
+			t.Errorf("job state = %q, want CANCELLED", got)
+		}
+		if got := transferForParkFixture(t, s, candID).State; got != core.TransferErrored {
+			t.Errorf("transfer state = %q, want ERRORED", got)
+		}
+	})
+}
+
+func TestParkJobForCandidateLocksJobBeforeTransferWhenCancellationOverlaps(t *testing.T) {
+	s := newTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	jobID, candID, transferID := seedParkJobFixture(t, s, 503, now)
+
+	// Hold an advisory lock from a separate transaction. The AFTER trigger
+	// stops parking only after its transfer UPDATE owns the transfer row, which
+	// gives the test a deterministic point at which to inspect the earlier job
+	// lock and start cancellation without timing sleeps.
+	lockTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin advisory lock transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback() })
+	if _, err := lockTx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(243, (
+			SELECT oid::integer FROM pg_database WHERE datname = current_database()
+		))`); err != nil {
+		t.Fatalf("acquire advisory lock: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE FUNCTION block_park_transfer() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(243, (
+				SELECT oid::integer FROM pg_database WHERE datname = current_database()
+			));
+			RETURN NEW;
+		END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER block_park_transfer AFTER UPDATE ON transfers
+			FOR EACH ROW WHEN (NEW.state = 'ERRORED') EXECUTE FUNCTION block_park_transfer()`); err != nil {
+		t.Fatalf("install blocking trigger: %v", err)
+	}
+
+	type parkResult struct {
+		changed bool
+		err     error
+	}
+	parkDone := make(chan parkResult, 1)
+	go func() {
+		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		parkDone <- parkResult{changed: changed, err: err}
+	}()
+	waitForStoreQueryWait(t, s, `%UPDATE transfers SET state = $1, bytes_done%`, "advisory")
+
+	probeTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin job-lock probe: %v", err)
+	}
+	var state string
+	err = probeTx.QueryRowContext(ctx,
+		`SELECT state FROM album_jobs WHERE id = $1 FOR UPDATE NOWAIT`, jobID).Scan(&state)
+	_ = probeTx.Rollback()
+	jobLockedFirst := false
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+			t.Fatalf("probe job lock: %v", err)
+		}
+		jobLockedFirst = true
+	}
+
+	type cancellationResult struct {
+		found bool
+		err   error
+	}
+	cancelDone := make(chan cancellationResult, 1)
+	go func() {
+		_, found, err := s.CancelJob(ctx, jobID, now.Add(2*time.Minute))
+		cancelDone <- cancellationResult{found: found, err: err}
+	}()
+	waitForStoreQueryWait(t, s, `%FOR UPDATE%`, "")
+
+	if err := lockTx.Rollback(); err != nil {
+		t.Fatalf("release advisory lock: %v", err)
+	}
+
+	var parked parkResult
+	select {
+	case parked = <-parkDone:
+	case <-ctx.Done():
+		t.Fatalf("parking did not finish: %v", ctx.Err())
+	}
+	if parked.err != nil {
+		t.Errorf("ParkJobForCandidate: %v", parked.err)
+	} else if !parked.changed {
+		t.Error("ParkJobForCandidate did not park the DOWNLOADING job")
+	}
+
+	var cancelled cancellationResult
+	select {
+	case cancelled = <-cancelDone:
+	case <-ctx.Done():
+		t.Fatalf("cancellation did not finish: %v", ctx.Err())
+	}
+	if cancelled.err != nil {
+		t.Errorf("CancelJob: %v", cancelled.err)
+	} else if !cancelled.found {
+		t.Error("CancelJob did not find the parked job")
+	}
+	if !jobLockedFirst {
+		t.Error("parking reached the transfer update without locking the owning job first")
+	}
+	if got := jobStateForStore(t, s, jobID); got != core.StateCancelled {
+		t.Errorf("job state = %q, want CANCELLED", got)
+	}
+	if got := transferForParkFixture(t, s, candID).State; got != core.TransferErrored {
+		t.Errorf("transfer state = %q, want ERRORED", got)
+	}
+}
+
+func waitForStoreQueryWait(t *testing.T, s *Store, queryPattern, waitEvent string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		var waiting bool
+		err := s.db.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid != pg_backend_pid()
+			  AND query LIKE $1
+			  AND wait_event_type = 'Lock'
+			  AND ($2 = '' OR wait_event = $2)
+		)`, queryPattern, waitEvent).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect blocked store query: %v", err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("query %q did not reach database lock wait: %v", queryPattern, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestParkJobForCandidateRollsBackOnEitherWriteFailure(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name    string
+		trigger string
+	}{
+		{
+			name: "transfer update failure",
+			trigger: `CREATE FUNCTION fail_park_transfer() RETURNS trigger AS $$
+				BEGIN RAISE EXCEPTION 'injected transfer failure'; END $$ LANGUAGE plpgsql;
+				CREATE TRIGGER fail_park_transfer BEFORE UPDATE ON transfers
+				FOR EACH ROW WHEN (NEW.state = 'ERRORED') EXECUTE FUNCTION fail_park_transfer()`,
+		},
+		{
+			name: "job update failure",
+			trigger: `CREATE FUNCTION fail_park_job() RETURNS trigger AS $$
+				BEGIN RAISE EXCEPTION 'injected job failure'; END $$ LANGUAGE plpgsql;
+				CREATE TRIGGER fail_park_job BEFORE UPDATE ON album_jobs
+				FOR EACH ROW WHEN (NEW.state = 'PARKED') EXECUTE FUNCTION fail_park_job()`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			jobID, candID, transferID := seedParkJobFixture(t, s, 502, now)
+			if _, err := s.db.ExecContext(ctx, tc.trigger); err != nil {
+				t.Fatalf("install failure trigger: %v", err)
+			}
+
+			if _, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute)); err == nil {
+				t.Fatal("ParkJobForCandidate unexpectedly succeeded")
+			}
+			if got := jobStateForStore(t, s, jobID); got != core.StateDownloading {
+				t.Errorf("job state after rollback = %q, want DOWNLOADING", got)
+			}
+			tr := transferForParkFixture(t, s, candID)
+			if tr.State != core.TransferInProgress || tr.BytesDone != 10 || tr.BytesTotal != 100 {
+				t.Errorf("transfer after rollback = state %q progress %d/%d, want IN_PROGRESS 10/100", tr.State, tr.BytesDone, tr.BytesTotal)
+			}
+		})
+	}
+}
+
+func seedParkJobFixture(t *testing.T, s *Store, albumID int64, now time.Time) (jobID, candidateID, transferID int64) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := s.UpsertWantedJob(ctx, albumID, now)
 	if err != nil {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
@@ -425,35 +670,24 @@ func TestOrphanJobForCandidate(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateDownloading, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
+	transferID, ok, err := s.RecordEnqueueIntent(ctx, cand.ID, "peer_one", "track.flac", now.Add(time.Hour), now)
+	if err != nil || !ok {
+		t.Fatalf("RecordEnqueueIntent: ok=%v (%v)", ok, err)
+	}
+	if err := s.UpdateTransferProgress(ctx, transferID, core.TransferInProgress, 10, 100, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	return job.ID, cand.ID, transferID
+}
 
-	changed, err := s.OrphanJobForCandidate(ctx, cand.ID, now)
+func transferForParkFixture(t *testing.T, s *Store, candidateID int64) core.Transfer {
+	t.Helper()
+	transfers, err := s.TransfersForCandidate(context.Background(), candidateID)
 	if err != nil {
-		t.Fatalf("OrphanJobForCandidate: %v", err)
+		t.Fatalf("TransfersForCandidate: %v", err)
 	}
-	if !changed {
-		t.Fatal("expected OrphanJobForCandidate to return true for a DOWNLOADING job")
+	if len(transfers) != 1 {
+		t.Fatalf("transfers = %d, want 1", len(transfers))
 	}
-	jobs, err := s.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
-	if err != nil {
-		t.Fatalf("RunnableJobsInState: %v", err)
-	}
-	if len(jobs) != 0 {
-		t.Fatalf("expected job to leave DOWNLOADING, got %+v", jobs)
-	}
-	view, found, err := s.JobWithTransfer(ctx, job.ID)
-	if err != nil || !found {
-		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
-	}
-	if view.Job.State != core.StateOrphaned {
-		t.Errorf("State = %q, want ORPHANED", view.Job.State)
-	}
-
-	// Already ORPHANED (not DOWNLOADING): the guard bounces, no-op.
-	changed, err = s.OrphanJobForCandidate(ctx, cand.ID, now)
-	if err != nil {
-		t.Fatalf("OrphanJobForCandidate (already orphaned): %v", err)
-	}
-	if changed {
-		t.Error("expected OrphanJobForCandidate to no-op when the job is not DOWNLOADING")
-	}
+	return transfers[0]
 }

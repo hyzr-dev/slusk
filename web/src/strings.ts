@@ -60,7 +60,7 @@ export const t = {
     stalled: 'Stalled',
     done: 'Done',
     failed: 'Failed',
-    orphaned: 'Orphaned',
+    parked: 'Parked',
   },
   // Two-letter status tags in the TUI job grid. The long labels in `status`
   // and `state` are still used wherever there is room for them.
@@ -68,7 +68,7 @@ export const t = {
     DL: 'DL',
     QU: 'QU',
     ST: 'ST',
-    OR: 'OR',
+    PA: 'PA',
     FA: 'FA',
     OK: 'OK',
     IM: 'IM',
@@ -81,7 +81,7 @@ export const t = {
     DL: 'Downloading',
     QU: 'Queued',
     ST: 'Stalled',
-    OR: 'Orphaned',
+    PA: 'Parked',
     FA: 'Failed',
     OK: 'Done',
     IM: 'Importing',
@@ -95,7 +95,7 @@ export const t = {
     DONE: 'Done',
     FAILED: 'Failed',
     CANCELLED: 'Cancelled',
-    ORPHANED: 'Orphaned',
+    PARKED: 'Parked',
   },
   candidateState: {
     NEW: 'Not tried',
@@ -135,6 +135,8 @@ export const t = {
     back: '← Back',
     cancel: 'Cancel',
     retry: 'Retry',
+    parkedExplanation:
+      'Repeated backend disappearance exhausted transfer retries, so automation stopped. Retry discards prior candidates and transfers, then starts a fresh search and download cycle.',
     forceSearch: 'Force search',
     delete: 'Delete',
     deleteConfirm: 'Click again to delete',
@@ -145,7 +147,7 @@ export const t = {
     noEvents: 'No events.',
     noCandidate: 'No candidate yet.',
     cancelFailed: 'Could not cancel the job. It may already have finished.',
-    retryFailed: 'Could not retry the job. Only failed jobs can be retried.',
+    retryFailed: 'Could not retry the job. Only failed or parked jobs can be retried.',
     forceSearchFailed: 'Could not force a search. The job may already be active.',
     deleteFailed: 'Could not delete the job. It may currently be importing.',
     sleepingUntil: (time: string) => `Sleeping until ${time}`,
@@ -191,15 +193,14 @@ export const t = {
       eta: 'ETA',
       tries: 'TRY',
     },
-    // Filter chip labels (mock line 1089). ORPHAN, not ORPHANED — the chip is
-    // narrower than the status pill it echoes.
+    // Filter chip labels use the canonical UI state names.
     chipLabel: {
       all: 'ALL',
       active: 'ACTIVE',
       queued: 'QUEUED',
       stalled: 'STALLED',
       failed: 'FAILED',
-      orphaned: 'ORPHAN',
+      parked: 'PARKED',
       done: 'DONE',
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
@@ -290,7 +291,7 @@ export const t = {
     metricActive: 'active downloads',
     metricQueued: 'queued',
     metricStalled: 'stalled',
-    metricOrphaned: 'orphaned transfers',
+    metricParked: 'parked transfers',
     metricUploads: 'active uploads',
     metricShared: 'shared files',
   },
@@ -372,6 +373,11 @@ export const t = {
     today: 'today',
     yesterday: 'yesterday',
     loadOlder: 'Load older messages',
+    newConversationUsernameLabel: 'Peer username',
+    newConversationUsernamePlaceholder: 'username',
+    newConversationMessageLabel: 'First message',
+    newConversationMessagePlaceholder: 'first message',
+    newConversationSubmit: 'START',
     composerLabel: 'Message',
     composerPlaceholder: 'message',
     // The mock's "[⏎] SEND" glyph is decoration — see EmptyState's doc

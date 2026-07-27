@@ -64,7 +64,7 @@ export default function Overview() {
     { label: t.status.active, value: status?.active ?? 0, phase: statusPhase },
     { label: t.status.queued, value: status?.queued ?? 0, phase: statusPhase },
     { label: t.status.stalled, value: status?.stalled ?? 0, phase: statusPhase },
-    { label: t.status.orphaned, value: status?.orphaned ?? 0, phase: statusPhase },
+    { label: t.status.parked, value: status?.parked ?? 0, phase: statusPhase },
     { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length, phase: jobsPhase },
   ];
 

@@ -509,7 +509,14 @@ func (h *downloadSessionHooks) frame(session *peerSession, frame sessionFrame) e
 		}
 		if tr := h.downloads.lookupByKey(session.key.username, msg.Filename); tr != nil {
 			tr.mu.Lock()
-			tr.queuePosition = msg.Place
+			// Only while the transfer is actually still waiting. A response to
+			// a request we sent just before the peer started uploading can
+			// land just after, which would otherwise reinstate the very
+			// staleness the IN_PROGRESS transition clears (issue #256). A
+			// retry that puts the transfer back to QUEUED records again.
+			if tr.state != core.TransferInProgress {
+				tr.queuePosition = msg.Place
+			}
 			tr.mu.Unlock()
 		}
 		return nil
@@ -940,6 +947,13 @@ queueWait:
 		return
 	}
 	tr.state = core.TransferInProgress
+	// The transfer is no longer waiting in the peer's queue, so its last
+	// reported place is now false. Nothing else ever clears it (issue #256):
+	// PlaceInQueueResponse is the only writer, and it only ever moves the
+	// number down, so a started transfer kept reporting the place it held
+	// right before the peer picked it up — surfacing as a file showing both a
+	// download speed and a queue position at once.
+	tr.queuePosition = 0
 	tr.mu.Unlock()
 
 	destPath, err := safeDownloadDest(c.cfg.DownloadDir, tr.filename)

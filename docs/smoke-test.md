@@ -54,12 +54,18 @@ eller `docker exec` in i Postgres-containern.)
 - [ ] `curl $STATUS/healthz` svarar utan autentisering och utan intern statusdata.
 - [ ] `curl $STATUS/readyz` svarar utan autentisering (`200` när modulerna hinner med, annars `503`).
 - [ ] Anrop utan token till `/`, `/status`, `/api/*` och `/metrics` svarar `401`.
-- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`).
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/status` svarar `200` med JSON (`{"queued":..,"active":..,"stalled":..,"parked":..,"orphaned":..,"modules":{...},"moduleDetails":{...}}`). `parked` är det auktoritativa fältet; det utfasade aliaset `orphaned` ska alltid ha samma värde.
       `modules` behåller den kompatibla kartan med senast avslutad tick för varje
       pipeline-modul (`wanted_sync`, `discovery`, `selecting`, `downloading`, `importing`).
       `moduleDetails` innehåller dessutom `lastAttempt`, `lastCompleted`, felstatus,
       serverns intervallbaserade `staleDeadline` samt dess auktoritativa `live`- och
       `ready`-värden; dashboarden använder dessa fält i stället för egna gränsvärden.
+- [ ] **PARKED-kompatibilitet:** den nya servern skickar `parked` i
+      `/api/jobs[].status` och `PARKED` i dess råa `.state`; dessa enumfält har inga
+      samtidiga gamla/nya alias. Den nya dashboarden accepterar både de gamla och nya
+      stavningarna, och `/status.orphaned` behålls. En gammal dashboard eller klient
+      måste uppgraderas tillsammans med servern; den kombinerade DB-migreringen
+      förutsätter att ingen gammal binär fortfarande kör mot databasen.
 - [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)

@@ -42,6 +42,21 @@ import styles from './Chat.module.css';
 // is the source of truth if it ever changes.
 const MAX_MESSAGE_BYTES = 8192;
 
+function messageDraftState(draft: string) {
+  const body = draft.trim();
+  return {
+    body,
+    tooLong: new TextEncoder().encode(body).length > MAX_MESSAGE_BYTES,
+  };
+}
+
+function sendErrorState(error: unknown) {
+  const status = error instanceof ApiError ? error.status : 0;
+  if (status === 503) return { message: t.chat.sendDisabled, disable: true };
+  if (status === 422) return { message: t.chat.sendRejected, disable: false };
+  return { message: t.chat.sendFailed, disable: false };
+}
+
 // How close to the bottom (in pixels) counts as "already at the bottom" for
 // the autoscroll-on-new-message behavior below.
 const NEAR_BOTTOM_PX = 40;
@@ -80,6 +95,7 @@ function DayDivider({ day }: { day: string }) {
 export default function Chat() {
   const { username } = useParams<{ username?: string }>();
   const navigate = useNavigate();
+  const [starterPending, setStarterPending] = useState(false);
 
   const conversationsQuery = useConversations();
   const conversations = conversationsQuery.data ?? [];
@@ -125,11 +141,18 @@ export default function Chat() {
   // mandatory — otherwise every visit to /chat becomes a back-button trap
   // through an intermediate history entry the user never asked for.
   useEffect(() => {
-    if (username !== undefined) return;
+    if (username !== undefined) {
+      if (starterPending) setStarterPending(false);
+      return;
+    }
+    // Starting from an empty rail owns navigation until its POST settles.
+    // Otherwise the successful conversations refetch can race ahead and
+    // turn the user-initiated PUSH into this effect's initial-list REPLACE.
+    if (starterPending) return;
     if (!hasData(conversationsPhase)) return;
     if (conversationsQuery.data === undefined || conversationsQuery.data.length === 0) return;
     navigate(`/chat/${encodeURIComponent(conversationsQuery.data[0].username)}`, { replace: true });
-  }, [username, conversationsPhase, conversationsQuery.data, navigate]);
+  }, [username, conversationsPhase, conversationsQuery.data, navigate, starterPending]);
 
   const paneRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
@@ -188,6 +211,7 @@ export default function Chat() {
     <div className={styles.root}>
       <div className={styles.rail}>
         <SectionHeader label={t.chat.railHeading} />
+        <NewConversation onPendingChange={setStarterPending} />
         <QueryNotice phase={conversationsPhase} />
         {hasData(conversationsPhase) && conversations.length === 0 && (
           <EmptyState message={t.chat.empty} />
@@ -300,40 +324,104 @@ export default function Chat() {
   );
 }
 
+function NewConversation({ onPendingChange }: { onPendingChange: (pending: boolean) => void }) {
+  const navigate = useNavigate();
+  const [username, setUsername] = useState('');
+  const [draft, setDraft] = useState('');
+  const [sendDisabled, setSendDisabled] = useState(false);
+  const [error, setError] = useState('');
+  const trimmedUsername = username.trim();
+  const message = messageDraftState(draft);
+  const send = useSendMessage();
+  const canSend =
+    trimmedUsername !== '' &&
+    message.body !== '' &&
+    !message.tooLong &&
+    !sendDisabled &&
+    !send.isPending;
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!canSend) return;
+    onPendingChange(true);
+    send.mutate(
+      { username: trimmedUsername, body: message.body },
+      {
+        onSuccess: (_message, { username: submittedUsername }) => {
+          setUsername('');
+          setDraft('');
+          setError('');
+          navigate(`/chat/${encodeURIComponent(submittedUsername)}`);
+        },
+        onError: (err) => {
+          onPendingChange(false);
+          const errorState = sendErrorState(err);
+          if (errorState.disable) setSendDisabled(true);
+          setError(errorState.message);
+        },
+      },
+    );
+  }
+
+  return (
+    <form className={styles.newConversation} onSubmit={handleSubmit}>
+      <label className={styles.visuallyHidden} htmlFor="new-conversation-username">
+        {t.chat.newConversationUsernameLabel}
+      </label>
+      <input
+        id="new-conversation-username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        placeholder={t.chat.newConversationUsernamePlaceholder}
+        disabled={sendDisabled || send.isPending}
+        className={styles.newConversationInput}
+      />
+      <label className={styles.visuallyHidden} htmlFor="new-conversation-message">
+        {t.chat.newConversationMessageLabel}
+      </label>
+      <input
+        id="new-conversation-message"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={t.chat.newConversationMessagePlaceholder}
+        disabled={sendDisabled || send.isPending}
+        className={styles.newConversationInput}
+      />
+      <div role="status" className={error || message.tooLong ? styles.newConversationError : undefined}>
+        {error || (message.tooLong ? t.chat.tooLong : '')}
+      </div>
+      <div className={styles.newConversationActions}>
+        <Button type="submit" variant="primary" disabled={!canSend}>
+          {t.chat.newConversationSubmit}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function Composer({ username }: { username: string }) {
   const [draft, setDraft] = useState('');
   const [sendDisabled, setSendDisabled] = useState(false);
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const send = useSendMessage(username);
+  const send = useSendMessage();
 
-  const trimmed = draft.trim();
-  const bytes = new TextEncoder().encode(trimmed).length;
-  const tooLong = bytes > MAX_MESSAGE_BYTES;
-  const canSend = trimmed !== '' && !tooLong && !sendDisabled && !send.isPending;
+  const message = messageDraftState(draft);
+  const canSend = message.body !== '' && !message.tooLong && !sendDisabled && !send.isPending;
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!canSend) return;
-    send.mutate(trimmed, {
+    send.mutate({ username, body: message.body }, {
       onSuccess: () => {
         setDraft('');
         setError('');
         inputRef.current?.focus();
       },
       onError: (err) => {
-        const status = err instanceof ApiError ? err.status : 0;
-        if (status === 503) {
-          setSendDisabled(true);
-          setError(t.chat.sendDisabled);
-        } else if (status === 422) {
-          setError(t.chat.sendRejected);
-        } else {
-          // Covers 502 (send failed upstream) and anything else (400,
-          // network error) with the same generic copy — the draft is
-          // preserved in every one of these cases so nothing is lost.
-          setError(t.chat.sendFailed);
-        }
+        const errorState = sendErrorState(err);
+        if (errorState.disable) setSendDisabled(true);
+        setError(errorState.message);
       },
     });
   }
@@ -341,7 +429,7 @@ function Composer({ username }: { username: string }) {
   return (
     <form className={styles.composer} onSubmit={handleSubmit}>
       <div role="status" className={error ? styles.composerError : undefined}>
-        {error || (tooLong ? t.chat.tooLong : '')}
+        {error || (message.tooLong ? t.chat.tooLong : '')}
       </div>
       <div className={styles.composerRow}>
         <span aria-hidden className={styles.prompt}>

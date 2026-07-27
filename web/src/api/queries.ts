@@ -5,6 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
+import { normalizeJobDetail, normalizeJobs, normalizeStatusReport } from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -15,19 +16,35 @@ import type {
   Job,
   JobDetail,
   JobEvent,
+  LiveJob,
   MarkReadResult,
   Peer,
   PrivateMessage,
+  ScopedLivePayload,
   ShareRescanResult,
   SharesReport,
-  StatusReport,
   ThreadPage,
+  ThroughputSample,
   UploadsReport,
+  WireJob,
+  WireJobDetail,
+  WireStatusReport,
 } from './types';
 
-// Intervals match the legacy dashboard exactly so perceived freshness is
-// unchanged by the migration.
-const JOBS_INTERVAL = 3000;
+// jobs was 3s before the SSE stream (#161) carried its live fields at ~1s
+// instead; it now only needs to be fresh enough for the DB-backed fields
+// (status/state/events-derived data), which change on a pipeline tick, not
+// continuously. See the #161 design doc's poll-interval table.
+const JOBS_INTERVAL = 15000;
+// Job detail deliberately keeps the old 3s cadence rather than following
+// JOBS_INTERVAL. The stream only carries per-file data for the job its
+// connection was opened with (/api/stream?job=<id>, set on the /jobs/:id
+// route), but JobExpansion renders the same per-file transfers inline on the
+// /jobs list, where the connection is unscoped. Slowing this to 15s would
+// make an expanded row's file progress update 5x slower than before #161 —
+// a regression the stream does not compensate for on that route. The #161
+// design's poll-interval table changes `jobs`, not the detail query.
+const JOB_DETAIL_INTERVAL = 3000;
 const EVENTS_INTERVAL = 3000;
 // Exported because the top bar derives its staleness threshold from it: a
 // hardcoded copy there would silently stop matching if this changed.
@@ -35,11 +52,12 @@ export const STATUS_INTERVAL = 5000;
 const PEERS_INTERVAL = 5000;
 const CHARTS_INTERVAL = 15000; // passes change at most every discovery tick (~30s)
 const SHARES_INTERVAL = 15000;
-const SHARES_SCANNING_INTERVAL = 3000; // matches JOBS_INTERVAL while a scan is actively running
+const SHARES_SCANNING_INTERVAL = 3000; // a scan's progress is worth watching closely while it runs
 // Uploads are live transfers, comparable to the jobs list rather than the
 // mostly-static share index: a typical track finishes inside 15s (the
 // SHARES_INTERVAL), which would miss most uploads' active window entirely.
-// 3s matches JOBS_INTERVAL, which polls a similarly-lived array.
+// 3s matches JOB_DETAIL_INTERVAL, which polls a similarly-lived array.
+// (Uploads are not on the #161 stream — it carries downloads only.)
 const UPLOADS_INTERVAL = 3000;
 // Layout mounts useConversations on every route (it feeds the sidebar's chat
 // badge), so this matches STATUS_INTERVAL's profile rather than the more
@@ -67,20 +85,128 @@ export const queryKeys = {
   // thread's own message pages.
   conversations: ['messages', 'conversations'] as const,
   thread: (username: string) => ['messages', 'thread', username] as const,
+  // Not backed by a queryFn — see useLiveData. api/stream.ts's StreamProvider
+  // is the only writer, via setQueryData on every `event: live` frame (and
+  // clears it to null on stream error/close — null rather than undefined
+  // because setQueryData ignores undefined; see the comment there).
+  live: ['live'] as const,
 };
 
+// Reads the SSE stream's latest frame (see api/stream.ts's StreamProvider)
+// without ever fetching it itself: queryFn is never invoked because
+// `enabled` is false, but the query still subscribes to cache updates, so a
+// component re-renders whenever StreamProvider calls
+// queryClient.setQueryData(queryKeys.live, ...). undefined means either no
+// frame has arrived yet or the stream just died — both cases the merge
+// functions below treat identically ("nothing live right now").
+export function useLiveData(): ScopedLivePayload | null | undefined {
+  return useQuery<ScopedLivePayload | null>({
+    queryKey: queryKeys.live,
+    queryFn: () => null,
+    enabled: false,
+    staleTime: Infinity,
+  }).data;
+}
+
+// Overlays a job's live fields on top of its REST values — never a
+// destructive replace. A job absent from `live` (not currently reporting a
+// matched, non-terminal live transfer — see LivePayload's doc comment) is
+// returned untouched, which is exactly "fall back to REST" since `jobs`
+// already carries whatever REST last reported for it.
+export function mergeLiveJobs(jobs: Job[] | undefined, live: LiveJob[] | undefined): Job[] | undefined {
+  if (!jobs || !live || live.length === 0) return jobs;
+  const byId = new Map(live.map((j) => [j.id, j]));
+  return jobs.map((job) => {
+    const l = byId.get(job.id);
+    if (!l) return job;
+    return {
+      ...job,
+      bytesDone: l.bytesDone,
+      bytesTotal: l.bytesTotal,
+      speed: l.speed,
+      queuePosition: l.queuePosition,
+      etaSeconds: l.etaSeconds,
+    };
+  });
+}
+
+// Transfer states the pipeline treats as terminal — the same three that gate
+// the purge in internal/pipeline/downloading.go. STALLED is deliberately absent:
+// it is a durable intent that the next reconcile pass retries, not an end state.
+const TERMINAL_TRANSFER_STATES = new Set(['COMPLETED', 'ERRORED', 'CANCELLED']);
+
+// Same overlay principle as mergeLiveJobs, but by filename within a job
+// detail's attempts, and scoped: a live frame only carries `files` for the
+// job id its connection was opened with (see ScopedLivePayload), so a stale
+// frame from a previously viewed job — arriving mid-reconnect after
+// navigating to a new one — must never apply here.
+//
+// A transfer REST already reports terminal is left completely alone. The two
+// sources lead each other on different fields — live leads on bytesDone (it
+// ticks every second while the DB is checkpointed far more coarsely), but REST
+// leads on state, because downloading.go commits the terminal
+// UpdateTransferProgress *before* purging the transfer from the live backend.
+// During that window a live frame still describes the file as in progress, with
+// a speed that stays nonzero for up to speedStaleAfter. Overlaying it makes a
+// finished row flip back to downloading on whichever of the two arrives last.
+export function mergeLiveFiles(detail: JobDetail | undefined, live: ScopedLivePayload | null | undefined, id: number): JobDetail | undefined {
+  if (!detail || !live || live.scopeJobId !== id) return detail;
+  const byFilename = new Map((live.files ?? []).map((f) => [f.filename, f]));
+  return {
+    ...detail,
+    attempts: detail.attempts.map((a) => ({
+      ...a,
+      transfers: a.transfers.map((tr) => {
+        if (TERMINAL_TRANSFER_STATES.has(tr.state)) return tr;
+        const f = byFilename.get(tr.filename);
+        if (!f) return tr;
+        return {
+          ...tr,
+          state: f.state,
+          bytesDone: f.bytesDone,
+          bytesTotal: f.bytesTotal,
+          speed: f.speed,
+          queuePosition: f.queuePosition,
+        };
+      }),
+    })),
+  };
+}
+
+// Matches internal/soulseek's throughputWindow (48 one-second samples) —
+// the server itself never reports more than that in one GET /api/charts
+// snapshot, so capping the client's merged series to the same size just
+// mirrors what REST would eventually re-converge to anyway rather than
+// growing the series unbounded as the stream keeps appending.
+const THROUGHPUT_CAP = 48;
+
+// Appends the stream's new throughput samples to an already-fetched series,
+// deduping on `at` (the REST snapshot and a live frame can legitimately
+// overlap on the sample taken right at fetch time) and capping the result —
+// see THROUGHPUT_CAP. Oldest-first in, oldest-first out, matching both
+// REST's and the stream's own ordering.
+export function mergeThroughputSamples(existing: ThroughputSample[], incoming: ThroughputSample[]): ThroughputSample[] {
+  if (incoming.length === 0) return existing;
+  const seen = new Set(existing.map((s) => s.at));
+  const deduped = incoming.filter((s) => !seen.has(s.at));
+  if (deduped.length === 0) return existing;
+  return [...existing, ...deduped].slice(-THROUGHPUT_CAP);
+}
+
 export function useJobs() {
-  return useQuery({
+  const jobsQuery = useQuery({
     queryKey: queryKeys.jobs,
-    queryFn: () => apiGet<Job[]>('/api/jobs'),
+    queryFn: () => apiGet<WireJob[]>('/api/jobs').then(normalizeJobs),
     refetchInterval: JOBS_INTERVAL,
   });
+  const live = useLiveData();
+  return { ...jobsQuery, data: mergeLiveJobs(jobsQuery.data, live?.jobs) };
 }
 
 export function useStatus() {
   return useQuery({
     queryKey: queryKeys.status,
-    queryFn: () => apiGet<StatusReport>('/status'),
+    queryFn: () => apiGet<WireStatusReport>('/status').then(normalizeStatusReport),
     refetchInterval: STATUS_INTERVAL,
   });
 }
@@ -110,18 +236,20 @@ export function usePeers() {
 // is expanded, so the fetch is naturally scoped to expanded rows rather than
 // firing for every row up front.
 export function useJobDetail(id: number) {
-  return useQuery({
+  const detailQuery = useQuery({
     queryKey: queryKeys.jobDetail(id),
-    queryFn: () => apiGet<JobDetail>(`/api/jobs/${id}/detail`),
-    refetchInterval: JOBS_INTERVAL,
+    queryFn: () => apiGet<WireJobDetail>(`/api/jobs/${id}/detail`).then(normalizeJobDetail),
+    refetchInterval: JOB_DETAIL_INTERVAL,
   });
+  const live = useLiveData();
+  return { ...detailQuery, data: mergeLiveFiles(detailQuery.data, live, id) };
 }
 
 export function useJobEvents(id: number) {
   return useQuery({
     queryKey: queryKeys.jobEvents(id),
     queryFn: () => apiGet<JobEvent[]>(`/api/jobs/${id}/events`),
-    refetchInterval: JOBS_INTERVAL,
+    refetchInterval: JOB_DETAIL_INTERVAL,
   });
 }
 
@@ -296,17 +424,19 @@ export function useThread(username: string | undefined) {
   });
 }
 
-// The 201 body is discarded on purpose: invalidating the thread and
-// conversations queries already refetches both with the new message in
-// place, in the correct newest-first order and paging state — hand-splicing
-// the mutation's own response into the cache would just duplicate that work
-// and risks getting the ordering wrong.
-export function useSendMessage(username: string) {
+// Username travels with the body as a mutation variable so a send paused
+// before its POST cannot be retargeted by a rerender. The 201 body is
+// discarded on purpose: invalidating the thread and conversations queries
+// already refetches both with the new message in place, in the correct
+// newest-first order and paging state — hand-splicing the mutation's own
+// response into the cache would just duplicate that work and risks getting
+// the ordering wrong.
+export function useSendMessage() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: string) =>
+    mutationFn: ({ username, body }: { username: string; body: string }) =>
       apiPostJson<PrivateMessage>(`/api/messages/${encodeURIComponent(username)}`, { body }),
-    onSuccess: () => {
+    onSuccess: (_message, { username }) => {
       void qc.invalidateQueries({ queryKey: queryKeys.thread(username) });
       void qc.invalidateQueries({ queryKey: queryKeys.conversations });
     },

@@ -141,6 +141,135 @@ func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 	}
 }
 
+// TestToJobDetailDTOOverlaysBytesDoneForLiveMatch is issue #161, part 1c: a
+// matched live transfer's BytesDone must win over the persisted value.
+func TestToJobDetailDTOOverlaysBytesDoneForLiveMatch(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 100, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
+	})
+
+	dto := toJobDetailDTO(detail, live)
+	tr := dto.Attempts[0].Transfers[0]
+	if tr.BytesDone != 750 {
+		t.Errorf("BytesDone = %d, want 750 (live overlay)", tr.BytesDone)
+	}
+	if tr.BytesTotal != 1000 {
+		t.Errorf("BytesTotal = %d, want 1000 (never overlaid)", tr.BytesTotal)
+	}
+}
+
+// TestToJobDetailDTOFallsBackToPersistedWithoutLiveMatch covers a transfer
+// with no live counterpart at all (e.g. terminal and already reconciled away
+// from ListDownloads): the persisted BytesDone must be served unmodified.
+func TestToJobDetailDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, BytesTotal: 1000},
+			},
+		}},
+	}
+
+	dto := toJobDetailDTO(detail, liveTransferIndex{})
+	tr := dto.Attempts[0].Transfers[0]
+	if tr.BytesDone != 1000 {
+		t.Errorf("BytesDone = %d, want 1000 (persisted, no live match)", tr.BytesDone)
+	}
+}
+
+// TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted is issue #161's
+// fix: a lingering terminal live entry (errored/cancelled/completed, not yet
+// reconciled away from ListDownloads) still supplies bytes — see
+// transferDetailDTO.BytesDone's comment on why a state-agnostic match is
+// what's accurate here (the live entry's byte count is only ever purged in
+// the same reconcile pass that also persists it, per
+// internal/pipeline/downloading.go's reconcile).
+func TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 800, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		// Lingering terminal entry, not yet reconciled away — its BytesDone is
+		// the file's final, accurate size.
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
+	})
+
+	dto := toJobDetailDTO(detail, live)
+	tr := dto.Attempts[0].Transfers[0]
+	if tr.BytesDone != 1000 {
+		t.Errorf("BytesDone = %d, want 1000 (terminal live match still supplies bytes)", tr.BytesDone)
+	}
+}
+
+// Reconcile persists the terminal state before purging the transfer from the
+// live backend, so a finished file can still match a lingering live entry that
+// reports IN_PROGRESS at a stale speed. Bytes must still come from it; speed
+// and queue position must not, or a completed row renders as downloading.
+func TestToJobDetailDTOTerminalPersistedDropsLiveSpeedAndQueue(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
+	})
+
+	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	if tr.Speed != 0 {
+		t.Errorf("Speed = %d, want 0 (persisted state is terminal)", tr.Speed)
+	}
+	if tr.QueuePosition != 0 {
+		t.Errorf("QueuePosition = %d, want 0 (persisted state is terminal)", tr.QueuePosition)
+	}
+	if tr.BytesDone != 1000 {
+		t.Errorf("BytesDone = %d, want 1000 (bytes come from live in every state)", tr.BytesDone)
+	}
+}
+
+// STALLED is a durable retry intent, not an end state: the transfer is still in
+// flight and its live speed/queue position are real.
+func TestToJobDetailDTOStalledKeepsLiveSpeedAndQueue(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferStalled, BytesDone: 400, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 600, Speed: 1500, QueuePosition: 3},
+	})
+
+	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	if tr.Speed != 1500 || tr.QueuePosition != 3 {
+		t.Errorf("Speed/QueuePosition = %d/%d, want 1500/3 (STALLED is not terminal)", tr.Speed, tr.QueuePosition)
+	}
+}
+
 // match prefers the remote id and falls back to username+filename.
 func TestLiveTransferIndexMatch(t *testing.T) {
 	idx := newLiveTransferIndex([]core.RemoteTransfer{

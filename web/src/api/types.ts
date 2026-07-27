@@ -1,13 +1,14 @@
 // Hand-written mirrors of the Go DTOs in internal/observ. Kept in one file so
 // drift has a single place to be caught. See spec 2026-07-20.
 
-// dashboardStatus() in internal/observ/status.go returns these six values for
-// a job's own status. "orphaned" is also aggregated as a count on
-// StatusReport (issue #158).
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'orphaned';
+// Canonical UI values. Legacy wire values are kept separate below and
+// normalized before React Query caches a response.
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'parked';
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED' | 'ORPHANED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';
+export type WireJobStatus = JobStatus | 'orphaned';
+export type WireJobState = JobState | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 
 // JobSource distinguishes a Lidarr wanted-sync job from one created manually
@@ -54,6 +55,12 @@ export interface Job {
   etaSeconds?: number;
 }
 
+/** GET /api/jobs wire shape during the orphaned-to-parked transition. */
+export type WireJob = Omit<Job, 'status' | 'state'> & {
+  status: WireJobStatus;
+  state: WireJobState;
+};
+
 /** internal/observ/jobdetail.go transferDetailDTO */
 export interface TransferDetail {
   filename: string;
@@ -90,6 +97,9 @@ export interface JobDetail {
   state: JobState;
   attempts: AttemptDetail[];
 }
+
+/** GET /api/jobs/{id}/detail wire shape during the state-name transition. */
+export type WireJobDetail = Omit<JobDetail, 'state'> & { state: WireJobState };
 
 /** GET /api/events and /api/jobs/{id}/events — eventDTO */
 export interface JobEvent {
@@ -139,7 +149,7 @@ export interface StatusReport {
   queued: number;
   active: number;
   stalled: number;
-  orphaned: number;
+  parked: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
   /**
@@ -150,6 +160,12 @@ export interface StatusReport {
    */
   version?: string;
 }
+
+/** GET /status wire shape; old servers omit parked, new servers may omit orphaned. */
+export type WireStatusReport = Omit<StatusReport, 'parked'> & {
+  parked?: number;
+  orphaned?: number;
+};
 
 /** internal/observ/config.go LidarrView */
 export interface LidarrConfigDTO {
@@ -512,4 +528,69 @@ export interface ChartsReport {
   passes: SearchPass[];
   completedByHour: HourCount[];
   throughput: ThroughputSample[];
+}
+
+/**
+ * internal/observ/stream.go streamJobDTO — one job's live aggregate carried
+ * by a GET /api/stream `event: live` frame. speed/queuePosition/etaSeconds
+ * are omitempty on the Go side: absent means zero/unknown, not "0", same
+ * convention as Job's own live fields.
+ */
+export interface LiveJob {
+  id: number;
+  bytesDone: number;
+  bytesTotal: number;
+  speed?: number;
+  queuePosition?: number;
+  etaSeconds?: number;
+}
+
+/**
+ * internal/observ/stream.go streamFileDTO — one file's live state, present
+ * only when the stream is scoped via `?job=<id>` (see ScopedLivePayload).
+ * Unlike LiveJob, a file is not filtered to non-terminal states: `state`
+ * transitioning to COMPLETED/ERRORED/CANCELLED is itself meaningful, not
+ * noise to hide.
+ */
+export interface LiveFile {
+  filename: string;
+  state: string;
+  bytesDone: number;
+  bytesTotal: number;
+  speed?: number;
+  queuePosition?: number;
+}
+
+/**
+ * GET /api/stream's `event: live` JSON body — internal/observ/stream.go
+ * livePayload. `jobs` is filtered server-side to jobs with at least one
+ * matched, non-terminal live transfer *at this instant* — a job present in
+ * one frame and absent from the next means "no live data for this job right
+ * now", not "job gone". `files` is present only when the connection was
+ * opened with `?job=<id>`. `throughput` carries only samples newer than the
+ * previous frame — see api/queries.ts's mergeThroughputSamples for how the
+ * client folds that into the cached series. `down` is always present (the
+ * aggregate live download speed across every non-terminal transfer, 0 when
+ * idle).
+ *
+ * See api/queries.ts's mergeLiveJobs/mergeLiveFiles for how "absent from
+ * this frame" is honoured on read — an overlay on top of REST, never a
+ * destructive replace, so losing the stream degrades cleanly back to
+ * whatever REST last reported.
+ */
+export interface LivePayload {
+  jobs: LiveJob[];
+  files?: LiveFile[];
+  throughput?: ThroughputSample[];
+  down: number;
+}
+
+/**
+ * The cached shape of queryKeys.live: a LivePayload plus which job id (if
+ * any) the connection was scoped to when this frame arrived. Read alongside
+ * `files` in mergeLiveFiles so a JobDetail page never applies a stale
+ * previous job's file data to the job now on screen during a reconnect.
+ */
+export interface ScopedLivePayload extends LivePayload {
+  scopeJobId?: number;
 }

@@ -63,10 +63,10 @@ func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) 
 
 // StatusReport is the read-only snapshot served at /status.
 type StatusReport struct {
-	Queued   int `json:"queued"`
-	Active   int `json:"active"`
-	Stalled  int `json:"stalled"`
-	Orphaned int `json:"orphaned"`
+	Queued  int `json:"queued"`
+	Active  int `json:"active"`
+	Stalled int `json:"stalled"`
+	Parked  int `json:"parked"`
 }
 
 // StatusFunc produces a current StatusReport (typically backed by the store).
@@ -87,6 +87,16 @@ type jobDTO struct {
 	// the frontend's progress bar doesn't jump backwards each time a new
 	// file in a multi-track album starts. Zero when the job has no
 	// candidate, matching AlbumBytesDone/Total's own zero value.
+	//
+	// BytesDone is computed as a per-file sum (see jobBytesDone, albumlive.go)
+	// rather than served straight from AlbumBytesDone whenever the candidate
+	// has at least one live match (issue #161): AlbumBytesDone is only as
+	// fresh as the last Downloading reconcile (default 15s), so without this
+	// overlay the number visibly jumps once every 15s instead of moving
+	// continuously. BytesTotal is deliberately NOT overlaid — it is written
+	// ahead from candidate file sizes at activation and does not drift, and
+	// overlaying the live counterpart's Size would risk the progress bar's
+	// denominator moving.
 	BytesDone  int64 `json:"bytesDone"`
 	BytesTotal int64 `json:"bytesTotal"`
 	// CreatedAt is when the job was first inserted — unlike UpdatedAt it never
@@ -133,8 +143,11 @@ type jobDTO struct {
 // live supplies the peer backend's current ListDownloads snapshot, indexed
 // for album-level aggregation (see aggregateLiveAlbum); its zero value
 // (liveTransferIndex{}) is a valid "no live data" index for callers with
-// none.
-func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveTransferIndex) jobDTO {
+// none. persisted supplies each live-matched candidate's exact per-file
+// persisted bytes (see jobBytesDone, Store.TransferBytesByCandidate); nil is
+// a valid "not fetched" map — every job then simply falls back to its own
+// AlbumBytesDone.
+func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveTransferIndex, persisted map[int64]map[string]int64) jobDTO {
 	d := jobDTO{
 		ID:              v.Job.ID,
 		Title:           v.Job.Title,
@@ -156,12 +169,17 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
-		speed, speedAvg, queuePosition, hasQueuePosition := aggregateLiveAlbum(v.Attempt, live)
+		// matched (whether any file has a live counterpart at all) is a
+		// stream-only concern — see aggregateLiveAlbum's doc comment. REST
+		// always reports every job regardless of live data, so it's ignored
+		// here.
+		speed, speedAvg, queuePosition, hasQueuePosition, _ := aggregateLiveAlbum(v.Attempt, live)
 		d.Speed = speed
 		if hasQueuePosition {
 			d.QueuePosition = queuePosition
 		}
 		d.ETASeconds = etaSeconds(v.AlbumBytesRemaining, speedAvg)
+		d.BytesDone = jobBytesDone(v.Attempt.Username, v.Attempt.Files, v.Attempt.ID, v.AlbumBytesDone, live, persisted)
 	}
 	if v.Job.NotBefore != nil {
 		d.NotBefore = v.Job.NotBefore.Format(timeFormat)
@@ -183,8 +201,8 @@ type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 // errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
 type CancelFunc func(ctx context.Context, jobID int64) error
 
-// RetryFunc manually revives one FAILED or ORPHANED job by id (typically
-// backed by app.Jobs.Retry). Errors are mapped to a status code by the
+// RetryFunc manually revives one FAILED, PARKED, or legacy ORPHANED job by id
+// (typically backed by app.Jobs.Retry). Errors are mapped to a status code by the
 // /api/jobs/{id}/retry handler: errors.Is(err, app.ErrJobNotFound) -> 404,
 // errors.Is(err, app.ErrJobNotRetryable) -> 409, anything else -> 500.
 type RetryFunc func(ctx context.Context, jobID int64) error
@@ -289,6 +307,13 @@ type ServerDeps struct {
 	// LiveTransfers enriches /api/jobs/{id}/detail with queue position and
 	// speed; failures there degrade to unenriched detail, never an error.
 	LiveTransfers LiveTransfersFunc
+	// TransferBytes supplies each live-matched candidate's exact per-file
+	// persisted bytes for GET /api/jobs and GET /api/stream's live-bytes
+	// overlay (issue #161, see jobBytesDone). Only ever called with the
+	// candidate ids that actually have a live match, never the whole job
+	// list. nil (as in every existing test's ServerDeps) degrades every job
+	// to its already-correct, if up-to-15s-stale, AlbumBytesDone.
+	TransferBytes TransferBytesFunc
 	// Charts supplies the Overview view's chart data served at /api/charts
 	// (see ChartsData).
 	Charts ChartsFunc
@@ -322,6 +347,14 @@ type ServerDeps struct {
 	Thread               ThreadFunc
 	Send                 SendMessageFunc
 	MarkRead             MarkReadFunc
+	// Shutdown closes GET /api/stream's open SSE connections when the server
+	// is stopping (issue #161): without it an open stream keeps its request
+	// context alive until the client disconnects, which can block graceful
+	// shutdown until lifecycleShutdownTimeout expires. nil (as in every
+	// existing test's ServerDeps) simply means "never signal shutdown" — the
+	// connection then only ends when the client disconnects, matching
+	// today's behavior for every other endpoint.
+	Shutdown <-chan struct{}
 }
 
 // NewServer returns an http.Handler exposing /metrics, /status, /healthz,
@@ -414,10 +447,19 @@ func NewServer(deps ServerDeps) http.Handler {
 		}
 		resp := struct {
 			StatusReport
+			// Orphaned is a deprecated response alias derived from Parked so the
+			// two fields cannot disagree.
+			Orphaned      int                        `json:"orphaned"`
 			Modules       map[string]string          `json:"modules"`
 			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
 			Version       string                     `json:"version"`
-		}{report, moduleTicks, moduleDetails, deps.Version}
+		}{
+			StatusReport:  report,
+			Orphaned:      report.Parked,
+			Modules:       moduleTicks,
+			ModuleDetails: moduleDetails,
+			Version:       deps.Version,
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -437,9 +479,24 @@ func NewServer(deps ServerDeps) http.Handler {
 				live = lt
 			}
 			liveIdx := newLiveTransferIndex(live)
+			// Exact per-file persisted bytes (issue #161) are only worth
+			// fetching for candidates that actually have a live match — bounded
+			// by concurrent downloads, not by the full (unbounded) job list.
+			var matchedIDs []int64
+			for _, v := range views {
+				if v.Attempt != nil && anyLiveMatch(v.Attempt.Username, v.Attempt.Files, liveIdx) {
+					matchedIDs = append(matchedIDs, v.Attempt.ID)
+				}
+			}
+			var persisted map[int64]map[string]int64
+			if len(matchedIDs) > 0 && deps.TransferBytes != nil {
+				if m, err := deps.TransferBytes(r.Context(), matchedIDs); err == nil {
+					persisted = m
+				}
+			}
 			dtos := make([]jobDTO, len(views))
 			for i, v := range views {
-				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx)
+				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(dtos)
@@ -487,7 +544,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		case errors.Is(err, app.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobNotRetryable):
-			http.Error(w, "job is not FAILED or ORPHANED", http.StatusConflict)
+			http.Error(w, "job is not FAILED or PARKED", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -609,6 +666,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
+	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }
@@ -683,7 +741,7 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 	case err == nil:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(toJobDTO(view, failedRetryAfter, maxCandidates, liveTransferIndex{}))
+		_ = json.NewEncoder(w).Encode(toJobDTO(view, failedRetryAfter, maxCandidates, liveTransferIndex{}, nil))
 	case errors.Is(err, app.ErrRemoteFileBusy):
 		writeConfigError(w, http.StatusConflict, err.Error(), nil)
 	default:

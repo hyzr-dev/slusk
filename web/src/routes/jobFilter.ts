@@ -66,7 +66,7 @@ export function countByStatus(
     stalled: 0,
     done: 0,
     failed: 0,
-    orphaned: 0,
+    parked: 0,
     importing: 0,
   };
   for (const job of jobs) {

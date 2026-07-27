@@ -9,7 +9,7 @@ describe('tagFor', () => {
     expect(tagFor('stalled', 'DOWNLOADING')).toBe('ST');
     expect(tagFor('done', 'DONE')).toBe('OK');
     expect(tagFor('failed', 'FAILED')).toBe('FA');
-    expect(tagFor('orphaned', 'ORPHANED')).toBe('OR');
+    expect(tagFor('parked', 'PARKED')).toBe('PA');
   });
 
   it('reports importing from the state, which the status cannot express', () => {
@@ -32,8 +32,8 @@ describe('tagFor', () => {
 
 describe('Tag', () => {
   it('renders the tag text with a readable title', () => {
-    render(<Tag status="stalled" state="DOWNLOADING" />);
-    const el = screen.getByText('ST');
-    expect(el).toHaveAttribute('title', 'Stalled');
+    render(<Tag status="parked" state="PARKED" />);
+    const el = screen.getByText('PA');
+    expect(el).toHaveAttribute('title', 'Parked');
   });
 });
