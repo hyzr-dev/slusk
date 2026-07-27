@@ -1,14 +1,32 @@
-.wrap { display: flex; flex-direction: column; gap: 4px; }
+.wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 25px; }
+.direction {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 1.1px;
+  color: var(--text-dim);
+}
 .peak {
-  align-self: flex-end;
   font-family: var(--font-mono);
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 600;
   color: var(--fg);
+  white-space: nowrap;
 }
-.chart { width: 100%; height: 96px; display: block; }
+.peakLabel {
+  font-size: 8.5px;
+  font-weight: 500;
+  letter-spacing: 0.9px;
+  color: var(--text-dim);
+}
+.chart { width: 100%; height: 82px; display: block; }
 .baseline { stroke: var(--line2); stroke-width: 1; }
-.area { fill: var(--bar); fill-opacity: 0.16; stroke: none; }
-.line { fill: none; stroke: var(--bar); stroke-width: 1.5; }
+.area { stroke: none; }
+.line { fill: none; stroke-width: 1.5; }
+.download .area { fill: var(--bar); fill-opacity: 0.16; }
+.download .line { stroke: var(--bar); }
+.upload .direction { color: var(--ok); }
+.upload .area { fill: var(--ok); fill-opacity: 0.14; }
+.upload .line { stroke: var(--ok); }
 .axis { display: flex; justify-content: space-between; font-size: 9.5px; letter-spacing: 0.8px; color: var(--text-dim); }
-.empty { font-size: 11.5px; letter-spacing: 1px; color: var(--text-dim); padding: 20px 0; text-align: center; }
+.empty { font-size: 10.5px; letter-spacing: 0.7px; color: var(--text-dim); padding: 32px 0 23px; text-align: center; }

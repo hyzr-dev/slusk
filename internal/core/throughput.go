@@ -2,18 +2,23 @@ package core
 
 import "time"
 
-// ThroughputSample is one instantaneous reading of the native soulseek
-// client's aggregate download throughput (issue #157): the sum of bytes/sec
-// across every in-flight download at the moment it was taken, plus how many
-// downloads were active. It describes DOWNLOAD throughput only — uploads have
-// no byte-level throughput tracking today, so this must not be read as
-// whole-node traffic. Backs the Overview view's live sparkline (GET
-// /api/charts); not persisted (see ThroughputMinute for the persisted,
-// per-minute rollup).
+// ThroughputSample is one instantaneous directional reading of the native
+// Soulseek client's aggregate throughput: the sum of bytes/sec across every
+// in-flight transfer in that direction, plus how many transfers were active.
+// Samples are memory-only; ThroughputMinute remains the download-only
+// persistence contract.
 type ThroughputSample struct {
 	At              time.Time
 	BytesPerSecond  int64
 	ActiveTransfers int
+}
+
+// ThroughputSeries holds aligned download and upload throughput samples,
+// oldest first. Native sampling appends one sample to each direction on the
+// same tick, so corresponding entries always have the same timestamp.
+type ThroughputSeries struct {
+	Download []ThroughputSample
+	Upload   []ThroughputSample
 }
 
 // ThroughputMinute is one persisted per-minute rollup of download throughput

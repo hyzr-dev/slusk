@@ -402,14 +402,14 @@ func main() {
 			return peers.ListDownloads(ctx)
 		}
 	}
-	// throughputFn backs the Overview view's live sparkline (issue #157): only
-	// the native soulseek client tracks byte throughput, so this stays nil
-	// (registerCharts then serves an empty series) on every other backend,
+	// throughputFn backs the Overview view's live sparklines: only the native
+	// soulseek client tracks byte throughput in both directions, so this stays
+	// nil (registerCharts then serves empty series) on every other backend,
 	// mirroring liveTransfersFn's own backend gate above.
 	var throughputFn observ.ThroughputFunc
 	if cfg.Pipeline.Backend == config.BackendSoulseek {
-		throughputFn = func(ctx context.Context) ([]core.ThroughputSample, error) {
-			return soulClient.ThroughputSamples(), nil
+		throughputFn = func(ctx context.Context) (core.ThroughputSeries, error) {
+			return soulClient.ThroughputSeries(), nil
 		}
 	}
 	// Connection tests for the settings view probe the loaded config, not any

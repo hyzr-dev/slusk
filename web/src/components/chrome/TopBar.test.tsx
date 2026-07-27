@@ -41,7 +41,12 @@ describe('TopBar', () => {
   function renderTopBar(status: Partial<StatusReport> | undefined) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     if (status) client.setQueryData(queryKeys.status, status);
-    client.setQueryData(queryKeys.charts, { passes: [], throughput: [], cumulative: [] });
+    client.setQueryData(queryKeys.charts, {
+      passes: [],
+      completedByHour: [],
+      throughput: [],
+      uploadThroughput: [],
+    });
     return render(
       <QueryClientProvider client={client}>
         <TopBar />
@@ -75,21 +80,20 @@ describe('TopBar', () => {
   });
 });
 
-// The header's download figure prefers the SSE stream's `down` but must
-// survive the stream not being there — see the comment on `down` in
-// TopBar.tsx. These guard the two non-obvious cases: a dead stream writes
-// null (not undefined) into the live cache, and a healthy but idle stream
-// legitimately reports 0.
-describe('download speed source', () => {
-  function renderWithLive(live: unknown, throughput = 2048) {
+// Each header direction independently prefers its SSE figure but survives the
+// stream not being there. A healthy stream's explicit zero means idle and must
+// not fall back to a stale non-zero REST sample.
+describe('throughput speed sources', () => {
+  function renderWithLive(live: unknown, down = 2048, up = 3072) {
     const fetchMock = vi.fn((_url: string) => new Promise(() => {}));
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(queryKeys.status, {});
     client.setQueryData(queryKeys.charts, {
       passes: [],
-      throughput: [{ at: '2026-01-01T00:00:00Z', bytesPerSecond: throughput, activeTransfers: 1 }],
-      cumulative: [],
+      completedByHour: [],
+      throughput: [{ at: '2026-01-01T00:00:00Z', bytesPerSecond: down, activeTransfers: 1 }],
+      uploadThroughput: [{ at: '2026-01-01T00:00:00Z', bytesPerSecond: up, activeTransfers: 1 }],
     });
     if (live !== undefined) client.setQueryData(queryKeys.live, live);
     const rendered = render(
@@ -100,14 +104,23 @@ describe('download speed source', () => {
     return { ...rendered, fetchMock };
   }
 
-  it('prefers the stream figure over the throughput fallback', () => {
-    renderWithLive({ jobs: [], down: 4096 });
-    expect(screen.getByText(formatSpeed(4096))).toBeInTheDocument();
+  it('renders DOWN then UP and prefers each stream figure', () => {
+    const { container } = renderWithLive({ jobs: [], down: 4096, up: 8192 });
+    const speedCell = Array.from(container.querySelectorAll('[class*="cell"]'))
+      .find((cell) => cell.textContent?.startsWith(t.chrome.down));
+    expect(speedCell).toHaveTextContent('DOWN 4 KB/s · UP 8 KB/s');
   });
 
-  it('falls back to the latest throughput sample when the stream has died', () => {
+  it('falls back to each latest REST sample when the stream has died', () => {
     renderWithLive(null);
     expect(screen.getByText(formatSpeed(2048))).toBeInTheDocument();
+    expect(screen.getByText(formatSpeed(3072))).toBeInTheDocument();
+  });
+
+  it('falls back independently when only one stream direction is absent', () => {
+    renderWithLive({ jobs: [], down: 4096 });
+    expect(screen.getByText(formatSpeed(4096))).toBeInTheDocument();
+    expect(screen.getByText(formatSpeed(3072))).toBeInTheDocument();
   });
 
   it('does not fetch the all-jobs endpoint from persistent chrome', () => {
@@ -115,8 +128,10 @@ describe('download speed source', () => {
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/jobs/all')).toBe(false);
   });
 
-  it('trusts a healthy stream reporting zero rather than falling back', () => {
-    renderWithLive({ jobs: [], down: 0 });
-    expect(screen.getByText(t.chrome.idle)).toBeInTheDocument();
+  it('trusts explicit zero for each stream direction rather than falling back', () => {
+    renderWithLive({ jobs: [], down: 0, up: 0 });
+    expect(screen.getAllByText(t.chrome.idle)).toHaveLength(2);
+    expect(screen.queryByText(formatSpeed(2048))).not.toBeInTheDocument();
+    expect(screen.queryByText(formatSpeed(3072))).not.toBeInTheDocument();
   });
 });

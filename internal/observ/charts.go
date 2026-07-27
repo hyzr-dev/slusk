@@ -35,11 +35,10 @@ type ChartsData struct {
 type ChartsFunc func(ctx context.Context) (ChartsData, error)
 
 // ThroughputFunc produces the native soulseek client's recent aggregate
-// download-throughput samples, oldest first (typically backed by
-// soulseek.Client.ThroughputSamples, issue #157). A nil func, or one wired to
-// a non-native backend, simply yields no throughput series — see
-// registerCharts.
-type ThroughputFunc func(ctx context.Context) ([]core.ThroughputSample, error)
+// download- and upload-throughput samples, oldest first (typically backed by
+// soulseek.Client.ThroughputSeries). A nil func, or one wired to a non-native
+// backend, simply yields empty throughput series — see registerCharts.
+type ThroughputFunc func(ctx context.Context) (core.ThroughputSeries, error)
 
 // passDTO is the JSON shape of one search pass served at GET /api/charts.
 type passDTO struct {
@@ -55,8 +54,8 @@ type hourCountDTO struct {
 	Count int    `json:"count"`
 }
 
-// throughputSampleDTO is the JSON shape of one live download-throughput
-// sample served at GET /api/charts (issue #157).
+// throughputSampleDTO is the JSON shape of one live directional throughput
+// sample served at GET /api/charts and in live SSE frames.
 type throughputSampleDTO struct {
 	At              string `json:"at"`
 	BytesPerSecond  int64  `json:"bytesPerSecond"`
@@ -65,9 +64,10 @@ type throughputSampleDTO struct {
 
 // chartsDTO is the JSON shape served at GET /api/charts.
 type chartsDTO struct {
-	Passes          []passDTO             `json:"passes"`
-	CompletedByHour []hourCountDTO        `json:"completedByHour"`
-	Throughput      []throughputSampleDTO `json:"throughput"`
+	Passes           []passDTO             `json:"passes"`
+	CompletedByHour  []hourCountDTO        `json:"completedByHour"`
+	Throughput       []throughputSampleDTO `json:"throughput"`
+	UploadThroughput []throughputSampleDTO `json:"uploadThroughput"`
 }
 
 func toThroughputDTO(samples []core.ThroughputSample) []throughputSampleDTO {
@@ -82,7 +82,7 @@ func toThroughputDTO(samples []core.ThroughputSample) []throughputSampleDTO {
 	return out
 }
 
-func toChartsDTO(data ChartsData, throughput []core.ThroughputSample, now time.Time) chartsDTO {
+func toChartsDTO(data ChartsData, throughput core.ThroughputSeries, now time.Time) chartsDTO {
 	// Passes arrive newest-first from the store; the chart draws oldest-first
 	// (left to right, newest at the right edge).
 	passes := make([]passDTO, len(data.Passes))
@@ -106,15 +106,18 @@ func toChartsDTO(data ChartsData, throughput []core.ThroughputSample, now time.T
 		buckets[i] = hourCountDTO{Hour: hour.Format(timeFormat), Count: counts[hour]}
 	}
 
-	return chartsDTO{Passes: passes, CompletedByHour: buckets, Throughput: toThroughputDTO(throughput)}
+	return chartsDTO{
+		Passes:           passes,
+		CompletedByHour:  buckets,
+		Throughput:       toThroughputDTO(throughput.Download),
+		UploadThroughput: toThroughputDTO(throughput.Upload),
+	}
 }
 
-// registerCharts wires GET /api/charts onto mux. throughput is best-effort
-// (issue #157): a nil func, or one that errors, yields an empty throughput
-// series and still a 200 — a Postgres outage (which does not affect the
-// in-memory throughput meter at all) must not blank the live sparkline, and a
-// non-native backend (which has no throughput data) must not 500 the whole
-// Overview view just because it has nothing to report there.
+// registerCharts wires GET /api/charts onto mux. throughput is best-effort:
+// a nil func, or one that errors, yields two empty throughput arrays and still
+// a 200 — a failure in the in-memory source must not blank the Overview, and
+// a non-native backend must not 500 just because it has no upload data.
 func registerCharts(mux *http.ServeMux, charts ChartsFunc, throughput ThroughputFunc) {
 	mux.HandleFunc("/api/charts", func(w http.ResponseWriter, r *http.Request) {
 		data, err := charts(r.Context())
@@ -122,13 +125,13 @@ func registerCharts(mux *http.ServeMux, charts ChartsFunc, throughput Throughput
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var samples []core.ThroughputSample
+		var series core.ThroughputSeries
 		if throughput != nil {
 			if s, tErr := throughput(r.Context()); tErr == nil {
-				samples = s
+				series = s
 			}
 		}
-		dto := toChartsDTO(data, samples, time.Now())
+		dto := toChartsDTO(data, series, time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dto)
 	})

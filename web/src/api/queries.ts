@@ -182,17 +182,18 @@ export function pickJobDetail(detail: JobDetail | undefined, live: ScopedLivePay
 }
 
 // Matches internal/soulseek's throughputWindow (48 one-second samples) —
-// the server itself never reports more than that in one GET /api/charts
-// snapshot, so capping the client's merged series to the same size just
-// mirrors what REST would eventually re-converge to anyway rather than
-// growing the series unbounded as the stream keeps appending.
+// the server itself never reports more than that per direction in one
+// GET /api/charts snapshot, so capping each client-merged series to the same
+// size mirrors what REST would eventually re-converge to anyway rather than
+// growing either series unbounded as the stream keeps appending.
 const THROUGHPUT_CAP = 48;
 
-// Appends the stream's new throughput samples to an already-fetched series,
-// deduping on `at` (the REST snapshot and a live frame can legitimately
+// Appends one direction's new throughput samples to its already-fetched
+// series, deduping on `at` (the REST snapshot and a live frame can legitimately
 // overlap on the sample taken right at fetch time) and capping the result —
-// see THROUGHPUT_CAP. Oldest-first in, oldest-first out, matching both
-// REST's and the stream's own ordering.
+// see THROUGHPUT_CAP. Call independently for downloads and uploads so one
+// direction can neither dedupe nor evict the other. Oldest-first in,
+// oldest-first out, matching both REST's and the stream's own ordering.
 export function mergeThroughputSamples(existing: ThroughputSample[], incoming: ThroughputSample[]): ThroughputSample[] {
   if (incoming.length === 0) return existing;
   const seen = new Set(existing.map((s) => s.at));

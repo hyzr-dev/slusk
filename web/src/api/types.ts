@@ -564,9 +564,9 @@ export interface HourCount {
 }
 
 /**
- * internal/observ/charts.go throughputSampleDTO — one live download-throughput
- * sample (issue #157). Downloads only — uploads have no byte-throughput
- * tracking.
+ * internal/observ/charts.go throughputSampleDTO — one live throughput sample.
+ * The containing field (throughput or uploadThroughput) identifies its
+ * direction; activeTransfers is the active count for that direction.
  */
 export interface ThroughputSample {
   at: string;
@@ -577,14 +577,16 @@ export interface ThroughputSample {
 /**
  * GET /api/charts — chartsDTO. passes is oldest-first, capped at 20;
  * completedByHour is always exactly 24 zero-filled hourly buckets, oldest
- * first, ending at the current hour; throughput is the native soulseek
- * client's recent samples, oldest first, and is always [] (never absent) on a
- * non-native backend or when unavailable.
+ * first, ending at the current hour; throughput and uploadThroughput are the
+ * native soulseek client's recent download and upload samples respectively,
+ * oldest first. Both are always [] (never absent) on a non-native backend or
+ * when unavailable.
  */
 export interface ChartsReport {
   passes: SearchPass[];
   completedByHour: HourCount[];
   throughput: ThroughputSample[];
+  uploadThroughput: ThroughputSample[];
 }
 
 /**
@@ -607,11 +609,11 @@ export interface LiveJob {
  * livePayload. `jobs` is filtered server-side to jobs with at least one
  * matched, non-terminal live transfer *at this instant* — a job present in
  * one frame and absent from the next means "no live data for this job right
- * now", not "job gone". `throughput` carries only samples newer than the
- * previous frame — see api/queries.ts's mergeThroughputSamples for how the
- * client folds that into the cached series. `down` is always present (the
- * aggregate live download speed across every non-terminal transfer, 0 when
- * idle).
+ * now", not "job gone". `throughput` and `uploadThroughput` carry only
+ * samples newer than the previous frame — see api/queries.ts's
+ * mergeThroughputSamples for how the client folds each direction independently
+ * into the cached series. `down` and `up` are always present (the global live
+ * rates for their directions, 0 when idle).
  *
  * `detail` is the whole `GET /api/jobs/{id}/detail` body, present only when
  * the connection was opened with `?job=<id>`, and built server-side by the
@@ -628,7 +630,9 @@ export interface LivePayload {
   jobs: LiveJob[];
   detail?: JobDetail;
   throughput?: ThroughputSample[];
+  uploadThroughput?: ThroughputSample[];
   down: number;
+  up: number;
 }
 
 /**

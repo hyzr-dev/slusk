@@ -1,7 +1,8 @@
 // Package observ: stream.go serves GET /api/stream (issue #161), a
 // server-sent-events endpoint of live dashboard data: bytes done/total,
-// speed, queue position and ETA per job; recent throughput samples; the
-// aggregate current download speed; and, when ?job=<id> is set, that job's
+// speed, queue position and ETA per job; recent directional throughput
+// samples; aggregate current download and upload speeds; and, when ?job=<id>
+// is set, that job's
 // whole detail body.
 //
 // The job list keeps the #161 split — live fields only, everything
@@ -117,10 +118,12 @@ type streamJobDTO struct {
 // that is exactly the REST/stream split issue #161 draws (see this file's
 // package comment).
 type livePayload struct {
-	Jobs       []streamJobDTO        `json:"jobs"`
-	Detail     *jobDetailDTO         `json:"detail,omitempty"`
-	Throughput []throughputSampleDTO `json:"throughput,omitempty"`
-	Down       int64                 `json:"down"`
+	Jobs             []streamJobDTO        `json:"jobs"`
+	Detail           *jobDetailDTO         `json:"detail,omitempty"`
+	Throughput       []throughputSampleDTO `json:"throughput,omitempty"`
+	UploadThroughput []throughputSampleDTO `json:"uploadThroughput,omitempty"`
+	Down             int64                 `json:"down"`
+	Up               int64                 `json:"up"`
 }
 
 // jobCorrelation is the minimal per-job data the stream hub needs to derive
@@ -245,6 +248,16 @@ func downSpeed(samples []core.ThroughputSample, live []core.RemoteTransfer) int6
 	return sumDownSpeed(live)
 }
 
+// upSpeed is the stream's global `up` field. Unlike downloads there is no
+// non-native transfer estimate to fall back to, so an absent series reports
+// explicit zero.
+func upSpeed(samples []core.ThroughputSample) int64 {
+	if n := len(samples); n > 0 {
+		return samples[n-1].BytesPerSecond
+	}
+	return 0
+}
+
 // sumDownSpeed sums the per-transfer speed estimates across every
 // non-terminal transfer. Non-terminal only, mirroring aggregateLiveAlbum: a
 // lingering terminal transfer's stale speed reading must not inflate the
@@ -261,20 +274,17 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 }
 
 // buildLivePayload computes one subscriber's live snapshot (everything but
-// Throughput, which is merged in by the caller — see newThroughputSince)
-// from already-fetched inputs: cachedJobs (the hub's correlation cache),
-// live (this tick's deps.LiveTransfers), and jobID (0 for the unscoped
-// dashboard stream, >0 for a ?job= scoped subscriber). persisted is threaded
-// through to buildStreamJobs (issue #161). samples is this tick's full
-// throughput series — the whole series, not the per-subscriber delta the
-// caller sends as Throughput, because Down reads only its newest entry (see
-// downSpeed). Pure and I/O-free by construction, so it is table-testable
-// without a server.
-func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64, persisted map[int64]map[string]int64, samples []core.ThroughputSample, detail core.JobDetail, hasDetail bool) livePayload {
+// the delta series, which are merged in by the caller — see
+// newThroughputSince) from already-fetched inputs. Throughput is always the
+// full global series here, never scoped by jobID, because Down and Up read
+// their direction's newest entry. Pure and I/O-free by construction, so it
+// is table-testable without a server.
+func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64, persisted map[int64]map[string]int64, throughput core.ThroughputSeries, detail core.JobDetail, hasDetail bool) livePayload {
 	idx := newLiveTransferIndex(live)
 	payload := livePayload{
 		Jobs: buildStreamJobs(cachedJobs, idx, persisted),
-		Down: downSpeed(samples, live),
+		Down: downSpeed(throughput.Download, live),
+		Up:   upSpeed(throughput.Upload),
 	}
 	if jobID > 0 {
 		payload.Detail = buildStreamDetail(detail, hasDetail, idx)
@@ -298,22 +308,19 @@ func newThroughputSince(samples []core.ThroughputSample, since time.Time) []core
 }
 
 // changedSinceLast decides whether a subscriber needs a fresh live frame:
-// either its Jobs/Detail/Down differ from what it last received (next vs
-// prev — Throughput is not part of the comparison; the caller decides that
-// via newThroughputCount), or there is at least one new throughput sample —
-// throughput can trigger a send even when nothing else changed, per
-// newThroughputSince's doc comment. Pure — no I/O — so it is table-testable
-// without a server or goroutines.
+// either its snapshot fields differ or either directional series has a new
+// sample. The two counts stay independent so an upload-only sample can
+// trigger delivery even when download throughput is unchanged.
 //
 // Detail needs reflect.DeepEqual rather than slices.Equal: it is a pointer to
 // a struct of nested slices, so neither == nor an element-wise comparison
 // reaches the transfers that actually change. This runs once per scoped
 // subscriber per tick over one job's attempts, not over the job table.
-func changedSinceLast(prev, next livePayload, newThroughputCount int) bool {
-	if newThroughputCount > 0 {
+func changedSinceLast(prev, next livePayload, newDownloadCount, newUploadCount int) bool {
+	if newDownloadCount > 0 || newUploadCount > 0 {
 		return true
 	}
-	if prev.Down != next.Down {
+	if prev.Down != next.Down || prev.Up != next.Up {
 		return true
 	}
 	if !slices.Equal(prev.Jobs, next.Jobs) {
@@ -330,11 +337,11 @@ func changedSinceLast(prev, next livePayload, newThroughputCount int) bool {
 type streamSubscriber struct {
 	ch    chan livePayload
 	jobID int64
-	// last remembers the Jobs/Files/Down this subscriber last had queued for
-	// it (its own Throughput field is unused — see changedSinceLast), purely
-	// so the broadcaster can decide whether the next tick has anything new.
-	last             livePayload
-	lastThroughputAt time.Time
+	// last remembers the snapshot fields this subscriber last had queued;
+	// directional deltas use independent per-subscriber watermarks.
+	last                     livePayload
+	lastDownloadThroughputAt time.Time
+	lastUploadThroughputAt   time.Time
 }
 
 // streamHub is the shared broadcaster behind GET /api/stream: one ticking
@@ -402,15 +409,15 @@ func (h *streamHub) fetchLive(ctx context.Context) []core.RemoteTransfer {
 	return live
 }
 
-func (h *streamHub) fetchThroughput(ctx context.Context) []core.ThroughputSample {
+func (h *streamHub) fetchThroughput(ctx context.Context) core.ThroughputSeries {
 	if h.throughput == nil {
-		return nil
+		return core.ThroughputSeries{}
 	}
-	samples, err := h.throughput(ctx)
+	series, err := h.throughput(ctx)
 	if err != nil {
-		return nil
+		return core.ThroughputSeries{}
 	}
-	return samples
+	return series
 }
 
 // refreshCorrelation re-derives the job<->candidate correlation cache from
@@ -651,21 +658,25 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64) (id uint64, ch c
 	// correlationInterval for its first Detail.
 	h.refreshCorrelation(ctx, h.scopedJobIDs(jobID))
 	live := h.fetchLive(ctx)
-	throughputSamples := h.fetchThroughput(ctx)
+	throughput := h.fetchThroughput(ctx)
 
 	corr := h.correlationSnapshot()
 	persisted := h.observeLiveBytes(corr, newLiveTransferIndex(live), h.bytesSnapshot())
 	detail, hasDetail := h.detailSnapshot(jobID)
-	initial = buildLivePayload(corr, live, jobID, persisted, throughputSamples, detail, hasDetail)
-	initial.Throughput = toThroughputDTO(throughputSamples)
+	initial = buildLivePayload(corr, live, jobID, persisted, throughput, detail, hasDetail)
+	initial.Throughput = toThroughputDTO(throughput.Download)
+	initial.UploadThroughput = toThroughputDTO(throughput.Upload)
 
 	sub := &streamSubscriber{
 		ch:    make(chan livePayload, 1),
 		jobID: jobID,
-		last:  livePayload{Jobs: initial.Jobs, Detail: initial.Detail, Down: initial.Down},
+		last:  livePayload{Jobs: initial.Jobs, Detail: initial.Detail, Down: initial.Down, Up: initial.Up},
 	}
-	if n := len(throughputSamples); n > 0 {
-		sub.lastThroughputAt = throughputSamples[n-1].At
+	if n := len(throughput.Download); n > 0 {
+		sub.lastDownloadThroughputAt = throughput.Download[n-1].At
+	}
+	if n := len(throughput.Upload); n > 0 {
+		sub.lastUploadThroughputAt = throughput.Upload[n-1].At
 	}
 
 	h.mu.Lock()
@@ -721,7 +732,7 @@ func (h *streamHub) tick(ctx context.Context) {
 	fetchCtx, cancel := context.WithTimeout(ctx, streamFetchTimeout)
 	defer cancel()
 	live := h.fetchLive(fetchCtx)
-	throughputSamples := h.fetchThroughput(fetchCtx)
+	throughput := h.fetchThroughput(fetchCtx)
 	cachedJobs := h.correlationSnapshot()
 	// Raises the cached per-file figures to the highest live figure seen, so
 	// a file that finished since the last correlation refresh doesn't read
@@ -748,35 +759,40 @@ func (h *streamHub) tick(ctx context.Context) {
 	}
 	for _, sub := range h.subs {
 		detail, hasDetail := details[sub.jobID]
-		payload := buildLivePayload(cachedJobs, live, sub.jobID, persisted, throughputSamples, detail, hasDetail)
-		fresh := newThroughputSince(throughputSamples, sub.lastThroughputAt)
-		next := livePayload{Jobs: payload.Jobs, Detail: payload.Detail, Down: payload.Down}
-		if !changedSinceLast(sub.last, next, len(fresh)) {
+		payload := buildLivePayload(cachedJobs, live, sub.jobID, persisted, throughput, detail, hasDetail)
+		freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
+		freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
+		next := livePayload{Jobs: payload.Jobs, Detail: payload.Detail, Down: payload.Down, Up: payload.Up}
+		if !changedSinceLast(sub.last, next, len(freshDownload), len(freshUpload)) {
 			continue
 		}
-		if len(fresh) > 0 {
-			payload.Throughput = toThroughputDTO(fresh)
+		if len(freshDownload) > 0 {
+			payload.Throughput = toThroughputDTO(freshDownload)
+		}
+		if len(freshUpload) > 0 {
+			payload.UploadThroughput = toThroughputDTO(freshUpload)
 		}
 		sub.last = next
 		queued := sendLatest(sub.ch, payload)
 		if n := len(queued.Throughput); n > 0 {
 			if at, err := time.Parse(timeFormat, queued.Throughput[n-1].At); err == nil {
-				sub.lastThroughputAt = at
+				sub.lastDownloadThroughputAt = at
+			}
+		}
+		if n := len(queued.UploadThroughput); n > 0 {
+			if at, err := time.Parse(timeFormat, queued.UploadThroughput[n-1].At); err == nil {
+				sub.lastUploadThroughputAt = at
 			}
 		}
 	}
 }
 
 // sendLatest delivers payload to ch without ever blocking. ch has capacity
-// 1; when it already holds an undelivered payload, that payload's
-// Jobs/Files/Down are a full snapshot that the fresh payload's own
-// Jobs/Files/Down simply supersede — but its Throughput is not a snapshot,
-// it's a delta-encoded time series (see newThroughputSince), and a sample
-// dropped here can never be resent. So the old payload's Throughput is
-// prepended to payload's rather than discarded, and the caller (tick)
-// advances its watermark from whatever this function actually leaves
-// queued — not from what was merely computed this tick — so a slow reader
-// accumulates un-acked samples across ticks instead of silently losing them.
+// 1; when it already holds an undelivered payload, the fresh snapshot fields
+// supersede the old ones. The two throughput fields are delta-encoded series,
+// though, so each old delta is prepended to its matching fresh delta rather
+// than discarded. The caller advances each watermark from what this function
+// actually leaves queued, so a slow reader loses neither direction.
 func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 	for {
 		select {
@@ -786,6 +802,7 @@ func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 			select {
 			case old := <-ch:
 				payload.Throughput = append(old.Throughput, payload.Throughput...)
+				payload.UploadThroughput = append(old.UploadThroughput, payload.UploadThroughput...)
 			default:
 			}
 		}

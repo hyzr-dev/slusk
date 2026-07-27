@@ -68,6 +68,10 @@ type uploadManager struct {
 	// seq is a monotonic counter assigned to each enqueued job's seq field,
 	// giving report a stable ordering for active uploads.
 	seq uint64
+	// totalWritten is manager-lifetime body bytes accepted by upload sockets.
+	// It is deliberately independent of per-job resume-aware progress so jobs
+	// that complete between throughput ticks cannot disappear from the delta.
+	totalWritten atomic.Uint64
 }
 
 func newUploadManager(c *Client, slots int) *uploadManager {
@@ -110,6 +114,16 @@ func (m *uploadManager) availability() (bool, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.active < m.slots && len(m.waiting) == 0, len(m.waiting)
+}
+
+// throughputSnapshot returns the manager-lifetime socket-write total and the
+// full active upload count. Waiting jobs are deliberately excluded.
+func (m *uploadManager) throughputSnapshot() (uint64, int) {
+	total := m.totalWritten.Load()
+	m.mu.Lock()
+	active := m.active
+	m.mu.Unlock()
+	return total, active
 }
 
 func (m *uploadManager) position(key uploadKey) (uint32, bool) {

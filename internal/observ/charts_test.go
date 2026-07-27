@@ -27,18 +27,23 @@ func newChartsTestHandlerWithThroughput(reg *prometheus.Registry, charts ChartsF
 	return NewServer(deps)
 }
 
-// TestChartsEndpointServesThroughputOldestFirst asserts the throughput series
-// from ThroughputFunc is served as-is (already oldest-first, see
-// soulseek.throughputMeter.Samples) under the "throughput" key.
-func TestChartsEndpointServesThroughputOldestFirst(t *testing.T) {
+// TestChartsEndpointServesBidirectionalThroughputOldestFirst asserts both
+// directional series are served as-is under their additive wire keys.
+func TestChartsEndpointServesBidirectionalThroughputOldestFirst(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
 	older := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	newer := older.Add(time.Second)
-	throughput := func(ctx context.Context) ([]core.ThroughputSample, error) {
-		return []core.ThroughputSample{
-			{At: older, BytesPerSecond: 100, ActiveTransfers: 1},
-			{At: newer, BytesPerSecond: 200, ActiveTransfers: 2},
+	throughput := func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{
+			Download: []core.ThroughputSample{
+				{At: older, BytesPerSecond: 100, ActiveTransfers: 1},
+				{At: newer, BytesPerSecond: 200, ActiveTransfers: 2},
+			},
+			Upload: []core.ThroughputSample{
+				{At: older, BytesPerSecond: 300, ActiveTransfers: 3},
+				{At: newer, BytesPerSecond: 400, ActiveTransfers: 4},
+			},
 		}, nil
 	}
 	h := newChartsTestHandlerWithThroughput(reg, charts, throughput)
@@ -54,18 +59,17 @@ func TestChartsEndpointServesThroughputOldestFirst(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Throughput) != 2 {
-		t.Fatalf("expected 2 throughput samples, got %d: %+v", len(got.Throughput), got.Throughput)
+	if len(got.Throughput) != 2 || got.Throughput[0].BytesPerSecond != 100 || got.Throughput[1].BytesPerSecond != 200 {
+		t.Errorf("download throughput not oldest-first: %+v", got.Throughput)
 	}
-	if got.Throughput[0].BytesPerSecond != 100 || got.Throughput[1].BytesPerSecond != 200 {
-		t.Errorf("throughput not oldest-first: %+v", got.Throughput)
+	if len(got.UploadThroughput) != 2 || got.UploadThroughput[0].BytesPerSecond != 300 || got.UploadThroughput[1].BytesPerSecond != 400 {
+		t.Errorf("upload throughput not oldest-first: %+v", got.UploadThroughput)
 	}
 }
 
-// TestChartsEndpointThroughputEmitsEmptyArrayNotNull asserts a nil
-// ThroughputFunc, or one returning nothing, serves "throughput":[] rather
-// than a null/absent field.
-func TestChartsEndpointThroughputEmitsEmptyArrayNotNull(t *testing.T) {
+// TestChartsEndpointThroughputEmitsEmptyArraysNotNull asserts a nil
+// ThroughputFunc (the slskd path) serves both directional keys as arrays.
+func TestChartsEndpointThroughputEmitsEmptyArraysNotNull(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
 	h := newChartsTestHandlerWithThroughput(reg, charts, nil)
@@ -78,8 +82,8 @@ func TestChartsEndpointThroughputEmitsEmptyArrayNotNull(t *testing.T) {
 		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `"throughput":[]`) {
-		t.Errorf("expected \"throughput\":[] in body, got %s", body)
+	if !strings.Contains(body, `"throughput":[]`) || !strings.Contains(body, `"uploadThroughput":[]`) {
+		t.Errorf("expected both empty throughput arrays in body, got %s", body)
 	}
 }
 
@@ -91,8 +95,8 @@ func TestChartsEndpointServesPassesWhenThroughputErrors(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	passes := []core.SearchPass{{StartedAt: time.Now(), FinishedAt: time.Now(), Searched: 1, Matched: 1}}
 	charts := func(ctx context.Context) (ChartsData, error) { return ChartsData{Passes: passes}, nil }
-	throughput := func(ctx context.Context) ([]core.ThroughputSample, error) {
-		return nil, errors.New("throughput boom")
+	throughput := func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{}, errors.New("throughput boom")
 	}
 	h := newChartsTestHandlerWithThroughput(reg, charts, throughput)
 
@@ -110,8 +114,8 @@ func TestChartsEndpointServesPassesWhenThroughputErrors(t *testing.T) {
 	if len(got.Passes) != 1 {
 		t.Errorf("expected passes still served, got %+v", got.Passes)
 	}
-	if len(got.Throughput) != 0 {
-		t.Errorf("expected empty throughput on error, got %+v", got.Throughput)
+	if len(got.Throughput) != 0 || len(got.UploadThroughput) != 0 {
+		t.Errorf("expected both throughput directions empty on error, got download=%+v upload=%+v", got.Throughput, got.UploadThroughput)
 	}
 }
 
@@ -133,11 +137,17 @@ func TestToChartsDTOZeroFillsHoursAndOrdersPassesOldestFirst(t *testing.T) {
 	sparseHour := now.Truncate(time.Hour).Add(-3 * time.Hour)
 	counts := []core.HourCount{{Hour: sparseHour, Count: 7}}
 
-	throughput := []core.ThroughputSample{{At: now, BytesPerSecond: 500, ActiveTransfers: 1}}
+	throughput := core.ThroughputSeries{
+		Download: []core.ThroughputSample{{At: now, BytesPerSecond: 500, ActiveTransfers: 1}},
+		Upload:   []core.ThroughputSample{{At: now, BytesPerSecond: 600, ActiveTransfers: 2}},
+	}
 	got := toChartsDTO(ChartsData{Passes: passes, CompletedByHour: counts}, throughput, now)
 
 	if len(got.Throughput) != 1 || got.Throughput[0].BytesPerSecond != 500 {
-		t.Errorf("throughput = %+v, want the one injected sample (500 bps) — toChartsDTO must assemble it, not registerCharts mutating the DTO afterward", got.Throughput)
+		t.Errorf("throughput = %+v, want the injected download sample", got.Throughput)
+	}
+	if len(got.UploadThroughput) != 1 || got.UploadThroughput[0].BytesPerSecond != 600 {
+		t.Errorf("uploadThroughput = %+v, want the injected upload sample", got.UploadThroughput)
 	}
 
 	if len(got.Passes) != 2 {

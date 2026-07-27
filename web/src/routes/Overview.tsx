@@ -68,7 +68,11 @@ export default function Overview() {
     { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length, phase: jobsPhase },
   ];
 
+  // ACTIVE remains download-only: it counts pipeline download jobs and its
+  // sparkline therefore follows only the download series. Uploads get their
+  // own independently-scaled chart below rather than changing this stat.
   const throughput = charts?.throughput ?? [];
+  const uploadThroughput = charts?.uploadThroughput ?? [];
   const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
   const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
 
@@ -172,7 +176,12 @@ export default function Overview() {
           <SectionHeader label={t.overview.throughputHeading} />
           <QueryNotice phase={chartsPhase} />
           <div className={styles.throughputBody}>
-            {hasData(chartsPhase) && <ThroughputAreaChart samples={throughput} />}
+            {hasData(chartsPhase) && (
+              <>
+                <ThroughputAreaChart samples={throughput} direction="download" />
+                <ThroughputAreaChart samples={uploadThroughput} direction="upload" />
+              </>
+            )}
           </div>
 
           <SectionHeader label={t.chrome.reconcile} />

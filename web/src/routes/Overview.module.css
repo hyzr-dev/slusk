@@ -102,7 +102,17 @@
   letter-spacing: 0.3px;
 }
 
-.throughputBody { padding: 14px 16px 10px; }
+.throughputBody {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 14px 16px 10px;
+}
+
+.throughputBody > * + * {
+  border-left: 1px solid var(--line);
+  padding-left: 14px;
+}
 
 .reconcileList { padding: 6px 0 8px; }
 
@@ -127,4 +137,11 @@
 
 @media (max-width: 640px) {
   .statGrid { grid-template-columns: repeat(2, 1fr); }
+  .throughputBody { grid-template-columns: 1fr; }
+  .throughputBody > * + * {
+    border-top: 1px solid var(--line);
+    border-left: none;
+    padding-top: 14px;
+    padding-left: 0;
+  }
 }

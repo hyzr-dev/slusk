@@ -128,6 +128,37 @@ func TestUploadReportOrdersActiveThenQueue(t *testing.T) {
 // truncated in Uploads while Queued still reports the full waiting count and
 // Truncated reports exactly what was omitted - and that an active upload is
 // never dropped by truncation, since it is bounded by slots, not limit.
+func TestUploadThroughputSnapshotIsUncappedExcludesQueueAndSurvivesReset(t *testing.T) {
+	m := newUploadReportTestManager(t)
+	m.slots = 150
+	for i := 0; i < 130; i++ {
+		if err := m.enqueue(fmt.Sprintf("user%d", i), `Music\a.flac`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 125; i++ {
+		promoteFirstWaiting(m)
+	}
+	m.totalWritten.Store(42)
+
+	total, active := m.throughputSnapshot()
+	if total != 42 || active != 125 {
+		t.Fatalf("throughput snapshot = total:%d active:%d, want 42/125", total, active)
+	}
+	m.mu.Lock()
+	queued := len(m.waiting)
+	m.mu.Unlock()
+	if queued != 5 {
+		t.Fatalf("queued = %d, want 5 excluded from active", queued)
+	}
+
+	m.reset()
+	total, active = m.throughputSnapshot()
+	if total != 42 || active != 0 {
+		t.Fatalf("snapshot after reset = total:%d active:%d, want manager-lifetime total 42 and active 0", total, active)
+	}
+}
+
 func TestUploadReportTruncatesQueue(t *testing.T) {
 	m := newUploadReportTestManager(t)
 	for i := 0; i < 6; i++ {

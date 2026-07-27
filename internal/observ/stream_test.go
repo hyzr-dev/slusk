@@ -116,21 +116,23 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 	detailB := &jobDetailDTO{ID: 1, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 20}}}}}
 
 	cases := []struct {
-		name               string
-		prev, next         livePayload
-		newThroughputCount int
-		want               bool
+		name                             string
+		prev, next                       livePayload
+		newDownloadCount, newUploadCount int
+		want                             bool
 	}{
-		{"nothing changed", livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, 0, false},
-		{"jobs changed", livePayload{Jobs: jobsA}, livePayload{Jobs: jobsB}, 0, true},
-		{"down changed", livePayload{Jobs: jobsA, Down: 5}, livePayload{Jobs: jobsA, Down: 6}, 0, true},
-		{"detail nested transfer bytes changed", livePayload{Detail: detailA}, livePayload{Detail: detailB}, 0, true},
-		{"detail appeared", livePayload{}, livePayload{Detail: detailA}, 0, true},
-		{"only new throughput, nothing else changed", livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, 1, true},
+		{"nothing changed", livePayload{Jobs: jobsA, Detail: detailA, Down: 5, Up: 6}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5, Up: 6}, 0, 0, false},
+		{"jobs changed", livePayload{Jobs: jobsA}, livePayload{Jobs: jobsB}, 0, 0, true},
+		{"down changed", livePayload{Jobs: jobsA, Down: 5}, livePayload{Jobs: jobsA, Down: 6}, 0, 0, true},
+		{"up changed", livePayload{Jobs: jobsA, Up: 5}, livePayload{Jobs: jobsA, Up: 6}, 0, 0, true},
+		{"detail nested transfer bytes changed", livePayload{Detail: detailA}, livePayload{Detail: detailB}, 0, 0, true},
+		{"detail appeared", livePayload{}, livePayload{Detail: detailA}, 0, 0, true},
+		{"only new download throughput", livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, 1, 0, true},
+		{"only new upload throughput", livePayload{Jobs: jobsA, Detail: detailA, Up: 5}, livePayload{Jobs: jobsA, Detail: detailA, Up: 5}, 0, 1, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := changedSinceLast(tc.prev, tc.next, tc.newThroughputCount)
+			got := changedSinceLast(tc.prev, tc.next, tc.newDownloadCount, tc.newUploadCount)
 			if got != tc.want {
 				t.Errorf("changedSinceLast(...) = %v, want %v", got, tc.want)
 			}
@@ -148,54 +150,115 @@ func TestBuildLivePayloadDetailScopingByJobID(t *testing.T) {
 			Transfers: []core.Transfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesTotal: 1000}},
 		}},
 	}
+	series := core.ThroughputSeries{
+		Download: []core.ThroughputSample{{BytesPerSecond: 100}, {BytesPerSecond: 200}},
+		Upload:   []core.ThroughputSample{{BytesPerSecond: 300}, {BytesPerSecond: 400}},
+	}
 
-	unscoped := buildLivePayload(corr, live, 0, nil, nil, detail, true)
+	unscoped := buildLivePayload(corr, live, 0, nil, series, detail, true)
 	if unscoped.Detail != nil {
 		t.Errorf("expected nil Detail without ?job=, got %+v", unscoped.Detail)
 	}
 
-	scoped := buildLivePayload(corr, live, 7, nil, nil, detail, true)
+	scoped := buildLivePayload(corr, live, 7, nil, series, detail, true)
 	if scoped.Detail == nil || len(scoped.Detail.Attempts) != 1 {
 		t.Fatalf("expected a detail for ?job=7, got %+v", scoped.Detail)
 	}
 	if got := scoped.Detail.Attempts[0].Transfers[0].BytesDone; got != 500 {
 		t.Errorf("BytesDone = %d, want 500 merged in from live", got)
 	}
+	if scoped.Down != 200 || scoped.Up != 400 || scoped.Down != unscoped.Down || scoped.Up != unscoped.Up {
+		t.Errorf("global rates changed under ?job=: scoped down/up=%d/%d, unscoped=%d/%d", scoped.Down, scoped.Up, unscoped.Down, unscoped.Up)
+	}
 
 	// Scoped, but the hub has no cached detail for that id yet — the field is
 	// omitted rather than sent empty, and the frontend keeps its REST copy.
-	missing := buildLivePayload(corr, live, 999, nil, nil, core.JobDetail{}, false)
+	missing := buildLivePayload(corr, live, 999, nil, series, core.JobDetail{}, false)
 	if missing.Detail != nil {
 		t.Errorf("expected nil Detail for an uncached job id, got %+v", missing.Detail)
 	}
+	if missing.Down != 200 || missing.Up != 400 {
+		t.Errorf("missing scoped detail affected global rates: down/up=%d/%d", missing.Down, missing.Up)
+	}
 }
 
-// TestSendLatestReplacesSnapshotButAccumulatesThroughput is issue #161
-// review finding #3: dropping an undelivered payload must not lose its
-// throughput samples, even though the rest of the payload (a full-set
-// snapshot) is freely superseded.
+func TestLivePayloadExactBidirectionalJSON(t *testing.T) {
+	payload := livePayload{
+		Jobs:             []streamJobDTO{},
+		Throughput:       []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 200, ActiveTransfers: 2}},
+		UploadThroughput: []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 400, ActiveTransfers: 4}},
+		Down:             200,
+		Up:               400,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"jobs":[],"throughput":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":200,"activeTransfers":2}],"uploadThroughput":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":400,"activeTransfers":4}],"down":200,"up":400}`
+	if string(body) != want {
+		t.Errorf("live JSON = %s\nwant      = %s", body, want)
+	}
+}
+
+func TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries(t *testing.T) {
+	at := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{
+			Download: []core.ThroughputSample{{At: at, BytesPerSecond: 200}},
+			Upload:   []core.ThroughputSample{{At: at, BytesPerSecond: 400}},
+		}, nil
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, time.Hour, time.Hour)
+	unscopedID, _, unscoped := hub.subscribe(context.Background(), 0)
+	defer hub.unsubscribe(unscopedID)
+	scopedID, _, scoped := hub.subscribe(context.Background(), 7)
+	defer hub.unsubscribe(scopedID)
+
+	if scoped.Down != unscoped.Down || scoped.Up != unscoped.Up {
+		t.Errorf("scoped rates = %d/%d, global = %d/%d", scoped.Down, scoped.Up, unscoped.Down, unscoped.Up)
+	}
+	if !reflect.DeepEqual(scoped.Throughput, unscoped.Throughput) || !reflect.DeepEqual(scoped.UploadThroughput, unscoped.UploadThroughput) {
+		t.Errorf("scoped series differ from global: scoped=%+v/%+v global=%+v/%+v", scoped.Throughput, scoped.UploadThroughput, unscoped.Throughput, unscoped.UploadThroughput)
+	}
+}
+
+// TestSendLatestReplacesSnapshotButAccumulatesThroughput asserts mailbox
+// replacement preserves both independently delta-encoded directional series.
 func TestSendLatestReplacesSnapshotButAccumulatesThroughput(t *testing.T) {
 	ch := make(chan livePayload, 1)
 
-	first := livePayload{Jobs: []streamJobDTO{{ID: 1}}, Down: 10, Throughput: []throughputSampleDTO{{At: "t1"}}}
-	if got := sendLatest(ch, first); len(got.Throughput) != 1 {
+	first := livePayload{
+		Jobs:             []streamJobDTO{{ID: 1}},
+		Down:             10,
+		Up:               11,
+		Throughput:       []throughputSampleDTO{{At: "d1"}},
+		UploadThroughput: []throughputSampleDTO{{At: "u1"}},
+	}
+	if got := sendLatest(ch, first); len(got.Throughput) != 1 || len(got.UploadThroughput) != 1 {
 		t.Fatalf("first send: got %+v", got)
 	}
 
-	// Second send while `first` is still sitting unread in ch: its
-	// throughput must survive, prepended to the new payload's.
-	second := livePayload{Jobs: []streamJobDTO{{ID: 2}}, Down: 20, Throughput: []throughputSampleDTO{{At: "t2"}}}
-	merged := sendLatest(ch, second)
-	if merged.Down != 20 || len(merged.Jobs) != 1 || merged.Jobs[0].ID != 2 {
-		t.Errorf("merged snapshot fields = %+v, want second's Jobs/Down (full-set fields are replaced, not merged)", merged)
+	second := livePayload{
+		Jobs:             []streamJobDTO{{ID: 2}},
+		Down:             20,
+		Up:               21,
+		Throughput:       []throughputSampleDTO{{At: "d2"}},
+		UploadThroughput: []throughputSampleDTO{{At: "u2"}},
 	}
-	if len(merged.Throughput) != 2 || merged.Throughput[0].At != "t1" || merged.Throughput[1].At != "t2" {
-		t.Errorf("merged.Throughput = %+v, want [t1, t2] (first's sample preserved)", merged.Throughput)
+	merged := sendLatest(ch, second)
+	if merged.Down != 20 || merged.Up != 21 || len(merged.Jobs) != 1 || merged.Jobs[0].ID != 2 {
+		t.Errorf("merged snapshot fields = %+v, want second's Jobs/Down/Up", merged)
+	}
+	if len(merged.Throughput) != 2 || merged.Throughput[0].At != "d1" || merged.Throughput[1].At != "d2" {
+		t.Errorf("merged.Throughput = %+v, want [d1, d2]", merged.Throughput)
+	}
+	if len(merged.UploadThroughput) != 2 || merged.UploadThroughput[0].At != "u1" || merged.UploadThroughput[1].At != "u2" {
+		t.Errorf("merged.UploadThroughput = %+v, want [u1, u2]", merged.UploadThroughput)
 	}
 
 	queued := <-ch
-	if len(queued.Throughput) != 2 {
-		t.Errorf("what's actually queued in ch has %d throughput samples, want 2", len(queued.Throughput))
+	if len(queued.Throughput) != 2 || len(queued.UploadThroughput) != 2 {
+		t.Errorf("queued directional samples = %d/%d, want 2/2", len(queued.Throughput), len(queued.UploadThroughput))
 	}
 }
 
@@ -320,7 +383,8 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, time.Hour, time.Hour)
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick.
-	_, ch, initial := hub.subscribe(context.Background(), 0)
+	id, ch, initial := hub.subscribe(context.Background(), 0)
+	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 100 {
 		t.Fatalf("initial payload = %+v, want job 7 at speed 100", initial)
 	}
@@ -343,6 +407,62 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 		}
 	default:
 		t.Fatal("changed tick must send a frame")
+	}
+}
+
+func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T) {
+	t1 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Second)
+	var uploadAdvanced atomic.Bool
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		series := core.ThroughputSeries{
+			Download: []core.ThroughputSample{{At: t1, BytesPerSecond: 100}},
+			Upload:   []core.ThroughputSample{{At: t1, BytesPerSecond: 300}},
+		}
+		if uploadAdvanced.Load() {
+			series.Upload = append(series.Upload, core.ThroughputSample{At: t2, BytesPerSecond: 300})
+		}
+		return series, nil
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, time.Hour, time.Hour)
+	id, ch, initial := hub.subscribe(context.Background(), 0)
+	defer hub.unsubscribe(id)
+	if initial.Down != 100 || initial.Up != 300 {
+		t.Fatalf("initial down/up = %d/%d, want 100/300", initial.Down, initial.Up)
+	}
+
+	uploadAdvanced.Store(true)
+	id2, ch2, secondInitial := hub.subscribe(context.Background(), 0)
+	defer hub.unsubscribe(id2)
+	if len(secondInitial.UploadThroughput) != 2 {
+		t.Fatalf("second subscriber initial upload series = %+v, want t1 and t2", secondInitial.UploadThroughput)
+	}
+
+	hub.tick(context.Background())
+	select {
+	case got := <-ch:
+		if len(got.Throughput) != 0 {
+			t.Errorf("download delta = %+v, want none", got.Throughput)
+		}
+		if len(got.UploadThroughput) != 1 || got.UploadThroughput[0].At != t2.Format(timeFormat) {
+			t.Errorf("upload delta = %+v, want only t2", got.UploadThroughput)
+		}
+	default:
+		t.Fatal("upload-only sample must trigger a frame")
+	}
+	select {
+	case got := <-ch2:
+		t.Fatalf("newer subscriber must not receive already-seen upload sample, got %+v", got)
+	default:
+	}
+
+	hub.mu.Lock()
+	sub1, sub2 := hub.subs[id], hub.subs[id2]
+	downloadAt1, uploadAt1 := sub1.lastDownloadThroughputAt, sub1.lastUploadThroughputAt
+	downloadAt2, uploadAt2 := sub2.lastDownloadThroughputAt, sub2.lastUploadThroughputAt
+	hub.mu.Unlock()
+	if !downloadAt1.Equal(t1) || !uploadAt1.Equal(t2) || !downloadAt2.Equal(t1) || !uploadAt2.Equal(t2) {
+		t.Errorf("subscriber watermarks = first %s/%s second %s/%s, want %s/%s for both", downloadAt1, uploadAt1, downloadAt2, uploadAt2, t1, t2)
 	}
 }
 
@@ -506,6 +626,9 @@ func TestStreamEndpointNilLiveTransfersAndThroughputDoesNotPanic(t *testing.T) {
 
 	if rec.Code() != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code())
+	}
+	if body := rec.String(); !strings.Contains(body, `"jobs":[],"down":0,"up":0`) {
+		t.Errorf("nil live sources must emit explicit zero rates, got %q", body)
 	}
 }
 
@@ -687,7 +810,7 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
 	corr := []jobCorrelation{{id: 1, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 20}}, albumBytesTotal: 20, albumBytesRemaining: 20}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
-	payload := buildLivePayload(corr, live, 1, nil, nil, core.JobDetail{}, false)
+	payload := buildLivePayload(corr, live, 1, nil, core.ThroughputSeries{}, core.JobDetail{}, false)
 	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
 	body, err := json.Marshal(payload)

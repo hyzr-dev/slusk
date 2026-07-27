@@ -48,7 +48,7 @@ function useStalenessLabel(dataUpdatedAt: number): string | null {
 
 /**
  * The top rule: brand, live-poll indicator, last reconcile pass and
- * aggregate download speed.
+ * global download and upload speeds.
  *
  * There is deliberately no per-dependency indicator here (no Lidarr/Soulseek
  * dot) — StatusReport.modules is keyed by pipeline module name
@@ -61,11 +61,14 @@ export default function TopBar() {
   const charts = useCharts();
   const live = useLiveData();
 
-  // The stream's `down` is preferred whenever a frame has arrived. The latest
-  // throughput sample is the existing REST-polled fallback, avoiding a global
-  // all-jobs request in chrome that mounts on every route.
-  const latestThroughput = charts.data?.throughput.at(-1)?.bytesPerSecond ?? 0;
-  const down = live?.down ?? latestThroughput;
+  // Resolve each direction independently: a frame can carry one newly-added
+  // field while the other still falls back to REST during a rolling update.
+  // Nullish coalescing is deliberate — an explicit stream zero means idle and
+  // must never revive the last non-zero REST sample.
+  const latestDown = charts.data?.throughput.at(-1)?.bytesPerSecond ?? 0;
+  const latestUp = charts.data?.uploadThroughput.at(-1)?.bytesPerSecond ?? 0;
+  const down = live?.down ?? latestDown;
+  const up = live?.up ?? latestUp;
   const lastPass = charts.data?.passes?.at(-1);
   const stale = useStalenessLabel(status.dataUpdatedAt);
 
@@ -99,7 +102,9 @@ export default function TopBar() {
       </div>
 
       <div className={styles.cell}>
-        {t.chrome.down} <span className={styles.value}>{down ? formatSpeed(down) : t.chrome.idle}</span>
+        <span>{t.chrome.down} <span className={styles.value}>{down ? formatSpeed(down) : t.chrome.idle}</span></span>{' '}
+        <span aria-hidden="true">{t.chrome.throughputSeparator}</span>{' '}
+        <span>{t.chrome.up} <span className={styles.value}>{up ? formatSpeed(up) : t.chrome.idle}</span></span>
       </div>
 
       <span className={styles.spacer} />

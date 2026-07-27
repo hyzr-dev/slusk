@@ -70,9 +70,8 @@ const (
 	// upload's cumulative throughput is sampled against
 	// uploadMinThroughput (see #108).
 	defaultUploadThroughputSampleInterval = 15 * time.Second
-	// defaultThroughputInterval is how often sampleThroughput aggregates
-	// every tracked download's byte throughput into a core.ThroughputSample
-	// (see throughput.go, issue #157).
+	// defaultThroughputInterval is how often sampleThroughput records aligned
+	// native download and upload throughput samples (see throughput.go).
 	defaultThroughputInterval = time.Second
 )
 
@@ -236,9 +235,8 @@ type Config struct {
 	// the scan deterministically without touching the filesystem. Always nil
 	// in production.
 	shareScanHook func(context.Context) error
-	// throughputInterval is how often sampleThroughput aggregates download
-	// byte throughput into a sample (see throughput.go, issue #157). Default
-	// 1s; test seam.
+	// throughputInterval is how often sampleThroughput records aligned native
+	// download and upload samples (see throughput.go). Default 1s; test seam.
 	throughputInterval time.Duration
 }
 
@@ -343,8 +341,8 @@ type Client struct {
 	// the P-session download hooks on top without changing its shape.
 	downloads *downloadRegistry
 
-	// throughput aggregates download byte-throughput samples (issue #157);
-	// see throughput.go and the sampleThroughput goroutine started by Run.
+	// throughput aggregates aligned download and upload byte-throughput
+	// samples; see throughput.go and the sampler started by Run.
 	throughput *throughputMeter
 
 	lifeMu       sync.Mutex
