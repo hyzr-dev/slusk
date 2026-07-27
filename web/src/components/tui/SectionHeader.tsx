@@ -34,7 +34,7 @@ export default function SectionHeader({
 }) {
   return (
     <div className={prominent ? `${styles.header} ${styles.prominent}` : styles.header}>
-      <h2 className={styles.label}>{label}</h2>
+      <h2 className={styles.label} title={label}>{label}</h2>
       <span className={styles.spacer} />
       {meta ? <span className={styles.meta}>{meta}</span> : null}
     </div>

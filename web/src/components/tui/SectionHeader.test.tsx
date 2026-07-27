@@ -12,8 +12,11 @@ describe('SectionHeader', () => {
     expect(screen.getByRole('heading', { name: 'THROUGHPUT', level: 2 })).toBeInTheDocument();
   });
 
-  it('renders optional meta content beside the label', () => {
-    render(<SectionHeader label="THROUGHPUT" meta="last 24h" />);
-    expect(screen.getByText('last 24h')).toBeInTheDocument();
+  it('keeps a long label available while rendering meta beside it', () => {
+    const label = 'a-username-that-is-much-wider-than-the-header';
+    render(<SectionHeader label={label} meta="ONLINE" />);
+
+    expect(screen.getByRole('heading', { level: 2, name: label })).toHaveAttribute('title', label);
+    expect(screen.getByText('ONLINE')).toBeInTheDocument();
   });
 });
