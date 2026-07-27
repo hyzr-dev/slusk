@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from 'rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys, useSendMessage } from '../api/queries';
 import type { Conversation, PrivateMessage, ThreadPage } from '../api/types';
+import sectionHeaderStyles from '../components/tui/SectionHeader.module.css';
 import { localDayKey } from '../format';
 import { t } from '../strings';
 import Chat from './Chat';
@@ -461,11 +462,11 @@ describe('Chat new conversation', () => {
 });
 
 describe('Chat rail', () => {
-  it('lists conversations in API order with unread digits and an active marker', async () => {
+  it('lists conversations with truthful presence, unread digits, and an active marker', async () => {
     const client = newClient();
     const conversations = [
-      makeConversation({ username: 'alice', unread: 0 }),
-      makeConversation({ username: 'bob', unread: 2 }),
+      makeConversation({ username: 'alice', online: true, unread: 0 }),
+      makeConversation({ username: 'bob', online: false, unread: 2 }),
       makeConversation({ username: 'carol', unread: 0 }),
     ];
     client.setQueryData(queryKeys.conversations, conversations);
@@ -473,13 +474,23 @@ describe('Chat rail', () => {
     stubFetchIndefinitely();
     renderChat('/chat/bob', client);
 
-    const bobLink = await screen.findByRole('link', { name: t.chat.threadLabel('bob', 2) });
+    const bobLink = await screen.findByRole('link', {
+      name: t.chat.threadLabel('bob', 2, false),
+    });
     expect(bobLink).toHaveAttribute('aria-current', 'page');
     expect(within(bobLink).getByText('2')).toBeInTheDocument();
+    expect(within(bobLink).getByText('■')).toHaveAttribute('aria-hidden', 'true');
 
-    const aliceLink = screen.getByRole('link', { name: t.chat.threadLabel('alice', 0) });
+    const aliceLink = screen.getByRole('link', {
+      name: t.chat.threadLabel('alice', 0, true),
+    });
     expect(aliceLink).not.toHaveAttribute('aria-current');
     expect(within(aliceLink).queryByText('0')).not.toBeInTheDocument();
+    expect(within(aliceLink).getByText('■')).toHaveAttribute('aria-hidden', 'true');
+
+    const carolLink = screen.getByRole('link', { name: t.chat.threadLabel('carol', 0) });
+    expect(within(carolLink).queryByText('■')).not.toBeInTheDocument();
+    expect(carolLink).toHaveAccessibleName('carol');
   });
 
   it('navigates and swaps messages when a different thread is clicked', async () => {
@@ -501,6 +512,65 @@ describe('Chat rail', () => {
     fireEvent.click(screen.getByRole('link', { name: t.chat.threadLabel('bob', 0) }));
     expect(await screen.findByText('from bob')).toBeInTheDocument();
     expect(screen.queryByText('from alice')).not.toBeInTheDocument();
+  });
+});
+
+describe('Chat presence header', () => {
+  it.each([
+    { online: true, label: t.chat.online },
+    { online: false, label: t.chat.offline },
+  ])('shows $label for a selected conversation with known presence', async ({ online, label }) => {
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username: 'alice', online })]);
+    seedThread(client, 'alice', [{ username: 'alice', messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    renderChat('/chat/alice', client);
+
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
+  it('opts only the selected username heading into truncation while preserving its full text', async () => {
+    const username = 'peer-with-a-username-much-wider-than-the-chat-pane';
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username, online: true })]);
+    seedThread(client, username, [{ username, messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    renderChat(`/chat/${username}`, client);
+
+    const heading = await screen.findByRole('heading', { level: 2, name: username });
+    expect(heading).toHaveClass(sectionHeaderStyles.truncateLabel);
+    expect(heading).toHaveTextContent(username);
+    expect(heading).not.toHaveAttribute('title');
+    expect(screen.getByText(t.chat.online)).toBeInTheDocument();
+
+    const railHeading = screen.getByRole('heading', { level: 2, name: t.chat.railHeading });
+    expect(railHeading).not.toHaveClass(sectionHeaderStyles.truncateLabel);
+  });
+
+  it('shows no chip when the selected conversation has unknown presence', async () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username: 'alice' })]);
+    seedThread(client, 'alice', [{ username: 'alice', messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    renderChat('/chat/alice', client);
+
+    await screen.findByRole('heading', { level: 2, name: 'alice' });
+    expect(screen.queryByText(t.chat.online)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.chat.offline)).not.toBeInTheDocument();
+  });
+
+  it('shows no chip for a route username absent from the conversation list', async () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [
+      makeConversation({ username: 'alice', online: true }),
+    ]);
+    seedThread(client, 'stranger', [{ username: 'stranger', messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    renderChat('/chat/stranger', client);
+
+    await screen.findByRole('heading', { level: 2, name: 'stranger' });
+    expect(screen.queryByText(t.chat.online)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.chat.offline)).not.toBeInTheDocument();
   });
 });
 

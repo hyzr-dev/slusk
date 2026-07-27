@@ -87,7 +87,12 @@ export default function TopBar() {
   const stale = useStalenessLabel(status.dataUpdatedAt);
 
   return (
-    <div className={styles.bar}>
+    <div
+      className={styles.bar}
+      role="region"
+      aria-label={t.chrome.statusRegion}
+      tabIndex={0}
+    >
       <div className={`${styles.cell} ${styles.brand}`}>
         <span className={styles.brandName}>{t.app.name.toUpperCase()}</span>
         {/* Rendered only when the server reports one. A server predating

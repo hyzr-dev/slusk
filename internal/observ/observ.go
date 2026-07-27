@@ -340,9 +340,13 @@ type ServerDeps struct {
 	// nil when nothing can send (POST /api/messages/{username} then answers
 	// 503); MarkRead backs POST /api/messages/{username}/read.
 	Conversations ConversationsFunc
-	Thread        ThreadFunc
-	Send          SendMessageFunc
-	MarkRead      MarkReadFunc
+	// ConversationPresence optionally enriches conversation rows with known
+	// native Soulseek presence. Nil means unsupported or unknown, so the JSON
+	// field is omitted.
+	ConversationPresence ConversationPresenceFunc
+	Thread               ThreadFunc
+	Send                 SendMessageFunc
+	MarkRead             MarkReadFunc
 	// Shutdown closes GET /api/stream's open SSE connections when the server
 	// is stopping (issue #161): without it an open stream keeps its request
 	// context alive until the client disconnects, which can block graceful
@@ -661,7 +665,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
-	registerMessages(mux, deps.Conversations, deps.Thread, deps.Send, deps.MarkRead)
+	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux

@@ -1,5 +1,10 @@
 // Every user-facing string lives here. Components must never inline text.
 // This is i18n preparation, not i18n — see #86.
+const CHAT_ONLINE = 'ONLINE';
+const CHAT_OFFLINE = 'OFFLINE';
+const CHAT_STATUS_ONLINE = 'online';
+const CHAT_STATUS_OFFLINE = 'offline';
+
 export const t = {
   app: {
     name: 'slskdarr',
@@ -32,6 +37,7 @@ export const t = {
     reconcileNever: '—',
     down: 'DOWN',
     idle: 'idle',
+    statusRegion: 'Application status',
   },
   // Shared query-state copy. Every view renders the same three states for a
   // GET — loading, failed, stale — so the two that are not view-specific live
@@ -346,10 +352,18 @@ export const t = {
     disabledNotice: 'Native Soulseek messaging is not enabled in the configuration.',
     empty: 'No conversations yet.',
     threadEmpty: 'No messages yet.',
-    // Announced on each rail row so the unread count reaches a screen reader
-    // even though it renders as a bare digit next to the name (issue #183).
-    threadLabel: (username: string, unread: number) =>
-      unread > 0 ? `${username}, ${unread} unread` : username,
+    online: CHAT_ONLINE,
+    offline: CHAT_OFFLINE,
+    // Announced on each rail row so presence and the unread count reach a
+    // screen reader even though they render as a color-coded dot and a bare
+    // digit respectively. Unknown presence is deliberately omitted.
+    threadLabel: (username: string, unread: number, online?: boolean) => {
+      const presence = online === undefined
+        ? ''
+        : `, ${online ? CHAT_STATUS_ONLINE : CHAT_STATUS_OFFLINE}`;
+      const unreadLabel = unread > 0 ? `, ${unread} unread` : '';
+      return `${username}${presence}${unreadLabel}`;
+    },
     you: '<you>',
     peer: (username: string) => `<${username}>`,
     // Day-divider labels (issue #247). Only the two nameable days get words;

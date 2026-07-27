@@ -45,6 +45,11 @@ const maxSendMessageRequestBytes = maxMessageBodyBytes*2 + 256
 // first, for GET /api/messages.
 type ConversationsFunc func(ctx context.Context) ([]core.Conversation, error)
 
+// ConversationPresenceFunc returns explicitly known online states for the
+// ordered conversation usernames supplied by GET /api/messages. Missing map
+// keys mean unknown and are omitted from the response.
+type ConversationPresenceFunc func(usernames []string) map[string]bool
+
 // ThreadFunc pages one peer's message history newest-first for GET
 // /api/messages/{username}. beforeID > 0 pages backwards from that message id;
 // limit is already clamped by the caller.
@@ -103,6 +108,7 @@ type conversationDTO struct {
 	LastDirection string `json:"lastDirection"`
 	Unread        int    `json:"unread"`
 	Total         int    `json:"total"`
+	Online        *bool  `json:"online,omitempty"`
 }
 
 func toConversationDTO(c core.Conversation) conversationDTO {
@@ -135,7 +141,7 @@ type markReadResponse struct {
 
 // registerMessages wires GET /api/messages, GET/POST /api/messages/{username}
 // and POST /api/messages/{username}/read onto mux.
-func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc) {
+func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, presence ConversationPresenceFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc) {
 	mux.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -152,8 +158,19 @@ func registerMessages(mux *http.ServeMux, conversations ConversationsFunc, threa
 			return
 		}
 		dtos := make([]conversationDTO, len(convs))
+		usernames := make([]string, len(convs))
 		for i, c := range convs {
 			dtos[i] = toConversationDTO(c)
+			usernames[i] = c.Username
+		}
+		if presence != nil {
+			states := presence(usernames)
+			for i, username := range usernames {
+				if online, known := states[username]; known {
+					dtos[i].Online = new(bool)
+					*dtos[i].Online = online
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(dtos)

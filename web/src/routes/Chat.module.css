@@ -92,6 +92,25 @@
 
 .rowUnread { font-size: 10px; color: var(--fg); }
 
+.presenceDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  line-height: 8px;
+}
+
+.presenceChip {
+  font-size: 10px;
+  letter-spacing: 0.8px;
+}
+
+.presenceOnline { color: var(--ok); }
+.presenceOffline { color: var(--faint); }
+
 .pane {
   flex: 1;
   min-width: 0;
@@ -185,4 +204,27 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Stack the peers above the thread once the shell becomes a mobile nav strip.
+   A bounded, scrolling rail leaves the active thread and composer most of the
+   viewport even when many conversations exist. */
+@media (max-width: 640px) {
+  .root { flex-direction: column; }
+
+  .rail {
+    width: 100%;
+    height: min(32%, 190px);
+    flex: 0 0 min(32%, 190px);
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .row,
+  .rowActive { min-height: 44px; }
+
+  .pane {
+    width: 100%;
+    min-height: 0;
+  }
 }

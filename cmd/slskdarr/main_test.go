@@ -15,8 +15,40 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/config"
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 )
+
+type fakeConversationPresenceClient struct {
+	usernames []string
+	result    map[string]bool
+}
+
+func (f *fakeConversationPresenceClient) ConversationPresence(usernames []string) map[string]bool {
+	f.usernames = append([]string(nil), usernames...)
+	return f.result
+}
+
+func TestConversationPresenceForBackend(t *testing.T) {
+	fake := &fakeConversationPresenceClient{result: map[string]bool{"alice": true, "bob": false}}
+	presence := conversationPresenceForBackend(config.BackendSoulseek, fake)
+	if presence == nil {
+		t.Fatal("native backend returned nil provider")
+	}
+	got := presence([]string{"bob", "alice"})
+	if len(fake.usernames) != 2 || fake.usernames[0] != "bob" || fake.usernames[1] != "alice" {
+		t.Fatalf("delegated usernames = %v", fake.usernames)
+	}
+	if !got["alice"] || got["bob"] {
+		t.Fatalf("delegated result = %v", got)
+	}
+	if provider := conversationPresenceForBackend(config.BackendSlskd, fake); provider != nil {
+		t.Fatal("slskd backend exposed native presence provider")
+	}
+	if provider := conversationPresenceForBackend(config.BackendSoulseek, nil); provider != nil {
+		t.Fatal("nil native client exposed presence provider")
+	}
+}
 
 type runtimeTestModule struct{}
 

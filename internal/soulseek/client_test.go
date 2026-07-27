@@ -112,6 +112,16 @@ func watchUserResponseFrame(t *testing.T, username string, speed uint32) []byte 
 	return packFrame(payload.Bytes())
 }
 
+func getUserStatusResponseFrame(t *testing.T, username string, status server.UserStatus) []byte {
+	t.Helper()
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(server.CodeGetUserStatus)))
+	mustWrite(t, writeString(payload, username))
+	mustWrite(t, writeUint32(payload, uint32(status)))
+	mustWrite(t, writeBool(payload, false))
+	return packFrame(payload.Bytes())
+}
+
 func embeddedSearchFrame(t *testing.T) []byte {
 	t.Helper()
 	search := &distributed.Search{Username: "searcher", Token: 1, Query: "query"}
@@ -176,6 +186,18 @@ func readFramePayload(conn net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("frame too short for a code")
 	}
 	return buf, nil
+}
+
+func frameCodeAndUsername(payload []byte) (uint32, string, error) {
+	if len(payload) < 8 {
+		return 0, "", fmt.Errorf("frame too short")
+	}
+	code := binary.LittleEndian.Uint32(payload[:4])
+	length := int(binary.LittleEndian.Uint32(payload[4:8]))
+	if length < 0 || len(payload) != 8+length {
+		return 0, "", fmt.Errorf("invalid username length %d for payload %d", length, len(payload))
+	}
+	return code, string(payload[8:]), nil
 }
 
 // readUntilSharedFoldersFiles reads frames off conn, skipping anything that
@@ -533,6 +555,105 @@ func TestClientValidRawWatchUserDoesNotDropServerConnection(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return")
 	}
+}
+
+func TestClientPresenceDispatchPreservesSelfSpeedAndHandlesTransitions(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.presence.reconcileAndSnapshot([]string{"me", "alice"})
+	// handleMessage deliberately treats a client with no live serverConn as
+	// generation zero. Keep the directly exercised tree/tracker on that same
+	// generation; lifecycle tests cover real non-zero generations.
+	c.presence.activate(0)
+	c.tree.mu.Lock()
+	c.tree.active = true
+	c.tree.generation = 0
+	c.tree.mu.Unlock()
+
+	if err := c.handleMessage(context.Background(), server.CodeWatchUser, bytes.NewReader(watchUserResponseFrame(t, "me", 3456))); err != nil {
+		t.Fatalf("handle self WatchUser: %v", err)
+	}
+	c.tree.mu.Lock()
+	uploadSpeed, uploadKnown := c.tree.uploadSpeed, c.tree.uploadKnown
+	c.tree.mu.Unlock()
+	if uploadSpeed != 3456 || !uploadKnown {
+		t.Fatalf("self upload speed = %d/%v, want 3456/true", uploadSpeed, uploadKnown)
+	}
+	if online, known := c.ConversationPresence([]string{"me", "alice"})["me"]; !known || !online {
+		t.Fatalf("self presence = %v/%v, want online/known", online, known)
+	}
+
+	if err := c.handleMessage(context.Background(), server.CodeGetUserStatus, bytes.NewReader(getUserStatusResponseFrame(t, "me", server.StatusOffline))); err != nil {
+		t.Fatalf("handle GetUserStatus: %v", err)
+	}
+	if online, known := c.ConversationPresence([]string{"me", "alice"})["me"]; !known || online {
+		t.Fatalf("self presence = %v/%v, want offline/known", online, known)
+	}
+
+	if err := c.handleMessage(context.Background(), server.CodeGetUserStatus, bytes.NewReader(getUserStatusResponseFrame(t, "mallory", server.StatusOnline))); err != nil {
+		t.Fatalf("handle unsolicited GetUserStatus: %v", err)
+	}
+	if _, known := c.ConversationPresence([]string{"me", "alice"})["mallory"]; known {
+		t.Fatal("unsolicited username appeared in presence snapshot")
+	}
+}
+
+func TestClientSynchronizesWatchUnwatchAndReconnect(t *testing.T) {
+	c := New(Config{}, testLogger())
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c.mu.Lock()
+	c.serverConn = clientConn
+	c.serverGeneration = 1
+	c.mu.Unlock()
+	c.presence.reconcileAndSnapshot([]string{"alice", "bob"})
+	c.presence.activate(1)
+
+	type expectedPresenceFrame struct {
+		code     uint32
+		username string
+	}
+	runSync := func(generation uint64, want []expectedPresenceFrame) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- c.syncConversationPresence(generation) }()
+		for _, expected := range want {
+			payload, err := readFramePayload(serverConn)
+			if err != nil {
+				t.Fatalf("read presence frame: %v", err)
+			}
+			code, username, err := frameCodeAndUsername(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code != expected.code || username != expected.username {
+				t.Fatalf("frame = (%d, %q), want (%d, %q)", code, username, expected.code, expected.username)
+			}
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("sync presence: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("presence sync did not finish")
+		}
+	}
+
+	runSync(1, []expectedPresenceFrame{{uint32(server.CodeWatchUser), "alice"}, {uint32(server.CodeWatchUser), "bob"}})
+	if err := c.syncConversationPresence(1); err != nil {
+		t.Fatalf("idempotent sync: %v", err)
+	}
+
+	c.presence.reconcileAndSnapshot([]string{"bob", "carol"})
+	runSync(1, []expectedPresenceFrame{{uint32(server.CodeUnwatchUser), "alice"}, {uint32(server.CodeWatchUser), "carol"}})
+
+	c.presence.invalidate(1)
+	c.mu.Lock()
+	c.serverGeneration = 2
+	c.mu.Unlock()
+	c.presence.activate(2)
+	runSync(2, []expectedPresenceFrame{{uint32(server.CodeWatchUser), "bob"}, {uint32(server.CodeWatchUser), "carol"}})
 }
 
 func TestClientInvalidPass(t *testing.T) {

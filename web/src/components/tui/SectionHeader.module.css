@@ -28,3 +28,12 @@
   letter-spacing: inherit;
   color: inherit;
 }
+
+/* Dynamic labels opt into one-line truncation explicitly; wrapping remains
+   the default for prominent page subjects and every other section heading. */
+.truncateLabel {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
