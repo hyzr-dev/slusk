@@ -62,6 +62,15 @@ type jobDetailDTO struct {
 	Attempts []attemptDetailDTO `json:"attempts"`
 }
 
+// terminalTransferState reports whether a persisted transfer state is one the
+// pipeline treats as final — the same three that gate reconcile's purge of a
+// transfer from the live backend (internal/pipeline/downloading.go). STALLED is
+// deliberately excluded: it is a durable retry intent the next pass acts on,
+// not an end state, and such a transfer is still genuinely in flight.
+func terminalTransferState(s core.TransferState) bool {
+	return s == core.TransferCompleted || s == core.TransferErrored || s == core.TransferCancelled
+}
+
 // toJobDetailDTO flattens a core.JobDetail into the detail panel's
 // display-ready shape, enriching each transfer with live queue-position/speed
 // from the peer backend where a match exists (see liveTransferIndex).
@@ -96,8 +105,21 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 				t.LastProgressAt = tr.LastProgressAt.Format(timeFormat)
 			}
 			if lt, ok := live.match(tr); ok {
-				t.QueuePosition = lt.QueuePosition
-				t.Speed = lt.Speed
+				// Queue position and speed describe work still in flight, so
+				// they are gated on the PERSISTED state rather than the live
+				// one. Reconcile commits the terminal state before purging the
+				// transfer from the live backend
+				// (internal/pipeline/downloading.go), so a persisted-terminal
+				// row can still match a lingering live entry — one that keeps
+				// reporting IN_PROGRESS at a speed that stays nonzero for up to
+				// speedStaleAfter. Reading either field off it renders a
+				// finished file as still downloading. Gating on lt.State
+				// instead would not help: it is precisely the field that has
+				// not caught up yet.
+				if !terminalTransferState(tr.State) {
+					t.QueuePosition = lt.QueuePosition
+					t.Speed = lt.Speed
+				}
 				// A matched live transfer supplies bytes regardless of its
 				// state — see transferDetailDTO.BytesDone's comment.
 				t.BytesDone = clampBytesDone(lt.BytesDone, tr.BytesTotal)
