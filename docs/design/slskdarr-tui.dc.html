@@ -70,85 +70,126 @@
 
       <!-- ================= OVERVIEW ================= -->
       <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
-      <div>
-        <div style="display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line);">
-          <sc-for list="{{ statCells }}" as="c" hint-placeholder-count="5">
-            <div style="{{ c.box }}">
-              <div style="display:flex;align-items:baseline;justify-content:space-between;">
-                <span style="font-size:10px;letter-spacing:1.3px;color:var(--faint);">{{ c.label }}</span>
-                <span style="{{ c.deltaStyle }}">{{ c.delta }}</span>
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;">
+
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;">
+          <div>
+            <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Overview</div>
+            <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Lidarr wanted list, reconciled against Soulseek every 45s</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+          <sc-for list="{{ statCells }}" as="c" hint-placeholder-count="4">
+            <div style="border:1px solid var(--line);background:#0a0b0c;padding:15px 17px 17px;">
+              <div style="font-size:10px;letter-spacing:1.3px;color:var(--faint);">{{ c.label }}</div>
+              <div style="display:flex;align-items:flex-end;gap:5px;margin-top:14px;">
+                <span style="{{ c.valueStyle }}">{{ c.value }}</span>
+                <span style="font-size:11px;color:var(--faint);padding-bottom:3px;">{{ c.unit }}</span>
               </div>
-              <div style="display:flex;align-items:flex-end;gap:3px;margin-top:11px;">
-                <span style="font-size:30px;font-weight:500;line-height:0.85;color:{{ c.valueColor }};">{{ c.value }}</span>
-                <span style="font-size:11px;color:var(--faint);padding-bottom:2px;">{{ c.unit }}</span>
-              </div>
-              <div style="display:flex;gap:1px;align-items:flex-end;height:18px;margin-top:13px;">
-                <sc-for list="{{ c.ticks }}" as="t" hint-placeholder-count="20">
-                  <span style="{{ t }}"></span>
-                </sc-for>
-              </div>
+              <div style="font-size:10.5px;color:#5f696f;margin-top:10px;letter-spacing:0.3px;">{{ c.sub }}</div>
             </div>
           </sc-for>
         </div>
 
-        <div style="display:grid;grid-template-columns:1.6fr 1fr;">
-
-          <div style="border-right:1px solid var(--line);">
-            <div style="{{ hdr }}">
-              <span>TRANSFERS</span>
-              <span style="flex:1;"></span>
-              <span style="color:var(--dim);">{{ activeCount }} active</span>
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
+          <div style="display:flex;align-items:center;gap:11px;padding:13px 17px;border-bottom:1px solid var(--line);">
+            <span style="color:#4c555b;font-size:11px;">─</span>
+            <span style="font-size:12.5px;color:var(--fg);letter-spacing:0.3px;">Transfers</span>
+            <span style="flex:1;"></span>
+            <span style="font-size:11px;color:var(--faint);letter-spacing:0.4px;">{{ activeCount }} active</span>
+          </div>
+          <div style="display:grid;grid-template-columns:28px minmax(150px,2fr) minmax(76px,1fr) minmax(130px,1.4fr) 62px 84px;gap:10px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#5f696f;">
+            <span>ST</span><span>ALBUM</span><span>PEER</span><span>PROGRESS</span><span style="text-align:right;">SPEED</span><span style="text-align:right;">SIZE</span>
+          </div>
+          <sc-for list="{{ activeRows }}" as="r" hint-placeholder-count="5">
+            <div style="display:grid;grid-template-columns:28px minmax(150px,2fr) minmax(76px,1fr) minmax(130px,1.4fr) 62px 84px;gap:10px;padding:10px 17px;border-bottom:1px solid #131619;font-size:11.5px;align-items:center;">
+              <span style="{{ r.tag }}">{{ r.tagText }}</span>
+              <span style="min-width:0;display:flex;align-items:baseline;gap:9px;">
+                <span style="flex:0 1 auto;min-width:0;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.title }}</span>
+                <span style="flex:0 2 auto;min-width:0;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.artist }}</span>
+                <span style="flex:0 0 auto;font-size:10px;color:#5f696f;letter-spacing:0.4px;">{{ r.format }}</span>
+              </span>
+              <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.peer }}</span>
+              <span style="display:flex;align-items:center;gap:9px;min-width:0;">
+                <span style="position:relative;display:block;flex:1;min-width:0;height:8px;background:repeating-linear-gradient(90deg,#1d2125 0 1px,transparent 1px 2px);">
+                  <span style="{{ r.fill }}"></span>
+                </span>
+                <span style="{{ r.pctStyle }}">{{ r.pct }}</span>
+              </span>
+              <span style="text-align:right;color:var(--dim);">{{ r.speed }}</span>
+              <span style="text-align:right;color:var(--faint);">{{ r.right }}</span>
             </div>
-            <sc-for list="{{ activeRows }}" as="r" hint-placeholder-count="5">
-              <div style="padding:11px 16px;border-bottom:1px solid var(--line);">
-                <div style="display:flex;align-items:baseline;gap:10px;">
-                  <span style="{{ r.tag }}">{{ r.tagText }}</span>
-                  <span style="flex:1;min-width:0;font-size:12px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.title }}</span>
-                  <span style="font-size:11px;color:var(--faint);">{{ r.speed }}</span>
-                  <span style="{{ r.pctStyle }}">{{ r.pct }}</span>
-                </div>
-                <div style="display:flex;gap:1px;align-items:flex-end;height:12px;margin-top:9px;">
-                  <sc-for list="{{ r.ticks }}" as="t" hint-placeholder-count="104">
-                    <span style="{{ t }}"></span>
-                  </sc-for>
-                </div>
-                <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:10.5px;color:var(--faint);letter-spacing:0.3px;">
-                  <span>{{ r.sub }}</span>
-                  <span>{{ r.right }}</span>
-                </div>
+          </sc-for>
+        </section>
+
+        <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:12px;">
+          <section style="border:1px solid var(--line);background:#0a0b0c;">
+            <div style="display:flex;align-items:center;gap:11px;padding:13px 17px;border-bottom:1px solid var(--line);">
+              <span style="color:#4c555b;font-size:11px;">─</span>
+              <span style="font-size:12.5px;color:var(--fg);letter-spacing:0.3px;">Reconcile passes</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:11px;color:var(--faint);">#{{ reconcileTotal }} · next T–{{ nextIn }}s</span>
+            </div>
+            <div style="display:grid;grid-template-columns:56px 74px 1fr 58px;gap:12px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#5f696f;">
+              <span>WHEN</span><span>PASS</span><span>RESULT</span><span style="text-align:right;">DUR</span>
+            </div>
+            <sc-for list="{{ passRows }}" as="p" hint-placeholder-count="7">
+              <div style="display:grid;grid-template-columns:56px 74px 1fr 58px;gap:12px;padding:7px 17px;border-bottom:1px solid #131619;font-size:11.5px;align-items:center;">
+                <span style="color:#5f696f;">{{ p.time }}</span>
+                <span style="color:var(--faint);">#{{ p.id }}</span>
+                <span style="{{ p.matchStyle }}">{{ p.matchText }}</span>
+                <span style="text-align:right;color:#5f696f;">{{ p.dur }}</span>
               </div>
             </sc-for>
-          </div>
+          </section>
 
-          <div>
-            <div style="{{ hdr }}"><span>THROUGHPUT</span><span style="flex:1;"></span><span style="color:var(--dim);">MB/s · 48s</span></div>
-            <div style="padding:14px 16px 10px;">
-              <div style="height:96px;">{{ throughputChart }}</div>
-              <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#5f696f;letter-spacing:0.8px;margin-top:5px;">
-                <span>−48s</span><span>PEAK {{ peak }}</span><span>NOW</span>
+          <section style="border:1px solid var(--line);background:#0a0b0c;display:flex;flex-direction:column;">
+            <div style="display:flex;align-items:center;gap:11px;padding:13px 17px;border-bottom:1px solid var(--line);">
+              <span style="color:#4c555b;font-size:11px;">─</span>
+              <span style="font-size:12.5px;color:var(--fg);letter-spacing:0.3px;">Throughput</span>
+              <span style="flex:1;"></span>
+              <span style="font-size:11px;color:var(--faint);">MB/s · last 48s</span>
+            </div>
+            <div style="padding:15px 17px 14px;flex:1;display:flex;flex-direction:column;gap:16px;justify-content:center;">
+              <div>
+                <div style="display:flex;align-items:baseline;gap:9px;">
+                  <span style="font-size:10px;letter-spacing:1.2px;color:var(--faint);">DOWN</span>
+                  <span style="font-size:12.5px;color:var(--fg);">{{ dlSpeed }}</span>
+                  <span style="flex:1;"></span>
+                  <span style="font-size:9.5px;color:#5f696f;letter-spacing:0.6px;">PEAK {{ peak }}</span>
+                </div>
+                <div style="height:64px;margin-top:8px;">{{ throughputChart }}</div>
+              </div>
+              <div>
+                <div style="display:flex;align-items:baseline;gap:9px;">
+                  <span style="font-size:10px;letter-spacing:1.2px;color:var(--faint);">UP</span>
+                  <span style="font-size:12.5px;color:var(--dim);">{{ ulSpeed }}</span>
+                  <span style="flex:1;"></span>
+                  <span style="font-size:9.5px;color:#5f696f;letter-spacing:0.6px;">PEAK {{ peakUp }}</span>
+                </div>
+                <div style="height:64px;margin-top:8px;">{{ uploadChart }}</div>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#5f696f;letter-spacing:0.8px;">
+                <span>−48s</span><span>NOW</span>
               </div>
             </div>
-
-            <div style="{{ hdr }};border-top:1px solid var(--line);"><span>RECONCILE</span><span style="flex:1;"></span><span style="color:var(--dim);">#{{ reconcileTotal }}</span></div>
-            <div style="padding:6px 0 8px;">
-              <sc-for list="{{ passRows }}" as="p" hint-placeholder-count="7">
-                <div style="display:flex;align-items:center;gap:10px;padding:4px 16px;font-size:11px;">
-                  <span style="color:#5f696f;width:44px;">{{ p.time }}</span>
-                  <span style="color:var(--faint);">#{{ p.id }}</span>
-                  <span style="flex:1;"></span>
-                  <span style="{{ p.matchStyle }}">{{ p.matchText }}</span>
-                  <span style="color:#5f696f;width:34px;text-align:right;">{{ p.dur }}</span>
-                </div>
-              </sc-for>
-            </div>
-          </div>
+          </section>
         </div>
       </div>
       </sc-if>
 
       <!-- ================= JOBS ================= -->
       <sc-if value="{{ isJobs }}" hint-placeholder-val="{{ false }}">
-      <div>
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;">
+          <div>
+            <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Jobs</div>
+            <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Every album slskdarr is tracking, from queued to imported</div>
+          </div>
+        </div>
+
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
         <div style="display:flex;align-items:center;gap:8px;padding:11px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap;">
           <div style="display:flex;align-items:center;gap:8px;border:1px solid var(--line2);padding:5px 10px;flex:0 0 230px;">
             <span style="color:var(--dim);font-size:12px;">/</span>
@@ -160,7 +201,9 @@
         </div>
 
         <div style="{{ gridHead }}">
-          <span>ST</span><span>ALBUM</span><span>PEER</span><span>FMT</span><span>PROGRESS</span><span style="text-align:right;">SPEED</span><span style="text-align:right;">ETA</span><span style="text-align:right;">TRY</span>
+          <sc-for list="{{ jobHeads }}" as="h" hint-placeholder-count="7">
+            <span onClick="{{ h.onClick }}" style="{{ h.style }}">{{ h.label }}</span>
+          </sc-for>
         </div>
         <sc-for list="{{ jobRows }}" as="j" hint-placeholder-count="10">
           <div onClick="{{ j.onClick }}" style="{{ j.rowStyle }}" style-hover="background:#0e1012;">
@@ -170,14 +213,12 @@
               <span style="flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg);">{{ j.album }}</span>
               <span style="flex:0 2 auto;min-width:0;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.artist }}</span>
               <span style="{{ j.srcStyle }}">{{ j.srcText }}</span>
+              <span style="flex:0 0 auto;font-size:10px;color:#5f696f;letter-spacing:0.4px;">{{ j.format }}</span>
             </span>
             <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.peer }}</span>
-            <span style="color:var(--faint);">{{ j.format }}</span>
-            <span style="display:flex;align-items:center;gap:8px;">
-              <span style="display:flex;gap:1px;align-items:flex-end;height:9px;flex:1;">
-                <sc-for list="{{ j.ticks }}" as="t" hint-placeholder-count="26">
-                  <span style="{{ t }}"></span>
-                </sc-for>
+            <span style="display:flex;align-items:center;gap:8px;min-width:0;">
+              <span style="position:relative;display:block;flex:1;min-width:0;height:8px;background:repeating-linear-gradient(90deg,#1d2125 0 1px,transparent 1px 2px);">
+                <span style="{{ j.fill }}"></span>
               </span>
               <span style="{{ j.pctStyle }}">{{ j.pct }}</span>
             </span>
@@ -222,12 +263,31 @@
         <sc-if value="{{ jobsEmpty }}" hint-placeholder-val="{{ false }}">
           <div style="padding:40px;text-align:center;color:#5f696f;font-size:11.5px;letter-spacing:1px;">── NO MATCHING JOBS ──</div>
         </sc-if>
+        <sc-if value="{{ showPager }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--line);">
+            <span style="font-size:10.5px;letter-spacing:0.8px;color:#5f696f;">{{ jobRange }}</span>
+            <div style="display:flex;align-items:center;gap:5px;">
+              <button onClick="{{ prevPage }}" style="{{ prevStyle }}">[,] PREV</button>
+              <sc-for list="{{ pageBtns }}" as="p" hint-placeholder-count="3">
+                <button onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</button>
+              </sc-for>
+              <button onClick="{{ nextPage }}" style="{{ nextStyle }}">NEXT [.]</button>
+            </div>
+          </div>
+        </sc-if>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= SEARCH ================= -->
       <sc-if value="{{ isSearch }}" hint-placeholder-val="{{ false }}">
-      <div>
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Search</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Query the Soulseek network directly and import straight into Lidarr</div>
+        </div>
+
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
         <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);">
           <span style="color:var(--dim);font-size:13px;">&gt;</span>
           <input ref="{{ searchRef }}" value="{{ sq }}" onInput="{{ onSq }}" onKeyDown="{{ onSqKey }}" placeholder="search soulseek" style="flex:1;background:transparent;border:none;outline:none;color:var(--fg);font-size:13px;letter-spacing:0.3px;"/>
@@ -308,15 +368,21 @@
             </sc-if>
           </sc-for>
         </sc-if>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= HEALTH ================= -->
       <sc-if value="{{ isHealth }}" hint-placeholder-val="{{ false }}">
-      <div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid var(--line);">
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Health</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Dependencies, reconcile throughput and raw metrics</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
           <sc-for list="{{ deps }}" as="d" hint-placeholder-count="3">
-            <div style="padding:15px 16px;border-right:1px solid var(--line);">
+            <div style="border:1px solid var(--line);background:#0a0b0c;padding:15px 17px 17px;">
               <div style="display:flex;align-items:center;gap:9px;">
                 <span style="{{ d.dot }}">■</span>
                 <span style="font-size:11px;letter-spacing:1.3px;color:var(--fg);">{{ d.name }}</span>
@@ -324,7 +390,7 @@
                 <span style="{{ d.stateStyle }}">{{ d.state }}</span>
               </div>
               <div style="font-size:11px;color:var(--faint);margin-top:9px;letter-spacing:0.3px;">{{ d.detail }}</div>
-              <div style="display:flex;gap:1px;align-items:flex-end;height:16px;margin-top:12px;">
+              <div style="display:flex;gap:0.5px;align-items:flex-end;height:10px;margin-top:12px;overflow:hidden;">
                 <sc-for list="{{ d.ticks }}" as="t" hint-placeholder-count="30">
                   <span style="{{ t }}"></span>
                 </sc-for>
@@ -336,8 +402,8 @@
           </sc-for>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;">
-          <div style="border-right:1px solid var(--line);">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div style="border:1px solid var(--line);background:#0a0b0c;">
             <div style="{{ hdr }}"><span>RECONCILE RATE</span><span style="flex:1;"></span><span style="color:var(--dim);">matched / pass · 20</span></div>
             <div style="padding:14px 16px 10px;">
               <div style="display:flex;gap:2px;align-items:flex-end;height:92px;">
@@ -350,7 +416,7 @@
               </div>
             </div>
           </div>
-          <div>
+          <div style="border:1px solid var(--line);background:#0a0b0c;">
             <div style="{{ hdr }}"><span>COMPLETED</span><span style="flex:1;"></span><span style="color:var(--dim);">cumulative · 24h</span></div>
             <div style="padding:14px 16px 10px;">
               <div style="height:92px;">{{ completedChart }}</div>
@@ -361,21 +427,28 @@
           </div>
         </div>
 
-        <div style="{{ hdr }};border-top:1px solid var(--line);"><span>METRICS</span><span style="flex:1;"></span><span style="color:var(--dim);">prometheus</span></div>
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
+        <div style="{{ hdr }}"><span>METRICS</span><span style="flex:1;"></span><span style="color:var(--dim);">prometheus</span></div>
         <sc-for list="{{ metricRows }}" as="m" hint-placeholder-count="6">
-          <div style="display:grid;grid-template-columns:1fr 90px;gap:12px;padding:6px 16px;border-bottom:1px solid var(--line);font-size:11.5px;">
+          <div style="display:grid;grid-template-columns:1fr 90px;gap:12px;padding:7px 17px;border-bottom:1px solid #131619;font-size:11.5px;">
             <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ m.key }}</span>
             <span style="text-align:right;color:var(--fg);">{{ m.value }}</span>
           </div>
         </sc-for>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= SHARES ================= -->
       <sc-if value="{{ isShare }}" hint-placeholder-val="{{ false }}">
-      <div>
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Sharing</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">What you give back to the network — and who is pulling from you</div>
+        </div>
+
         <sc-if value="{{ noShares }}" hint-placeholder-val="{{ false }}">
-          <div style="padding:16px;">
+          <div>
             <div style="border:1px solid var(--bad);border-left-width:2px;padding:16px 18px;background:#0f0b0c;">
               <div style="font-size:11px;letter-spacing:1.4px;color:var(--bad);">NO SHARED FOLDERS</div>
               <div style="font-size:11.5px;color:var(--dim);margin-top:10px;line-height:1.9;max-width:560px;">Sharing nothing makes you a leech on the network — most peers auto-block users with no shares, and your downloads will queue forever. Add at least one folder to <span style="color:var(--fg);">shares:</span> in the config file, then rescan.</div>
@@ -384,6 +457,7 @@
           </div>
         </sc-if>
 
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
         <div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line);">
           <span style="font-size:9.5px;letter-spacing:1.4px;color:var(--faint);">SHARED FOLDERS</span>
           <span style="font-size:11px;color:var(--dim);">{{ shareSummary }}</span>
@@ -396,11 +470,7 @@
 
         <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
           <div style="padding:11px 16px;border-bottom:1px solid var(--line);">
-            <div style="display:flex;gap:1px;align-items:flex-end;height:12px;">
-              <sc-for list="{{ scanTicks }}" as="t" hint-placeholder-count="104">
-                <span style="{{ t }}"></span>
-              </sc-for>
-            </div>
+            <div style="display:flex;"><span style="position:relative;display:block;flex:1;min-width:0;height:8px;background:repeating-linear-gradient(90deg,#1d2125 0 1px,transparent 1px 2px);"><span style="{{ scanFill }}"></span></span></div>
             <div style="font-size:10.5px;color:var(--faint);margin-top:7px;letter-spacing:0.3px;">{{ scanDetail }}</div>
           </div>
         </sc-if>
@@ -416,8 +486,10 @@
             <span style="{{ sh.indexedStyle }}">{{ sh.indexed }}</span>
           </div>
         </sc-for>
+        </section>
 
-        <div style="{{ hdr }};border-top:1px solid var(--line);">
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
+        <div style="{{ hdr }}">
           <span>UPLOADS</span><span style="flex:1;"></span><span style="color:var(--dim);">{{ uploadSummary }}</span>
         </div>
         <sc-for list="{{ uploadRows }}" as="u" hint-placeholder-count="4">
@@ -428,11 +500,7 @@
               <span style="font-size:11px;color:var(--faint);">{{ u.speed }}</span>
               <span style="{{ u.pctStyle }}">{{ u.pct }}</span>
             </div>
-            <div style="display:flex;gap:1px;align-items:flex-end;height:12px;margin-top:9px;">
-              <sc-for list="{{ u.ticks }}" as="t" hint-placeholder-count="104">
-                <span style="{{ t }}"></span>
-              </sc-for>
-            </div>
+            <div style="display:flex;margin-top:9px;"><span style="position:relative;display:block;flex:1;min-width:0;height:8px;background:repeating-linear-gradient(90deg,#1d2125 0 1px,transparent 1px 2px);"><span style="{{ u.fill }}"></span></span></div>
             <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:10.5px;color:var(--faint);letter-spacing:0.3px;">
               <span>{{ u.peer }}</span>
               <span>{{ u.right }}</span>
@@ -442,12 +510,19 @@
         <sc-if value="{{ noUploads }}" hint-placeholder-val="{{ false }}">
           <div style="padding:34px;text-align:center;color:#5f696f;font-size:11.5px;letter-spacing:1px;">── NO ACTIVE UPLOADS ──</div>
         </sc-if>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= CHAT ================= -->
       <sc-if value="{{ isChat }}" hint-placeholder-val="{{ false }}">
-      <div style="display:flex;height:100%;min-height:0;">
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;height:100%;box-sizing:border-box;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Chat</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Direct messages with peers — useful when a transfer needs a nudge</div>
+        </div>
+
+        <section style="border:1px solid var(--line);background:#0a0b0c;flex:1;min-height:280px;display:flex;">
         <div style="width:194px;flex:0 0 194px;border-right:1px solid var(--line);display:flex;flex-direction:column;">
           <div style="{{ hdr }}"><span>PEERS</span></div>
           <sc-for list="{{ threads }}" as="t" hint-placeholder-count="4">
@@ -479,18 +554,21 @@
             <button onClick="{{ send }}" style="{{ btnPrimary }}">[⏎] SEND</button>
           </div>
         </div>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= SETUP ================= -->
       <sc-if value="{{ isSetup }}" hint-placeholder-val="{{ false }}">
-      <div style="max-width:720px;">
-        <div style="padding:16px 16px 6px;">
-          <div style="font-size:11px;letter-spacing:1.4px;color:var(--faint);">GUIDED SETUP</div>
-          <div style="font-size:11.5px;color:var(--dim);margin-top:9px;line-height:1.9;">slskdarr validates the config file you already wrote — it never writes it. Fix anything that fails, then rerun the check.</div>
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;max-width:820px;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Setup</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">slskdarr validates the config you already wrote — it never writes it</div>
         </div>
+
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
         <sc-for list="{{ steps }}" as="st" hint-placeholder-count="3">
-          <div style="border-top:1px solid var(--line);padding:15px 16px;">
+          <div style="border-bottom:1px solid #131619;padding:16px 17px;">
             <div style="display:flex;align-items:center;gap:11px;">
               <span style="{{ st.numStyle }}">{{ st.num }}</span>
               <span style="font-size:11.5px;color:var(--fg);letter-spacing:0.4px;">{{ st.title }}</span>
@@ -514,12 +592,19 @@
             </div>
           </div>
         </sc-for>
+        </section>
       </div>
       </sc-if>
 
       <!-- ================= CONFIG ================= -->
       <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
-      <div style="max-width:760px;">
+      <div style="padding:26px 24px 40px;display:flex;flex-direction:column;gap:22px;max-width:1320px;max-width:900px;">
+        <div>
+          <div style="font-size:19px;font-weight:500;color:var(--fg);letter-spacing:0.2px;">Config</div>
+          <div style="font-size:12px;color:var(--faint);margin-top:6px;letter-spacing:0.2px;">Resolved runtime configuration, as slskdarr sees it</div>
+        </div>
+
+        <section style="border:1px solid var(--line);background:#0a0b0c;">
         <div style="display:flex;align-items:center;gap:11px;padding:11px 16px;border-bottom:1px solid var(--line);">
           <span style="font-size:9.5px;letter-spacing:1.4px;color:var(--faint);">CONFIG</span>
           <span style="font-size:11px;color:var(--dim);">/etc/slskdarr/config.yaml</span>
@@ -529,12 +614,13 @@
         <sc-for list="{{ configGroups }}" as="g" hint-placeholder-count="4">
           <div style="{{ hdr }}"><span>{{ g.label }}</span></div>
           <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="4">
-            <div style="display:grid;grid-template-columns:190px 1fr;gap:14px;padding:6.5px 16px;border-bottom:1px solid var(--line);font-size:11.5px;">
+            <div style="display:grid;grid-template-columns:190px 1fr;gap:14px;padding:7px 17px;border-bottom:1px solid #131619;font-size:11.5px;">
               <span style="color:var(--faint);letter-spacing:0.4px;">{{ r.k }}</span>
               <span style="{{ r.vStyle }}">{{ r.v }}</span>
             </div>
           </sc-for>
         </sc-for>
+        </section>
       </div>
       </sc-if>
 
@@ -611,7 +697,7 @@ class Component extends DCLogic {
       {id:'R5',title:'In Rainbows [WEB]',artist:'Radiohead',tracks:10,sizeMB:112,format:'MP3 320',bitrate:'320k',complete:true,peer:'nordic_rip',speedKBs:660,free:true,queue:0},
       {id:'R6',title:'In Rainbows',artist:'Radiohead',tracks:7,sizeMB:58,format:'MP3 192',bitrate:'192k',complete:false,peer:'wax_and_bits',speedKBs:140,free:false,queue:6}
     ];
-    return {view:'overview',jobs,expandedId:null,filter:'all',jq:'',
+    return {view:'overview',jobs,expandedId:null,filter:'all',jq:'',jobSort:{k:'',dir:1},jobPage:0,
       reconcileTotal:1482,nextIn:38,updatedAgo:1,passes,tp,
       sq:'',sLast:'',searchState:'idle',pool,revealed:0,sExpanded:null,sort:'best',sel:{},imports:{},spinIdx:0,
       lidarrOk:true,tick:0,
@@ -689,6 +775,7 @@ class Component extends DCLogic {
     }
     if(k==='?'){ e.preventDefault(); this.setState(s=>({help:!s.help})); return; }
     const st=this.state;
+    if(st.view==='jobs'&&(k===','||k==='.')){ e.preventDefault(); this.stepJobPage(k===','?-1:1); return; }
     if(st.view==='jobs'&&st.expandedId){
       const id=st.expandedId; const stop={stopPropagation(){}};
       if(k==='r'){ e.preventDefault(); this.retry(id)(stop); this.flash('retrying #'+id); return; }
@@ -735,8 +822,14 @@ class Component extends DCLogic {
   }
 
   go=(v)=>()=>this.setState({view:v});
-  setFilter=(f)=>()=>this.setState({filter:f});
-  onJq=(e)=>this.setState({jq:e.target.value});
+  setFilter=(f)=>()=>this.setState({filter:f,jobPage:0});
+  onJq=(e)=>this.setState({jq:e.target.value,jobPage:0});
+  setJobSort=(k)=>()=>this.setState(s=>({jobSort:{k,dir:s.jobSort.k===k?-s.jobSort.dir:1},jobPage:0}));
+  setJobPage=(p)=>()=>this.setState({jobPage:p,expandedId:null});
+  stepJobPage=(d)=>this.setState(s=>{
+    const n=Math.max(0,Math.min(this.jobPageCount-1,s.jobPage+d));
+    return {jobPage:n,expandedId:null};
+  });
   toggleJob=(id)=>()=>this.setState(s=>({expandedId:s.expandedId===id?null:id}));
   retry=(id)=>(e)=>{e.stopPropagation();this.setState(s=>({jobs:s.jobs.map(j=>j.id!==id?j:{...j,status:'active',progress:Math.max(1,j.progress),speedKBs:420,retries:j.retries+1,reason:'',queuePos:0,stateMin:0})}));};
   cancel=(id)=>(e)=>{e.stopPropagation();this.setState(s=>({jobs:s.jobs.map(j=>j.id!==id?j:{...j,status:'queued',progress:0,speedKBs:0,peer:'—',queuePos:0})}));};
@@ -817,6 +910,12 @@ class Component extends DCLogic {
   // ── the bars ──────────────────────────────────────────
   // dense vertical ticks of uniform height — progress recolours
   // ticks in place; the newest tick flares so change is visible
+  fill(pct,color,live){
+    const p=Math.max(0,Math.min(100,pct));
+    return 'position:absolute;left:0;top:0;bottom:0;width:'+p+'%;overflow:hidden;'+
+      'background:repeating-linear-gradient(90deg,'+color+' 0 1px,transparent 1px 2px);'+
+      (live?'box-shadow:1px 0 4px '+color+'66;':'');
+  }
   ticks(pct,count,color,h,live){
     h=h||100; const out=[]; const filled=(pct/100)*count;
     const height=h===100?'100%':h+'%';
@@ -827,13 +926,13 @@ class Component extends DCLogic {
       const isHead=live&&on&&i===head;
       const op = on?1 : (partial?0.5:1);
       const anim = isHead?'animation:tui-flare .9s ease-out;':'';
-      out.push(`flex:1;min-width:1px;height:${height};background:${(on||partial)?color:'#1d2125'};opacity:${op};${anim}`);
+      out.push(`flex:1 1 0;min-width:0;height:${height};background:${(on||partial)?color:'#1d2125'};opacity:${op};${anim}`);
     }
     return out;
   }
   sparkTicks(arr,color){
     const mx=Math.max.apply(null,arr.concat([1]));
-    return arr.map(v=>`flex:1;min-width:1px;height:${Math.max(12,(v/mx)*100)}%;background:#3d474d;opacity:${0.4+0.6*(v/mx)};`);
+    return arr.map(v=>`flex:1 1 0;min-width:0;height:${Math.max(12,(v/mx)*100)}%;background:#3d474d;opacity:${0.4+0.6*(v/mx)};`);
   }
   area(points,color){
     const w=100,h=96,n=points.length;
@@ -841,8 +940,8 @@ class Component extends DCLogic {
     const step=n>1?w/(n-1):0;
     const pts=points.map((v,i)=>[+(i*step).toFixed(2),+(h-3-(v/mx)*(h-10)).toFixed(2)]);
     const line=pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' ');
-    const gid='tuiGrad';
-    return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:h+'px',display:'block'}},
+    const gid='tuiGrad'+color.replace(/[^a-z0-9]/gi,'');
+    return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:'100%',display:'block'}},
       React.createElement('defs',null,React.createElement('linearGradient',{id:gid,x1:'0',y1:'0',x2:'0',y2:'1'},
         React.createElement('stop',{offset:'0%',stopColor:color,stopOpacity:0.42}),
         React.createElement('stop',{offset:'100%',stopColor:color,stopOpacity:0}))),
@@ -862,7 +961,7 @@ class Component extends DCLogic {
   healthVals(C){
     const s=this.state;
     const upTicks=(downAt)=>{const a=[];for(let i=0;i<30;i++)a.push(downAt!==null&&i>=downAt&&i<downAt+3?0:1);
-      return a.map(v=>`flex:1;min-width:1px;height:100%;background:${v?'#4f9e80':'#b5595c'};opacity:${v?0.75:1};`);};
+      return a.map(v=>`flex:1 1 0;min-width:0;height:100%;background:${v?'#4f9e80':'#b5595c'};opacity:${v?0.75:1};`);};
     const dep=(name,state,detail,downAt,uptimePct)=>({
       name,state:state.toUpperCase(),detail,uptimePct,
       dot:`color:${state==='connected'||state==='indexed'?'var(--ok)':(state==='degraded'?'var(--bad)':'var(--dim)')};font-size:9px;`,
@@ -907,7 +1006,7 @@ class Component extends DCLogic {
       shareSummary:`${s.shares.length} folders · ${totalF.toLocaleString('sv-SE')} files · ${(totalG/1024).toFixed(1)} TB`,
       scanning:s.scanning, scanPct:Math.round(s.scanPct)+'%', scanSpinner:spin,
       scanDetail:`indexing /media/archive/flac · ${s.scanFiles.toLocaleString('sv-SE')} files hashed`,
-      scanTicks:this.ticks(s.scanPct,104,'#c8ccd0',100,true),
+      scanFill:this.fill(s.scanPct,'#c8ccd0',true),
       rescan:this.rescan,
       shareRows:s.shares.map(x=>({path:x.path,files:x.files.toLocaleString('sv-SE'),
         size:x.sizeGB>=1024?(x.sizeGB/1024).toFixed(1)+' TB':x.sizeGB+' GB',
@@ -921,8 +1020,8 @@ class Component extends DCLogic {
         speed:u.queued?'—':this.spd(u.speedKBs),
         right:u.queued?'waiting for slot':Math.round(u.pct)+'% sent',
         pct:u.queued?'—':Math.round(u.pct)+'%',
-        pctStyle:`font-size:11.5px;color:${u.queued?'var(--dim)':'#c8ccd0'};width:38px;text-align:right;`,
-        ticks:this.ticks(u.queued?100:u.pct,104,u.queued?'#2a2f34':'#c8ccd0',100,!u.queued)}))};
+        pctStyle:`font-size:11px;color:${u.queued?'var(--dim)':'#c8ccd0'};width:34px;text-align:right;`,
+        fill:this.fill(u.queued?100:u.pct,u.queued?'#2a2f34':'#c8ccd0',!u.queued)}))};
   }
 
   chatVals(){
@@ -1005,35 +1104,31 @@ class Component extends DCLogic {
     ];
 
     const totalSpeed=s.jobs.filter(j=>j.status==='active'&&j.queuePos===0).reduce((a,j)=>a+j.speedKBs*6,0);
+    const up=s.tp.map((v,i)=>Math.max(0.15,v*0.09+Math.sin(i/3.4)*0.35+0.5));
     const hdr='display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.4px;color:var(--faint);';
 
     // stat cells
-    const cell=(label,value,unit,sub,color,series,delta)=>({
-      box:'padding:14px 16px;border-right:1px solid var(--line);',
-      label,value,unit,sub,valueColor:color,
-      delta:delta||'', deltaStyle:`font-size:10px;color:${(delta||'').indexOf('+')===0?'var(--ok)':'#5f696f'};`,
-      ticks:this.sparkTicks(series,'#39424799')
-    });
-    const hist=(n,base)=>{const a=[];for(let i=0;i<n;i++)a.push(Math.max(0.4,base+Math.sin(i/2.2)*1.1+Math.random()*0.7));return a;};
+    const cell=(label,value,unit,sub,color)=>({label,value,unit,sub,
+      valueStyle:`font-size:31px;font-weight:500;line-height:0.85;color:${color||'var(--fg)'};`});
+    const attn=C.stalled+C.orphaned;
     const statCells=[
-      cell('ACTIVE',C.active,'',C.importing+' importing','var(--fg)',s.tp.slice(-20),'+2'),
-      cell('QUEUED',C.queued,'','awaiting peer','var(--dim)',hist(20,2.4)),
-      cell('STALLED',C.stalled,'','needs attention','var(--bad)',hist(20,1.2)),
-      cell('ORPHANED',C.orphaned,'','unknown transfer','var(--bad)',hist(20,1)),
-      cell('DONE',C.done,'','imported today','var(--ok)',hist(20,3),'+5')
+      cell('IN FLIGHT',C.active,'','downloading from '+C.active+' peers'),
+      cell('QUEUED',C.queued,'','awaiting a free slot','var(--dim)'),
+      cell('IMPORTED TODAY',C.done,'',C.importing+' verifying now','var(--fg)'),
+      cell('NEEDS ATTENTION',attn,'',C.stalled+' stalled · '+C.orphaned+' orphaned',attn?'var(--bad)':'var(--dim)')
     ];
 
     const activeRows=s.jobs.filter(j=>j.status==='active'||j.status==='importing'||j.status==='stalled').slice(0,8).map(j=>{
       const m=this.meta(j.status); const inQ=j.status==='active'&&j.queuePos>0;
       const col=inQ?'var(--dim)':(j.status==='stalled'?'var(--bad)':'#c8ccd0');
-      return {tag:`font-size:9.5px;letter-spacing:1px;color:${m.c};border:1px solid var(--line2);padding:1px 5px;`,
+      return {tag:`font-size:9.5px;letter-spacing:0.8px;color:${m.c};`,
         tagText:inQ?'QU':m.t,
-        title:j.album, sub:j.artist+' · '+j.peer,
-        right:inQ?('queue pos '+j.queuePos):(j.status==='importing'?'verifying':this.size(j.sizeMB*j.progress/100)+' / '+this.size(j.sizeMB)),
+        title:j.album, artist:j.artist, peer:j.peer, format:j.format,
+        right:inQ?('pos '+j.queuePos):(j.status==='importing'?'verifying':this.size(j.sizeMB*j.progress/100)+' / '+this.size(j.sizeMB)),
         speed:inQ?'—':this.spd(j.speedKBs),
         pct:Math.round(j.progress)+'%',
-        pctStyle:`font-size:11.5px;color:${col};width:38px;text-align:right;`,
-        ticks:this.ticks(inQ?100:j.progress,104,inQ?'#2a2f34':col,100,j.status==='active'&&!inQ)};
+        pctStyle:`font-size:11px;color:${col};width:34px;text-align:right;`,
+        fill:this.fill(inQ?100:j.progress,inQ?'#2a2f34':col,j.status==='active'&&!inQ)};
     });
 
     const passRows=s.passes.slice(0,7).map(p=>({
@@ -1047,7 +1142,47 @@ class Component extends DCLogic {
     const q=s.jq.trim().toLowerCase();
     if(q) rows=rows.filter(j=>(j.artist+' '+j.album+' '+j.peer).toLowerCase().includes(q));
 
-    const gridCols='grid-template-columns:28px minmax(0,2fr) 116px 60px 148px 66px 44px 32px;';
+    // sorting
+    const etaSec=(j)=>(j.status==='active'&&j.queuePos===0&&j.speedKBs>0)?(j.sizeMB*1024*(1-j.progress/100))/(j.speedKBs*6):Infinity;
+    const stRank={active:0,importing:1,queued:2,stalled:3,failed:4,orphaned:5,done:6};
+    const KEY={
+      st:j=>(stRank[j.status]??9)*10+(j.queuePos>0?1:0),
+      album:j=>(j.album+' '+j.artist).toLowerCase(),
+      peer:j=>(j.peer||'').toLowerCase(),
+      progress:j=>j.progress,
+      speed:j=>(j.status==='active'&&j.queuePos===0)?j.speedKBs:-1,
+      eta:j=>etaSec(j),
+      try:j=>j.retries
+    };
+    const sk=s.jobSort.k;
+    if(sk&&KEY[sk]){
+      const f=KEY[sk],d=s.jobSort.dir;
+      rows=rows.slice().sort((a,b)=>{const x=f(a),y=f(b);return (x<y?-1:x>y?1:0)*d;});
+    }
+
+    // pagination
+    const per=12, total=rows.length;
+    const pageCount=Math.max(1,Math.ceil(total/per));
+    this.jobPageCount=pageCount;
+    const page=Math.min(s.jobPage,pageCount-1);
+    rows=rows.slice(page*per,page*per+per);
+
+    const arrow=(k)=>sk===k?(s.jobSort.dir>0?' ▲':' ▼'):'';
+    const headStyle=(k,right)=>`cursor:pointer;user-select:none;color:${sk===k?'var(--dim)':'#5f696f'};${right?'text-align:right;':''}`;
+    const head=(k,label,right)=>({label:label+arrow(k),onClick:this.setJobSort(k),style:headStyle(k,right)});
+    const plain=(label,right)=>({label,onClick:null,style:`color:#5f696f;${right?'text-align:right;':''}`});
+    const jobHeads=[head('st','ST'),head('album','ALBUM'),head('peer','PEER'),plain('PROGRESS'),plain('SPEED',1),plain('ETA',1),plain('TRY',1)];
+
+    const pgBase='padding:4px 9px;border:1px solid var(--line2);background:transparent;font-size:10.5px;letter-spacing:0.7px;cursor:pointer;font-family:inherit;';
+    const pageBtns=[];
+    for(let i=0;i<pageCount;i++){
+      const on=i===page;
+      pageBtns.push({label:String(i+1),onClick:this.setJobPage(i),
+        style:`${pgBase}min-width:26px;border-color:${on?'var(--dim)':'var(--line2)'};background:${on?'#14181b':'transparent'};color:${on?'var(--fg)':'var(--faint)'};`});
+    }
+    const navStyle=(dis)=>`${pgBase}color:${dis?'#3a4145':'var(--faint)'};cursor:${dis?'default':'pointer'};`;
+
+    const gridCols='grid-template-columns:28px minmax(150px,2fr) minmax(72px,1fr) minmax(110px,1.3fr) 62px 44px 32px;';
     const gridHead=`display:grid;${gridCols}gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#5f696f;`;
     const jobRows=rows.map(j=>{
       const m=this.meta(j.status); const inQ=j.status==='active'&&j.queuePos>0;
@@ -1056,13 +1191,13 @@ class Component extends DCLogic {
       const exp=s.expandedId===j.id;
       return {...j,
         onClick:this.toggleJob(j.id),
-        rowStyle:`display:grid;${gridCols}gap:10px;padding:7px 16px;border-bottom:1px solid var(--line);font-size:11.5px;align-items:center;cursor:pointer;background:${exp?'#0e1012':'transparent'};`,
+        rowStyle:`display:grid;${gridCols}gap:10px;padding:9px 16px;border-bottom:1px solid #131619;font-size:11.5px;align-items:center;cursor:pointer;background:${exp?'#0e1012':'transparent'};`,
         tag:`font-size:9.5px;letter-spacing:0.8px;color:${m.c};`, tagText:inQ?'QU':m.t,
         caret:exp?'▾':'▸', caretStyle:'color:#5f696f;font-size:9px;',
         srcText:j.source==='manual'?'●':'', srcStyle:'color:var(--dim);font-size:8px;',
         pct:inQ?('P'+j.queuePos):Math.round(j.progress)+'%',
         pctStyle:`font-size:11px;color:${col};width:34px;text-align:right;`,
-        ticks:this.ticks(inQ?100:j.progress,26,inQ?'#2a2f34':col,100,j.status==='active'&&!inQ),
+        fill:this.fill(inQ?100:j.progress,inQ?'#2a2f34':col,j.status==='active'&&!inQ),
         speed:dl?this.spd(j.speedKBs):'—',
         eta:(dl&&j.speedKBs>0)?(()=>{const sec=(j.sizeMB*1024*(1-j.progress/100))/(j.speedKBs*6);return sec>=60?Math.round(sec/60)+'m':Math.round(sec)+'s';})():'—',
         tries:j.retries>0?j.retries:'·',
@@ -1141,16 +1276,22 @@ class Component extends DCLogic {
         {k:'r',d:'retry expanded job'},{k:'c',d:'cancel expanded job'},
         {k:'d',d:'delete expanded job'},{k:'a',d:'download album (search)'},
         {k:'s',d:'download selected (search)'},{k:'i',d:'toggle lidarr import'},
+        {k:', / .',d:'prev / next jobs page'},
         {k:'esc',d:'collapse / blur'},{k:'?',d:'toggle this help'}
       ],
       isOverview:V==='overview',isJobs:V==='jobs',isSearch:V==='search',
       updatedText:s.updatedAgo===0?'now':s.updatedAgo+'s',
-      nextIn:s.nextIn, dlSpeed:totalSpeed>0?(totalSpeed/1024).toFixed(1)+' MB/s':'idle', ulSpeed:'0.9 MB/s',
+      nextIn:s.nextIn, dlSpeed:totalSpeed>0?(totalSpeed/1024).toFixed(1)+' MB/s':'idle', ulSpeed:up[up.length-1].toFixed(1)+' MB/s',
       lidarrDot:`color:${(s.lidarrOk&&!this.props.lidarrDown)?'var(--ok)':'var(--bad)'};`,
       uptime:'14d 06h', mem:'82 MB', peers:'214k',
-      statCells, activeRows, activeCount:C.active, passRows, reconcileTotal:s.reconcileTotal,
+      statCells, activeRows, activeCount:C.active, passRows, slotText:C.active+'/8', reconcileTotal:s.reconcileTotal,
       throughputChart:this.area(s.tp,'#c8ccd0'), peak:Math.max.apply(null,s.tp).toFixed(1),
-      jq:s.jq,onJq:this.onJq,jobChips,jobRows,jobsEmpty:jobRows.length===0,
+      uploadChart:this.area(up,'#7d868c'), peakUp:Math.max.apply(null,up).toFixed(1),
+      jq:s.jq,onJq:this.onJq,jobChips,jobRows,jobsEmpty:jobRows.length===0,jobHeads,
+      pageBtns,showPager:total>0,
+      jobRange:total===0?'':`${page*per+1}–${Math.min(total,page*per+per)} of ${total}`,
+      prevPage:()=>this.stepJobPage(-1),nextPage:()=>this.stepJobPage(1),
+      prevStyle:navStyle(page===0),nextStyle:navStyle(page>=pageCount-1),
       sq:s.sq,onSq:this.onSq,onSqKey:this.onSqKey,runSearch:this.runSearch,
       sIdle:s.searchState==='idle',sEmpty:s.searchState==='empty',
       sHas:s.searchState==='searching'||s.searchState==='done',

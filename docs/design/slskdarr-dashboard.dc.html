@@ -614,6 +614,65 @@
     </div>
     </sc-if>
 
+    <!-- ============ CHATT ============ -->
+    <sc-if value="{{ isChat }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:18px 26px 26px;">
+      <div style="{{ chatShellStyle }}">
+
+        <div style="width:250px;flex:0 0 250px;border-right:1px solid #1e222a;display:flex;flex-direction:column;min-height:0;">
+          <div style="padding:11px 14px;border-bottom:1px solid #1e222a;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;color:#6b7280;">Konversationer</div>
+          <div style="flex:1;overflow-y:auto;">
+            <sc-for list="{{ chatThreads }}" as="t" hint-placeholder-count="4">
+              <div onClick="{{ t.onClick }}" style="{{ t.style }}" style-hover="background:#181c22;">
+                <span style="{{ t.dot }}"></span>
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="{{ t.nameStyle }}">{{ t.peer }}</span>
+                    <span style="margin-left:auto;font-size:10px;color:#5f6672;font-family:'IBM Plex Mono',monospace;white-space:nowrap;">{{ t.time }}</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:7px;margin-top:3px;">
+                    <span style="flex:1;min-width:0;font-size:11.5px;color:#7c828d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ t.preview }}</span>
+                    <sc-if value="{{ t.hasUnread }}" hint-placeholder-val="{{ false }}">
+                      <span style="{{ t.unreadStyle }}">{{ t.unread }}</span>
+                    </sc-if>
+                  </div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;">
+          <sc-if value="{{ chatHasThread }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;align-items:center;gap:9px;padding:12px 16px;border-bottom:1px solid #1e222a;background:#12151a;flex:0 0 auto;">
+              <span style="{{ chatPeerDot }}"></span>
+              <span style="font-size:13.5px;font-weight:600;color:#e2e5ea;font-family:'IBM Plex Mono',monospace;">{{ chatPeer }}</span>
+              <span style="font-size:11.5px;color:#6b7280;">{{ chatPresence }}</span>
+            </div>
+            <div ref="{{ msgPaneRef }}" style="flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:11px;">
+              <sc-for list="{{ chatMessages }}" as="m" hint-placeholder-count="4">
+                <div style="{{ m.rowStyle }}">
+                  <div style="{{ m.bubbleStyle }}">{{ m.text }}</div>
+                  <span style="{{ m.metaStyle }}">{{ m.time }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:12px 16px;border-top:1px solid #1e222a;background:#12151a;flex:0 0 auto;">
+              <input value="{{ chatDraft }}" onInput="{{ onChatDraft }}" onKeyDown="{{ onChatKey }}" placeholder="Skriv ett meddelande…" style="flex:1;padding:9px 12px;border-radius:8px;background:#0f1216;border:1px solid #23272f;color:#dfe2e8;font-size:12.5px;outline:none;" style-focus="border-color:var(--accent);"/>
+              <button onClick="{{ sendChat }}" style="{{ chatSendStyle }}">Skicka</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{ chatNoThread }}" hint-placeholder-val="{{ false }}">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;">
+              <div style="font-size:14px;color:#c8cdd5;font-weight:500;">Ingen konversation vald</div>
+              <div style="font-size:12.5px;color:#6b7280;">Välj en peer i listan för att läsa meddelanden.</div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
     <!-- ============ HÄLSA ============ -->
     <sc-if value="{{ isHealth }}" hint-placeholder-val="{{ false }}">
     <div style="padding:22px 26px 48px;">
@@ -889,6 +948,27 @@ class Component extends DCLogic {
       // share
       rescanning:false, rescanPct:0, rescanFile:'',
       shareEmpty:false,
+      // chat
+      chatThreads:[
+        {id:'C1', peer:'lossless_lars', online:true, unread:0, msgs:[
+          {me:false, text:'hey, saw you grabbed In Rainbows — got the 24/96 vinyl rip too if you want it', time:'14:02'},
+          {me:true, text:'ja tack! kör på', time:'14:03'},
+          {me:false, text:'queued it for you, 4 filer', time:'14:06'},
+          {me:false, text:'säg till om nåt saknas', time:'14:06'}
+        ]},
+        {id:'C2', peer:'nordic_rip', online:true, unread:0, msgs:[
+          {me:false, text:'thanks for the upload!', time:'11:41'},
+          {me:true, text:'no problem', time:'11:52'}
+        ]},
+        {id:'C3', peer:'ripper_78', online:false, unread:1, msgs:[
+          {me:true, text:'transfern dog vid 34%, kan du köa om?', time:'igår 22:14'},
+          {me:false, text:'sorry, router rebooted. try again now', time:'igår 23:02'}
+        ]},
+        {id:'C4', peer:'audiophile_se', online:false, unread:0, msgs:[
+          {me:false, text:'do you have the japanese pressing?', time:'2 dagar sedan'}
+        ]}
+      ],
+      chatActiveId:'C1', chatDraft:'',
       toast:null, tickN:0
     };
   }
@@ -922,7 +1002,8 @@ class Component extends DCLogic {
     return h;
   }
 
-  componentDidMount(){ this._t=setInterval(()=>this.tick(),1000); }
+  componentDidMount(){ this._t=setInterval(()=>this.tick(),1000); this._chatSig=this.chatSig(); this.pinChatBottom(); }
+  componentDidUpdate(){ const sig=this.chatSig(); if(sig!==this._chatSig||this._pinNext){ this._chatSig=sig; this._pinNext=false; this.pinChatBottom(); } }
   componentWillUnmount(){ clearInterval(this._t); [this._toastT,this._searchT,this._rescanT].forEach(t=>t&&clearTimeout(t)); if(this._searchI)clearInterval(this._searchI); if(this._rescanI)clearInterval(this._rescanI); }
 
   tick(){
@@ -1013,12 +1094,28 @@ class Component extends DCLogic {
   rescanAll=()=>{ if(this.state.rescanning) return; const files=['/music/library/…/album.flac','/music/flac-archive/…/track.flac','/music/incoming/…/scan.mp3']; this.setState({rescanning:true,rescanPct:0,rescanFile:files[0]}); this._rescanI=setInterval(()=>{ this.setState(s=>{ const p=s.rescanPct+3+Math.random()*5; if(p>=100){ clearInterval(this._rescanI); this._rescanT=setTimeout(()=>this.setState({rescanning:false,rescanPct:0}),400); this.showToast('Rescan klar · index uppdaterat'); return {rescanPct:100}; } return {rescanPct:p, rescanFile:files[Math.floor(p/34)]||files[2]}; }); },260); };
   toggleShareEmpty=()=>this.setState(s=>({shareEmpty:!s.shareEmpty}));
 
+  // chat
+  msgPane = React.createRef();
+  pinChatBottom(){ const el=this.msgPane.current; if(el) el.scrollTop=el.scrollHeight; }
+  chatSig(){ const t=(this.state.chatThreads||[]).find(x=>x.id===this.state.chatActiveId); return this.state.view+':'+this.state.chatActiveId+':'+(t?t.msgs.length:0); }
+  selectThread=(id)=>()=>this.setState(s=>({chatActiveId:id, chatThreads:s.chatThreads.map(t=>t.id===id?{...t,unread:0}:t)}));
+  onChatDraft=(e)=>this.setState({chatDraft:e.target.value});
+  onChatKey=(e)=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); this.sendChat(); } };
+  sendChat=()=>{
+    const txt=(this.state.chatDraft||'').trim(); if(!txt) return;
+    const now=new Date(); const hh=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+    this.setState(s=>({chatDraft:'', chatThreads:s.chatThreads.map(t=>t.id!==s.chatActiveId?t:{...t,msgs:[...t.msgs,{me:true,text:txt,time:hh}]})}), ()=>this.pinChatBottom());
+  };
+
   // setup
   testStep=(k)=>()=>{ this.setState(s=>({setup:{...s.setup,[k]:{...s.setup[k],state:'testing'}}})); setTimeout(()=>{ this.setState(s=>{ const fail=(k==='lidarr'); return {setup:{...s.setup,[k]:{...s.setup[k],state:fail?'failed':'success'}}}; }); },1200); };
 
   // charts
   buildArea(points,opts){ opts=opts||{}; const w=100,h=opts.h||110,color=opts.color||'var(--accent)',fill=opts.fill||'rgba(53,196,143,0.14)',n=points.length; if(!n)return null; const mx=opts.max||Math.max.apply(null,points.concat([1])),mn=opts.min!==undefined?opts.min:0,step=n>1?w/(n-1):0; const pts=points.map((v,i)=>[+(i*step).toFixed(2),+(h-4-((v-mn)/(mx-mn||1))*(h-10)).toFixed(2)]); const line=pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '); return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:h+'px',display:'block'}},React.createElement('path',{d:line+' L '+w+' '+h+' L 0 '+h+' Z',fill}),React.createElement('path',{d:line,fill:'none',stroke:color,strokeWidth:1.6,vectorEffect:'non-scaling-stroke',strokeLinejoin:'round',strokeLinecap:'round'})); }
   buildBars(points,opts){ opts=opts||{}; const w=100,h=opts.h||110,color=opts.color||'var(--active)',n=points.length,mx=opts.max||Math.max.apply(null,points.concat([1])),bw=w/n; return React.createElement('svg',{viewBox:'0 0 '+w+' '+h,preserveAspectRatio:'none',style:{width:'100%',height:h+'px',display:'block'}},points.map((v,i)=>{const bh=Math.max(1,(v/mx)*(h-4));return React.createElement('rect',{key:i,x:(i*bw+0.7).toFixed(2),y:(h-bh).toFixed(2),width:(bw-1.4).toFixed(2),height:bh.toFixed(2),rx:1,fill:v===0?'#262b34':color});})); }
+
+  // alpha suffixes are invalid on var() refs — mix instead so the token still drives the ring
+  ring(c,pct){ pct=pct||40; return String(c).indexOf('var(')===0 ? `color-mix(in srgb, ${c} ${pct}%, transparent)` : c+(pct>=40?'66':'33'); }
 
   statusMeta(st){ const m={ active:{c:'var(--active)',bg:'var(--active-bg)',label:'Aktiv'}, queued:{c:'var(--queued)',bg:'var(--queued-bg)',label:'Köad'}, stalled:{c:'var(--stalled)',bg:'var(--stalled-bg)',label:'Stalled'}, orphaned:{c:'var(--orphaned)',bg:'var(--orphaned-bg)',label:'Orphaned'}, done:{c:'var(--done)',bg:'var(--done-bg)',label:'Klar'}, importing:{c:'var(--accent)',bg:'var(--done-bg)',label:'Importerar'}, failed:{c:'var(--orphaned)',bg:'var(--orphaned-bg)',label:'Misslyckad'} }; return m[st]||m.queued; }
   barColor(st){ return st==='active'?'var(--active)':st==='stalled'?'var(--stalled)':st==='done'?'var(--done)':st==='importing'?'var(--accent)':st==='orphaned'?'var(--orphaned)':st==='failed'?'var(--orphaned)':'var(--queued)'; }
@@ -1052,7 +1149,8 @@ class Component extends DCLogic {
       ]},
       {label:'Soulseek', items:[
         navItem('search','Sök', ico('<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5" stroke-linecap="round"/>')),
-        navItem('share','Delning', ico('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>'))
+        navItem('share','Delning', ico('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.5" x2="15.4" y2="6.5"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/>')),
+        navItem('chat','Chatt', ico('<path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 9 9 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3 8.4 8.4 0 0 1 21 11.5Z" stroke-linecap="round" stroke-linejoin="round"/>'), s.chatThreads.reduce((a,t)=>a+t.unread,0))
       ]},
       {label:'System', items:[
         navItem('setup','Setup', ico('<path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.9 4.9 2.8 2.8"/><path d="m16.3 16.3 2.8 2.8"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="3"/>'), undefined, s.setup.lidarr.state==='failed'||s.setup.shares.state!=='success'),
@@ -1110,7 +1208,7 @@ class Component extends DCLogic {
         expanded:s.expandedId===j.id, toggle:()=>this.toggleExpand(j.id),
         retry:()=>this.retryJob(j.id), cancel:()=>this.cancelJob(j.id), remove:()=>this.removeJob(j.id), forceSearch:()=>this.forceSearch(j.id),
         hasReason:!!j.reason, reasonTitle:this.statusMeta(j.status).label,
-        reasonBox:`padding:10px 13px;border-radius:8px;margin-bottom:16px;font-size:12.5px;color:${meta.c};background:${meta.bg};border:1px solid ${meta.c}33;`,
+        reasonBox:`padding:10px 13px;border-radius:8px;margin-bottom:16px;font-size:12.5px;color:${meta.c};background:${meta.bg};border:1px solid ${this.ring(meta.c,33)};`,
         detailRows:dr, metaRight:inQueue?('plats '+j.queuePos):(j.status==='importing'?'verifierar':this.speedStr(j.speedKBs)),
         openInJobs:this.openJob(j.id),
         files:j.files.map(f=>({...f,dot:`width:6px;height:6px;border-radius:50%;flex:0 0 6px;background:${f.done?'var(--done)':'#3a3f49'};`})),
@@ -1125,9 +1223,9 @@ class Component extends DCLogic {
     const q=s.search.trim().toLowerCase();
     if (q) filtered=filtered.filter(j=>(j.artist+' '+j.album+' '+j.peer).toLowerCase().includes(q));
 
-    const chip=(key,label)=>{ const on=s.filter===key; const m=key==='all'?{c:'var(--accent)',bg:'rgba(53,196,143,0.12)'}:this.statusMeta(key); return {label,onClick:()=>this.setFilter(key), count:key==='all'?s.jobs.length:(counts[key]||0), style:`display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?m.c+'55':'#23272f'};background:${on?m.bg:'#13161b'};color:${on?m.c:'#9aa1ad'};`, countStyle:"font-family:'IBM Plex Mono',monospace;font-size:11px;opacity:.8;"}; };
+    const chip=(key,label)=>{ const on=s.filter===key; const m=key==='all'?{c:'var(--accent)',bg:'rgba(53,196,143,0.12)'}:this.statusMeta(key); return {label,onClick:()=>this.setFilter(key), count:key==='all'?s.jobs.length:(counts[key]||0), style:`display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?this.ring(m.c):'#23272f'};background:${on?m.bg:'#13161b'};color:${on?m.c:'#9aa1ad'};`, countStyle:"font-family:'IBM Plex Mono',monospace;font-size:11px;opacity:.8;"}; };
     const filterChips=[chip('all','Alla'),chip('active','Aktiva'),chip('queued','Köade'),chip('importing','Importerar'),chip('stalled','Stalled'),chip('failed','Misslyckade'),chip('orphaned','Orphaned'),chip('done','Klara')];
-    const srcChip=(key,label)=>{ const on=s.source===key; const c=key==='manual'?'var(--manual)':(key==='lidarr'?'#9aa1ad':'var(--accent)'); const bg=key==='manual'?'var(--manual-bg)':(key==='lidarr'?'rgba(138,145,157,0.12)':'rgba(53,196,143,0.12)'); return {label,onClick:()=>this.setSource(key), style:`padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?c+'55':'#23272f'};background:${on?bg:'#13161b'};color:${on?c:'#9aa1ad'};`}; };
+    const srcChip=(key,label)=>{ const on=s.source===key; const c=key==='manual'?'var(--manual)':(key==='lidarr'?'#9aa1ad':'var(--accent)'); const bg=key==='manual'?'var(--manual-bg)':(key==='lidarr'?'rgba(138,145,157,0.12)':'rgba(53,196,143,0.12)'); return {label,onClick:()=>this.setSource(key), style:`padding:6px 11px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer;border:1px solid ${on?this.ring(c):'#23272f'};background:${on?bg:'#13161b'};color:${on?c:'#9aa1ad'};`}; };
     const sourceChips=[srcChip('all','Alla'),srcChip('manual','Manuell'),srcChip('lidarr','Lidarr')];
     const filtersActive=s.filter!=='all'||s.source!=='all'||!!q;
     const fsum=[]; if(s.source!=='all')fsum.push(s.source==='manual'?'Manuell':'Lidarr'); if(s.filter!=='all')fsum.push(this.statusMeta(s.filter).label); if(q)fsum.push('"'+s.search.trim()+'"');
@@ -1211,7 +1309,7 @@ class Component extends DCLogic {
         downloadLabel:(is&&is.dlMode==='selected')?('Ladda ner '+sel+' valda'):'Ladda ner album'
       };
     });
-    const sFmtChip=(key,label)=>{ const on=s.sFmtFilter===key; return {label,onClick:()=>this.setFmtFilter(key), style:`padding:5px 10px;border-radius:7px;font-size:11.5px;font-weight:500;cursor:pointer;border:1px solid ${on?'var(--accent)55':'#23272f'};background:${on?'rgba(53,196,143,0.12)':'#13161b'};color:${on?'var(--accent)':'#9aa1ad'};`}; };
+    const sFmtChip=(key,label)=>{ const on=s.sFmtFilter===key; return {label,onClick:()=>this.setFmtFilter(key), style:`padding:5px 10px;border-radius:7px;font-size:11.5px;font-weight:500;cursor:pointer;border:1px solid ${on?this.ring('var(--accent)'):'#23272f'};background:${on?'rgba(53,196,143,0.12)':'#13161b'};color:${on?'var(--accent)':'#9aa1ad'};`}; };
     const sFormatChips=[sFmtChip('all','Alla'),sFmtChip('FLAC','FLAC'),sFmtChip('MP3 320','320'),sFmtChip('MP3 V0','V0')];
     const sExamples=['Radiohead In Rainbows','Aphex Twin','Bonobo Migration'].map(q=>({label:q,onClick:this.setExample(q)}));
 
@@ -1246,16 +1344,45 @@ class Component extends DCLogic {
     const setupDoneCount=['soulseek','lidarr','shares'].filter(k=>rState(k)==='success').length;
     const setupProgress=['soulseek','lidarr','shares'].map(k=>({style:`width:34px;height:4px;border-radius:2px;background:${rState(k)==='success'?'var(--accent)':rState(k)==='failed'?'var(--orphaned)':'#2a2f39'};`}));
 
+    // ---- chat
+    const activeThread=s.chatThreads.find(t=>t.id===s.chatActiveId)||null;
+    const chatThreads=s.chatThreads.map(t=>{
+      const on=t.id===s.chatActiveId; const last=t.msgs[t.msgs.length-1];
+      return {...t,
+        onClick:this.selectThread(t.id),
+        style:`display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-bottom:1px solid #191d24;cursor:pointer;background:${on?'#181c22':'transparent'};${on?'box-shadow:inset 2px 0 0 var(--accent);':''}`,
+        dot:`width:7px;height:7px;border-radius:50%;flex:0 0 7px;margin-top:5px;background:${t.online?'var(--done)':'#3a3f49'};`,
+        preview:(last&&last.me?'Du: ':'')+(last?last.text:''),
+        time:last?last.time:'',
+        nameStyle:`font-size:12.5px;font-weight:${t.unread>0?'600':'500'};color:${t.unread>0?'#eef0f3':'#d5d8de'};font-family:'IBM Plex Mono',monospace;`,
+        hasUnread:t.unread>0,
+        unreadStyle:"font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;min-width:17px;text-align:center;padding:1px 5px;border-radius:9px;background:var(--accent);color:#08130d;"
+      };
+    });
+    const chatMessages=activeThread?activeThread.msgs.map(m=>({
+      text:m.text, time:m.time,
+      rowStyle:`display:flex;flex-direction:column;align-items:${m.me?'flex-end':'flex-start'};gap:3px;`,
+      bubbleStyle:`max-width:74%;padding:9px 12px;border-radius:10px;font-size:12.5px;line-height:1.45;text-wrap:pretty;${m.me?'background:var(--manual-bg);border:1px solid rgba(34,201,214,0.22);color:#dfe2e8;border-bottom-right-radius:4px;':'background:#181c22;border:1px solid #23272f;color:#c8cdd5;border-bottom-left-radius:4px;'}`,
+      metaStyle:"font-size:10px;color:#5f6672;font-family:'IBM Plex Mono',monospace;padding:0 3px;"
+    })):[];
+
     // ---- components showcase
     const compSections=this.buildComponentsShowcase();
 
-    const titles={ overview:['Översikt','Vad som händer med din musik just nu'], jobs:['Jobb','Manuella och automatiska nedladdningar i samma vy'], search:['Sök','Manuell sökning på Soulseek'], share:['Delning','Delade mappar och uploads — din biljett till nätverket'], health:['Hälsa','Beroenden, metrics och trender'], setup:['Setup','Validera konfigurationen mot dina tjänster'], settings:['Inställningar','Reconcile-beteende och timeouts'], components:['Komponenter','Designsystem — isolerade enheter och varianter'] };
+    const titles={ overview:['Översikt','Vad som händer med din musik just nu'], jobs:['Jobb','Manuella och automatiska nedladdningar i samma vy'], search:['Sök','Manuell sökning på Soulseek'], share:['Delning','Delade mappar och uploads — din biljett till nätverket'], health:['Hälsa','Beroenden, metrics och trender'], setup:['Setup','Validera konfigurationen mot dina tjänster'], chat:['Chatt','Direktmeddelanden med peers'], settings:['Inställningar','Reconcile-beteende och timeouts'], components:['Komponenter','Designsystem — isolerade enheter och varianter'] };
     const t=titles[V];
     const rc=s.nextReconcileIn;
 
     return {
       rootStyle, navGroups, sidebarDeps,
-      isOverview:V==='overview', isJobs:V==='jobs', isSearch:V==='search', isShare:V==='share', isHealth:V==='health', isSetup:V==='setup', isSettings:V==='settings', isComponents:V==='components',
+      isOverview:V==='overview', isJobs:V==='jobs', isSearch:V==='search', isShare:V==='share', isHealth:V==='health', isSetup:V==='setup', isSettings:V==='settings', isComponents:V==='components', isChat:V==='chat',
+      chatThreads, chatMessages, chatDraft:s.chatDraft, onChatDraft:this.onChatDraft, onChatKey:this.onChatKey, sendChat:this.sendChat,
+      chatPeer:activeThread?activeThread.peer:'', chatOnline:activeThread?activeThread.online:false,
+      chatPeerDot:`width:8px;height:8px;border-radius:50%;background:${activeThread&&activeThread.online?'var(--done)':'#3a3f49'};`,
+      chatPresence:activeThread?(activeThread.online?'online':'offline'):'',
+      chatHasThread:!!activeThread, chatNoThread:!activeThread, msgPaneRef:this.msgPane,
+      chatShellStyle:`display:flex;background:#14171c;border:1px solid #21252e;border-radius:11px;overflow:hidden;min-height:260px;height:calc(100vh - ${86+66+((V!=='setup'&&(s.setup.lidarr.state==='failed'||s.setup.shares.state!=='success'))?78:0)}px);`,
+      chatSendStyle:`padding:9px 16px;border-radius:8px;border:1px solid rgba(53,196,143,0.35);font-size:12.5px;font-weight:600;white-space:nowrap;${(s.chatDraft||'').trim()?'background:var(--accent);color:#08130d;cursor:pointer;':'background:#191d24;border-color:#2a2f39;color:#5f6672;cursor:not-allowed;'}`,
       pageTitle:t[0], pageSubtitle:t[1],
       updatedText:s.updatedAgo===0?'uppdaterad nyss':'uppdaterad '+s.updatedAgo+'s sedan',
       nextReconcileText:rc>=60?('om '+Math.floor(rc/60)+'m '+(rc%60)+'s'):('om '+rc+'s'),
