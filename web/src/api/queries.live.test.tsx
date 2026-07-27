@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  mergeLiveFiles,
+  pickJobDetail,
   mergeLiveJobs,
   mergeThroughputSamples,
   queryKeys,
@@ -93,34 +93,33 @@ describe('mergeLiveJobs', () => {
   });
 });
 
-describe('mergeLiveFiles', () => {
-  it('overlays a live file onto its matching transfer by filename', () => {
-    const detail = makeDetail();
-    const live: ScopedLivePayload = {
-      jobs: [],
-      down: 0,
-      scopeJobId: 1,
-      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 450, bytesTotal: 1000, speed: 2000 }],
+describe('pickJobDetail', () => {
+  // The stream's detail is built by the same server-side function as REST's,
+  // so it is adopted whole rather than merged field by field (issue #258).
+  it('replaces the REST detail with the stream\'s when scoped to this job', () => {
+    const rest = makeDetail();
+    const streamed = makeDetail();
+    streamed.attempts[0].transfers[0] = {
+      filename: '01.flac',
+      state: 'IN_PROGRESS',
+      bytesDone: 450,
+      bytesTotal: 1000,
+      retries: 0,
+      lastProgressAt: '',
+      speed: 2000,
     };
-    const merged = mergeLiveFiles(detail, live, 1);
-    expect(merged?.attempts[0].transfers[0]).toMatchObject({ bytesDone: 450, speed: 2000 });
-    // The other file has no live match this frame — falls back to REST.
-    // Asserted per-property rather than via toMatchObject({ speed: undefined }):
-    // toMatchObject requires the key to be present even when the expected
-    // value is undefined, and an untouched REST transfer simply has no
-    // `speed` key at all, which is precisely the fallback we want.
-    expect(merged?.attempts[0].transfers[1].bytesDone).toBe(0);
-    expect(merged?.attempts[0].transfers[1].speed).toBeUndefined();
+    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1, detail: streamed };
+    expect(pickJobDetail(rest, live, 1)).toBe(streamed);
   });
 
-  // The window between downloading.go committing the terminal state and
-  // purging the transfer from the live backend: REST already says COMPLETED
-  // while the frame still describes it as downloading, at a speed that stays
-  // nonzero for up to speedStaleAfter. Overlaying that made the finished row
-  // flip back to downloading depending on which of the two landed last.
-  it('leaves a transfer REST reports terminal untouched by a lagging live frame', () => {
-    const detail = makeDetail();
-    detail.attempts[0].transfers[0] = {
+  // The regression the merge kept producing: a finished transfer flipping back
+  // to downloading. With a whole-object replace it cannot happen — whichever
+  // object is shown was built in one pass by one authority, so its state and
+  // its speed always agree with each other.
+  it('never shows a terminal transfer together with a speed', () => {
+    const rest = makeDetail();
+    const streamed = makeDetail();
+    streamed.attempts[0].transfers[0] = {
       filename: '01.flac',
       state: 'COMPLETED',
       bytesDone: 1000,
@@ -128,55 +127,32 @@ describe('mergeLiveFiles', () => {
       retries: 0,
       lastProgressAt: '',
     };
-    const live: ScopedLivePayload = {
-      jobs: [],
-      down: 0,
-      scopeJobId: 1,
-      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 980, bytesTotal: 1000, speed: 2000 }],
-    };
-    const merged = mergeLiveFiles(detail, live, 1);
-    const tr = merged?.attempts[0].transfers[0];
+    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1, detail: streamed };
+    const tr = pickJobDetail(rest, live, 1)?.attempts[0].transfers[0];
     expect(tr?.state).toBe('COMPLETED');
-    expect(tr?.bytesDone).toBe(1000);
     expect(tr?.speed).toBeUndefined();
   });
 
-  // STALLED is a durable retry intent, not an end state — the transfer is still
-  // live and its frame is the fresher source, so the overlay must still apply.
-  it('still overlays a STALLED transfer, which is not terminal', () => {
-    const detail = makeDetail();
-    detail.attempts[0].transfers[0] = {
-      filename: '01.flac',
-      state: 'STALLED',
-      bytesDone: 400,
-      bytesTotal: 1000,
-      retries: 1,
-      lastProgressAt: '',
-    };
-    const live: ScopedLivePayload = {
-      jobs: [],
-      down: 0,
-      scopeJobId: 1,
-      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 600, bytesTotal: 1000, speed: 1500 }],
-    };
-    const merged = mergeLiveFiles(detail, live, 1);
-    expect(merged?.attempts[0].transfers[0]).toMatchObject({ state: 'IN_PROGRESS', bytesDone: 600, speed: 1500 });
+  it('ignores a frame scoped to a different job (stale during a route change)', () => {
+    const rest = makeDetail();
+    const other = makeDetail();
+    other.id = 2;
+    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 2, detail: other };
+    expect(pickJobDetail(rest, live, 1)).toBe(rest);
   });
 
-  it('ignores a live frame scoped to a different job (stale during a route change)', () => {
-    const detail = makeDetail();
-    const live: ScopedLivePayload = {
-      jobs: [],
-      down: 0,
-      scopeJobId: 2, // viewing job 1, but this frame is still scoped to job 2
-      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 999, bytesTotal: 1000, speed: 1 }],
-    };
-    expect(mergeLiveFiles(detail, live, 1)).toBe(detail);
+  // An unscoped connection (the /jobs list, where JobExpansion renders the
+  // same transfers inline) carries no detail at all, so REST stays in charge.
+  it('falls back to REST when the frame carries no detail', () => {
+    const rest = makeDetail();
+    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1 };
+    expect(pickJobDetail(rest, live, 1)).toBe(rest);
   });
 
-  it('returns detail unchanged when there is no live data', () => {
-    const detail = makeDetail();
-    expect(mergeLiveFiles(detail, undefined, 1)).toBe(detail);
+  it('returns the REST detail unchanged when there is no live data', () => {
+    const rest = makeDetail();
+    expect(pickJobDetail(rest, undefined, 1)).toBe(rest);
+    expect(pickJobDetail(rest, null, 1)).toBe(rest);
   });
 });
 
@@ -236,7 +212,7 @@ describe('useJobs live overlay', () => {
     // Job 1 drops out of the next frame — reverts to REST values. The
     // overlay is never written back into the jobs cache, so what comes back
     // is the pristine REST object, which has no `speed` key at all (hence
-    // the per-property assertion — see the note in mergeLiveFiles' test).
+    // the per-property assertion — see the note in pickJobDetail's test).
     queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0 });
     rerender();
     expect(result.current.data?.[0].bytesDone).toBe(50);
@@ -244,8 +220,8 @@ describe('useJobs live overlay', () => {
   });
 });
 
-describe('useJobDetail live overlay', () => {
-  it('merges scoped live files into the hook output', () => {
+describe('useJobDetail live detail', () => {
+  it('serves the stream\'s scoped detail in place of the REST one', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(queryKeys.jobDetail(1), makeDetail());
@@ -253,13 +229,25 @@ describe('useJobDetail live overlay', () => {
     const { result, rerender } = renderHook(() => useJobDetail(1), { wrapper: makeWrapper(queryClient) });
     expect(result.current.data?.attempts[0].transfers[0].speed).toBeUndefined();
 
-    queryClient.setQueryData(queryKeys.live, {
-      jobs: [],
-      down: 0,
-      scopeJobId: 1,
-      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 500, bytesTotal: 1000, speed: 3000 }],
-    });
+    const streamed = makeDetail();
+    streamed.attempts[0].transfers[0] = {
+      filename: '01.flac',
+      state: 'IN_PROGRESS',
+      bytesDone: 500,
+      bytesTotal: 1000,
+      retries: 0,
+      lastProgressAt: '',
+      speed: 3000,
+    };
+    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, scopeJobId: 1, detail: streamed });
     rerender();
     expect(result.current.data?.attempts[0].transfers[0]).toMatchObject({ bytesDone: 500, speed: 3000 });
+
+    // Stream drops: the hook falls straight back to the REST object still in
+    // the cache, because the stream's detail was never written into it.
+    queryClient.setQueryData(queryKeys.live, null);
+    rerender();
+    expect(result.current.data?.attempts[0].transfers[0].bytesDone).toBe(400);
+    expect(result.current.data?.attempts[0].transfers[0].speed).toBeUndefined();
   });
 });

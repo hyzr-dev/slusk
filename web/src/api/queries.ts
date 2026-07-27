@@ -37,13 +37,20 @@ import type {
 // continuously. See the #161 design doc's poll-interval table.
 const JOBS_INTERVAL = 15000;
 // Job detail deliberately keeps the old 3s cadence rather than following
-// JOBS_INTERVAL. The stream only carries per-file data for the job its
-// connection was opened with (/api/stream?job=<id>, set on the /jobs/:id
-// route), but JobExpansion renders the same per-file transfers inline on the
-// /jobs list, where the connection is unscoped. Slowing this to 15s would
-// make an expanded row's file progress update 5x slower than before #161 —
-// a regression the stream does not compensate for on that route. The #161
-// design's poll-interval table changes `jobs`, not the detail query.
+// JOBS_INTERVAL. The stream only carries a detail for the job its connection
+// was opened with (/api/stream?job=<id>, set on the /jobs/:id route), but
+// JobExpansion renders the same per-file transfers inline on the /jobs list,
+// where the connection is unscoped and REST is the only source. Slowing this
+// to 15s would make an expanded row's file progress update 5x slower than
+// before #161 — a regression the stream does not compensate for on that
+// route. The #161 design's poll-interval table changes `jobs`, not the
+// detail query.
+//
+// On /jobs/:id the poll is not redundant either: it keeps this cache key
+// warm as the fallback the moment the stream drops, and it stays the only
+// *writer* of the key — pickJobDetail chooses between the two objects at
+// read time rather than writing the stream's into the cache, so there is
+// never more than one author of the cached value (issue #258).
 const JOB_DETAIL_INTERVAL = 3000;
 const EVENTS_INTERVAL = 3000;
 // Exported because the top bar derives its staleness threshold from it: a
@@ -130,47 +137,26 @@ export function mergeLiveJobs(jobs: Job[] | undefined, live: LiveJob[] | undefin
   });
 }
 
-// Transfer states the pipeline treats as terminal — the same three that gate
-// the purge in internal/pipeline/downloading.go. STALLED is deliberately absent:
-// it is a durable intent that the next reconcile pass retries, not an end state.
-const TERMINAL_TRANSFER_STATES = new Set(['COMPLETED', 'ERRORED', 'CANCELLED']);
-
-// Same overlay principle as mergeLiveJobs, but by filename within a job
-// detail's attempts, and scoped: a live frame only carries `files` for the
-// job id its connection was opened with (see ScopedLivePayload), so a stale
-// frame from a previously viewed job — arriving mid-reconnect after
-// navigating to a new one — must never apply here.
+// Picks the job detail to render: the stream's when it carries one for this
+// job, otherwise REST's.
 //
-// A transfer REST already reports terminal is left completely alone. The two
-// sources lead each other on different fields — live leads on bytesDone (it
-// ticks every second while the DB is checkpointed far more coarsely), but REST
-// leads on state, because downloading.go commits the terminal
-// UpdateTransferProgress *before* purging the transfer from the live backend.
-// During that window a live frame still describes the file as in progress, with
-// a speed that stays nonzero for up to speedStaleAfter. Overlaying it makes a
-// finished row flip back to downloading on whichever of the two arrives last.
-export function mergeLiveFiles(detail: JobDetail | undefined, live: ScopedLivePayload | null | undefined, id: number): JobDetail | undefined {
-  if (!detail || !live || live.scopeJobId !== id) return detail;
-  const byFilename = new Map((live.files ?? []).map((f) => [f.filename, f]));
-  return {
-    ...detail,
-    attempts: detail.attempts.map((a) => ({
-      ...a,
-      transfers: a.transfers.map((tr) => {
-        if (TERMINAL_TRANSFER_STATES.has(tr.state)) return tr;
-        const f = byFilename.get(tr.filename);
-        if (!f) return tr;
-        return {
-          ...tr,
-          state: f.state,
-          bytesDone: f.bytesDone,
-          bytesTotal: f.bytesTotal,
-          speed: f.speed,
-          queuePosition: f.queuePosition,
-        };
-      }),
-    })),
-  };
+// This is a *replacement*, not a merge, and that is the whole point of issue
+// #258. Both objects are produced by the same server-side function
+// (internal/observ's toJobDetailDTO, called by the REST handler and by the
+// stream hub alike), so neither is a partial view the other has to complete.
+// The previous version overlaid the two field by field on the client, which
+// cannot be made correct: live leads REST on bytesDone and on a transfer
+// reaching a terminal state, by up to a whole downloading_interval (15s),
+// while REST is the only source of retries, lastProgressAt and attempt state
+// — and in the instant between reconcile's commit and its purge the ordering
+// flips again. Four separate regressions in #161 came from that merge.
+//
+// The scope check stays: a frame carries `detail` only for the job its
+// connection was opened with, so a stale frame arriving mid-reconnect after
+// navigating between jobs must never be adopted by the job now on screen.
+export function pickJobDetail(detail: JobDetail | undefined, live: ScopedLivePayload | null | undefined, id: number): JobDetail | undefined {
+  if (!live || live.scopeJobId !== id || !live.detail) return detail;
+  return live.detail;
 }
 
 // Matches internal/soulseek's throughputWindow (48 one-second samples) —
@@ -242,7 +228,7 @@ export function useJobDetail(id: number) {
     refetchInterval: JOB_DETAIL_INTERVAL,
   });
   const live = useLiveData();
-  return { ...detailQuery, data: mergeLiveFiles(detailQuery.data, live, id) };
+  return { ...detailQuery, data: pickJobDetail(detailQuery.data, live, id) };
 }
 
 export function useJobEvents(id: number) {
