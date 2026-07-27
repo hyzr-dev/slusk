@@ -1,14 +1,17 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useNavigationType } from 'react-router-dom';
+import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { queryKeys } from '../api/queries';
+import { queryKeys, useSendMessage } from '../api/queries';
 import type { Conversation, PrivateMessage, ThreadPage } from '../api/types';
 import { localDayKey } from '../format';
 import { t } from '../strings';
 import Chat from './Chat';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  onlineManager.setOnline(true);
+  vi.unstubAllGlobals();
+});
 
 function makeConversation(overrides: Partial<Conversation> = {}): Conversation {
   return {
@@ -88,6 +91,7 @@ describe('Chat query states', () => {
     stubFetchIndefinitely();
     renderChat('/chat/alice', newClient());
     expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(t.chat.newConversationUsernameLabel)).toBeInTheDocument();
     expect(screen.queryByText(t.chat.empty, { exact: false })).not.toBeInTheDocument();
   });
 
@@ -96,6 +100,7 @@ describe('Chat query states', () => {
     renderChat('/chat', newClient());
     expect(await screen.findByText(t.chat.disabledNotice, { exact: false })).toBeInTheDocument();
     expect(screen.queryByText(t.chat.railHeading)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(t.chat.newConversationUsernameLabel)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(t.chat.composerLabel)).not.toBeInTheDocument();
   });
 
@@ -105,7 +110,16 @@ describe('Chat query states', () => {
     stubFetchIndefinitely();
     renderChat('/chat', client);
     expect(await screen.findByText(t.chat.empty, { exact: false })).toBeInTheDocument();
+    expect(screen.getByLabelText(t.chat.newConversationUsernameLabel)).toBeInTheDocument();
     expect(screen.queryByLabelText(t.chat.composerLabel)).not.toBeInTheDocument();
+  });
+
+  it('keeps the starter available after a recoverable conversations error', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(errJson(500, { error: 'temporary' }))));
+    renderChat('/chat', newClient());
+
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.getByLabelText(t.chat.newConversationUsernameLabel)).toBeInTheDocument();
   });
 });
 
@@ -116,6 +130,10 @@ describe('Chat query states', () => {
 // pull in a Request/AbortSignal implementation jsdom does not support).
 function NavigationTypeProbe() {
   return <div data-testid="nav-type">{useNavigationType()}</div>;
+}
+
+function PathnameProbe() {
+  return <div data-testid="pathname">{useLocation().pathname}</div>;
 }
 
 describe('Chat redirect', () => {
@@ -150,6 +168,295 @@ describe('Chat redirect', () => {
 
     await screen.findByRole('heading', { level: 2, name: 'alice' });
     await waitFor(() => expect(screen.getByTestId('nav-type')).toHaveTextContent('REPLACE'));
+  });
+});
+
+describe('Chat new conversation', () => {
+  function renderWithPath(path: string, queryClient: QueryClient) {
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route
+              path="chat/:username?"
+              element={
+                <>
+                  <Chat />
+                  <PathnameProbe />
+                  <NavigationTypeProbe />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  function usernameInput() {
+    return screen.getByLabelText(t.chat.newConversationUsernameLabel);
+  }
+
+  function messageInput() {
+    return screen.getByLabelText(t.chat.newConversationMessageLabel);
+  }
+
+  function startButton() {
+    return screen.getByRole('button', { name: t.chat.newConversationSubmit });
+  }
+
+  function starterForm() {
+    return usernameInput().closest('form')!;
+  }
+
+  function setUp(conversations: Conversation[] = []) {
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, conversations);
+    stubFetchIndefinitely();
+    renderWithPath('/chat', client);
+    return client;
+  }
+
+  it('renders above populated peer rows and remains visible for an empty list', async () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username: 'alice' })]);
+    seedThread(client, 'alice', [{ username: 'alice', messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    const view = renderWithPath('/chat/alice', client);
+
+    const form = starterForm();
+    const peer = await screen.findByRole('link', { name: t.chat.threadLabel('alice', 0) });
+    expect(form.compareDocumentPosition(peer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    view.unmount();
+
+    const emptyClient = newClient();
+    emptyClient.setQueryData(queryKeys.conversations, []);
+    renderWithPath('/chat', emptyClient);
+    expect(screen.getByLabelText(t.chat.newConversationUsernameLabel)).toBeInTheDocument();
+  });
+
+  it('does not navigate or render an empty thread when starter fields are only edited', () => {
+    setUp();
+
+    fireEvent.change(usernameInput(), { target: { value: 'new peer' } });
+    fireEvent.change(messageInput(), { target: { value: 'hello' } });
+
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/chat');
+    expect(screen.queryByRole('log')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(t.chat.composerLabel)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 2, name: 'new peer' })).not.toBeInTheDocument();
+  });
+
+  it('requires nonblank fields and enforces the UTF-8 message byte limit', () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) => new Promise(() => {}));
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, []);
+    vi.stubGlobal('fetch', fetchMock);
+    renderWithPath('/chat', client);
+
+    fireEvent.change(usernameInput(), { target: { value: '   ' } });
+    fireEvent.change(messageInput(), { target: { value: 'hello' } });
+    expect(startButton()).toBeDisabled();
+
+    fireEvent.change(usernameInput(), { target: { value: 'alice' } });
+    fireEvent.change(messageInput(), { target: { value: '   ' } });
+    expect(startButton()).toBeDisabled();
+
+    fireEvent.change(messageInput(), { target: { value: 'a'.repeat(8193) } });
+    expect(startButton()).toBeDisabled();
+    expect(within(starterForm()).getByText(t.chat.tooLong)).toBeInTheDocument();
+
+    fireEvent.change(messageInput(), { target: { value: 'é'.repeat(4097) } });
+    expect(startButton()).toBeDisabled();
+    expect(within(starterForm()).getByText(t.chat.tooLong)).toBeInTheDocument();
+
+    expect(
+      fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST'),
+    ).toBe(false);
+  });
+
+  it('disables the starter while the first send pauses before POST', async () => {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve(okJson(makeMessage({ id: 99, direction: 'OUT', body: 'hello' }), 201));
+      }
+      if (url === '/api/messages') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson({ username: 'alice', messages: [], hasMore: false }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, []);
+    renderWithPath('/chat', client);
+
+    onlineManager.setOnline(false);
+    fireEvent.change(usernameInput(), { target: { value: 'alice' } });
+    fireEvent.change(messageInput(), { target: { value: 'hello' } });
+    fireEvent.click(startButton());
+
+    await waitFor(() => expect(startButton()).toBeDisabled());
+    expect(usernameInput()).toBeDisabled();
+    expect(messageInput()).toBeDisabled();
+    expect(usernameInput()).toHaveValue('alice');
+    expect(messageInput()).toHaveValue('hello');
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/chat');
+
+    onlineManager.setOnline(true);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/messages/alice',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    );
+    const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(postCall![1]!.body as string)).toEqual({ body: 'hello' });
+    await waitFor(() => expect(screen.getByTestId('pathname')).toHaveTextContent('/chat/alice'));
+  });
+
+  it('keeps paused mutation variables immutable across a rerender', async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return Promise.resolve(okJson(makeMessage({ id: 99, direction: 'OUT', body: 'hello' }), 201));
+      }
+      return Promise.resolve(okJson([]));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = newClient();
+    const alice = { username: 'alice', body: 'hello' };
+    const bob = { username: 'bob', body: 'changed' };
+    const { result, rerender } = renderHook(
+      ({ variables }) => ({ send: useSendMessage(), variables }),
+      {
+        initialProps: { variables: alice },
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+
+    onlineManager.setOnline(false);
+    act(() => result.current.send.mutate(result.current.variables));
+    await waitFor(() => expect(result.current.send.isPending).toBe(true));
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+
+    rerender({ variables: bob });
+    expect(result.current.variables).toBe(bob);
+    onlineManager.setOnline(true);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/messages/alice',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    );
+    const postCall = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(postCall![1]!.body as string)).toEqual({ body: 'hello' });
+  });
+
+  it(
+    'trims and encodes the target and body, then navigates and refetches conversations after success',
+    async () => {
+      const username = 'foo/bar baz';
+      const encoded = encodeURIComponent(username);
+      let resolvePost!: (response: Response) => void;
+      const postResponse = new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+      let sent = false;
+      let conversationGets = 0;
+      const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+        if (init?.method === 'POST') return postResponse;
+        if (url === '/api/messages') {
+          conversationGets += 1;
+          return Promise.resolve(okJson(sent ? [makeConversation({ username })] : []));
+        }
+        if (url === `/api/messages/${encoded}?before=0`) {
+          return Promise.resolve(okJson({ username, messages: [], hasMore: false }));
+        }
+        return Promise.resolve(okJson([]));
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const client = newClient();
+      client.setQueryData(queryKeys.conversations, []);
+      renderWithPath('/chat', client);
+
+      fireEvent.change(usernameInput(), { target: { value: `  ${username}  ` } });
+      fireEvent.change(messageInput(), { target: { value: '  hello there  ' } });
+      fireEvent.click(startButton());
+
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          `/api/messages/${encoded}`,
+          expect.objectContaining({ method: 'POST' }),
+        ),
+      );
+      const postCall = fetchMock.mock.calls.find(
+        ([, init]) => (init as RequestInit)?.method === 'POST',
+      );
+      expect(JSON.parse((postCall![1] as RequestInit).body as string)).toEqual({
+        body: 'hello there',
+      });
+      expect(screen.getByTestId('pathname')).toHaveTextContent('/chat');
+      const getsBeforeSuccess = conversationGets;
+
+      sent = true;
+      resolvePost(
+        okJson(makeMessage({ id: 99, username, direction: 'OUT', body: 'hello there' }), 201),
+      );
+
+      await waitFor(() =>
+        expect(screen.getByTestId('pathname')).toHaveTextContent(`/chat/${encoded}`),
+      );
+      expect(screen.getByTestId('nav-type')).toHaveTextContent('PUSH');
+      await waitFor(() => expect(conversationGets).toBeGreaterThan(getsBeforeSuccess));
+      expect(
+        await screen.findByRole('link', { name: t.chat.threadLabel(username, 0) }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    [503, t.chat.sendDisabled, true],
+    [502, t.chat.sendFailed, false],
+    [422, t.chat.sendRejected, false],
+  ])('preserves the starter and route after a %i response', async (status, copy, latched) => {
+    const username = 'new peer';
+    let resolvePost!: (response: Response) => void;
+    const postResponse = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return postResponse;
+      if (url === '/api/messages') return Promise.resolve(okJson([]));
+      return Promise.resolve(okJson({ username, messages: [], hasMore: false }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, []);
+    renderWithPath('/chat', client);
+
+    fireEvent.change(usernameInput(), { target: { value: username } });
+    fireEvent.change(messageInput(), { target: { value: 'first message' } });
+    fireEvent.click(startButton());
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(true),
+    );
+    expect(usernameInput()).toBeDisabled();
+    expect(messageInput()).toBeDisabled();
+    expect(startButton()).toBeDisabled();
+
+    resolvePost(errJson(status, { error: 'failed' }));
+
+    expect(await within(starterForm()).findByText(copy)).toBeInTheDocument();
+    expect(usernameInput()).toHaveValue(username);
+    expect(messageInput()).toHaveValue('first message');
+    expect(usernameInput()).toHaveProperty('disabled', latched);
+    expect(messageInput()).toHaveProperty('disabled', latched);
+    expect(startButton()).toHaveProperty('disabled', latched);
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/chat');
+    expect(screen.queryByRole('link', { name: username })).not.toBeInTheDocument();
   });
 });
 
