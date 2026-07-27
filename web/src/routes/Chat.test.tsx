@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useNavigationType } from 'react-router-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { Conversation, PrivateMessage, ThreadPage } from '../api/types';
+import sectionHeaderStyles from '../components/tui/SectionHeader.module.css';
 import { localDayKey } from '../format';
 import { t } from '../strings';
 import Chat from './Chat';
@@ -219,6 +220,24 @@ describe('Chat presence header', () => {
     renderChat('/chat/alice', client);
 
     expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
+  it('opts only the selected username heading into truncation while preserving its full text', async () => {
+    const username = 'peer-with-a-username-much-wider-than-the-chat-pane';
+    const client = newClient();
+    client.setQueryData(queryKeys.conversations, [makeConversation({ username, online: true })]);
+    seedThread(client, username, [{ username, messages: [], hasMore: false }]);
+    stubFetchIndefinitely();
+    renderChat(`/chat/${username}`, client);
+
+    const heading = await screen.findByRole('heading', { level: 2, name: username });
+    expect(heading).toHaveClass(sectionHeaderStyles.truncateLabel);
+    expect(heading).toHaveTextContent(username);
+    expect(heading).not.toHaveAttribute('title');
+    expect(screen.getByText(t.chat.online)).toBeInTheDocument();
+
+    const railHeading = screen.getByRole('heading', { level: 2, name: t.chat.railHeading });
+    expect(railHeading).not.toHaveClass(sectionHeaderStyles.truncateLabel);
   });
 
   it('shows no chip when the selected conversation has unknown presence', async () => {

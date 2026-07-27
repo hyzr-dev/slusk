@@ -22,19 +22,27 @@ import styles from './SectionHeader.module.css';
  * after (a terminal UI) has no notion of headings at all. `.label` resets
  * the browser's default heading font/margin back to `.header`'s own
  * styling, so this is visually identical to a plain <span>.
+ *
+ * `truncateLabel` is opt-in because prominent subjects such as album titles
+ * should keep their natural wrapping. It only changes visual overflow; the
+ * complete label remains the heading's text and accessible name.
  */
 export default function SectionHeader({
   label,
   meta,
   prominent = false,
+  truncateLabel = false,
 }: {
   label: string;
   meta?: ReactNode;
   prominent?: boolean;
+  truncateLabel?: boolean;
 }) {
   return (
     <div className={prominent ? `${styles.header} ${styles.prominent}` : styles.header}>
-      <h2 className={styles.label} title={label}>{label}</h2>
+      <h2 className={truncateLabel ? `${styles.label} ${styles.truncateLabel}` : styles.label}>
+        {label}
+      </h2>
       <span className={styles.spacer} />
       {meta ? <span className={styles.meta}>{meta}</span> : null}
     </div>

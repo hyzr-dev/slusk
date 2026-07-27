@@ -229,6 +229,7 @@ export default function Chat() {
         <div key={username} className={styles.pane}>
           <SectionHeader
             label={username}
+            truncateLabel
             meta={
               selectedConversation?.online !== undefined ? (
                 <span
