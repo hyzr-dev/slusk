@@ -15,15 +15,15 @@ import (
 type transferDetailDTO struct {
 	Filename string `json:"filename"`
 	State    string `json:"state"`
-	// BytesDone is overlaid with the live in-memory value when a live match
-	// exists AND that match is still non-terminal (issue #161) — mirroring
-	// jobDTO.BytesDone's album-level overlay in observ.go, and for the same
-	// reason: the persisted value is only as fresh as the last Downloading
-	// reconcile. The overlay is max(persisted, live) so a lingering terminal
-	// live entry, or a re-queued transfer whose live BytesDone restarts at a
-	// smaller value than what's already persisted, can never regress the
-	// number backwards — and it is clamped to BytesTotal (clampBytesDone) so
-	// an overlapping live sample can never push the file past 100%.
+	// BytesDone is overlaid with the live in-memory value whenever a live
+	// match exists, regardless of that match's state (issue #161) — mirroring
+	// jobDTO.BytesDone's album-level per-file overlay in observ.go (see
+	// jobBytesDone's doc comment for why terminal states must be included: a
+	// just-completed transfer still carries the most accurate byte count
+	// available, more accurate than the persisted row until the next
+	// Downloading reconcile writes it). It is clamped to BytesTotal
+	// (clampBytesDone) so a peer momentarily reporting more bytes than the
+	// file's own known size can't push the file past 100%.
 	// BytesTotal is never overlaid — see jobDTO.BytesTotal's comment; the same
 	// rationale applies per-file.
 	BytesDone      int64  `json:"bytesDone"`
@@ -98,11 +98,9 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 			if lt, ok := live.match(tr); ok {
 				t.QueuePosition = lt.QueuePosition
 				t.Speed = lt.Speed
-				// Only overlay BytesDone while the live match is itself
-				// non-terminal — see transferDetailDTO.BytesDone's comment.
-				if lt.State == core.TransferQueued || lt.State == core.TransferInProgress {
-					t.BytesDone = clampBytesDone(max(tr.BytesDone, lt.BytesDone), tr.BytesTotal)
-				}
+				// A matched live transfer supplies bytes regardless of its
+				// state — see transferDetailDTO.BytesDone's comment.
+				t.BytesDone = clampBytesDone(lt.BytesDone, tr.BytesTotal)
 			}
 			a.Transfers[j] = t
 		}
@@ -122,6 +120,12 @@ type JobDetailFunc func(ctx context.Context, jobID int64) (core.JobDetail, bool,
 // func, or one wired to the slskd backend (which leaves the fields zero), just
 // yields no enrichment.
 type LiveTransfersFunc func(ctx context.Context) ([]core.RemoteTransfer, error)
+
+// TransferBytesFunc returns per-candidate, per-filename persisted bytes-done
+// for exactly the given candidate ids (typically backed by
+// Store.TransferBytesByCandidate). See ServerDeps.TransferBytes and
+// jobBytesDone (albumlive.go, issue #161).
+type TransferBytesFunc func(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error)
 
 // liveTransferIndex correlates persisted store transfers to their live
 // ListDownloads counterpart the same way the reconcile loop does

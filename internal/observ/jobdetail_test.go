@@ -141,10 +141,9 @@ func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 	}
 }
 
-// TestToJobDetailDTOOverlaysBytesDoneForNonTerminalLiveMatch is issue #161,
-// part 1c: a matched, non-terminal live transfer's BytesDone must win over
-// the persisted value.
-func TestToJobDetailDTOOverlaysBytesDoneForNonTerminalLiveMatch(t *testing.T) {
+// TestToJobDetailDTOOverlaysBytesDoneForLiveMatch is issue #161, part 1c: a
+// matched live transfer's BytesDone must win over the persisted value.
+func TestToJobDetailDTOOverlaysBytesDoneForLiveMatch(t *testing.T) {
 	detail := core.JobDetail{
 		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
 		Attempts: []core.AttemptDetail{{
@@ -189,31 +188,33 @@ func TestToJobDetailDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
 	}
 }
 
-// TestToJobDetailDTOTerminalLiveMatchDoesNotOverwritePersisted covers a
-// lingering terminal live entry (errored/cancelled/completed, not yet
-// reconciled away from ListDownloads): even though it matches, its BytesDone
-// must NOT overwrite the persisted value — see transferDetailDTO.BytesDone's
-// comment. Without this guard a completed transfer's live entry could
-// briefly report 0 or a stale figure and regress the displayed bytes.
-func TestToJobDetailDTOTerminalLiveMatchDoesNotOverwritePersisted(t *testing.T) {
+// TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted is issue #161's
+// fix: a lingering terminal live entry (errored/cancelled/completed, not yet
+// reconciled away from ListDownloads) still supplies bytes — see
+// transferDetailDTO.BytesDone's comment on why a state-agnostic match is
+// what's accurate here (the live entry's byte count is only ever purged in
+// the same reconcile pass that also persists it, per
+// internal/pipeline/downloading.go's reconcile).
+func TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted(t *testing.T) {
 	detail := core.JobDetail{
 		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
 		Attempts: []core.AttemptDetail{{
 			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
 			Transfers: []core.Transfer{
-				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, BytesTotal: 1000},
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 800, BytesTotal: 1000},
 			},
 		}},
 	}
 	live := newLiveTransferIndex([]core.RemoteTransfer{
-		// Lingering terminal entry, not yet reconciled away; a stale/zero BytesDone.
-		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 0},
+		// Lingering terminal entry, not yet reconciled away — its BytesDone is
+		// the file's final, accurate size.
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
 	})
 
 	dto := toJobDetailDTO(detail, live)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 1000 {
-		t.Errorf("BytesDone = %d, want 1000 (persisted, terminal live match must not overwrite)", tr.BytesDone)
+		t.Errorf("BytesDone = %d, want 1000 (terminal live match still supplies bytes)", tr.BytesDone)
 	}
 }
 

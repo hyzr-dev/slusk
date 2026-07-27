@@ -43,7 +43,7 @@ const jobViewSelect = `
 		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
-		agg.bytes_done, agg.bytes_total, agg.bytes_remaining, agg.bytes_done_nonterminal
+		agg.bytes_done, agg.bytes_total, agg.bytes_remaining
 	FROM album_jobs j
 	LEFT JOIN candidates a ON a.id = (
 		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
@@ -60,22 +60,14 @@ const jobViewSelect = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
-			-- These three literals are hardcoded, unlike every other transfer-state bind
-			-- in this package (e.g. string(core.TransferPending)). The reason is that
+			-- This literal is hardcoded, unlike every other transfer-state bind in
+			-- this package (e.g. string(core.TransferPending)). The reason is that
 			-- jobViewSelect is a const prefix its callers concatenate their own WHERE
-			-- clause onto, so the placeholder numbering space is shared: binding these
+			-- clause onto, so the placeholder numbering space is shared: binding it
 			-- here would claim $1-$3 and shift every caller's own params (see the
 			-- StateCancelled and jobID binds below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
-				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining,
-			-- bytes_done_nonterminal is bytes_done under the same non-terminal
-			-- filter as bytes_remaining above, not bytes_done itself: it lets
-			-- observ.toJobDTO know exactly how much of AlbumBytesDone came from
-			-- transfers that are still in flight (and so may be superseded by a
-			-- live in-memory value) versus already-terminal ones (whose
-			-- persisted figure is final) — see core.JobView.AlbumBytesDoneNonTerminal.
-			COALESCE(SUM(bytes_done)
-				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_done_nonterminal
+				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
 		FROM transfers
 		WHERE candidate_id = a.id
 	) agg ON true`
@@ -100,7 +92,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
-		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining, &v.AlbumBytesDoneNonTerminal,
+		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
 	)
 	if err != nil {
 		return core.JobView{}, err
@@ -237,6 +229,46 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 		details[i], details[j] = details[j], details[i]
 	}
 	return core.JobDetail{Job: job, Attempts: details}, true, nil
+}
+
+// TransferBytesByCandidate returns each candidate's per-file persisted
+// bytes-done, keyed by candidate id then filename, for exactly the given
+// candidate ids — never the whole transfers table. It exists for
+// internal/observ's live-bytes overlay (issue #161's backwards-jump/freeze
+// fix): a job whose current candidate has at least one file with a live
+// in-memory match still needs the OTHER, unmatched files' persisted bytes to
+// build a correct album total, and jobViewSelect's own per-candidate
+// aggregate doesn't break bytes out per file. Callers should only pass
+// candidate ids that actually have a live match (see the observ package's
+// anyLiveMatch) — a candidate with none needs no query at all, since its
+// per-file sum trivially equals the AlbumBytesDone jobViewSelect already
+// computed. An empty or nil ids yields an empty, non-nil map.
+func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
+	out := make(map[int64]map[string]int64, len(candidateIDs))
+	if len(candidateIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT candidate_id, filename, bytes_done FROM transfers WHERE candidate_id = ANY($1)`,
+		candidateIDs)
+	if err != nil {
+		return nil, fmt.Errorf("transfer bytes by candidate: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var candidateID, bytesDone int64
+		var filename string
+		if err := rows.Scan(&candidateID, &filename, &bytesDone); err != nil {
+			return nil, fmt.Errorf("transfer bytes by candidate: scan: %w", err)
+		}
+		byFilename, ok := out[candidateID]
+		if !ok {
+			byFilename = make(map[string]int64)
+			out[candidateID] = byFilename
+		}
+		byFilename[filename] = bytesDone
+	}
+	return out, rows.Err()
 }
 
 // Peers returns every known Soulseek peer's global reliability plus their

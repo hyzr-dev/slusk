@@ -19,14 +19,15 @@ import (
 
 func TestBuildStreamJobsOnlyIncludesLiveMatchedAndSorts(t *testing.T) {
 	corr := []jobCorrelation{
-		{id: 5, username: "bob", files: []core.CandidateFile{{Filename: "b.flac", Size: 500}}, albumBytesTotal: 500, albumBytesRemaining: 500},
-		{id: 3, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}, albumBytesDone: 100, albumBytesDoneNonTerminal: 100, albumBytesTotal: 1000, albumBytesRemaining: 900},
+		{id: 5, candidateID: 105, username: "bob", files: []core.CandidateFile{{Filename: "b.flac", Size: 500}}, albumBytesTotal: 500, albumBytesRemaining: 500},
+		{id: 3, candidateID: 103, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}, albumBytesDone: 100, albumBytesTotal: 1000, albumBytesRemaining: 900},
 	}
 	live := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50, SpeedAverage: 40, BytesDone: 300, QueuePosition: 2},
 	})
 
-	got := buildStreamJobs(corr, live)
+	persisted := map[int64]map[string]int64{103: {"a.flac": 100}}
+	got := buildStreamJobs(corr, live, persisted)
 	// job 5 has no live match at all (bob never appears in `live`) and must
 	// be omitted entirely — see buildStreamJobs' absence contract.
 	if len(got) != 1 {
@@ -57,12 +58,12 @@ func TestBuildStreamJobsDropsJobThatLosesItsLiveTransfer(t *testing.T) {
 	withLive := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50, BytesDone: 300},
 	})
-	if got := buildStreamJobs(corr, withLive); len(got) != 1 {
+	if got := buildStreamJobs(corr, withLive, nil); len(got) != 1 {
 		t.Fatalf("expected job present while its transfer is live, got %d: %+v", len(got), got)
 	}
 
 	withoutLive := newLiveTransferIndex(nil)
-	if got := buildStreamJobs(corr, withoutLive); len(got) != 0 {
+	if got := buildStreamJobs(corr, withoutLive, nil); len(got) != 0 {
 		t.Fatalf("expected job absent once its transfer disappears from live, got %d: %+v", len(got), got)
 	}
 }
@@ -164,17 +165,17 @@ func TestBuildLivePayloadFileScopingByJobID(t *testing.T) {
 	corr := []jobCorrelation{{id: 7, username: "alice", files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}, albumBytesTotal: 1000, albumBytesRemaining: 1000}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 500}}
 
-	unscoped := buildLivePayload(corr, live, 0)
+	unscoped := buildLivePayload(corr, live, 0, nil)
 	if unscoped.Files != nil {
 		t.Errorf("expected nil Files without ?job=, got %+v", unscoped.Files)
 	}
 
-	scoped := buildLivePayload(corr, live, 7)
+	scoped := buildLivePayload(corr, live, 7, nil)
 	if len(scoped.Files) != 1 || scoped.Files[0].Filename != "01.flac" {
 		t.Errorf("expected 1 file for ?job=7, got %+v", scoped.Files)
 	}
 
-	missing := buildLivePayload(corr, live, 999)
+	missing := buildLivePayload(corr, live, 999, nil)
 	if missing.Files != nil {
 		t.Errorf("expected nil Files for unknown job id, got %+v", missing.Files)
 	}
@@ -232,7 +233,7 @@ func TestSendLatestDeliversDirectlyToEmptyChannel(t *testing.T) {
 // broadcaster lifecycle directly: started on the first subscriber, still
 // running with two, and stopped only once the last one leaves.
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
 
 	id1, _, _ := hub.subscribe(context.Background(), 0)
 	if !hubRunning(hub) {
@@ -285,7 +286,7 @@ func hubSubCount(h *streamHub) int {
 // registered before this stale tick got the lock) must not send anything or
 // touch subscriber state.
 func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
 	_, ch, initial := hub.subscribe(context.Background(), 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,7 +328,7 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, time.Hour, time.Hour)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick.
 	_, ch, initial := hub.subscribe(context.Background(), 0)
@@ -678,7 +679,7 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
 	corr := []jobCorrelation{{id: 1, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 20}}, albumBytesTotal: 20, albumBytesRemaining: 20}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
-	payload := buildLivePayload(corr, live, 1)
+	payload := buildLivePayload(corr, live, 1, nil)
 	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
 	body, err := json.Marshal(payload)

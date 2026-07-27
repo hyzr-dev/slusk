@@ -76,7 +76,7 @@ const streamMaxSubscribers = 200
 
 // streamJobDTO is one job's live aggregate, served in livePayload.Jobs.
 // Fields mirror jobDTO's own live fields (observ.go) exactly, computed via
-// the same aggregateLiveAlbum/overlayBytesDone so the REST snapshot and the
+// the same aggregateLiveAlbum/jobBytesDone so the REST snapshot and the
 // stream can never disagree about a given tick.
 type streamJobDTO struct {
 	ID            int64  `json:"id"`
@@ -125,13 +125,13 @@ type livePayload struct {
 // never serves) for the life of the process. Treat every field read-only —
 // files aliases the store's own candidate.Files slice.
 type jobCorrelation struct {
-	id                        int64
-	username                  string
-	files                     []core.CandidateFile
-	albumBytesDone            int64
-	albumBytesDoneNonTerminal int64
-	albumBytesTotal           int64
-	albumBytesRemaining       int64
+	id                  int64
+	candidateID         int64
+	username            string
+	files               []core.CandidateFile
+	albumBytesDone      int64
+	albumBytesTotal     int64
+	albumBytesRemaining int64
 }
 
 // projectJobCorrelation converts the store's full JobView down to
@@ -145,13 +145,13 @@ func projectJobCorrelation(views []core.JobView) []jobCorrelation {
 			continue
 		}
 		out = append(out, jobCorrelation{
-			id:                        v.Job.ID,
-			username:                  v.Attempt.Username,
-			files:                     v.Attempt.Files,
-			albumBytesDone:            v.AlbumBytesDone,
-			albumBytesDoneNonTerminal: v.AlbumBytesDoneNonTerminal,
-			albumBytesTotal:           v.AlbumBytesTotal,
-			albumBytesRemaining:       v.AlbumBytesRemaining,
+			id:                  v.Job.ID,
+			candidateID:         v.Attempt.ID,
+			username:            v.Attempt.Username,
+			files:               v.Attempt.Files,
+			albumBytesDone:      v.AlbumBytesDone,
+			albumBytesTotal:     v.AlbumBytesTotal,
+			albumBytesRemaining: v.AlbumBytesRemaining,
 		})
 	}
 	return out
@@ -178,18 +178,20 @@ func findJobCorrelation(jobs []jobCorrelation, id int64) (jobCorrelation, bool) 
 // (the unfiltered set was unbounded by the number of jobs ever processed,
 // not the number of jobs with something to report). Sorted by job ID so
 // tick-to-tick comparison in changedSinceLast is independent of the
-// correlation cache's own ordering.
-func buildStreamJobs(corr []jobCorrelation, idx liveTransferIndex) []streamJobDTO {
+// correlation cache's own ordering. persisted supplies each live-matched
+// candidate's exact per-file persisted bytes for jobBytesDone (issue #161);
+// see streamHub.bytesByCandidate for how/when it's refreshed.
+func buildStreamJobs(corr []jobCorrelation, idx liveTransferIndex, persisted map[int64]map[string]int64) []streamJobDTO {
 	out := make([]streamJobDTO, 0, len(corr))
 	for _, c := range corr {
 		candidate := &core.Candidate{Username: c.username, Files: c.files}
-		speed, speedAvg, queuePosition, hasQueuePosition, liveBytesDone, matched := aggregateLiveAlbum(candidate, idx)
+		speed, speedAvg, queuePosition, hasQueuePosition, matched := aggregateLiveAlbum(candidate, idx)
 		if !matched {
 			continue
 		}
 		dto := streamJobDTO{
 			ID:         c.id,
-			BytesDone:  overlayBytesDone(c.albumBytesDone, c.albumBytesDoneNonTerminal, liveBytesDone, c.albumBytesTotal),
+			BytesDone:  jobBytesDone(c.username, c.files, c.candidateID, c.albumBytesDone, idx, persisted),
 			BytesTotal: c.albumBytesTotal,
 			Speed:      speed,
 			ETASeconds: etaSeconds(c.albumBytesRemaining, speedAvg),
@@ -252,12 +254,13 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 // Throughput, which is merged in by the caller — see newThroughputSince)
 // from already-fetched inputs: cachedJobs (the hub's correlation cache),
 // live (this tick's deps.LiveTransfers), and jobID (0 for the unscoped
-// dashboard stream, >0 for a ?job= scoped subscriber). Pure and I/O-free by
-// construction, so it is table-testable without a server.
-func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64) livePayload {
+// dashboard stream, >0 for a ?job= scoped subscriber). persisted is threaded
+// through to buildStreamJobs (issue #161). Pure and I/O-free by construction,
+// so it is table-testable without a server.
+func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64, persisted map[int64]map[string]int64) livePayload {
 	idx := newLiveTransferIndex(live)
 	payload := livePayload{
-		Jobs: buildStreamJobs(cachedJobs, idx),
+		Jobs: buildStreamJobs(cachedJobs, idx, persisted),
 		Down: sumDownSpeed(live),
 	}
 	if jobID > 0 {
@@ -328,11 +331,13 @@ type streamHub struct {
 	jobs                JobsFunc
 	liveTransfers       LiveTransfersFunc
 	throughput          ThroughputFunc
+	transferBytes       TransferBytesFunc
 	tickInterval        time.Duration
 	correlationInterval time.Duration
 
-	corrMu      sync.RWMutex
-	correlation []jobCorrelation
+	corrMu           sync.RWMutex
+	correlation      []jobCorrelation
+	bytesByCandidate map[int64]map[string]int64
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -340,11 +345,12 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, tickInterval, correlationInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, tickInterval, correlationInterval time.Duration) *streamHub {
 	return &streamHub{
 		jobs:                jobs,
 		liveTransfers:       liveTransfers,
 		throughput:          throughput,
+		transferBytes:       transferBytes,
 		tickInterval:        tickInterval,
 		correlationInterval: correlationInterval,
 		subs:                make(map[uint64]*streamSubscriber),
@@ -383,6 +389,17 @@ func (h *streamHub) fetchThroughput(ctx context.Context) []core.ThroughputSample
 // error leaves the existing cache in place rather than clearing it: a
 // transient Postgres hiccup should degrade to slightly-stale correlation,
 // not to no live data at all.
+//
+// It also refreshes h.bytesByCandidate (issue #161's per-file byte overlay,
+// see jobBytesDone): this is the ONLY place GET /api/stream fetches
+// per-candidate persisted bytes, again only on correlationInterval — the 1Hz
+// tick reads the cached map (bytesSnapshot) and never queries. The set of
+// candidate ids fetched is restricted to those with a live match right now
+// (anyLiveMatch), the same bound /api/jobs applies, so this stays sized by
+// concurrent downloads rather than the full job list. A brand new live match
+// that appears between two correlation refreshes simply falls back to
+// AlbumBytesDone (jobBytesDone's nil-map behavior) until the next refresh
+// picks it up — bounded staleness, same as the correlation cache itself.
 func (h *streamHub) refreshCorrelation(ctx context.Context) {
 	if h.jobs == nil {
 		return
@@ -392,8 +409,26 @@ func (h *streamHub) refreshCorrelation(ctx context.Context) {
 		return
 	}
 	corr := projectJobCorrelation(views)
+
+	var bytesByCandidate map[int64]map[string]int64
+	if h.transferBytes != nil {
+		idx := newLiveTransferIndex(h.fetchLive(ctx))
+		var matchedIDs []int64
+		for _, c := range corr {
+			if anyLiveMatch(c.username, c.files, idx) {
+				matchedIDs = append(matchedIDs, c.candidateID)
+			}
+		}
+		if len(matchedIDs) > 0 {
+			if m, err := h.transferBytes(ctx, matchedIDs); err == nil {
+				bytesByCandidate = m
+			}
+		}
+	}
+
 	h.corrMu.Lock()
 	h.correlation = corr
+	h.bytesByCandidate = bytesByCandidate
 	h.corrMu.Unlock()
 }
 
@@ -401,6 +436,12 @@ func (h *streamHub) correlationSnapshot() []jobCorrelation {
 	h.corrMu.RLock()
 	defer h.corrMu.RUnlock()
 	return h.correlation
+}
+
+func (h *streamHub) bytesSnapshot() map[int64]map[string]int64 {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.bytesByCandidate
 }
 
 // atCapacity reports whether streamMaxSubscribers open connections are
@@ -426,7 +467,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64) (id uint64, ch c
 	live := h.fetchLive(ctx)
 	throughputSamples := h.fetchThroughput(ctx)
 
-	initial = buildLivePayload(h.correlationSnapshot(), live, jobID)
+	initial = buildLivePayload(h.correlationSnapshot(), live, jobID, h.bytesSnapshot())
 	initial.Throughput = toThroughputDTO(throughputSamples)
 
 	sub := &streamSubscriber{
@@ -493,6 +534,7 @@ func (h *streamHub) tick(ctx context.Context) {
 	live := h.fetchLive(fetchCtx)
 	throughputSamples := h.fetchThroughput(fetchCtx)
 	cachedJobs := h.correlationSnapshot()
+	persisted := h.bytesSnapshot()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -509,7 +551,7 @@ func (h *streamHub) tick(ctx context.Context) {
 		return
 	}
 	for _, sub := range h.subs {
-		payload := buildLivePayload(cachedJobs, live, sub.jobID)
+		payload := buildLivePayload(cachedJobs, live, sub.jobID, persisted)
 		fresh := newThroughputSince(throughputSamples, sub.lastThroughputAt)
 		next := livePayload{Jobs: payload.Jobs, Files: payload.Files, Down: payload.Down}
 		if !changedSinceLast(sub.last, next, len(fresh)) {
@@ -580,7 +622,7 @@ func writeLiveEvent(w http.ResponseWriter, rc *http.ResponseController, payload 
 // durations instead of the real cadences; NewServer's call site passes the
 // real constants.
 func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval time.Duration) {
-	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, tickInterval, correlationInterval)
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, tickInterval, correlationInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {

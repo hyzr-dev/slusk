@@ -512,6 +512,7 @@ func main() {
 		Restart:          restartFn,
 		ConnectionTester: connectionTester,
 		LiveTransfers:    liveTransfersFn,
+		TransferBytes:    st.TransferBytesByCandidate,
 		Charts:           chartsFn,
 		Shares:           sharesFn,
 		RescanShares:     rescanSharesFn,

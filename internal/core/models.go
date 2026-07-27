@@ -145,17 +145,6 @@ type JobView struct {
 	AlbumBytesDone      int64
 	AlbumBytesTotal     int64
 	AlbumBytesRemaining int64
-	// AlbumBytesDoneNonTerminal is AlbumBytesDone, but summed only over
-	// transfers in a non-terminal state — the same filter AlbumBytesRemaining
-	// uses (excludes COMPLETED, ERRORED, CANCELLED). It exists so the
-	// presentation layer (internal/observ) can overlay live in-memory bytes on
-	// top of the persisted snapshot without double counting: a transfer's
-	// persisted contribution to AlbumBytesDone is only ever replaced by its
-	// live counterpart while that transfer is still in flight (per the last
-	// reconcile), and this field is exactly that persisted contribution — see
-	// issue #161's SSE design doc, part 1. Zero when the job has no candidate,
-	// matching the other Album* fields.
-	AlbumBytesDoneNonTerminal int64
 }
 
 // AttemptDetail bundles one candidate with every transfer (one per file) it

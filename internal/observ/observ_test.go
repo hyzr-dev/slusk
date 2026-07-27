@@ -33,14 +33,17 @@ func noopModules() map[string]ModuleStatus                                     {
 func noopRetry(ctx context.Context, jobID int64) error                         { return nil }
 func noopConfig() AppConfig                                                    { return AppConfig{} }
 func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     { return nil, nil }
-func noopJobs(ctx context.Context) ([]core.JobView, error)                     { return nil, nil }
-func noopCharts(ctx context.Context) (ChartsData, error)                       { return ChartsData{}, nil }
-func noopShares() ShareStatsReport                                             { return ShareStatsReport{} }
-func noopRescanShares() error                                                  { return nil }
-func noopUploads() UploadReport                                                { return UploadReport{} }
-func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error)      { return nil, nil }
-func noopConfigWriter(ConfigUpdate) error                                      { return nil }
-func noopRestart()                                                             {}
+func noopTransferBytes(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
+	return nil, nil
+}
+func noopJobs(ctx context.Context) ([]core.JobView, error)                { return nil, nil }
+func noopCharts(ctx context.Context) (ChartsData, error)                  { return ChartsData{}, nil }
+func noopShares() ShareStatsReport                                        { return ShareStatsReport{} }
+func noopRescanShares() error                                             { return nil }
+func noopUploads() UploadReport                                           { return UploadReport{} }
+func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error) { return nil, nil }
+func noopConfigWriter(ConfigUpdate) error                                 { return nil }
+func noopRestart()                                                        {}
 func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
 	return core.JobView{}, nil
 }
@@ -74,6 +77,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		MaxCandidates:    testMaxCandidates,
 		Config:           noopConfig,
 		LiveTransfers:    noopLiveTransfers,
+		TransferBytes:    noopTransferBytes,
 		ConnectionTester: ConnectionTester{},
 		Charts:           noopCharts,
 		Shares:           noopShares,
@@ -369,28 +373,31 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 	}
 }
 
-// TestToJobDTOOverlaysLiveBytesForNonTerminalMatch is issue #161, part 1b:
-// the live in-memory BytesDone for a matched, non-terminal transfer must
-// win over the persisted, up-to-15s-stale AlbumBytesDone.
-func TestToJobDTOOverlaysLiveBytesForNonTerminalMatch(t *testing.T) {
+// TestToJobDTOOverlaysLiveBytesRegardlessOfState is issue #161, part 1b: the
+// live in-memory BytesDone for a matched transfer wins over the persisted,
+// up-to-15s-stale AlbumBytesDone — even when that live match is itself
+// terminal (a just-completed file lingering until the next reconcile), which
+// is exactly the case the old non-terminal-only overlay missed.
+func TestToJobDTOOverlaysLiveBytesRegardlessOfState(t *testing.T) {
 	candidate := &core.Candidate{
+		ID:       1,
 		Username: "alice",
 		Files:    []core.CandidateFile{{Filename: "01.flac", Size: 1000}},
 	}
 	view := core.JobView{
-		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
-		Attempt:                   candidate,
-		AlbumBytesDone:            300,
-		AlbumBytesDoneNonTerminal: 300,
-		AlbumBytesTotal:           1000,
+		Job:             core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:         candidate,
+		AlbumBytesDone:  300,
+		AlbumBytesTotal: 1000,
 	}
 	live := newLiveTransferIndex([]core.RemoteTransfer{
-		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
+		{Username: "alice", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
 	})
+	persisted := map[int64]map[string]int64{1: {"01.flac": 300}}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live)
-	if dto.BytesDone != 750 {
-		t.Errorf("BytesDone = %d, want 750 (live overlay)", dto.BytesDone)
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted)
+	if dto.BytesDone != 1000 {
+		t.Errorf("BytesDone = %d, want 1000 (live overlay wins even though the match is terminal)", dto.BytesDone)
 	}
 	if dto.BytesTotal != 1000 {
 		t.Errorf("BytesTotal = %d, want 1000 (never overlaid, see jobDTO.BytesTotal)", dto.BytesTotal)
@@ -402,49 +409,51 @@ func TestToJobDTOOverlaysLiveBytesForNonTerminalMatch(t *testing.T) {
 // restarted): the persisted AlbumBytesDone must be served unmodified.
 func TestToJobDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
 	candidate := &core.Candidate{
+		ID:       1,
 		Username: "alice",
 		Files:    []core.CandidateFile{{Filename: "01.flac", Size: 1000}},
 	}
 	view := core.JobView{
-		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
-		Attempt:                   candidate,
-		AlbumBytesDone:            300,
-		AlbumBytesDoneNonTerminal: 300,
-		AlbumBytesTotal:           1000,
+		Job:             core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:         candidate,
+		AlbumBytesDone:  300,
+		AlbumBytesTotal: 1000,
 	}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{})
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{}, nil)
 	if dto.BytesDone != 300 {
 		t.Errorf("BytesDone = %d, want 300 (persisted fallback, no live match)", dto.BytesDone)
 	}
 }
 
-// TestToJobDTOBytesDoneMonotoneWithoutLiveMatchForOneFile covers the
-// monotone-max guard directly: one file is still non-terminal but has no
-// live match (backend just restarted, or not yet enqueued), while another
-// file of the same album is already terminal and persisted-final. The
-// overlay computation alone (AlbumBytesDone - AlbumBytesDoneNonTerminal +
-// liveBytesDone) would understate the total here; max() with the persisted
-// AlbumBytesDone must keep BytesDone from regressing.
-func TestToJobDTOBytesDoneMonotoneWithoutLiveMatchForOneFile(t *testing.T) {
+// TestToJobDTOSumsPersistedForUnmatchedFilesInLiveMatchedCandidate covers a
+// multi-file album where one file has a live match and another does not
+// (backend just restarted, or not yet enqueued): the unmatched file's exact
+// persisted bytes (from the TransferBytes dep) must still be counted,
+// alongside the matched file's live bytes.
+func TestToJobDTOSumsPersistedForUnmatchedFilesInLiveMatchedCandidate(t *testing.T) {
 	candidate := &core.Candidate{
+		ID:       1,
 		Username: "alice",
 		Files: []core.CandidateFile{
-			{Filename: "01.flac", Size: 1000}, // non-terminal, no live match
-			{Filename: "02.flac", Size: 1000}, // terminal (completed), persisted-final
+			{Filename: "01.flac", Size: 1000}, // live match
+			{Filename: "02.flac", Size: 1000}, // no live match, persisted-final
 		},
 	}
 	view := core.JobView{
-		Job:                       core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
-		Attempt:                   candidate,
-		AlbumBytesDone:            1500, // 500 (file1, non-terminal) + 1000 (file2, terminal)
-		AlbumBytesDoneNonTerminal: 500,
-		AlbumBytesTotal:           2000,
+		Job:             core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+		Attempt:         candidate,
+		AlbumBytesDone:  1500, // stale: 500 (file1) + 1000 (file2)
+		AlbumBytesTotal: 2000,
 	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
+	})
+	persisted := map[int64]map[string]int64{1: {"01.flac": 500, "02.flac": 1000}}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{})
-	if dto.BytesDone != 1500 {
-		t.Errorf("BytesDone = %d, want 1500 (overlay alone computes 1000; max() keeps the persisted 1500)", dto.BytesDone)
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted)
+	if dto.BytesDone != 750+1000 {
+		t.Errorf("BytesDone = %d, want %d (750 live + 1000 persisted)", dto.BytesDone, 750+1000)
 	}
 }
 
@@ -804,6 +813,69 @@ func TestJobsEndpointDegradesUnenrichedWhenLiveTransfersErrors(t *testing.T) {
 	}
 	if got[0].Speed != 0 || got[0].QueuePosition != 0 || got[0].ETASeconds != 0 {
 		t.Errorf("expected unenriched job on LiveTransfers error, got %+v", got[0])
+	}
+}
+
+// TestJobsEndpointBytesDoneUsesTransferBytesForLiveMatchedCandidate is the
+// HTTP-level counterpart of TestToJobDTOSumsPersistedForUnmatchedFilesInLiveMatchedCandidate:
+// it proves the /api/jobs handler actually collects the live-matched
+// candidate ids, calls deps.TransferBytes with exactly those, and threads the
+// result through to BytesDone (issue #161). A second, live-unmatched job is
+// included to prove TransferBytes is called with only the matched candidate's
+// id, not every candidate in the list.
+func TestJobsEndpointBytesDoneUsesTransferBytesForLiveMatchedCandidate(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:             core.AlbumJob{ID: 1, Title: "Live", ArtistName: "X", State: core.StateDownloading},
+				Attempt:         &core.Candidate{ID: 11, Username: "alice", Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}, {Filename: "02.flac", Size: 1000}}},
+				AlbumBytesDone:  1500,
+				AlbumBytesTotal: 2000,
+			},
+			{
+				Job:             core.AlbumJob{ID: 2, Title: "NotLive", ArtistName: "Y", State: core.StateDownloading},
+				Attempt:         &core.Candidate{ID: 22, Username: "bob", Files: []core.CandidateFile{{Filename: "b1.flac", Size: 500}}},
+				AlbumBytesDone:  200,
+				AlbumBytesTotal: 500,
+			},
+		}, nil
+	}
+	live := func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		return []core.RemoteTransfer{
+			{Username: "alice", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
+		}, nil
+	}
+	var gotIDs []int64
+	transferBytes := func(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
+		gotIDs = candidateIDs
+		return map[int64]map[string]int64{11: {"01.flac": 500, "02.flac": 1000}}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.Jobs = jobs
+	deps.LiveTransfers = live
+	deps.TransferBytes = transferBytes
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(gotIDs) != 1 || gotIDs[0] != 11 {
+		t.Fatalf("TransferBytes called with %v, want [11] (only the live-matched candidate)", gotIDs)
+	}
+	var got []jobDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got[0].BytesDone != 1000+1000 {
+		t.Errorf("job 1 BytesDone = %d, want %d (1000 live 01.flac + 1000 persisted 02.flac)", got[0].BytesDone, 1000+1000)
+	}
+	if got[1].BytesDone != 200 {
+		t.Errorf("job 2 BytesDone = %d, want 200 (no live match, AlbumBytesDone unmodified)", got[1].BytesDone)
 	}
 }
 
