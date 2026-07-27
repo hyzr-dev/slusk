@@ -36,6 +36,8 @@ export const t = {
     reconcile: 'RECONCILE',
     reconcileNever: '—',
     down: 'DOWN',
+    up: 'UP',
+    throughputSeparator: '·',
     idle: 'idle',
     statusRegion: 'Application status',
   },
@@ -251,8 +253,15 @@ export const t = {
     activeCountMeta: (n: number) => `${n} active`,
     // The peer-queue special case: an "active" job with no bytes moving.
     queuePos: (n: number) => `queue pos ${n}`,
-    noThroughputData: 'No throughput data yet',
-    throughputAriaLabel: (peak: string) => `Peak download throughput ${peak} over the recent samples`,
+    downloadThroughput: 'DOWNLOAD',
+    uploadThroughput: 'UPLOAD',
+    peak: 'PEAK',
+    noDownloadThroughputData: 'No download throughput data yet',
+    noUploadThroughputData: 'No upload throughput data yet',
+    downloadThroughputAriaLabel: (peak: string) =>
+      `Peak download throughput ${peak} over the recent samples`,
+    uploadThroughputAriaLabel: (peak: string) =>
+      `Peak upload throughput ${peak} over the recent samples`,
     reconcileMatched: (n: number) => `${n} matched`,
     reconcileNoMatch: 'no match',
   },

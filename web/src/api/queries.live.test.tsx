@@ -143,7 +143,7 @@ describe('pickJobDetail', () => {
       lastProgressAt: '',
       speed: 2000,
     };
-    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1, detail: streamed };
+    const live: ScopedLivePayload = { jobs: [], down: 0, up: 0, scopeJobId: 1, detail: streamed };
     expect(pickJobDetail(rest, live, 1)).toBe(streamed);
   });
 
@@ -162,7 +162,7 @@ describe('pickJobDetail', () => {
       retries: 0,
       lastProgressAt: '',
     };
-    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1, detail: streamed };
+    const live: ScopedLivePayload = { jobs: [], down: 0, up: 0, scopeJobId: 1, detail: streamed };
     const tr = pickJobDetail(rest, live, 1)?.attempts[0].transfers[0];
     expect(tr?.state).toBe('COMPLETED');
     expect(tr?.speed).toBeUndefined();
@@ -172,7 +172,7 @@ describe('pickJobDetail', () => {
     const rest = makeDetail();
     const other = makeDetail();
     other.id = 2;
-    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 2, detail: other };
+    const live: ScopedLivePayload = { jobs: [], down: 0, up: 0, scopeJobId: 2, detail: other };
     expect(pickJobDetail(rest, live, 1)).toBe(rest);
   });
 
@@ -180,7 +180,7 @@ describe('pickJobDetail', () => {
   // same transfers inline) carries no detail at all, so REST stays in charge.
   it('falls back to REST when the frame carries no detail', () => {
     const rest = makeDetail();
-    const live: ScopedLivePayload = { jobs: [], down: 0, scopeJobId: 1 };
+    const live: ScopedLivePayload = { jobs: [], down: 0, up: 0, scopeJobId: 1 };
     expect(pickJobDetail(rest, live, 1)).toBe(rest);
   });
 
@@ -261,11 +261,15 @@ describe('useJobs live overlay', () => {
     const { result, rerender } = renderHook(() => useJobs(DEFAULT_JOB_PAGE_PARAMS), { wrapper: makeWrapper(queryClient) });
     expect(result.current.data?.jobs[0].speed).toBeUndefined();
 
-    queryClient.setQueryData(queryKeys.live, { jobs: [{ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 }], down: 4000 });
+    queryClient.setQueryData(queryKeys.live, {
+      jobs: [{ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 }],
+      down: 4000,
+      up: 0,
+    });
     rerender();
     expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 80, speed: 4000 });
 
-    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0 });
+    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, up: 0 });
     rerender();
     expect(result.current.data?.jobs[0].bytesDone).toBe(50);
     expect(result.current.data?.jobs[0].speed).toBeUndefined();
@@ -292,7 +296,7 @@ describe('useJobDetail live detail', () => {
       lastProgressAt: '',
       speed: 3000,
     };
-    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, scopeJobId: 1, detail: streamed });
+    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, up: 0, scopeJobId: 1, detail: streamed });
     rerender();
     expect(result.current.data?.attempts[0].transfers[0]).toMatchObject({ bytesDone: 500, speed: 3000 });
 

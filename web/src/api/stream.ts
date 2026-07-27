@@ -68,13 +68,23 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       const payload = JSON.parse((event as MessageEvent<string>).data) as LivePayload;
       const scoped: ScopedLivePayload = { ...payload, scopeJobId: jobId };
       queryClient.setQueryData(queryKeys.live, scoped);
-      if (payload.throughput?.length) {
+      if (payload.throughput?.length || payload.uploadThroughput?.length) {
         // Only folds in once a REST snapshot already exists — if none has
         // landed yet there's nothing to append to, and the imminent REST
-        // fetch will carry these samples anyway.
-        queryClient.setQueryData<ChartsReport>(queryKeys.charts, (prev) =>
-          prev ? { ...prev, throughput: mergeThroughputSamples(prev.throughput, payload.throughput!) } : prev,
-        );
+        // fetch will carry these samples anyway. Each direction merges into
+        // its own 48-sample window, even when a frame updates both at once.
+        queryClient.setQueryData<ChartsReport>(queryKeys.charts, (prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            throughput: payload.throughput?.length
+              ? mergeThroughputSamples(prev.throughput, payload.throughput)
+              : prev.throughput,
+            uploadThroughput: payload.uploadThroughput?.length
+              ? mergeThroughputSamples(prev.uploadThroughput, payload.uploadThroughput)
+              : prev.uploadThroughput,
+          };
+        });
       }
     });
 

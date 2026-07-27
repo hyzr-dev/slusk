@@ -115,10 +115,15 @@ describe('StreamProvider', () => {
       </QueryClientProvider>,
     );
 
-    act(() => MockEventSource.instances[0].emit('live', { jobs: [{ id: 7, bytesDone: 1, bytesTotal: 2 }], down: 500 }));
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 7, bytesDone: 1, bytesTotal: 2 }],
+      down: 500,
+      up: 250,
+    }));
 
     expect(queryClient.getQueryData(queryKeys.live)).toMatchObject({
       down: 500,
+      up: 250,
       scopeJobId: 7,
       jobs: [{ id: 7, bytesDone: 1, bytesTotal: 2 }],
     });
@@ -134,7 +139,7 @@ describe('StreamProvider', () => {
       </QueryClientProvider>,
     );
 
-    act(() => MockEventSource.instances[0].emit('live', { jobs: [], down: 1000 }));
+    act(() => MockEventSource.instances[0].emit('live', { jobs: [], down: 1000, up: 500 }));
     expect(queryClient.getQueryData(queryKeys.live)).toBeDefined();
 
     // null, not undefined: setQueryData ignores an undefined value, so
@@ -145,12 +150,13 @@ describe('StreamProvider', () => {
     expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
   });
 
-  it('merges new throughput samples into an already-fetched charts cache', () => {
+  it('merges and dedupes download and upload samples independently', () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(queryKeys.charts, {
       passes: [],
       completedByHour: [],
       throughput: [{ at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 }],
+      uploadThroughput: [{ at: '2026-07-26T12:00:00Z', bytesPerSecond: 500, activeTransfers: 1 }],
     });
     render(
       <QueryClientProvider client={queryClient}>
@@ -163,12 +169,72 @@ describe('StreamProvider', () => {
     act(() =>
       MockEventSource.instances[0].emit('live', {
         jobs: [],
-        down: 0,
-        throughput: [{ at: '2026-07-26T12:00:01Z', bytesPerSecond: 2000, activeTransfers: 2 }],
+        down: 2000,
+        up: 750,
+        throughput: [
+          { at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 },
+          { at: '2026-07-26T12:00:01Z', bytesPerSecond: 2000, activeTransfers: 2 },
+        ],
+        uploadThroughput: [
+          { at: '2026-07-26T12:00:01Z', bytesPerSecond: 750, activeTransfers: 1 },
+          { at: '2026-07-26T12:00:02Z', bytesPerSecond: 0, activeTransfers: 0 },
+        ],
       }),
     );
 
-    const charts = queryClient.getQueryData(queryKeys.charts) as { throughput: { at: string }[] };
-    expect(charts.throughput.map((s) => s.at)).toEqual(['2026-07-26T12:00:00Z', '2026-07-26T12:00:01Z']);
+    const charts = queryClient.getQueryData(queryKeys.charts) as {
+      throughput: { at: string }[];
+      uploadThroughput: { at: string }[];
+    };
+    expect(charts.throughput.map((sample) => sample.at)).toEqual([
+      '2026-07-26T12:00:00Z',
+      '2026-07-26T12:00:01Z',
+    ]);
+    expect(charts.uploadThroughput.map((sample) => sample.at)).toEqual([
+      '2026-07-26T12:00:00Z',
+      '2026-07-26T12:00:01Z',
+      '2026-07-26T12:00:02Z',
+    ]);
+  });
+
+  it('caps each cached direction at 48 samples without changing the other', () => {
+    const queryClient = new QueryClient();
+    const samples = Array.from({ length: 48 }, (_, index) => ({
+      at: `2026-07-26T12:00:${String(index).padStart(2, '0')}Z`,
+      bytesPerSecond: index,
+      activeTransfers: 1,
+    }));
+    queryClient.setQueryData(queryKeys.charts, {
+      passes: [],
+      completedByHour: [],
+      throughput: samples,
+      uploadThroughput: samples,
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [],
+      down: 0,
+      up: 999,
+      uploadThroughput: [
+        { at: '2026-07-26T12:01:00Z', bytesPerSecond: 999, activeTransfers: 1 },
+      ],
+    }));
+
+    const charts = queryClient.getQueryData(queryKeys.charts) as {
+      throughput: { at: string }[];
+      uploadThroughput: { at: string }[];
+    };
+    expect(charts.throughput).toHaveLength(48);
+    expect(charts.throughput[0].at).toBe('2026-07-26T12:00:00Z');
+    expect(charts.uploadThroughput).toHaveLength(48);
+    expect(charts.uploadThroughput[0].at).toBe('2026-07-26T12:00:01Z');
+    expect(charts.uploadThroughput.at(-1)?.at).toBe('2026-07-26T12:01:00Z');
   });
 });

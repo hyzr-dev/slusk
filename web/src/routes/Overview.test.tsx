@@ -62,6 +62,7 @@ const charts: ChartsReport = {
   ],
   completedByHour: [{ hour: '2026-07-01T10:00:00Z', count: 2 }],
   throughput: [],
+  uploadThroughput: [],
 };
 
 function renderOverview(
@@ -117,8 +118,41 @@ describe('Overview', () => {
   });
 
   it('shows the empty reconcile state when the charts report has no passes', () => {
-    renderOverview(jobs, { passes: [], completedByHour: charts.completedByHour, throughput: [] });
+    renderOverview(jobs, {
+      passes: [],
+      completedByHour: charts.completedByHour,
+      throughput: [],
+      uploadThroughput: [],
+    });
     expect(screen.getByText('── No pass history yet ──')).toBeInTheDocument();
+  });
+
+  it('renders independently-scaled download and upload throughput charts', () => {
+    renderOverview(jobs, {
+      ...charts,
+      throughput: [
+        { at: '2026-07-01T10:00:00Z', bytesPerSecond: 1024, activeTransfers: 1 },
+        { at: '2026-07-01T10:00:01Z', bytesPerSecond: 4096, activeTransfers: 2 },
+      ],
+      uploadThroughput: [
+        { at: '2026-07-01T10:00:00Z', bytesPerSecond: 2048, activeTransfers: 1 },
+        { at: '2026-07-01T10:00:01Z', bytesPerSecond: 8192, activeTransfers: 3 },
+      ],
+    });
+
+    expect(screen.getByText(t.overview.downloadThroughput)).toBeInTheDocument();
+    expect(screen.getByText(t.overview.uploadThroughput)).toBeInTheDocument();
+    expect(screen.getByRole('img', {
+      name: t.overview.downloadThroughputAriaLabel('4 KB/s'),
+    })).toBeInTheDocument();
+    expect(screen.getByRole('img', {
+      name: t.overview.uploadThroughputAriaLabel('8 KB/s'),
+    })).toBeInTheDocument();
+
+    // ACTIVE is download-only: its sparkline has one bar per download sample,
+    // not one per upload sample or a combined series.
+    const activeCell = screen.getByText(t.status.active).closest('[class*="statCell"]') as HTMLElement;
+    expect(activeCell.querySelectorAll('[class*="sparkline"] span')).toHaveLength(2);
   });
 
   it('shows a peer-queued job as queued rather than downloading', () => {
