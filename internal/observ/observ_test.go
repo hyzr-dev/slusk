@@ -40,13 +40,15 @@ func noopJobs(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 func noopPagedJobs(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
 	return PagedJobsResult{Jobs: []core.JobView{}}, nil
 }
-func noopCharts(ctx context.Context) (ChartsData, error)                  { return ChartsData{}, nil }
-func noopShares() ShareStatsReport                                        { return ShareStatsReport{} }
-func noopRescanShares() error                                             { return nil }
-func noopUploads() UploadReport                                           { return UploadReport{} }
-func noopThroughput(ctx context.Context) ([]core.ThroughputSample, error) { return nil, nil }
-func noopConfigWriter(ConfigUpdate) error                                 { return nil }
-func noopRestart()                                                        {}
+func noopCharts(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
+func noopShares() ShareStatsReport                       { return ShareStatsReport{} }
+func noopRescanShares() error                            { return nil }
+func noopUploads() UploadReport                          { return UploadReport{} }
+func noopThroughput(ctx context.Context) (core.ThroughputSeries, error) {
+	return core.ThroughputSeries{}, nil
+}
+func noopConfigWriter(ConfigUpdate) error { return nil }
+func noopRestart()                        {}
 func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
 	return core.JobView{}, nil
 }

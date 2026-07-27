@@ -379,10 +379,9 @@ type ServerDeps struct {
 	// served at GET /api/uploads (issue #179). nil when native Soulseek
 	// sharing is not enabled, mirroring Shares.
 	Uploads UploadsFunc
-	// Throughput supplies the Overview view's live download-throughput series
-	// served at /api/charts (issue #157). nil (the non-native backends, or
-	// tests that don't care) yields an empty series rather than omitting the
-	// field.
+	// Throughput supplies the Overview view's live directional throughput
+	// series served at /api/charts. nil (the non-native backends, or tests that
+	// don't care) yields empty arrays rather than omitting either field.
 	Throughput ThroughputFunc
 	// Conversations and Thread back GET /api/messages and GET
 	// /api/messages/{username} (issue #183). Unlike Shares/RescanShares these
