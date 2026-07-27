@@ -130,11 +130,25 @@ export function mergeLiveJobs(jobs: Job[] | undefined, live: LiveJob[] | undefin
   });
 }
 
+// Transfer states the pipeline treats as terminal — the same three that gate
+// the purge in internal/pipeline/downloading.go. STALLED is deliberately absent:
+// it is a durable intent that the next reconcile pass retries, not an end state.
+const TERMINAL_TRANSFER_STATES = new Set(['COMPLETED', 'ERRORED', 'CANCELLED']);
+
 // Same overlay principle as mergeLiveJobs, but by filename within a job
 // detail's attempts, and scoped: a live frame only carries `files` for the
 // job id its connection was opened with (see ScopedLivePayload), so a stale
 // frame from a previously viewed job — arriving mid-reconnect after
 // navigating to a new one — must never apply here.
+//
+// A transfer REST already reports terminal is left completely alone. The two
+// sources lead each other on different fields — live leads on bytesDone (it
+// ticks every second while the DB is checkpointed far more coarsely), but REST
+// leads on state, because downloading.go commits the terminal
+// UpdateTransferProgress *before* purging the transfer from the live backend.
+// During that window a live frame still describes the file as in progress, with
+// a speed that stays nonzero for up to speedStaleAfter. Overlaying it makes a
+// finished row flip back to downloading on whichever of the two arrives last.
 export function mergeLiveFiles(detail: JobDetail | undefined, live: ScopedLivePayload | null | undefined, id: number): JobDetail | undefined {
   if (!detail || !live || live.scopeJobId !== id) return detail;
   const byFilename = new Map((live.files ?? []).map((f) => [f.filename, f]));
@@ -143,6 +157,7 @@ export function mergeLiveFiles(detail: JobDetail | undefined, live: ScopedLivePa
     attempts: detail.attempts.map((a) => ({
       ...a,
       transfers: a.transfers.map((tr) => {
+        if (TERMINAL_TRANSFER_STATES.has(tr.state)) return tr;
         const f = byFilename.get(tr.filename);
         if (!f) return tr;
         return {

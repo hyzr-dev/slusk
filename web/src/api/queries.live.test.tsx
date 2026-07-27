@@ -113,6 +113,56 @@ describe('mergeLiveFiles', () => {
     expect(merged?.attempts[0].transfers[1].speed).toBeUndefined();
   });
 
+  // The window between downloading.go committing the terminal state and
+  // purging the transfer from the live backend: REST already says COMPLETED
+  // while the frame still describes it as downloading, at a speed that stays
+  // nonzero for up to speedStaleAfter. Overlaying that made the finished row
+  // flip back to downloading depending on which of the two landed last.
+  it('leaves a transfer REST reports terminal untouched by a lagging live frame', () => {
+    const detail = makeDetail();
+    detail.attempts[0].transfers[0] = {
+      filename: '01.flac',
+      state: 'COMPLETED',
+      bytesDone: 1000,
+      bytesTotal: 1000,
+      retries: 0,
+      lastProgressAt: '',
+    };
+    const live: ScopedLivePayload = {
+      jobs: [],
+      down: 0,
+      scopeJobId: 1,
+      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 980, bytesTotal: 1000, speed: 2000 }],
+    };
+    const merged = mergeLiveFiles(detail, live, 1);
+    const tr = merged?.attempts[0].transfers[0];
+    expect(tr?.state).toBe('COMPLETED');
+    expect(tr?.bytesDone).toBe(1000);
+    expect(tr?.speed).toBeUndefined();
+  });
+
+  // STALLED is a durable retry intent, not an end state — the transfer is still
+  // live and its frame is the fresher source, so the overlay must still apply.
+  it('still overlays a STALLED transfer, which is not terminal', () => {
+    const detail = makeDetail();
+    detail.attempts[0].transfers[0] = {
+      filename: '01.flac',
+      state: 'STALLED',
+      bytesDone: 400,
+      bytesTotal: 1000,
+      retries: 1,
+      lastProgressAt: '',
+    };
+    const live: ScopedLivePayload = {
+      jobs: [],
+      down: 0,
+      scopeJobId: 1,
+      files: [{ filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 600, bytesTotal: 1000, speed: 1500 }],
+    };
+    const merged = mergeLiveFiles(detail, live, 1);
+    expect(merged?.attempts[0].transfers[0]).toMatchObject({ state: 'IN_PROGRESS', bytesDone: 600, speed: 1500 });
+  });
+
   it('ignores a live frame scoped to a different job (stale during a route change)', () => {
     const detail = makeDetail();
     const live: ScopedLivePayload = {
