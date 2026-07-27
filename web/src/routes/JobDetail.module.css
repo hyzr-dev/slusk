@@ -46,5 +46,15 @@
 .transferName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ticksWrap { min-width: 0; }
 .transferBytes { color: var(--faint); text-align: right; }
-.transferExtra { color: var(--text-dim); }
+/* Speed and queue position are mutually exclusive per file once #256 clears the
+   position on start, but a brief transition window can still set both. Keep the
+   cell to one line so that window can never change the row's height: the column
+   is a fixed 130px (see .transferRow), so the text is clipped rather than
+   wrapped. */
+.transferExtra {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .transferRetries { color: var(--text-dim); text-align: right; }

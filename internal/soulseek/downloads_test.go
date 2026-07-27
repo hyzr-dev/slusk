@@ -325,6 +325,32 @@ func TestDownloadHooksClaimAndDispatch(t *testing.T) {
 		t.Errorf("queuePosition = %d, want 3", place)
 	}
 
+	// A response to a request sent just before the peer started uploading can
+	// land just after. Recording it would reinstate exactly the staleness the
+	// IN_PROGRESS transition clears (issue #256).
+	tr.mu.Lock()
+	tr.state = core.TransferInProgress
+	tr.queuePosition = 0
+	tr.mu.Unlock()
+	latePIQ := &peer.PlaceInQueueResponse{Filename: "song.flac", Place: 9}
+	wire, err = latePIQ.Serialize(latePIQ)
+	if err != nil {
+		t.Fatalf("serialize late place in queue response: %v", err)
+	}
+	if err := hook.frame(session, sessionFrame{connType: peer.ConnectionType, code: int(peer.CodePlaceInQueueResponse), wire: wire}); err != nil {
+		t.Fatalf("frame(late PlaceInQueueResponse) = %v, want nil", err)
+	}
+	tr.mu.Lock()
+	place, state := tr.queuePosition, tr.state
+	tr.mu.Unlock()
+	if place != 0 {
+		t.Errorf("queuePosition = %d after a late response to an IN_PROGRESS transfer, want 0", place)
+	}
+	// Restore so the failure assertions below run against the original state.
+	tr.mu.Lock()
+	tr.state = state
+	tr.mu.Unlock()
+
 	failed := &peer.UploadFailed{Filename: "song.flac"}
 	wire, err = failed.Serialize(failed)
 	if err != nil {
