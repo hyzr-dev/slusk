@@ -15,6 +15,51 @@ export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 // via POST /api/jobs (issue #155).
 export type JobSource = 'lidarr' | 'manual';
 
+/** GET /api/jobs query primitives. The backend fixes each page at 12 jobs. */
+export type JobPageSort = 'st' | 'album' | 'peer' | 'try';
+export type JobPageDirection = 'asc' | 'desc';
+export type JobStatusFilter =
+  | 'all'
+  | 'active'
+  | 'importing'
+  | 'queued'
+  | 'stalled'
+  | 'failed'
+  | 'parked'
+  | 'done';
+export type JobSourceFilter = 'all' | JobSource;
+
+export interface JobPageParams {
+  page: number;
+  sort: JobPageSort;
+  dir: JobPageDirection;
+  filter: JobStatusFilter;
+  source: JobSourceFilter;
+  q: string;
+}
+
+export interface JobStatusFacets {
+  all: number;
+  active: number;
+  importing: number;
+  queued: number;
+  stalled: number;
+  failed: number;
+  parked: number;
+  done: number;
+}
+
+export interface JobSourceFacets {
+  all: number;
+  manual: number;
+  lidarr: number;
+}
+
+export interface JobFacets {
+  status: JobStatusFacets;
+  source: JobSourceFacets;
+}
+
 /** GET /api/jobs — internal/observ/observ.go jobDTO */
 export interface Job {
   id: number;
@@ -55,11 +100,23 @@ export interface Job {
   etaSeconds?: number;
 }
 
-/** GET /api/jobs wire shape during the orphaned-to-parked transition. */
+/** Job wire shape during the orphaned-to-parked transition. */
 export type WireJob = Omit<Job, 'status' | 'state'> & {
   status: WireJobStatus;
   state: WireJobState;
 };
+
+/** GET /api/jobs response after normalization. */
+export interface JobPage {
+  jobs: Job[];
+  total: number;
+  facets: JobFacets;
+}
+
+/** GET /api/jobs response before nested jobs are normalized. */
+export interface WireJobPage extends Omit<JobPage, 'jobs'> {
+  jobs: WireJob[];
+}
 
 /** internal/observ/jobdetail.go transferDetailDTO */
 export interface TransferDetail {

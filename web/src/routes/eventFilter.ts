@@ -1,15 +1,12 @@
 import type { JobEvent } from '../api/types';
 
-// Semantics preserved from the legacy dashboard: unlike jobFilter's per-field
-// matching, this joins the raw event code, the detail text and the job id
-// into a single haystack and does one case-insensitive substring match
-// against it.
+// Semantics preserved from the legacy dashboard: unlike the server-side job
+// search's per-field matching, this joins the raw event code, detail text and
+// job id into a single haystack and does one case-insensitive substring match.
 //
-// This cross-field behavior is INTENTIONAL and must not be "fixed" to match
-// jobFilter's per-field approach — the two filters are deliberately
-// different (jobFilter was changed to per-field matching specifically to
-// avoid this kind of boundary match; events keeps the legacy haystack
-// behavior). See spec 2026-07-20.
+// This cross-field behavior is INTENTIONAL: the two filters are deliberately
+// different, and events keeps the legacy haystack behavior. See spec
+// 2026-07-20.
 export function matchesFilter(event: JobEvent, filter: string): boolean {
   if (!filter) return true;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WireJob, WireStatusReport } from './types';
-import { normalizeJobDetail, normalizeJobs, normalizeStatusReport } from './normalize';
+import { normalizeJobDetail, normalizeJobPage, normalizeJobs, normalizeStatusReport } from './normalize';
 
 function wireJob(overrides: Partial<WireJob> = {}): WireJob {
   return {
@@ -54,6 +54,21 @@ describe('wire compatibility normalization', () => {
 
     expect(job).toMatchObject({ status: 'parked', state: 'PARKED' });
     expect(detail.state).toBe('PARKED');
+  });
+
+  it('normalizes nested page jobs without losing total or facets', () => {
+    const page = normalizeJobPage({
+      jobs: [wireJob({ status: 'orphaned', state: 'ORPHANED' })],
+      total: 25,
+      facets: {
+        status: { all: 25, active: 2, importing: 1, queued: 3, stalled: 4, failed: 5, parked: 6, done: 4 },
+        source: { all: 25, manual: 5, lidarr: 20 },
+      },
+    });
+
+    expect(page.jobs[0]).toMatchObject({ status: 'parked', state: 'PARKED' });
+    expect(page.total).toBe(25);
+    expect(page.facets.source).toEqual({ all: 25, manual: 5, lidarr: 20 });
   });
 
   it('accepts new and mixed job payloads without exposing a legacy UI value', () => {

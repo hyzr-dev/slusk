@@ -73,7 +73,7 @@ function renderOverview(
   // keep it pending indefinitely so the seeded data is what's asserted on.
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  queryClient.setQueryData(queryKeys.jobs, jobsData);
+  queryClient.setQueryData(queryKeys.jobsAll, jobsData);
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -128,6 +128,16 @@ describe('Overview', () => {
     ]);
     expect(screen.getByText('QU')).toBeInTheDocument();
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
+  });
+
+  it('keeps an IMPORTING active job in TRANSFERS with its importing tag and verifying path', () => {
+    renderOverview([
+      { ...baseJob, title: 'Importing Album', status: 'active', state: 'IMPORTING' },
+    ]);
+
+    expect(screen.getByText('Importing Album')).toBeInTheDocument();
+    expect(screen.getByText('IM')).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.verifying)).toBeInTheDocument();
   });
 
   it('ranks active above stalled in TRANSFERS, so an older stalled job never evicts an active one (#233)', () => {

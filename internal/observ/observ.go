@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -192,9 +193,57 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 
 const timeFormat = "2006-01-02T15:04:05Z07:00"
 
-// JobsFunc produces the current list of job views (typically backed by the
-// store's ListJobsWithTransfer).
+// JobsFunc produces the current complete list of job views (typically backed
+// by the store's ListJobsWithTransfer). The stream and legacy all-jobs REST
+// endpoint deliberately retain this unpaged dependency.
 type JobsFunc func(ctx context.Context) ([]core.JobView, error)
+
+// PagedJobsQuery is the validated persisted-only query for GET /api/jobs.
+type PagedJobsQuery struct {
+	Page   int64
+	Sort   string
+	Dir    string
+	Filter string
+	Source string
+	Query  string
+}
+
+// JobStatusFacets contains counts for every dashboard status. All ignores the
+// selected status while respecting the selected source and search query.
+type JobStatusFacets struct {
+	All       int64 `json:"all"`
+	Active    int64 `json:"active"`
+	Importing int64 `json:"importing"`
+	Queued    int64 `json:"queued"`
+	Stalled   int64 `json:"stalled"`
+	Failed    int64 `json:"failed"`
+	Parked    int64 `json:"parked"`
+	Done      int64 `json:"done"`
+}
+
+// JobSourceFacets contains counts for every persisted source. All ignores the
+// selected source while respecting the selected status and search query.
+type JobSourceFacets struct {
+	All    int64 `json:"all"`
+	Manual int64 `json:"manual"`
+	Lidarr int64 `json:"lidarr"`
+}
+
+// JobFacets groups the independent status and source facets.
+type JobFacets struct {
+	Status JobStatusFacets `json:"status"`
+	Source JobSourceFacets `json:"source"`
+}
+
+// PagedJobsResult is the persisted store result consumed by GET /api/jobs.
+type PagedJobsResult struct {
+	Jobs   []core.JobView
+	Total  int64
+	Facets JobFacets
+}
+
+// PagedJobsFunc produces one persisted job page and its consistent counts.
+type PagedJobsFunc func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error)
 
 // CancelFunc cancels a job by id (typically backed by app.Jobs.Cancel).
 // Errors are mapped to a status code by the /api/jobs/{id}/cancel handler:
@@ -266,8 +315,10 @@ type ServerDeps struct {
 	Version string
 	// Status reports the pipeline snapshot served at /status.
 	Status StatusFunc
-	// Jobs lists the job views served at GET /api/jobs.
+	// Jobs lists all job views for GET /api/jobs/all and GET /api/stream.
 	Jobs JobsFunc
+	// PagedJobs backs GET /api/jobs without changing the all-jobs dependency.
+	PagedJobs PagedJobsFunc
 	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
 	// /api/jobs/{id}.
 	Cancel    CancelFunc
@@ -463,43 +514,39 @@ func NewServer(deps ServerDeps) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("GET /api/jobs/all", func(w http.ResponseWriter, r *http.Request) {
+		views, err := deps.Jobs(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(enrichJobDTOs(r.Context(), views, deps))
+	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			views, err := deps.Jobs(r.Context())
+			query, err := parsePagedJobsQuery(r.URL)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			result, err := deps.PagedJobs(r.Context(), query)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			// Live album speed/ETA is best-effort cosmetic enrichment, exactly
-			// like the job detail endpoint: a ListDownloads failure degrades to
-			// a list without speed/ETA rather than failing the whole request.
-			var live []core.RemoteTransfer
-			if lt, liveErr := deps.LiveTransfers(r.Context()); liveErr == nil {
-				live = lt
-			}
-			liveIdx := newLiveTransferIndex(live)
-			// Exact per-file persisted bytes (issue #161) are only worth
-			// fetching for candidates that actually have a live match — bounded
-			// by concurrent downloads, not by the full (unbounded) job list.
-			var matchedIDs []int64
-			for _, v := range views {
-				if v.Attempt != nil && anyLiveMatch(v.Attempt.Username, v.Attempt.Files, liveIdx) {
-					matchedIDs = append(matchedIDs, v.Attempt.ID)
-				}
-			}
-			var persisted map[int64]map[string]int64
-			if len(matchedIDs) > 0 && deps.TransferBytes != nil {
-				if m, err := deps.TransferBytes(r.Context(), matchedIDs); err == nil {
-					persisted = m
-				}
-			}
-			dtos := make([]jobDTO, len(views))
-			for i, v := range views {
-				dtos[i] = toJobDTO(v, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted)
+			resp := struct {
+				Jobs   []jobDTO  `json:"jobs"`
+				Total  int64     `json:"total"`
+				Facets JobFacets `json:"facets"`
+			}{
+				Jobs:   enrichJobDTOs(r.Context(), result.Jobs, deps),
+				Total:  result.Total,
+				Facets: result.Facets,
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(dtos)
+			_ = json.NewEncoder(w).Encode(resp)
 		case http.MethodPost:
 			serveCreateJob(w, r, deps.CreateJob, deps.FailedRetryAfter, deps.MaxCandidates)
 		default:
@@ -669,6 +716,101 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux
+}
+
+const jobsPageSize int64 = 12
+
+func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
+	query := PagedJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"}
+	values, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return PagedJobsQuery{}, errors.New("invalid query parameters")
+	}
+	allowed := map[string]struct{}{"page": {}, "sort": {}, "dir": {}, "filter": {}, "source": {}, "q": {}}
+	for key, value := range values {
+		if _, ok := allowed[key]; !ok {
+			return PagedJobsQuery{}, fmt.Errorf("unknown query parameter %q", key)
+		}
+		if len(value) != 1 {
+			return PagedJobsQuery{}, fmt.Errorf("duplicate query parameter %q", key)
+		}
+	}
+	if raw, ok := values["page"]; ok {
+		page, parseErr := strconv.ParseInt(raw[0], 10, 64)
+		if parseErr != nil || page < 0 || page > (int64(^uint64(0)>>1)/jobsPageSize) {
+			return PagedJobsQuery{}, errors.New("invalid page")
+		}
+		query.Page = page
+	}
+	if raw, ok := values["sort"]; ok {
+		query.Sort = raw[0]
+	}
+	if raw, ok := values["dir"]; ok {
+		query.Dir = raw[0]
+	}
+	if raw, ok := values["filter"]; ok {
+		query.Filter = raw[0]
+	}
+	if raw, ok := values["source"]; ok {
+		query.Source = raw[0]
+	}
+	if raw, ok := values["q"]; ok {
+		query.Query = strings.TrimSpace(raw[0])
+	}
+	if !oneOf(query.Sort, "st", "album", "peer", "try") {
+		return PagedJobsQuery{}, errors.New("invalid sort")
+	}
+	if !oneOf(query.Dir, "asc", "desc") {
+		return PagedJobsQuery{}, errors.New("invalid dir")
+	}
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done") {
+		return PagedJobsQuery{}, errors.New("invalid filter")
+	}
+	if !oneOf(query.Source, "all", "manual", "lidarr") {
+		return PagedJobsQuery{}, errors.New("invalid source")
+	}
+	return query, nil
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) []jobDTO {
+	// Live album speed/ETA is best-effort cosmetic enrichment, exactly like
+	// the job detail endpoint: a ListDownloads failure degrades to persisted
+	// values rather than failing the whole request.
+	var live []core.RemoteTransfer
+	if deps.LiveTransfers != nil {
+		if transfers, err := deps.LiveTransfers(ctx); err == nil {
+			live = transfers
+		}
+	}
+	liveIdx := newLiveTransferIndex(live)
+	// Exact per-file persisted bytes are fetched only for candidates that have
+	// a live match, bounded by concurrent downloads rather than result size.
+	var matchedIDs []int64
+	for _, view := range views {
+		if view.Attempt != nil && anyLiveMatch(view.Attempt.Username, view.Attempt.Files, liveIdx) {
+			matchedIDs = append(matchedIDs, view.Attempt.ID)
+		}
+	}
+	var persisted map[int64]map[string]int64
+	if len(matchedIDs) > 0 && deps.TransferBytes != nil {
+		if bytes, err := deps.TransferBytes(ctx, matchedIDs); err == nil {
+			persisted = bytes
+		}
+	}
+	dtos := make([]jobDTO, len(views))
+	for i, view := range views {
+		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted)
+	}
+	return dtos
 }
 
 // createJobFileRequest is one file of a POST /api/jobs request body.

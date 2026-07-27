@@ -1,11 +1,13 @@
 import type {
   Job,
   JobDetail,
+  JobPage,
   JobState,
   JobStatus,
   StatusReport,
   WireJob,
   WireJobDetail,
+  WireJobPage,
   WireJobState,
   WireJobStatus,
   WireStatusReport,
@@ -29,6 +31,10 @@ export function normalizeJob(job: WireJob): Job {
 
 export function normalizeJobs(jobs: WireJob[]): Job[] {
   return jobs.map(normalizeJob);
+}
+
+export function normalizeJobPage(page: WireJobPage): JobPage {
+  return { ...page, jobs: normalizeJobs(page.jobs) };
 }
 
 export function normalizeJobDetail(detail: WireJobDetail): JobDetail {

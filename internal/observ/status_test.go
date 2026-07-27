@@ -27,7 +27,7 @@ func TestDashboardStatus(t *testing.T) {
 			want: "queued",
 		},
 		{
-			name: "importing is active",
+			name: "importing is active in the public DTO",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateImporting}},
 			want: "active",
 		},
@@ -55,6 +55,11 @@ func TestDashboardStatus(t *testing.T) {
 		{
 			name: "job done is done",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateDone}},
+			want: "done",
+		},
+		{
+			name: "legacy completed job is done",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateCompleted}},
 			want: "done",
 		},
 		{

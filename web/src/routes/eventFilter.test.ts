@@ -32,11 +32,10 @@ describe('matchesFilter', () => {
     expect(matchesFilter(event, '42')).toBe(true);
   });
 
-  // Intentional divergence from jobFilter: events keeps the legacy cross-field
-  // haystack behavior, so a filter spanning the joined boundary between two
-  // fields still matches — jobFilter's per-field matching was deliberately
-  // changed to reject the equivalent case. Do not "fix" this to be consistent
-  // with jobFilter.
+  // Intentional divergence from server-side job search: events keeps the
+  // legacy cross-field haystack behavior, so a filter spanning the joined
+  // boundary between two fields still matches. Do not "fix" the two searches
+  // to be consistent.
   it('matches across the joined event/detail boundary (intentional cross-field behavior)', () => {
     expect(matchesFilter(event, 'failed peer')).toBe(true);
   });

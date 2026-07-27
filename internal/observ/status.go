@@ -9,7 +9,7 @@ import "github.com/samuelenocsson/slskdarr/internal/core"
 // dashboardStatus derives the dashboard's coarse status label for a job view.
 func dashboardStatus(v core.JobView) string {
 	switch v.Job.State {
-	case core.StateDone:
+	case core.StateDone, core.StateCompleted:
 		return "done"
 	case core.StateFailed:
 		return "failed"

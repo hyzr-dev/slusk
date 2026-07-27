@@ -3,11 +3,42 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
+
+func insertDashboardTestJob(t *testing.T, s *Store, lidarrID int64, source core.JobSource, state core.AlbumJobState, transferState core.TransferState, title, artist, peer string, retries int, at time.Time) int64 {
+	t.Helper()
+	var id int64
+	if err := s.db.QueryRowContext(context.Background(),
+		`INSERT INTO album_jobs (lidarr_album_id, source, state, retries, created_at, updated_at, title, artist_name)
+		 VALUES ($1, $2, $3, $4, $5, $5, $6, $7) RETURNING id`,
+		lidarrID, string(source), string(state), retries, at, title, artist).Scan(&id); err != nil {
+		t.Fatalf("insert dashboard job: %v", err)
+	}
+	if peer == "" && transferState == "" {
+		return id
+	}
+	var candidateID int64
+	if err := s.db.QueryRowContext(context.Background(),
+		`INSERT INTO candidates (album_job_id, username, score, files, state, created_at, updated_at)
+		 VALUES ($1, $2, 1, '[]', 'ACTIVE', $3, $3) RETURNING id`,
+		id, peer, at).Scan(&candidateID); err != nil {
+		t.Fatalf("insert dashboard candidate: %v", err)
+	}
+	if transferState != "" {
+		if _, err := s.db.ExecContext(context.Background(),
+			`INSERT INTO transfers (candidate_id, username, filename, state, deadline, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			candidateID, peer, fmt.Sprintf("%d.flac", id), string(transferState), at.Add(time.Hour), at); err != nil {
+			t.Fatalf("insert dashboard transfer: %v", err)
+		}
+	}
+	return id
+}
 
 func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 	s := newTestStore(t)
@@ -1069,4 +1100,143 @@ func TestDeleteJobRefusedWhileImporting(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("expected the IMPORTING job to survive the refused delete, got %+v", views)
 	}
+}
+
+func TestListDashboardJobsStatusOrderAndIndependentFacets(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	activeID := insertDashboardTestJob(t, s, 2001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "Artist", "peer_active", 0, now)
+	importingID := insertDashboardTestJob(t, s, 2002, core.SourceLidarr, core.StateImporting, core.TransferStalled, "Importing", "Artist", "peer_importing", 0, now.Add(time.Second))
+	queuedID := insertDashboardTestJob(t, s, 2003, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
+	stalledID := insertDashboardTestJob(t, s, 2004, core.SourceManual, core.StateDownloading, core.TransferStalled, "Stalled", "Artist", "peer_stalled", 0, now.Add(3*time.Second))
+	failedLidarrID := insertDashboardTestJob(t, s, 2005, core.SourceLidarr, core.StateFailed, core.TransferInProgress, "Failed Lidarr", "Artist", "peer_failed", 0, now.Add(4*time.Second))
+	failedManualID := insertDashboardTestJob(t, s, 2006, core.SourceManual, core.StateDownloading, core.TransferErrored, "Failed Manual", "Artist", "peer_failed_manual", 0, now.Add(5*time.Second))
+	parkedID := insertDashboardTestJob(t, s, 2007, core.SourceManual, core.StateParked, core.TransferInProgress, "Parked", "Artist", "peer_parked", 0, now.Add(6*time.Second))
+	doneID := insertDashboardTestJob(t, s, 2008, core.SourceLidarr, core.StateDone, core.TransferInProgress, "Done Percent%_Literal", "Artist", "Visible_Peer", 0, now.Add(7*time.Second))
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	gotIDs := make([]int64, len(page.Jobs))
+	for i, job := range page.Jobs {
+		gotIDs[i] = job.Job.ID
+	}
+	wantIDs := []int64{activeID, importingID, queuedID, stalledID, failedLidarrID, failedManualID, parkedID, doneID}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
+		t.Errorf("status order ids = %v, want %v", gotIDs, wantIDs)
+	}
+	if page.Total != 8 || page.Facets.Status.All != 8 || page.Facets.Status.Active != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Queued != 1 || page.Facets.Status.Stalled != 1 || page.Facets.Status.Failed != 2 || page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
+		t.Errorf("unexpected unfiltered counts: total=%d status=%+v", page.Total, page.Facets.Status)
+	}
+	if page.Facets.Source.All != 8 || page.Facets.Source.Lidarr != 5 || page.Facets.Source.Manual != 3 {
+		t.Errorf("unexpected source facets: %+v", page.Facets.Source)
+	}
+
+	importing, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "importing", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs importing: %v", err)
+	}
+	if importing.Total != 1 || len(importing.Jobs) != 1 || importing.Jobs[0].Job.ID != importingID {
+		t.Errorf("importing page = total %d jobs %+v", importing.Total, importing.Jobs)
+	}
+
+	filtered, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "failed", Source: "lidarr"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs filtered: %v", err)
+	}
+	if filtered.Total != 1 || len(filtered.Jobs) != 1 || filtered.Jobs[0].Job.ID != failedLidarrID {
+		t.Errorf("filtered page = total %d jobs %+v", filtered.Total, filtered.Jobs)
+	}
+	// Status ignores the selected status but still respects source=lidarr.
+	if filtered.Facets.Status.All != 5 || filtered.Facets.Status.Active != 1 || filtered.Facets.Status.Importing != 1 || filtered.Facets.Status.Failed != 1 || filtered.Facets.Status.Done != 1 {
+		t.Errorf("status facets did not ignore only status: %+v", filtered.Facets.Status)
+	}
+	// Source ignores source=lidarr but still respects status=failed.
+	if filtered.Facets.Source.All != 2 || filtered.Facets.Source.Lidarr != 1 || filtered.Facets.Source.Manual != 1 {
+		t.Errorf("source facets did not ignore only source: %+v", filtered.Facets.Source)
+	}
+
+	literal, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all", Query: "%_literal"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs literal q: %v", err)
+	}
+	if literal.Total != 1 || len(literal.Jobs) != 1 || literal.Jobs[0].Job.ID != doneID {
+		t.Errorf("literal q page = total %d jobs %+v", literal.Total, literal.Jobs)
+	}
+	peerSearch, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all", Query: "visible_peer"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs peer q: %v", err)
+	}
+	if peerSearch.Total != 1 || peerSearch.Jobs[0].Job.ID != doneID {
+		t.Errorf("peer q page = total %d jobs %+v", peerSearch.Total, peerSearch.Jobs)
+	}
+	idSearch, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all", Query: fmt.Sprint(activeID)})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs id q: %v", err)
+	}
+	if idSearch.Total != 0 || len(idSearch.Jobs) != 0 {
+		t.Errorf("id-only q unexpectedly matched jobs: total %d jobs %+v", idSearch.Total, idSearch.Jobs)
+	}
+}
+
+func TestListDashboardJobsPaginationAndOutOfRangePage(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 13; i++ {
+		insertDashboardTestJob(t, s, int64(3000+i), core.SourceLidarr, core.StateWanted, "", fmt.Sprintf("Album %02d", i), "Artist", "", 0, now.Add(time.Duration(i)*time.Second))
+	}
+
+	first, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "album", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	second, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Page: 1, Sort: "album", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	outside, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Page: 99, Sort: "album", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("out-of-range page: %v", err)
+	}
+	if len(first.Jobs) != int(DashboardJobsPageSize) || first.Total != 13 {
+		t.Errorf("first = len %d total %d", len(first.Jobs), first.Total)
+	}
+	if len(second.Jobs) != 1 || second.Total != 13 || second.Jobs[0].Job.Title != "Album 12" {
+		t.Errorf("second = len %d total %d jobs %+v", len(second.Jobs), second.Total, second.Jobs)
+	}
+	if outside.Jobs == nil || len(outside.Jobs) != 0 || outside.Total != 13 {
+		t.Errorf("outside = jobs %#v total %d, want non-nil empty and 13", outside.Jobs, outside.Total)
+	}
+}
+
+func TestListDashboardJobsPersistedSortsAndIDTieBreak(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	betaID := insertDashboardTestJob(t, s, 4001, core.SourceLidarr, core.StateWanted, "", "beta", "Artist", "", 2, now)
+	alphaZID := insertDashboardTestJob(t, s, 4002, core.SourceLidarr, core.StateWanted, "", "Alpha", "Zebra", "", 1, now)
+	alphaAID := insertDashboardTestJob(t, s, 4003, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "alpha", "Able", "zoe", 2, now)
+	aliceID := insertDashboardTestJob(t, s, 4004, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "gamma", "Artist", "alice", 0, now)
+
+	assertOrder := func(sort, dir string, want []int64) {
+		t.Helper()
+		page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: sort, Dir: dir, Filter: "all", Source: "all"})
+		if err != nil {
+			t.Fatalf("sort %s %s: %v", sort, dir, err)
+		}
+		got := make([]int64, len(page.Jobs))
+		for i, job := range page.Jobs {
+			got[i] = job.Job.ID
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("sort %s %s = %v, want %v", sort, dir, got, want)
+		}
+	}
+	assertOrder("album", "asc", []int64{alphaAID, alphaZID, betaID, aliceID})
+	assertOrder("peer", "desc", []int64{alphaAID, aliceID, betaID, alphaZID})
+	assertOrder("try", "desc", []int64{betaID, alphaAID, alphaZID, aliceID})
 }

@@ -36,7 +36,10 @@ func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     {
 func noopTransferBytes(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
 	return nil, nil
 }
-func noopJobs(ctx context.Context) ([]core.JobView, error)                { return nil, nil }
+func noopJobs(ctx context.Context) ([]core.JobView, error) { return nil, nil }
+func noopPagedJobs(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+	return PagedJobsResult{Jobs: []core.JobView{}}, nil
+}
 func noopCharts(ctx context.Context) (ChartsData, error)                  { return ChartsData{}, nil }
 func noopShares() ShareStatsReport                                        { return ShareStatsReport{} }
 func noopRescanShares() error                                             { return nil }
@@ -65,6 +68,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		Registry:         reg,
 		Status:           func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil },
 		Jobs:             func(ctx context.Context) ([]core.JobView, error) { return nil, nil },
+		PagedJobs:        noopPagedJobs,
 		Cancel:           func(ctx context.Context, jobID int64) error { return nil },
 		JobDetail:        noopJobDetail,
 		JobEvents:        noopJobEvents,
@@ -307,6 +311,136 @@ func TestMetricsEndpointServes(t *testing.T) {
 	}
 }
 
+func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var gotQuery PagedJobsQuery
+	deps := testServerDeps(reg)
+	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+		gotQuery = query
+		return PagedJobsResult{
+			Jobs: []core.JobView{{
+				Job:  core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateImporting, Source: core.SourceLidarr},
+				Peer: "flac_hoarder",
+			}},
+			Total: 25,
+			Facets: JobFacets{
+				Status: JobStatusFacets{All: 30, Active: 3, Importing: 2, Queued: 4, Stalled: 5, Failed: 6, Parked: 7, Done: 3},
+				Source: JobSourceFacets{All: 8, Manual: 2, Lidarr: 6},
+			},
+		}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs?page=2&sort=album&dir=desc&filter=importing&source=lidarr&q=%20Four%20%20", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	wantQuery := PagedJobsQuery{Page: 2, Sort: "album", Dir: "desc", Filter: "importing", Source: "lidarr", Query: "Four"}
+	if !reflect.DeepEqual(gotQuery, wantQuery) {
+		t.Fatalf("query = %+v, want %+v", gotQuery, wantQuery)
+	}
+	var got struct {
+		Jobs   []jobDTO  `json:"jobs"`
+		Total  int64     `json:"total"`
+		Facets JobFacets `json:"facets"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Jobs) != 1 || got.Jobs[0].ID != 7 || got.Jobs[0].Status != "active" || got.Jobs[0].State != string(core.StateImporting) {
+		t.Errorf("jobs = %+v, want IMPORTING job serialized with active status", got.Jobs)
+	}
+	if got.Total != 25 || got.Facets.Status.Importing != 2 || got.Facets.Source.Lidarr != 6 {
+		t.Errorf("page metadata = total %d facets %+v", got.Total, got.Facets)
+	}
+}
+
+func TestPagedJobsEndpointDefaultsAndEmptyJobsArray(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	var gotQuery PagedJobsQuery
+	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+		gotQuery = query
+		return PagedJobsResult{Jobs: nil}, nil
+	}
+	h := NewServer(deps)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+
+	wantQuery := PagedJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"}
+	if !reflect.DeepEqual(gotQuery, wantQuery) {
+		t.Fatalf("query = %+v, want %+v", gotQuery, wantQuery)
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"jobs":[]`) {
+		t.Fatalf("response = %d %s, want jobs as []", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPagedJobsEndpointRejectsInvalidQueries(t *testing.T) {
+	invalid := []string{
+		"?page=-1",
+		"?page=not-a-number",
+		"?page=999999999999999999999999",
+		"?page=9223372036854775807",
+		"?sort=nope",
+		"?dir=sideways",
+		"?filter=nope",
+		"?source=nope",
+		"?unknown=x",
+		"?page=1&page=2",
+		"?q=a&q=b",
+		"?q=%zz",
+	}
+	for _, suffix := range invalid {
+		t.Run(suffix, func(t *testing.T) {
+			deps := testServerDeps(prometheus.NewRegistry())
+			called := false
+			deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+				called = true
+				return PagedJobsResult{}, nil
+			}
+			rec := httptest.NewRecorder()
+			NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs"+suffix, nil))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+			if called {
+				t.Fatal("PagedJobs called for invalid query")
+			}
+		})
+	}
+}
+
+func TestPagedJobsEndpointReturns500OnStoreError(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+		return PagedJobsResult{}, errors.New("db exploded")
+	}
+	rec := httptest.NewRecorder()
+	NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestAllJobsEndpointPreservesBareArrayAndAllJobsDependency(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.Jobs = func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{{Job: core.AlbumJob{ID: 9, State: core.StateWanted}}}, nil
+	}
+	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+		t.Fatal("PagedJobs must not serve /api/jobs/all")
+		return PagedJobsResult{}, nil
+	}
+	rec := httptest.NewRecorder()
+	NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Body.String(), "[") {
+		t.Fatalf("response = %d %s, want bare array", rec.Code, rec.Body.String())
+	}
+}
+
 // TestJobsEndpointReturnsJobList also verifies BytesDone/BytesTotal come
 // from the JobView's album totals (AlbumBytesDone/AlbumBytesTotal) rather
 // than the single latest Transfer — the fixture deliberately gives them
@@ -330,7 +464,7 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -482,7 +616,7 @@ func TestJobsEndpointReturnsCandidateMetadata(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -528,7 +662,7 @@ func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -570,7 +704,7 @@ func TestJobsEndpointReturnsCreatedAtDistinctFromUpdatedAt(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -605,7 +739,7 @@ func TestJobsEndpointReturnsRetriesAndNotBeforeForWantedJob(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -635,7 +769,7 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 	deps.Jobs = jobs
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -675,7 +809,7 @@ func TestJobsEndpointIncludesLiveAlbumSpeedQueuePositionAndETA(t *testing.T) {
 	deps.LiveTransfers = live
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -731,7 +865,7 @@ func TestJobsEndpointETAUsesAlbumBytesRemainingNotLiveOnly(t *testing.T) {
 	deps.LiveTransfers = live
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -765,7 +899,7 @@ func TestJobsEndpointOmitsLiveFieldsWhenNoMatch(t *testing.T) {
 	deps.LiveTransfers = noopLiveTransfers
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -800,7 +934,7 @@ func TestJobsEndpointDegradesUnenrichedWhenLiveTransfersErrors(t *testing.T) {
 	}
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -857,7 +991,7 @@ func TestJobsEndpointBytesDoneUsesTransferBytesForLiveMatchedCandidate(t *testin
 	deps.TransferBytes = transferBytes
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/all", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 

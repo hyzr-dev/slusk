@@ -1,7 +1,13 @@
-import { Fragment, memo, useCallback, useState } from 'react';
+import { Fragment, memo, useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Job } from '../api/types';
-import { useJobs } from '../api/queries';
+import { JOBS_PAGE_SIZE, useJobs } from '../api/queries';
+import type {
+  Job,
+  JobPageDirection,
+  JobPageSort,
+  JobSourceFilter,
+  JobStatusFilter,
+} from '../api/types';
 import Chip from '../components/tui/Chip';
 import EmptyState from '../components/tui/EmptyState';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
@@ -9,27 +15,21 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatSpeed, percent } from '../format';
 import { t } from '../strings';
-import { countByStatus, matchesFilters, type SourceFilter, type StatusFilter } from './jobFilter';
 import JobExpansion from './JobExpansion';
 import styles from './Jobs.module.css';
 
-// The seven filter chips (mock, docs/design/slskdarr-tui.dc.html:1089). No
-// "Importing" chip — the mock has no such bucket, and IMPORTING jobs stay
-// visible under ALL and carry their own IM tag; jobFilter.ts's separate
-// 'importing' StatusFilter value (used by other, not-yet-reskinned views'
-// tests) is simply never selected here.
-type ChipKey = Exclude<StatusFilter, 'importing'>;
+// The approved status row keeps the mock's seven chips. IMPORTING remains a
+// supported server filter/facet and is represented under ALL by its IM tag.
+type ChipKey = Exclude<JobStatusFilter, 'importing'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
 // mock doesn't draw this control — its designer was working against a data
-// model that predates the source axis, though the mock does know the
-// concept (the small "●" dot on manual rows) — jobFilter.ts's SourceFilter
-// machinery would otherwise be unreachable from this view, silently
-// regressing a shipped feature. Kept in the same TUI chip idiom as the
-// status row, just visually separated by a divider so it reads as a second
-// axis rather than more status values.
-const SOURCE_CHIP_ORDER: SourceFilter[] = ['all', 'manual', 'lidarr'];
+// model that predates the source axis, though the mock does know the concept
+// (the small "●" dot on manual rows). Source filtering is a shipped feature,
+// so it stays in the same TUI chip idiom as the status row, visually separated
+// by a divider so it reads as a second axis rather than more status values.
+const SOURCE_CHIP_ORDER: JobSourceFilter[] = ['all', 'manual', 'lidarr'];
 
 // Per-row tick resolution in the jobs grid, matching the mock exactly.
 const ROW_TICKS = 26;
@@ -186,42 +186,129 @@ function jobRowPropsEqual(prev: JobRowProps, next: JobRowProps): boolean {
 
 const JobRow = memo(JobRowImpl, jobRowPropsEqual);
 
+type PageItem = number | 'ellipsis';
+
+// Always exposes the boundaries while keeping the control compact for large
+// collections. A one-page neighbourhood around the current page is enough to
+// move locally; first/last provide the long jump.
+export function paginationItems(page: number, totalPages: number): PageItem[] {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i);
+  const pages = [...new Set([0, totalPages - 1, page - 1, page, page + 1])]
+    .filter((candidate) => candidate >= 0 && candidate < totalPages)
+    .sort((a, b) => a - b);
+  const items: PageItem[] = [];
+  pages.forEach((candidate, index) => {
+    if (index > 0 && candidate - pages[index - 1] > 1) items.push('ellipsis');
+    items.push(candidate);
+  });
+  return items;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+}
+
+interface SortHeaderProps {
+  label: string;
+  sortKey: JobPageSort;
+  activeSort: JobPageSort;
+  direction: JobPageDirection;
+  onSort: (sort: JobPageSort) => void;
+  right?: boolean;
+}
+
+function SortHeader({ label, sortKey, activeSort, direction, onSort, right }: SortHeaderProps) {
+  const active = activeSort === sortKey;
+  return (
+    <span
+      role="columnheader"
+      aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+      className={right ? styles.headRight : undefined}
+    >
+      <button type="button" className={styles.sortButton} onClick={() => onSort(sortKey)}>
+        {label}
+        {active && <span aria-hidden className={styles.sortDirection}>{direction === 'asc' ? '↑' : '↓'}</span>}
+      </button>
+    </span>
+  );
+}
+
 export default function Jobs() {
-  const jobsQuery = useJobs();
-  const jobs = jobsQuery.data ?? [];
-  const phase = queryPhase(jobsQuery);
+  const [page, setPage] = useState(0);
+  const [sort, setSort] = useState<JobPageSort>('st');
+  const [direction, setDirection] = useState<JobPageDirection>('asc');
   const [search, setSearch] = useState('');
-  const [status, setStatus] = useState<StatusFilter>('all');
-  const [source, setSource] = useState<SourceFilter>('all');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [status, setStatus] = useState<JobStatusFilter>('all');
+  const [source, setSource] = useState<JobSourceFilter>('all');
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const filtered = jobs.filter((j) => matchesFilters(j, search, status, source));
-  const counts = countByStatus(jobs, search, source);
-  // What the ALL status chip would show if clicked: every job matching the
-  // search and source regardless of status, i.e. the sum of every bucket
-  // above — not jobs.length, which ignores those two filters and so can
-  // disagree with what actually renders when the chip is clicked.
-  const allCount = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
-  // Source counts mirror the same "what would this chip show" contract, but
-  // jobFilter.ts has no dedicated helper for this axis — reusing
-  // matchesFilters directly here is simpler than adding one for three values.
-  // Deliberately NOT `allCount`: that sum respects the current *source*
-  // filter (it comes from countByStatus(jobs, search, source)) while
-  // ignoring *status* — the two axes must count by the same rule, so this
-  // recomputes the source-ALL bucket the same way as manual/lidarr below,
-  // filtering by search and status but leaving source itself at 'all'.
-  const sourceCounts: Record<SourceFilter, number> = {
-    all: jobs.filter((j) => matchesFilters(j, search, status, 'all')).length,
-    manual: jobs.filter((j) => matchesFilters(j, search, status, 'manual')).length,
-    lidarr: jobs.filter((j) => matchesFilters(j, search, status, 'lidarr')).length,
-  };
+  const jobsQuery = useJobs({ page, sort, dir: direction, filter: status, source, q: debouncedSearch });
+  const result = jobsQuery.data;
+  const jobs = result?.jobs ?? [];
+  const total = result?.total ?? 0;
+  const phase = queryPhase(jobsQuery);
+  const totalPages = Math.max(1, Math.ceil(total / JOBS_PAGE_SIZE));
 
-  // Stable across renders (no deps), so JobRow's memo comparator above is
-  // never defeated by a fresh function identity on every Jobs render.
+  // A mutation or narrower filter can make the current page cease to exist.
+  // Correct it as soon as the new total arrives instead of leaving an empty
+  // out-of-range page selected.
+  useEffect(() => {
+    const lastPage = Math.max(0, Math.ceil(total / JOBS_PAGE_SIZE) - 1);
+    if (result && page > lastPage) {
+      setPage(lastPage);
+      setExpandedId(null);
+    }
+  }, [page, result, total]);
+
   const toggleExpanded = useCallback((id: number) => {
     setExpandedId((prev) => (prev === id ? null : id));
   }, []);
+
+  const goToPage = useCallback((nextPage: number) => {
+    if (nextPage < 0 || nextPage >= totalPages) return;
+    setPage(nextPage);
+    setExpandedId(null);
+  }, [totalPages]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || isEditableTarget(event.target)) return;
+      if (event.key === ',' && page > 0) {
+        event.preventDefault();
+        goToPage(page - 1);
+      } else if (event.key === '.' && page + 1 < totalPages) {
+        event.preventDefault();
+        goToPage(page + 1);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [goToPage, page, totalPages]);
+
+  const resetPage = () => {
+    setPage(0);
+    setExpandedId(null);
+  };
+
+  const changeSort = (nextSort: JobPageSort) => {
+    if (sort === nextSort) {
+      setDirection((current) => (current === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSort(nextSort);
+      setDirection('asc');
+    }
+    resetPage();
+  };
+
+  const start = total === 0 ? 0 : page * JOBS_PAGE_SIZE + 1;
+  const end = Math.min(total, (page + 1) * JOBS_PAGE_SIZE);
 
   return (
     <>
@@ -233,7 +320,10 @@ export default function Jobs() {
             type="text"
             placeholder={t.jobs.searchPlaceholder}
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              resetPage();
+            }}
           />
         </div>
         <div className={styles.chipGroup} role="group" aria-label={t.columns.status}>
@@ -241,9 +331,12 @@ export default function Jobs() {
             <Chip
               key={key}
               label={t.jobs.chipLabel[key]}
-              count={hasData(phase) ? (key === 'all' ? allCount : counts[key]) : undefined}
+              count={hasData(phase) ? result?.facets.status[key] : undefined}
               active={status === key}
-              onClick={() => setStatus(key)}
+              onClick={() => {
+                setStatus(key);
+                resetPage();
+              }}
             />
           ))}
         </div>
@@ -253,9 +346,12 @@ export default function Jobs() {
             <Chip
               key={key}
               label={t.jobs.sourceChipLabel[key]}
-              count={hasData(phase) ? sourceCounts[key] : undefined}
+              count={hasData(phase) ? result?.facets.source[key] : undefined}
               active={source === key}
-              onClick={() => setSource(key)}
+              onClick={() => {
+                setSource(key);
+                resetPage();
+              }}
             />
           ))}
         </div>
@@ -263,26 +359,54 @@ export default function Jobs() {
 
       <div role="table">
         <div role="row" className={`${styles.grid} ${styles.head}`}>
-          <span role="columnheader">{t.jobs.gridHead.status}</span>
-          <span role="columnheader">{t.jobs.gridHead.album}</span>
-          <span role="columnheader">{t.jobs.gridHead.peer}</span>
+          <SortHeader label={t.jobs.gridHead.status} sortKey="st" activeSort={sort} direction={direction} onSort={changeSort} />
+          <SortHeader label={t.jobs.gridHead.album} sortKey="album" activeSort={sort} direction={direction} onSort={changeSort} />
+          <SortHeader label={t.jobs.gridHead.peer} sortKey="peer" activeSort={sort} direction={direction} onSort={changeSort} />
           <span role="columnheader">{t.jobs.gridHead.format}</span>
           <span role="columnheader">{t.jobs.gridHead.progress}</span>
           <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.speed}</span>
           <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.eta}</span>
-          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.tries}</span>
+          <SortHeader label={t.jobs.gridHead.tries} sortKey="try" activeSort={sort} direction={direction} onSort={changeSort} right />
         </div>
 
-        {hasData(phase) &&
-          filtered.map((j) => (
-            <JobRow key={j.id} job={j} expanded={expandedId === j.id} onToggle={toggleExpanded} />
-          ))}
+        {hasData(phase) && jobs.map((job) => (
+          <JobRow key={job.id} job={job} expanded={expandedId === job.id} onToggle={toggleExpanded} />
+        ))}
       </div>
 
-      {/* Both of these sit outside the table: `role="table"` admits only rows,
-          so a notice or an empty state nested inside would be invalid ARIA. */}
+      {/* These sit outside the table because `role="table"` admits only rows. */}
       <QueryNotice phase={phase} />
-      {hasData(phase) && filtered.length === 0 && <EmptyState message={t.jobs.noMatch} />}
+      {hasData(phase) && jobs.length === 0 && <EmptyState message={t.jobs.noMatch} />}
+
+      {hasData(phase) && (
+        <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
+          <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
+          <div className={styles.pageButtons}>
+            <button type="button" className={styles.pageButton} disabled={page === 0} onClick={() => goToPage(page - 1)}>
+              {t.jobs.previousPage}
+            </button>
+            {paginationItems(page, totalPages).map((item, index) =>
+              item === 'ellipsis' ? (
+                <span key={`ellipsis-${index}`} className={styles.ellipsis} aria-hidden>…</span>
+              ) : (
+                <button
+                  type="button"
+                  key={item}
+                  className={`${styles.pageButton} ${item === page ? styles.pageButtonActive : ''}`}
+                  aria-current={item === page ? 'page' : undefined}
+                  aria-label={t.jobs.pageLabel(item + 1)}
+                  onClick={() => goToPage(item)}
+                >
+                  {item + 1}
+                </button>
+              ),
+            )}
+            <button type="button" className={styles.pageButton} disabled={page + 1 >= totalPages} onClick={() => goToPage(page + 1)}>
+              {t.jobs.nextPage}
+            </button>
+          </div>
+        </nav>
+      )}
     </>
   );
 }

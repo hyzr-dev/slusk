@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -46,10 +47,10 @@ const jobViewSelect = `
 		agg.bytes_done, agg.bytes_total, agg.bytes_remaining
 	FROM album_jobs j
 	LEFT JOIN candidates a ON a.id = (
-		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC LIMIT 1
+		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC, id DESC LIMIT 1
 	)
 	LEFT JOIN transfers t ON t.id = (
-		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC LIMIT 1
+		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC, id DESC LIMIT 1
 	)
 	LEFT JOIN LATERAL (
 		SELECT
@@ -172,6 +173,223 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// DashboardJobsPageSize is the fixed number of jobs returned by one dashboard page.
+const DashboardJobsPageSize int64 = 12
+
+// DashboardJobsQuery is the validated, persisted-only query used by the
+// dashboard's paged REST endpoint. Live transfer data must never be threaded
+// into this query because it would make page membership move between polls.
+type DashboardJobsQuery struct {
+	Page   int64
+	Sort   string
+	Dir    string
+	Filter string
+	Source string
+	Query  string
+}
+
+// DashboardStatusFacets contains counts for each dashboard status. All ignores
+// the selected status filter while the individual counts use the same q and
+// source constraints as All.
+type DashboardStatusFacets struct {
+	All       int64
+	Active    int64
+	Importing int64
+	Queued    int64
+	Stalled   int64
+	Failed    int64
+	Parked    int64
+	Done      int64
+}
+
+// DashboardSourceFacets contains counts for each persisted job source. All
+// ignores the selected source while respecting q and status.
+type DashboardSourceFacets struct {
+	All    int64
+	Manual int64
+	Lidarr int64
+}
+
+// DashboardJobsFacets contains the independent status and source facets.
+type DashboardJobsFacets struct {
+	Status DashboardStatusFacets
+	Source DashboardSourceFacets
+}
+
+// DashboardJobsPage is one persisted dashboard page plus the matching total
+// and independent facet counts.
+type DashboardJobsPage struct {
+	Jobs   []core.JobView
+	Total  int64
+	Facets DashboardJobsFacets
+}
+
+const dashboardJobStatusSQL = `CASE
+	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
+	WHEN j.state = 'FAILED' THEN 'failed'
+	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
+	WHEN j.state = 'IMPORTING' THEN 'importing'
+	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
+	WHEN t.state = 'STALLED' THEN 'stalled'
+	WHEN t.state = 'IN_PROGRESS' THEN 'active'
+	WHEN t.state IN ('ERRORED', 'CANCELLED') THEN 'failed'
+	ELSE 'queued'
+END`
+
+const dashboardJobCountFrom = `
+	FROM album_jobs j
+	LEFT JOIN candidates a ON a.id = (
+		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC, id DESC LIMIT 1
+	)
+	LEFT JOIN transfers t ON t.id = (
+		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC, id DESC LIMIT 1
+	)`
+
+func validateDashboardJobsQuery(q DashboardJobsQuery) error {
+	if q.Page < 0 || q.Page > (int64(^uint64(0)>>1)/DashboardJobsPageSize) {
+		return fmt.Errorf("invalid dashboard jobs page %d", q.Page)
+	}
+	switch q.Sort {
+	case "st", "album", "peer", "try":
+	default:
+		return fmt.Errorf("invalid dashboard jobs sort %q", q.Sort)
+	}
+	switch q.Dir {
+	case "asc", "desc":
+	default:
+		return fmt.Errorf("invalid dashboard jobs direction %q", q.Dir)
+	}
+	switch q.Filter {
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done":
+	default:
+		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
+	}
+	switch q.Source {
+	case "all", "manual", "lidarr":
+	default:
+		return fmt.Errorf("invalid dashboard jobs source %q", q.Source)
+	}
+	return nil
+}
+
+func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool) (string, []any) {
+	clauses := []string{"j.state != $1"}
+	args := []any{string(core.StateCancelled)}
+	bind := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if q.Query != "" {
+		placeholder := bind(q.Query)
+		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(t.username, '')), lower("+placeholder+")) > 0)")
+	}
+	if includeStatus && q.Filter != "all" {
+		clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
+	}
+	if includeSource && q.Source != "all" {
+		clauses = append(clauses, "j.source = "+bind(q.Source))
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func dashboardJobsOrder(q DashboardJobsQuery) string {
+	direction := "ASC"
+	if q.Dir == "desc" {
+		direction = "DESC"
+	}
+	switch q.Sort {
+	case "st":
+		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
+			WHEN 'active' THEN 1 WHEN 'importing' THEN 2 WHEN 'queued' THEN 3
+			WHEN 'stalled' THEN 4 WHEN 'failed' THEN 5 WHEN 'parked' THEN 6
+			WHEN 'done' THEN 7 ELSE 8 END ` + direction + `, j.id ASC`
+	case "album":
+		return " ORDER BY lower(j.title) " + direction + ", lower(j.artist_name) " + direction + ", j.id ASC"
+	case "peer":
+		return " ORDER BY (NULLIF(t.username, '') IS NULL) ASC, t.username " + direction + ", j.id ASC"
+	case "try":
+		return " ORDER BY j.retries " + direction + ", j.id ASC"
+	default:
+		panic("dashboardJobsOrder called without validation")
+	}
+}
+
+// ListDashboardJobs returns one persisted-only page, total, and facets from a
+// repeatable-read snapshot. This keeps the page and its counts mutually
+// consistent even while pipeline modules update jobs concurrently.
+func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (DashboardJobsPage, error) {
+	if err := validateDashboardJobsQuery(q); err != nil {
+		return DashboardJobsPage{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
+	statusSQL := `SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE status = 'active'),
+		COUNT(*) FILTER (WHERE status = 'importing'),
+		COUNT(*) FILTER (WHERE status = 'queued'),
+		COUNT(*) FILTER (WHERE status = 'stalled'),
+		COUNT(*) FILTER (WHERE status = 'failed'),
+		COUNT(*) FILTER (WHERE status = 'parked'),
+		COUNT(*) FILTER (WHERE status = 'done')
+		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + dashboardJobCountFrom + statusWhere + `) dashboard_jobs`
+	var page DashboardJobsPage
+	if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
+		&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
+		&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
+		&page.Facets.Status.Parked, &page.Facets.Status.Done,
+	); err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
+	}
+
+	sourceWhere, sourceArgs := dashboardJobsWhere(q, true, false)
+	sourceSQL := `SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE source = 'manual'),
+		COUNT(*) FILTER (WHERE source = 'lidarr')
+		FROM (SELECT j.source AS source` + dashboardJobCountFrom + sourceWhere + `) dashboard_jobs`
+	if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
+		&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
+	); err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: source facets: %w", err)
+	}
+
+	where, args := dashboardJobsWhere(q, true, true)
+	countSQL := `SELECT COUNT(*)` + dashboardJobCountFrom + where
+	if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
+	}
+
+	args = append(args, DashboardJobsPageSize, q.Page*DashboardJobsPageSize)
+	rows, err := tx.QueryContext(ctx, jobViewSelect+where+dashboardJobsOrder(q)+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
+	if err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: page: %w", err)
+	}
+	page.Jobs = make([]core.JobView, 0, DashboardJobsPageSize)
+	for rows.Next() {
+		view, scanErr := scanJobView(rows)
+		if scanErr != nil {
+			rows.Close()
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: scan: %w", scanErr)
+		}
+		page.Jobs = append(page.Jobs, view)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: close rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: commit: %w", err)
+	}
+	return page, nil
 }
 
 // JobWithTransfer looks up a single job (regardless of state) with its most

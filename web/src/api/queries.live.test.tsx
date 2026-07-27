@@ -1,16 +1,20 @@
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_JOB_PAGE_PARAMS,
+  jobsPageUrl,
+  mergeLiveJobPage,
   pickJobDetail,
   mergeLiveJobs,
   mergeThroughputSamples,
   queryKeys,
+  useAllJobs,
   useJobDetail,
   useJobs,
 } from './queries';
-import type { Job, JobDetail, ScopedLivePayload, ThroughputSample } from './types';
+import type { Job, JobDetail, JobPage, ScopedLivePayload, ThroughputSample } from './types';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -90,6 +94,37 @@ describe('mergeLiveJobs', () => {
   it('passes through jobs unchanged when live data is undefined', () => {
     const jobs = [makeJob()];
     expect(mergeLiveJobs(jobs, undefined)).toBe(jobs);
+  });
+});
+
+describe('paged jobs transport', () => {
+  it('isolates every request primitive in query keys and URL-encodes search values', () => {
+    const params = { ...DEFAULT_JOB_PAGE_PARAMS, page: 2, sort: 'peer' as const, dir: 'desc' as const, filter: 'failed' as const, source: 'manual' as const, q: 'Miles & Blue' };
+    const key = queryKeys.jobsPage(params);
+
+    expect(key).toEqual(['jobs', 'page', 2, 'peer', 'desc', 'failed', 'manual', 'Miles & Blue']);
+    expect(queryKeys.jobsPage({ ...params, source: 'lidarr' })).not.toEqual(key);
+    expect(jobsPageUrl(params)).toBe('/api/jobs?page=2&sort=peer&dir=desc&filter=failed&source=manual&q=Miles+%26+Blue');
+  });
+
+  it('overlays current-page IDs only while preserving order and metadata', () => {
+    const page: JobPage = {
+      jobs: [makeJob({ id: 2 }), makeJob({ id: 1 })],
+      total: 25,
+      facets: {
+        status: { all: 25, active: 2, importing: 1, queued: 3, stalled: 4, failed: 5, parked: 6, done: 4 },
+        source: { all: 25, manual: 5, lidarr: 20 },
+      },
+    };
+    const merged = mergeLiveJobPage(page, [
+      { id: 1, bytesDone: 99, bytesTotal: 100, speed: 5000 },
+      { id: 3, bytesDone: 10, bytesTotal: 20, speed: 1000 },
+    ]);
+
+    expect(merged?.jobs.map((job) => job.id)).toEqual([2, 1]);
+    expect(merged?.jobs[1]).toMatchObject({ id: 1, bytesDone: 99, speed: 5000 });
+    expect(merged?.total).toBe(25);
+    expect(merged?.facets).toBe(page.facets);
   });
 });
 
@@ -195,28 +230,46 @@ function makeWrapper(queryClient: QueryClient) {
   };
 }
 
+describe('all-jobs hook', () => {
+  it('uses the dedicated complete-collection endpoint and cache key', async () => {
+    const fetchMock = vi.fn((_url: string) => Promise.resolve(new Response('[]', { status: 200 })));
+    vi.stubGlobal('fetch', fetchMock);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { result } = renderHook(() => useAllJobs(), { wrapper: makeWrapper(queryClient) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/jobs/all');
+    expect(queryClient.getQueryData(queryKeys.jobsAll)).toEqual([]);
+  });
+});
+
 describe('useJobs live overlay', () => {
-  it('merges live fields into the hook output as the live cache changes', () => {
+  it('merges live fields into the page hook output as the live cache changes', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })];
-    queryClient.setQueryData(queryKeys.jobs, jobs);
+    const page: JobPage = {
+      jobs: [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })],
+      total: 1,
+      facets: {
+        status: { all: 1, active: 1, importing: 0, queued: 0, stalled: 0, failed: 0, parked: 0, done: 0 },
+        source: { all: 1, manual: 0, lidarr: 1 },
+      },
+    };
+    queryClient.setQueryData(queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS), page);
 
-    const { result, rerender } = renderHook(() => useJobs(), { wrapper: makeWrapper(queryClient) });
-    expect(result.current.data?.[0].speed).toBeUndefined();
+    const { result, rerender } = renderHook(() => useJobs(DEFAULT_JOB_PAGE_PARAMS), { wrapper: makeWrapper(queryClient) });
+    expect(result.current.data?.jobs[0].speed).toBeUndefined();
 
     queryClient.setQueryData(queryKeys.live, { jobs: [{ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 }], down: 4000 });
     rerender();
-    expect(result.current.data?.[0]).toMatchObject({ bytesDone: 80, speed: 4000 });
+    expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 80, speed: 4000 });
 
-    // Job 1 drops out of the next frame — reverts to REST values. The
-    // overlay is never written back into the jobs cache, so what comes back
-    // is the pristine REST object, which has no `speed` key at all (hence
-    // the per-property assertion — see the note in pickJobDetail's test).
     queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0 });
     rerender();
-    expect(result.current.data?.[0].bytesDone).toBe(50);
-    expect(result.current.data?.[0].speed).toBeUndefined();
+    expect(result.current.data?.jobs[0].bytesDone).toBe(50);
+    expect(result.current.data?.jobs[0].speed).toBeUndefined();
+    expect(result.current.data?.total).toBe(1);
   });
 });
 
