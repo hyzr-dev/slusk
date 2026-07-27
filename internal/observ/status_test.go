@@ -27,9 +27,9 @@ func TestDashboardStatus(t *testing.T) {
 			want: "queued",
 		},
 		{
-			name: "importing is active",
+			name: "importing is distinct",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateImporting}},
-			want: "active",
+			want: "importing",
 		},
 		{
 			name: "downloading with no transfer yet is queued",
@@ -55,6 +55,11 @@ func TestDashboardStatus(t *testing.T) {
 		{
 			name: "job done is done",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateDone}},
+			want: "done",
+		},
+		{
+			name: "legacy completed job is done",
+			v:    core.JobView{Job: core.AlbumJob{State: core.StateCompleted}},
 			want: "done",
 		},
 		{

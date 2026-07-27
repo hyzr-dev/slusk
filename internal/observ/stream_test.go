@@ -606,6 +606,10 @@ func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 			},
 		}, nil
 	}
+	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+		t.Fatal("GET /api/stream must never call PagedJobs")
+		return PagedJobsResult{}, nil
+	}
 	deps.JobDetail = func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 		return core.JobDetail{
 			Job: core.AlbumJob{ID: jobID},

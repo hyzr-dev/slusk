@@ -1,6 +1,6 @@
 // Package observ: status.go maps internal job/transfer states to the small
 // display vocabulary the dashboard's Queue view uses (queued/active/
-// stalled/done/failed/parked), decoupling the UI from the pipeline's state
+// importing/stalled/done/failed/parked), decoupling the UI from the pipeline's state
 // machine.
 package observ
 
@@ -9,7 +9,7 @@ import "github.com/samuelenocsson/slskdarr/internal/core"
 // dashboardStatus derives the dashboard's coarse status label for a job view.
 func dashboardStatus(v core.JobView) string {
 	switch v.Job.State {
-	case core.StateDone:
+	case core.StateDone, core.StateCompleted:
 		return "done"
 	case core.StateFailed:
 		return "failed"
@@ -23,7 +23,7 @@ func dashboardStatus(v core.JobView) string {
 	case core.StateWanted, core.StateSelecting:
 		return "queued"
 	case core.StateImporting:
-		return "active"
+		return "importing"
 	}
 	if v.Transfer != nil {
 		switch v.Transfer.State {

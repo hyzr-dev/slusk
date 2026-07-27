@@ -268,6 +268,31 @@ func main() {
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)
 	}
+	pagedJobsFn := func(ctx context.Context, query observ.PagedJobsQuery) (observ.PagedJobsResult, error) {
+		page, err := st.ListDashboardJobs(ctx, store.DashboardJobsQuery{
+			Page: query.Page, Sort: query.Sort, Dir: query.Dir,
+			Filter: query.Filter, Source: query.Source, Query: query.Query,
+		})
+		if err != nil {
+			return observ.PagedJobsResult{}, err
+		}
+		return observ.PagedJobsResult{
+			Jobs:  page.Jobs,
+			Total: page.Total,
+			Facets: observ.JobFacets{
+				Status: observ.JobStatusFacets{
+					All: page.Facets.Status.All, Active: page.Facets.Status.Active,
+					Importing: page.Facets.Status.Importing, Queued: page.Facets.Status.Queued,
+					Stalled: page.Facets.Status.Stalled, Failed: page.Facets.Status.Failed,
+					Parked: page.Facets.Status.Parked, Done: page.Facets.Status.Done,
+				},
+				Source: observ.JobSourceFacets{
+					All: page.Facets.Source.All, Manual: page.Facets.Source.Manual,
+					Lidarr: page.Facets.Source.Lidarr,
+				},
+			},
+		}, nil
+	}
 	jobDetailFn := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 		return st.JobDetail(ctx, jobID)
 	}
@@ -504,6 +529,7 @@ func main() {
 		Version:              version,
 		Status:               statusFn,
 		Jobs:                 jobsFn,
+		PagedJobs:            pagedJobsFn,
 		Cancel:               jobs.Cancel,
 		Retry:                jobs.Retry,
 		SearchJob:            jobs.ForceSearch,
