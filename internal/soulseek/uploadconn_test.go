@@ -21,6 +21,57 @@ type readSeeker struct{ r *bytes.Reader }
 func (rs *readSeeker) Read(p []byte) (int, error)                   { return rs.r.Read(p) }
 func (rs *readSeeker) Seek(offset int64, whence int) (int64, error) { return rs.r.Seek(offset, whence) }
 
+type fixedWriteConn struct {
+	n   int
+	err error
+}
+
+func (*fixedWriteConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *fixedWriteConn) Write(p []byte) (int, error)    { return min(c.n, len(p)), c.err }
+func (*fixedWriteConn) Close() error                     { return nil }
+func (*fixedWriteConn) LocalAddr() net.Addr              { return nil }
+func (*fixedWriteConn) RemoteAddr() net.Addr             { return nil }
+func (*fixedWriteConn) SetDeadline(time.Time) error      { return nil }
+func (*fixedWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (*fixedWriteConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestProgressWriterAggregatesActualSocketWriteCounts(t *testing.T) {
+	total := &atomic.Uint64{}
+	firstJob := &atomic.Uint64{}
+	secondJob := &atomic.Uint64{}
+	first := &progressWriter{conn: &fixedWriteConn{n: 4}, idleTimeout: time.Second, written: firstJob, totalWritten: total}
+	second := &progressWriter{conn: &fixedWriteConn{n: 6}, idleTimeout: time.Second, written: secondJob, totalWritten: total}
+
+	if n, err := first.Write(make([]byte, 4)); err != nil || n != 4 {
+		t.Fatalf("first Write = %d, %v", n, err)
+	}
+	if n, err := second.Write(make([]byte, 6)); err != nil || n != 6 {
+		t.Fatalf("second Write = %d, %v", n, err)
+	}
+	if firstJob.Load() != 4 || secondJob.Load() != 6 || total.Load() != 10 {
+		t.Fatalf("write counters = first:%d second:%d total:%d, want 4/6/10", firstJob.Load(), secondJob.Load(), total.Load())
+	}
+}
+
+func TestProgressWriterShortWriteCountsOnlyReturnedBytes(t *testing.T) {
+	job := &atomic.Uint64{}
+	total := &atomic.Uint64{}
+	writer := &progressWriter{
+		conn:         &fixedWriteConn{n: 3, err: io.ErrUnexpectedEOF},
+		idleTimeout:  time.Second,
+		written:      job,
+		totalWritten: total,
+	}
+
+	n, err := writer.Write(make([]byte, 10))
+	if n != 3 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Write = %d, %v, want 3, unexpected EOF", n, err)
+	}
+	if job.Load() != 3 || total.Load() != 3 {
+		t.Fatalf("short-write counters = job:%d total:%d, want 3/3", job.Load(), total.Load())
+	}
+}
+
 func TestStreamUploadConnResumeOffsets(t *testing.T) {
 	payload := []byte("0123456789")
 	for _, offset := range []uint64{0, 4, uint64(len(payload))} {
@@ -54,7 +105,8 @@ func TestStreamUploadConnResumeOffsets(t *testing.T) {
 			// exactly one attempt and must not accumulate across calls.
 			sent := &atomic.Uint64{}
 			sent.Store(12345)
-			err := streamUploadConn(client, 99, bytes.NewReader(payload), uint64(len(payload)), time.Second, time.Second, 0, 0, sent)
+			totalWritten := &atomic.Uint64{}
+			err := streamUploadConn(client, 99, bytes.NewReader(payload), uint64(len(payload)), time.Second, time.Second, 0, 0, sent, totalWritten)
 			if err != nil {
 				t.Fatalf("streamUploadConn: %v", err)
 			}
@@ -69,6 +121,9 @@ func TestStreamUploadConnResumeOffsets(t *testing.T) {
 			// less than 100%.
 			if got := sent.Load(); got != uint64(len(payload)) {
 				t.Fatalf("sent.Load() = %d, want %d (offset %d)", got, len(payload), offset)
+			}
+			if got, want := totalWritten.Load(), uint64(len(payload))-offset; got != want {
+				t.Fatalf("totalWritten.Load() = %d, want actual body writes %d (offset %d)", got, want, offset)
 			}
 		})
 	}
@@ -89,7 +144,7 @@ func TestStreamUploadConnWaitsBoundedlyForDownloaderClose(t *testing.T) {
 		// Deliberately retain the downloader side instead of closing it.
 	}()
 	start := time.Now()
-	err := streamUploadConn(client, 1, bytes.NewReader([]byte("abc")), 3, time.Second, 30*time.Millisecond, 0, 0, nil)
+	err := streamUploadConn(client, 1, bytes.NewReader([]byte("abc")), 3, time.Second, 30*time.Millisecond, 0, 0, nil, nil)
 	<-peerReady
 	if err == nil || time.Since(start) < 20*time.Millisecond {
 		t.Fatalf("completion wait error=%v elapsed=%v", err, time.Since(start))
@@ -105,7 +160,7 @@ func TestStreamUploadConnRejectsOversizedOffset(t *testing.T) {
 		_ = init.Deserialize(remote)
 		_, _ = file.Write(remote, &file.Offset{Offset: 11})
 	}()
-	if err := streamUploadConn(client, 1, bytes.NewReader([]byte("0123456789")), 10, time.Second, time.Second, 0, 0, nil); err == nil {
+	if err := streamUploadConn(client, 1, bytes.NewReader([]byte("0123456789")), 10, time.Second, time.Second, 0, 0, nil, nil); err == nil {
 		t.Fatal("oversized offset accepted")
 	}
 }
@@ -141,7 +196,7 @@ func TestStreamUploadConnAbortsSlowPeer(t *testing.T) {
 	rs := &readSeeker{r: bytes.NewReader(payload)}
 	// threshold = minThroughput * sampleInterval.Seconds() = 100000 * 0.02 = 2000 bytes/window,
 	// far above the 10 bytes/20ms (~500 bytes/s) the fake peer above trickles at.
-	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 100000, 20*time.Millisecond, nil)
+	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 100000, 20*time.Millisecond, nil, nil)
 	if !errors.Is(err, errUploadTooSlow) {
 		t.Fatalf("streamUploadConn err = %v, want errUploadTooSlow", err)
 	}
@@ -176,7 +231,7 @@ func TestStreamUploadConnAllowsSteadySlowPeer(t *testing.T) {
 	rs := &readSeeker{r: bytes.NewReader(payload)}
 	// threshold = minThroughput * sampleInterval.Seconds() = 1000 * 0.02 = 20 bytes/window;
 	// the unthrottled reader below drains the whole 300-byte payload well within that.
-	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 1000, 20*time.Millisecond, nil)
+	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 1000, 20*time.Millisecond, nil, nil)
 	if err != nil {
 		t.Fatalf("streamUploadConn: %v", err)
 	}

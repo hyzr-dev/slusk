@@ -142,7 +142,7 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 		}
 	}()
 
-	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval, sent)
+	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval, sent, &c.uploads.totalWritten)
 }
 
 // uploadThroughputStrikeLimit is how many consecutive sub-floor sample
@@ -151,7 +151,7 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 // initial read latency never counts against it.
 const uploadThroughputStrikeLimit = 2
 
-func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent *atomic.Uint64) error {
+func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent, totalWritten *atomic.Uint64) error {
 	if sent == nil {
 		sent = new(atomic.Uint64)
 	}
@@ -185,7 +185,7 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 		if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
 			return err
 		}
-		if err := streamUploadBody(conn, shared, size-offset.Offset, idleTimeout, minThroughput, sampleInterval, sent); err != nil {
+		if err := streamUploadBody(conn, shared, size-offset.Offset, idleTimeout, minThroughput, sampleInterval, sent, totalWritten); err != nil {
 			return err
 		}
 	}
@@ -216,11 +216,11 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 // close the connection - aborting the connection and returning
 // errUploadTooSlow if the peer sustains a throughput below minThroughput
 // for two consecutive sample windows (#108).
-func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent *atomic.Uint64) error {
+func streamUploadBody(conn net.Conn, shared io.Reader, n uint64, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent, totalWritten *atomic.Uint64) error {
 	if sent == nil {
 		sent = new(atomic.Uint64)
 	}
-	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout, written: sent}
+	writer := &progressWriter{conn: conn, idleTimeout: idleTimeout, written: sent, totalWritten: totalWritten}
 
 	var abortedSlow atomic.Bool
 	if minThroughput > 0 && sampleInterval > 0 {
@@ -300,9 +300,10 @@ func uploadThroughputSampler(writer *progressWriter, conn net.Conn, minThroughpu
 }
 
 type progressWriter struct {
-	conn        net.Conn
-	idleTimeout time.Duration
-	written     *atomic.Uint64
+	conn         net.Conn
+	idleTimeout  time.Duration
+	written      *atomic.Uint64
+	totalWritten *atomic.Uint64
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
@@ -310,6 +311,11 @@ func (w *progressWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	n, err := w.conn.Write(p)
-	w.written.Add(uint64(n))
+	if n > 0 {
+		w.written.Add(uint64(n))
+		if w.totalWritten != nil {
+			w.totalWritten.Add(uint64(n))
+		}
+	}
 	return n, err
 }

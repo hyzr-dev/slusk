@@ -23,16 +23,14 @@ const throughputWindow = 48
 // long-running daemon.
 const throughputPendingCap = 10
 
-// throughputMeter aggregates the native soulseek client's per-second
-// download-throughput samples (issue #157) into a short in-memory ring (for
-// the live sparkline) and a queue of completed per-minute rollups (for
-// persistence). All time comes from the caller (record's at parameter)
-// rather than time.Now(), so tests need no clock abstraction — see
-// sampleThroughput in client.go for the only production caller.
+// throughputMeter aggregates the native Soulseek client's aligned per-second
+// download and upload samples into a short in-memory ring. Only download
+// samples feed the completed per-minute rollups retained for persistence.
+// All time comes from record's at parameter so tests need no clock abstraction.
 type throughputMeter struct {
 	mu sync.Mutex
 
-	ring     [throughputWindow]core.ThroughputSample
+	ring     [throughputWindow]throughputPair
 	ringLen  int
 	ringNext int // next write position, wrapping
 
@@ -55,8 +53,13 @@ type throughputMeter struct {
 	// where clients connect and disconnect constantly (issue #157 F6): an
 	// append-only slice would leave every disconnected client's closure
 	// invoked every second forever, in a daemon that runs for months.
-	subs      map[uint64]func(core.ThroughputSample)
+	subs      map[uint64]func(core.ThroughputSeries)
 	nextSubID uint64
+}
+
+type throughputPair struct {
+	download core.ThroughputSample
+	upload   core.ThroughputSample
 }
 
 // newThroughputMeter constructs an empty throughputMeter.
@@ -64,18 +67,19 @@ func newThroughputMeter() *throughputMeter {
 	return &throughputMeter{}
 }
 
-// record folds one sample (bps aggregate bytes/sec, active transfer count) at
-// instant at into the ring and the in-flight minute accumulator, rolling the
-// minute and enqueueing it onto pending when at crosses into a new UTC minute
-// (see closeMinute). Every subscriber registered via Subscribe is notified,
-// under the lock — see Subscribe's doc comment on why that means a
-// subscriber must never block.
-func (m *throughputMeter) record(at time.Time, bps int64, active int) {
+// record folds one aligned directional sample pair into the ring. The
+// in-flight minute accumulator intentionally consumes only download values,
+// preserving the existing download-only persistence contract. Subscribers
+// are notified under the lock and therefore must not block.
+func (m *throughputMeter) record(at time.Time, downloadBPS int64, downloadActive int, uploadBPS int64, uploadActive int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	sample := core.ThroughputSample{At: at, BytesPerSecond: bps, ActiveTransfers: active}
-	m.ring[m.ringNext] = sample
+	pair := throughputPair{
+		download: core.ThroughputSample{At: at, BytesPerSecond: downloadBPS, ActiveTransfers: downloadActive},
+		upload:   core.ThroughputSample{At: at, BytesPerSecond: uploadBPS, ActiveTransfers: uploadActive},
+	}
+	m.ring[m.ringNext] = pair
 	m.ringNext = (m.ringNext + 1) % throughputWindow
 	if m.ringLen < throughputWindow {
 		m.ringLen++
@@ -89,17 +93,21 @@ func (m *throughputMeter) record(at time.Time, bps int64, active int) {
 		m.closeMinute()
 		m.minute = current
 	}
-	m.sumBytes += bps
-	if bps > m.peakBytes {
-		m.peakBytes = bps
+	m.sumBytes += downloadBPS
+	if downloadBPS > m.peakBytes {
+		m.peakBytes = downloadBPS
 	}
-	if active > m.maxActive {
-		m.maxActive = active
+	if downloadActive > m.maxActive {
+		m.maxActive = downloadActive
 	}
 	m.samples++
 
+	series := core.ThroughputSeries{
+		Download: []core.ThroughputSample{pair.download},
+		Upload:   []core.ThroughputSample{pair.upload},
+	}
 	for _, fn := range m.subs {
-		fn(sample)
+		fn(series)
 	}
 }
 
@@ -135,17 +143,22 @@ func (m *throughputMeter) enqueuePending(minute core.ThroughputMinute) {
 	m.pending = append(m.pending, minute)
 }
 
-// Samples returns a copy of every sample currently in the ring, oldest
-// first. Never nil, so JSON-encoding it always serializes to "[]" rather
-// than "null" (see internal/observ/charts.go's Throughput field).
-func (m *throughputMeter) Samples() []core.ThroughputSample {
+// Samples returns copies of both aligned directional rings, oldest first.
+// Both slices are non-nil so their JSON representations are arrays even when
+// no sample has been recorded.
+func (m *throughputMeter) Samples() core.ThroughputSeries {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	out := make([]core.ThroughputSample, 0, m.ringLen)
+	out := core.ThroughputSeries{
+		Download: make([]core.ThroughputSample, 0, m.ringLen),
+		Upload:   make([]core.ThroughputSample, 0, m.ringLen),
+	}
 	start := (m.ringNext - m.ringLen + throughputWindow) % throughputWindow
 	for i := 0; i < m.ringLen; i++ {
-		out = append(out, m.ring[(start+i)%throughputWindow])
+		pair := m.ring[(start+i)%throughputWindow]
+		out.Download = append(out.Download, pair.download)
+		out.Upload = append(out.Upload, pair.upload)
 	}
 	return out
 }
@@ -195,12 +208,12 @@ func (m *throughputMeter) TakeThroughputMinutes(includePartial bool) []core.Thro
 //
 // cancel is safe to call more than once (the second and later calls are
 // no-ops) and safe to call concurrently with record()'s fan-out.
-func (m *throughputMeter) Subscribe(fn func(core.ThroughputSample)) (cancel func()) {
+func (m *throughputMeter) Subscribe(fn func(core.ThroughputSeries)) (cancel func()) {
 	m.mu.Lock()
 	id := m.nextSubID
 	m.nextSubID++
 	if m.subs == nil {
-		m.subs = make(map[uint64]func(core.ThroughputSample))
+		m.subs = make(map[uint64]func(core.ThroughputSeries))
 	}
 	m.subs[id] = fn
 	m.mu.Unlock()
@@ -215,58 +228,57 @@ func (m *throughputMeter) Subscribe(fn func(core.ThroughputSample)) (cancel func
 	}
 }
 
-// sampleThroughput owns the ticker that periodically aggregates every
-// tracked download's byte-throughput into the client's throughputMeter
-// (issue #157). It runs for the lifetime of the client's Run context (see
-// the fourth startTracked call in Run) and returns promptly once ctx is
-// cancelled. prevAt tracks the wall-clock time of the previous tick so
-// throughputTick can divide by the real elapsed interval rather than the
-// ticker's configured one — see throughputTick's doc comment.
+// throughputBaseline holds the cumulative counters observed on the previous
+// aligned tick. Download counters remain per-transfer so completed downloads
+// retain their existing eviction behavior; upload bytes use the manager's
+// lifetime total so a completed and removed upload cannot disappear between
+// ticks.
+type throughputBaseline struct {
+	downloads   map[string]int64
+	uploadBytes uint64
+}
+
+// sampleThroughput owns the client's lifetime ticker and records one aligned
+// download/upload pair on every tick. prevAt is the actual previous tick time,
+// not the configured interval, because time.Ticker may drop delayed ticks.
 func (c *Client) sampleThroughput(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.throughputInterval)
 	defer ticker.Stop()
 
-	last := make(map[string]int64)
+	baseline := throughputBaseline{downloads: make(map[string]int64)}
 	var prevAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			bps, active := c.throughputTick(now, prevAt, last)
-			c.throughput.record(now, bps, active)
+			download, upload := c.throughputTick(now, prevAt, &baseline)
+			c.throughput.record(now, download.BytesPerSecond, download.ActiveTransfers, upload.BytesPerSecond, upload.ActiveTransfers)
 			prevAt = now
 		}
 	}
 }
 
-// throughputTick computes one aggregate throughput sample from the byte
-// deltas of every tracked transfer since the previous tick, reading
-// bytesDone atomically (no mutex) rather than summing each transfer's
-// tr.speed field: a stalled transfer's tr.speed can be nonzero (see the
-// stale-speed fix in ListDownloads) for up to speedStaleAfter, but its
-// bytesDone delta is genuinely zero the instant it stalls, so this
-// contributes 0 for it automatically without needing to know about
-// staleness at all. active counts every transfer in core.TransferInProgress
-// regardless of whether it moved bytes this tick — a stalled transfer is
-// still occupying a slot. last is mutated in place: entries for transfers no
-// longer present in the current snapshot are evicted so the map cannot grow
-// unbounded as downloads complete and are Remove()d over a long-running
-// process.
+// throughputTick computes one aligned directional sample pair from cumulative
+// byte deltas. Download bytes retain the existing per-transfer accounting: a
+// stalled transfer contributes zero bytes while still counting active, and
+// entries disappear from the baseline when Remove deletes the transfer.
+// Upload bytes instead come from uploadManager's manager-lifetime socket-write
+// total, which survives job completion and excludes resume offsets. Queued
+// uploads are excluded from the uncapped active count.
 //
-// prevAt is the previous tick's timestamp (the zero Time on the very first
-// tick, which has no baseline to measure from and so reports bps 0). The
-// rate is total bytes moved divided by now.Sub(prevAt) — the MEASURED
-// elapsed time, not c.cfg.throughputInterval: time.Ticker drops ticks under
-// scheduling delay rather than queueing them (a real condition in the
-// CPU-limited container this runs in, see issues #138/#139), so dividing by
-// the nominal interval instead of the real one would inflate the reported
-// rate by however many ticks were dropped.
-func (c *Client) throughputTick(now, prevAt time.Time, last map[string]int64) (bps int64, active int) {
-	snapshot := c.downloads.snapshot()
+// The first tick establishes both baselines and reports zero rates. Later
+// rates divide by measured elapsed time rather than the nominal ticker period.
+func (c *Client) throughputTick(now, prevAt time.Time, baseline *throughputBaseline) (download core.ThroughputSample, upload core.ThroughputSample) {
+	download.At = now
+	upload.At = now
+	if baseline.downloads == nil {
+		baseline.downloads = make(map[string]int64)
+	}
 
+	snapshot := c.downloads.snapshot()
 	seen := make(map[string]struct{}, len(snapshot))
-	var total int64
+	var downloadBytes int64
 	for _, tr := range snapshot {
 		tr.mu.Lock()
 		state := tr.state
@@ -274,38 +286,54 @@ func (c *Client) throughputTick(now, prevAt time.Time, last map[string]int64) (b
 		done := tr.bytesDone.Load()
 
 		seen[tr.id] = struct{}{}
-		if prev, ok := last[tr.id]; ok {
-			if delta := done - prev; delta > 0 {
-				total += delta
+		if previous, ok := baseline.downloads[tr.id]; ok {
+			if delta := done - previous; delta > 0 {
+				downloadBytes += delta
 			}
 		}
-		last[tr.id] = done
-
+		baseline.downloads[tr.id] = done
 		if state == core.TransferInProgress {
-			active++
+			download.ActiveTransfers++
 		}
 	}
-	for id := range last {
+	for id := range baseline.downloads {
 		if _, ok := seen[id]; !ok {
-			delete(last, id)
+			delete(baseline.downloads, id)
 		}
 	}
+
+	var uploadTotal uint64
+	if c.uploads != nil {
+		uploadTotal, upload.ActiveTransfers = c.uploads.throughputSnapshot()
+	}
+	var uploadBytes uint64
+	if uploadTotal >= baseline.uploadBytes {
+		uploadBytes = uploadTotal - baseline.uploadBytes
+	}
+	baseline.uploadBytes = uploadTotal
 
 	if prevAt.IsZero() {
-		return 0, active
+		return download, upload
 	}
 	elapsed := now.Sub(prevAt).Seconds()
 	if elapsed <= 0 {
-		return 0, active
+		return download, upload
 	}
-	return int64(float64(total) / elapsed), active
+	download.BytesPerSecond = int64(float64(downloadBytes) / elapsed)
+	upload.BytesPerSecond = int64(float64(uploadBytes) / elapsed)
+	return download, upload
 }
 
-// ThroughputSamples returns the client's recent aggregate download-throughput
-// samples, oldest first (issue #157). Backs the Overview view's live
-// sparkline (GET /api/charts).
-func (c *Client) ThroughputSamples() []core.ThroughputSample {
+// ThroughputSeries returns aligned recent download and upload samples, oldest
+// first. This is the native observation seam for live throughput.
+func (c *Client) ThroughputSeries() core.ThroughputSeries {
 	return c.throughput.Samples()
+}
+
+// ThroughputSamples returns only the download side of ThroughputSeries. It is
+// retained for compatibility with callers predating native upload sampling.
+func (c *Client) ThroughputSamples() []core.ThroughputSample {
+	return c.ThroughputSeries().Download
 }
 
 // TakeThroughputMinutes drains and returns every completed per-minute
