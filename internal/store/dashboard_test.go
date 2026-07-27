@@ -1135,6 +1135,14 @@ func TestListDashboardJobsStatusOrderAndIndependentFacets(t *testing.T) {
 		t.Errorf("unexpected source facets: %+v", page.Facets.Source)
 	}
 
+	importing, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "importing", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs importing: %v", err)
+	}
+	if importing.Total != 1 || len(importing.Jobs) != 1 || importing.Jobs[0].Job.ID != importingID {
+		t.Errorf("importing page = total %d jobs %+v", importing.Total, importing.Jobs)
+	}
+
 	filtered, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "failed", Source: "lidarr"})
 	if err != nil {
 		t.Fatalf("ListDashboardJobs filtered: %v", err)

@@ -27,9 +27,9 @@ func TestDashboardStatus(t *testing.T) {
 			want: "queued",
 		},
 		{
-			name: "importing is distinct",
+			name: "importing is active in the public DTO",
 			v:    core.JobView{Job: core.AlbumJob{State: core.StateImporting}},
-			want: "importing",
+			want: "active",
 		},
 		{
 			name: "downloading with no transfer yet is queued",

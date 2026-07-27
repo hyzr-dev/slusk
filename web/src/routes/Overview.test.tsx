@@ -130,6 +130,16 @@ describe('Overview', () => {
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
+  it('keeps an IMPORTING active job in TRANSFERS with its importing tag and verifying path', () => {
+    renderOverview([
+      { ...baseJob, title: 'Importing Album', status: 'active', state: 'IMPORTING' },
+    ]);
+
+    expect(screen.getByText('Importing Album')).toBeInTheDocument();
+    expect(screen.getByText('IM')).toBeInTheDocument();
+    expect(screen.getByText(t.jobs.verifying)).toBeInTheDocument();
+  });
+
   it('ranks active above stalled in TRANSFERS, so an older stalled job never evicts an active one (#233)', () => {
     // 7 active jobs (more than fit alongside any stalled ones once
     // MAX_TRANSFER_ROWS (8) is applied) plus 3 stalled jobs. The stalled jobs'

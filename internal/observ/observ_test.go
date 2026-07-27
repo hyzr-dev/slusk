@@ -319,9 +319,8 @@ func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
 		gotQuery = query
 		return PagedJobsResult{
 			Jobs: []core.JobView{{
-				Job:      core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateDownloading, Source: core.SourceLidarr},
-				Transfer: &core.Transfer{State: core.TransferInProgress},
-				Peer:     "flac_hoarder",
+				Job:  core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateImporting, Source: core.SourceLidarr},
+				Peer: "flac_hoarder",
 			}},
 			Total: 25,
 			Facets: JobFacets{
@@ -332,14 +331,14 @@ func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
 	}
 	h := NewServer(deps)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/jobs?page=2&sort=album&dir=desc&filter=active&source=lidarr&q=%20Four%20%20", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs?page=2&sort=album&dir=desc&filter=importing&source=lidarr&q=%20Four%20%20", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	wantQuery := PagedJobsQuery{Page: 2, Sort: "album", Dir: "desc", Filter: "active", Source: "lidarr", Query: "Four"}
+	wantQuery := PagedJobsQuery{Page: 2, Sort: "album", Dir: "desc", Filter: "importing", Source: "lidarr", Query: "Four"}
 	if !reflect.DeepEqual(gotQuery, wantQuery) {
 		t.Fatalf("query = %+v, want %+v", gotQuery, wantQuery)
 	}
@@ -351,8 +350,8 @@ func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Jobs) != 1 || got.Jobs[0].ID != 7 || got.Jobs[0].Status != "active" {
-		t.Errorf("jobs = %+v", got.Jobs)
+	if len(got.Jobs) != 1 || got.Jobs[0].ID != 7 || got.Jobs[0].Status != "active" || got.Jobs[0].State != string(core.StateImporting) {
+		t.Errorf("jobs = %+v, want IMPORTING job serialized with active status", got.Jobs)
 	}
 	if got.Total != 25 || got.Facets.Status.Importing != 2 || got.Facets.Source.Lidarr != 6 {
 		t.Errorf("page metadata = total %d facets %+v", got.Total, got.Facets)
