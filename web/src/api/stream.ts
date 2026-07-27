@@ -1,6 +1,6 @@
 // api/stream.ts: the frontend half of issue #161's SSE live stream. See
 // internal/observ/stream.go for the server contract this consumes and
-// queries.ts's mergeLiveJobs/mergeLiveFiles/mergeThroughputSamples for how
+// queries.ts's mergeLiveJobs/pickJobDetail/mergeThroughputSamples for how
 // the frame this writes is folded into what components read.
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';

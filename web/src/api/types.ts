@@ -544,50 +544,39 @@ export interface LiveJob {
 }
 
 /**
- * internal/observ/stream.go streamFileDTO — one file's live state, present
- * only when the stream is scoped via `?job=<id>` (see ScopedLivePayload).
- * Unlike LiveJob, a file is not filtered to non-terminal states: `state`
- * transitioning to COMPLETED/ERRORED/CANCELLED is itself meaningful, not
- * noise to hide.
- */
-export interface LiveFile {
-  filename: string;
-  state: string;
-  bytesDone: number;
-  bytesTotal: number;
-  speed?: number;
-  queuePosition?: number;
-}
-
-/**
  * GET /api/stream's `event: live` JSON body — internal/observ/stream.go
  * livePayload. `jobs` is filtered server-side to jobs with at least one
  * matched, non-terminal live transfer *at this instant* — a job present in
  * one frame and absent from the next means "no live data for this job right
- * now", not "job gone". `files` is present only when the connection was
- * opened with `?job=<id>`. `throughput` carries only samples newer than the
+ * now", not "job gone". `throughput` carries only samples newer than the
  * previous frame — see api/queries.ts's mergeThroughputSamples for how the
  * client folds that into the cached series. `down` is always present (the
  * aggregate live download speed across every non-terminal transfer, 0 when
  * idle).
  *
- * See api/queries.ts's mergeLiveJobs/mergeLiveFiles for how "absent from
- * this frame" is honoured on read — an overlay on top of REST, never a
- * destructive replace, so losing the stream degrades cleanly back to
- * whatever REST last reported.
+ * `detail` is the whole `GET /api/jobs/{id}/detail` body, present only when
+ * the connection was opened with `?job=<id>`, and built server-side by the
+ * very same function the REST handler calls. It is therefore used as a
+ * *replacement* for the cached detail rather than an overlay on it — issue
+ * #258: merging two sources field by field on the client produced four
+ * separate regressions in #161, because which source is fresher differs per
+ * field and per moment.
+ *
+ * `jobs` is still an overlay (see mergeLiveJobs): "absent from this frame"
+ * means fall back to REST, so losing the stream degrades cleanly.
  */
 export interface LivePayload {
   jobs: LiveJob[];
-  files?: LiveFile[];
+  detail?: JobDetail;
   throughput?: ThroughputSample[];
   down: number;
 }
 
 /**
  * The cached shape of queryKeys.live: a LivePayload plus which job id (if
- * any) the connection was scoped to when this frame arrived. Read alongside
- * `files` in mergeLiveFiles so a JobDetail page never applies a stale
- * previous job's file data to the job now on screen during a reconnect.
+ * any) the connection was scoped to when this frame arrived. Checked before
+ * `detail` is applied so a JobDetail page never adopts a stale previous
+ * job's detail during a reconnect after navigating between jobs.
  */
 export interface ScopedLivePayload extends LivePayload {
   scopeJobId?: number;

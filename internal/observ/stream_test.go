@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,182 +69,51 @@ func TestBuildStreamJobsDropsJobThatLosesItsLiveTransfer(t *testing.T) {
 	}
 }
 
-func TestBuildStreamFilesOnlyIncludesLiveMatched(t *testing.T) {
-	job := jobCorrelation{
-		username: "alice",
-		files: []core.CandidateFile{
-			{Filename: "01.flac", Size: 1000},
-			{Filename: "02.flac", Size: 2000}, // not yet enqueued, no live entry
-		},
+// buildStreamDetail must produce exactly what GET /api/jobs/{id}/detail
+// produces for the same inputs — that identity is the whole point of #258's
+// alternative A, since it is what lets the frontend replace rather than merge.
+func TestBuildStreamDetailMatchesRESTHandlerOutput(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "alice"},
+			Transfers: []core.Transfer{
+				{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 100, BytesTotal: 1000},
+			},
+		}},
 	}
 	idx := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 400, Speed: 100},
 	})
 
-	got := buildStreamFiles(job, idx)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 file (02.flac has no live match), got %d: %+v", len(got), got)
+	got := buildStreamDetail(detail, true, idx)
+	if got == nil {
+		t.Fatal("expected a detail for a cached job")
 	}
-	if got[0].Filename != "01.flac" || got[0].State != "IN_PROGRESS" || got[0].BytesDone != 400 || got[0].BytesTotal != 1000 {
-		t.Errorf("unexpected file dto: %+v", got[0])
+	want := toJobDetailDTO(detail, idx)
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("stream detail diverged from the REST handler's:\n got %+v\nwant %+v", *got, want)
 	}
-}
-
-func TestBuildStreamFilesNoFilesYieldsEmpty(t *testing.T) {
-	if got := buildStreamFiles(jobCorrelation{}, liveTransferIndex{}); len(got) != 0 {
-		t.Errorf("expected empty, got %+v", got)
-	}
-}
-
-func TestSumDownSpeedExcludesTerminal(t *testing.T) {
-	live := []core.RemoteTransfer{
-		{State: core.TransferInProgress, Speed: 100},
-		{State: core.TransferQueued, Speed: 50},
-		{State: core.TransferCompleted, Speed: 999}, // excluded
-		{State: core.TransferErrored, Speed: 999},   // excluded
-	}
-	if got := sumDownSpeed(live); got != 150 {
-		t.Errorf("sumDownSpeed = %d, want 150", got)
+	// And the live overlay actually applied, so the comparison above is not
+	// two identically-wrong values.
+	if got.Attempts[0].Transfers[0].BytesDone != 400 {
+		t.Errorf("BytesDone = %d, want 400 from live", got.Attempts[0].Transfers[0].BytesDone)
 	}
 }
 
-// Reproduces the backwards step seen in the lab after the per-file rewrite:
-// a file finishes, reconcile persists its final size and purges it from the
-// live set, but the hub's cached persisted map is up to
-// streamCorrelationInterval old and still holds the pre-completion figure.
-// jobBytesDone then reads that stale figure and the album total drops.
-func TestObserveLiveBytesFloorsStalePersistedAfterFileCompletes(t *testing.T) {
-	corr := []jobCorrelation{{
-		id: 1, candidateID: 7, username: "peer",
-		files: []core.CandidateFile{{Filename: "a.flac", Size: 200}, {Filename: "b.flac", Size: 200}},
-	}}
-	// The cached map is one refresh behind throughout: a.flac reads 50 here
-	// even after it has finished at 200.
-	stale := map[int64]map[string]int64{7: {"a.flac": 50, "b.flac": 10}}
-	hub := newStreamHub(nil, nil, nil, nil, time.Hour, time.Hour)
-
-	// Tick 1 — a.flac is live and mid-transfer.
-	live := []core.RemoteTransfer{
-		{Username: "peer", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 180},
-	}
-	got := hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
-	before := sumFileBytesDone("peer", corr[0].files, newLiveTransferIndex(live), got[7])
-	if before != 190 { // 180 live + 10 persisted
-		t.Fatalf("before completion = %d, want 190", before)
-	}
-
-	// Tick 2 — a.flac finished at 200 and was purged from the live set. The
-	// cached map has not refreshed, so without the floor this reads 50.
-	live = []core.RemoteTransfer{
-		{Username: "peer", Filename: "a.flac", State: core.TransferCompleted, BytesDone: 200},
-	}
-	got = hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
-
-	live = nil // purged
-	got = hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
-	after := sumFileBytesDone("peer", corr[0].files, newLiveTransferIndex(live), got[7])
-	if after < before {
-		t.Errorf("album total regressed %d -> %d after the file completed", before, after)
-	}
-	if after != 210 { // 200 remembered + 10 persisted
-		t.Errorf("after completion = %d, want 210 (the floor, not the stale 50)", after)
-	}
-}
-
-func TestObserveLiveBytesForgetsOncePersistedCatchesUp(t *testing.T) {
-	corr := []jobCorrelation{{
-		id: 1, candidateID: 7, username: "peer",
-		files: []core.CandidateFile{{Filename: "a.flac", Size: 200}},
-	}}
-	hub := newStreamHub(nil, nil, nil, nil, time.Hour, time.Hour)
-	live := []core.RemoteTransfer{
-		{Username: "peer", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 200},
-	}
-	hub.observeLiveBytes(corr, newLiveTransferIndex(live), map[int64]map[string]int64{7: {"a.flac": 50}})
-
-	// The refresh lands: persisted now matches what was observed, so the
-	// memory has nothing left to contribute and must not linger.
-	hub.observeLiveBytes(corr, newLiveTransferIndex(nil), map[int64]map[string]int64{7: {"a.flac": 200}})
-	if got := hub.lastLiveBytes[7]["a.flac"]; got != 0 {
-		t.Errorf("floor for a.flac = %d, want it forgotten once persisted caught up", got)
-	}
-}
-
-func TestDownSpeedPrefersNewestThroughputSample(t *testing.T) {
-	t0 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	samples := []core.ThroughputSample{
-		{At: t0, BytesPerSecond: 111},
-		{At: t0.Add(time.Second), BytesPerSecond: 222},
-		{At: t0.Add(2 * time.Second), BytesPerSecond: 333}, // newest wins
-	}
-	live := []core.RemoteTransfer{{State: core.TransferInProgress, Speed: 999}}
-
-	if got := downSpeed(samples, live); got != 333 {
-		t.Errorf("downSpeed = %d, want 333 (newest sample, not the estimate)", got)
-	}
-}
-
-func TestDownSpeedReportsZeroWhenTransfersStall(t *testing.T) {
-	// The reason `down` reads the measured series at all: ListDownloads keeps
-	// serving a stalled transfer's last speed for up to speedStaleAfter (3s),
-	// so the estimate insists bytes are moving while the meter — which
-	// measures actual byte deltas — has already dropped to 0.
-	samples := []core.ThroughputSample{
-		{At: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC), BytesPerSecond: 0},
-	}
-	stalled := []core.RemoteTransfer{{State: core.TransferInProgress, Speed: 5_000_000}}
-
-	if got := downSpeed(samples, stalled); got != 0 {
-		t.Errorf("downSpeed = %d, want 0 — a stalled transfer's stale estimate must not win", got)
-	}
-}
-
-func TestDownSpeedFallsBackToEstimateWithoutSeries(t *testing.T) {
-	// No meter at all: cmd/slskdarr/main.go leaves ServerDeps.Throughput nil
-	// on every backend but the native soulseek client, and `down` reading 0
-	// while downloads plainly ran would be worse than a stale estimate.
-	live := []core.RemoteTransfer{
-		{State: core.TransferInProgress, Speed: 100},
-		{State: core.TransferQueued, Speed: 50},
-	}
-	for _, samples := range [][]core.ThroughputSample{nil, {}} {
-		if got := downSpeed(samples, live); got != 150 {
-			t.Errorf("downSpeed(%v) = %d, want 150", samples, got)
-		}
-	}
-}
-
-func TestNewThroughputSinceTableCases(t *testing.T) {
-	t0 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	samples := []core.ThroughputSample{
-		{At: t0, BytesPerSecond: 1},
-		{At: t0.Add(time.Second), BytesPerSecond: 2},
-		{At: t0.Add(2 * time.Second), BytesPerSecond: 3},
-	}
-	cases := []struct {
-		name  string
-		since time.Time
-		want  int
-	}{
-		{"zero time returns everything", time.Time{}, 3},
-		{"exactly at first sample excludes it (not strictly after)", t0, 2},
-		{"between samples", t0.Add(500 * time.Millisecond), 2},
-		{"after everything returns nothing", t0.Add(10 * time.Second), 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := newThroughputSince(samples, tc.since)
-			if len(got) != tc.want {
-				t.Errorf("newThroughputSince(...) len = %d, want %d", len(got), tc.want)
-			}
-		})
+// An uncached job omits the field entirely rather than sending an empty
+// object, which the frontend would read as "this job has no attempts".
+func TestBuildStreamDetailUncachedIsNil(t *testing.T) {
+	if got := buildStreamDetail(core.JobDetail{}, false, liveTransferIndex{}); got != nil {
+		t.Errorf("expected nil for an uncached job, got %+v", got)
 	}
 }
 
 func TestChangedSinceLastTableCases(t *testing.T) {
 	jobsA := []streamJobDTO{{ID: 1, BytesDone: 100}}
 	jobsB := []streamJobDTO{{ID: 1, BytesDone: 200}}
-	filesA := []streamFileDTO{{Filename: "a.flac", BytesDone: 10}}
+	detailA := &jobDetailDTO{ID: 1, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 10}}}}}
+	detailB := &jobDetailDTO{ID: 1, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 20}}}}}
 
 	cases := []struct {
 		name               string
@@ -251,11 +121,12 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 		newThroughputCount int
 		want               bool
 	}{
-		{"nothing changed", livePayload{Jobs: jobsA, Files: filesA, Down: 5}, livePayload{Jobs: jobsA, Files: filesA, Down: 5}, 0, false},
+		{"nothing changed", livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, 0, false},
 		{"jobs changed", livePayload{Jobs: jobsA}, livePayload{Jobs: jobsB}, 0, true},
 		{"down changed", livePayload{Jobs: jobsA, Down: 5}, livePayload{Jobs: jobsA, Down: 6}, 0, true},
-		{"files changed", livePayload{Files: filesA}, livePayload{}, 0, true},
-		{"only new throughput, nothing else changed", livePayload{Jobs: jobsA, Files: filesA, Down: 5}, livePayload{Jobs: jobsA, Files: filesA, Down: 5}, 1, true},
+		{"detail nested transfer bytes changed", livePayload{Detail: detailA}, livePayload{Detail: detailB}, 0, true},
+		{"detail appeared", livePayload{}, livePayload{Detail: detailA}, 0, true},
+		{"only new throughput, nothing else changed", livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, livePayload{Jobs: jobsA, Detail: detailA, Down: 5}, 1, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,23 +138,35 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 	}
 }
 
-func TestBuildLivePayloadFileScopingByJobID(t *testing.T) {
+func TestBuildLivePayloadDetailScopingByJobID(t *testing.T) {
 	corr := []jobCorrelation{{id: 7, username: "alice", files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}, albumBytesTotal: 1000, albumBytesRemaining: 1000}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 500}}
-
-	unscoped := buildLivePayload(corr, live, 0, nil, nil)
-	if unscoped.Files != nil {
-		t.Errorf("expected nil Files without ?job=, got %+v", unscoped.Files)
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 7},
+		Attempts: []core.AttemptDetail{{
+			Attempt:   core.Candidate{ID: 1, Username: "alice"},
+			Transfers: []core.Transfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesTotal: 1000}},
+		}},
 	}
 
-	scoped := buildLivePayload(corr, live, 7, nil, nil)
-	if len(scoped.Files) != 1 || scoped.Files[0].Filename != "01.flac" {
-		t.Errorf("expected 1 file for ?job=7, got %+v", scoped.Files)
+	unscoped := buildLivePayload(corr, live, 0, nil, nil, detail, true)
+	if unscoped.Detail != nil {
+		t.Errorf("expected nil Detail without ?job=, got %+v", unscoped.Detail)
 	}
 
-	missing := buildLivePayload(corr, live, 999, nil, nil)
-	if missing.Files != nil {
-		t.Errorf("expected nil Files for unknown job id, got %+v", missing.Files)
+	scoped := buildLivePayload(corr, live, 7, nil, nil, detail, true)
+	if scoped.Detail == nil || len(scoped.Detail.Attempts) != 1 {
+		t.Fatalf("expected a detail for ?job=7, got %+v", scoped.Detail)
+	}
+	if got := scoped.Detail.Attempts[0].Transfers[0].BytesDone; got != 500 {
+		t.Errorf("BytesDone = %d, want 500 merged in from live", got)
+	}
+
+	// Scoped, but the hub has no cached detail for that id yet — the field is
+	// omitted rather than sent empty, and the frontend keeps its REST copy.
+	missing := buildLivePayload(corr, live, 999, nil, nil, core.JobDetail{}, false)
+	if missing.Detail != nil {
+		t.Errorf("expected nil Detail for an uncached job id, got %+v", missing.Detail)
 	}
 }
 
@@ -339,7 +222,7 @@ func TestSendLatestDeliversDirectlyToEmptyChannel(t *testing.T) {
 // broadcaster lifecycle directly: started on the first subscriber, still
 // running with two, and stopped only once the last one leaves.
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, time.Hour, time.Hour)
 
 	id1, _, _ := hub.subscribe(context.Background(), 0)
 	if !hubRunning(hub) {
@@ -392,7 +275,7 @@ func hubSubCount(h *streamHub) int {
 // registered before this stale tick got the lock) must not send anything or
 // touch subscriber state.
 func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, time.Hour, time.Hour)
 	_, ch, initial := hub.subscribe(context.Background(), 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -434,7 +317,7 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, time.Hour, time.Hour)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, time.Hour, time.Hour)
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick.
 	_, ch, initial := hub.subscribe(context.Background(), 0)
@@ -703,8 +586,9 @@ func TestStreamEndpointInvalidJobIDReturns400(t *testing.T) {
 
 // TestStreamEndpointFedByOwnCorrelationRefresh covers the job<->candidate
 // correlation path end to end without any GET /api/jobs call: the hub's
-// deps.Jobs is queried directly by subscribe()'s synchronous refresh, so
-// ?job=<id> reports live per-file data on the very first frame.
+// deps.Jobs and deps.JobDetail are queried directly by subscribe()'s
+// synchronous refresh, so ?job=<id> reports live per-file data on the very
+// first frame rather than after a whole correlationInterval.
 func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) {
@@ -721,6 +605,15 @@ func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 				AlbumBytesRemaining: 1000,
 			},
 		}, nil
+	}
+	deps.JobDetail = func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+		return core.JobDetail{
+			Job: core.AlbumJob{ID: jobID},
+			Attempts: []core.AttemptDetail{{
+				Attempt:   core.Candidate{ID: 1, Username: "alice"},
+				Transfers: []core.Transfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesTotal: 1000}},
+			}},
+		}, true, nil
 	}
 	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
 
@@ -780,12 +673,17 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 // stream must never carry DB-only fields like status/state/events/peers at
 // the job/top level. Asserted against buildLivePayload's real output (not a
 // hand-built literal) so it actually exercises the builder, not just the
-// struct tags. streamFileDTO's own "state" is exempt — it's a live,
-// in-memory RemoteTransfer.State, not a persisted job/candidate state.
+// struct tags.
+//
+// Only top-level keys are checked, which is the point: since #258 the scoped
+// "detail" object deliberately nests persisted state (attempt state, retries,
+// per-transfer state), because serving the whole finished object is what lets
+// the frontend stop merging. The split the design forbids is at the job/top
+// level, and that is what this asserts.
 func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
 	corr := []jobCorrelation{{id: 1, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 20}}, albumBytesTotal: 20, albumBytesRemaining: 20}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
-	payload := buildLivePayload(corr, live, 1, nil, nil)
+	payload := buildLivePayload(corr, live, 1, nil, nil, core.JobDetail{}, false)
 	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
 	body, err := json.Marshal(payload)
