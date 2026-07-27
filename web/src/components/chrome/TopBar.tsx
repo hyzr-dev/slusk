@@ -1,20 +1,8 @@
 import { useEffect, useState } from 'react';
-import { STATUS_INTERVAL, useCharts, useJobs, useLiveData, useStatus } from '../../api/queries';
+import { STATUS_INTERVAL, useCharts, useLiveData, useStatus } from '../../api/queries';
 import { formatAge, formatShortTime, formatSpeed } from '../../format';
 import { t } from '../../strings';
 import styles from './TopBar.module.css';
-
-/**
- * Aggregate download speed across jobs that are actually moving bytes.
- *
- * A job with a peer queue position is "active" but transferring nothing, and
- * counting its stale `speed` would inflate the headline figure.
- */
-function totalSpeed(jobs: { status: string; speed?: number; queuePosition?: number }[]): number {
-  return jobs
-    .filter((j) => j.status === 'active' && !j.queuePosition)
-    .reduce((sum, j) => sum + (j.speed ?? 0), 0);
-}
 
 // Two missed polls. One late response is normal jitter and must not raise an
 // alarm; two in a row means the data on screen has genuinely stopped being
@@ -69,20 +57,15 @@ function useStalenessLabel(dataUpdatedAt: number): string | null {
  * its test asserting on ModuleDetails["wanted_sync"]/["discovery"].
  */
 export default function TopBar() {
-  const jobs = useJobs();
   const status = useStatus();
   const charts = useCharts();
   const live = useLiveData();
 
-  // The stream's `down` is a straight sum, already scoped to non-terminal
-  // transfers server-side (see sumDownSpeed, internal/observ/stream.go), so
-  // it's preferred whenever a frame has arrived. Falls back to totalSpeed()
-  // when no frame has arrived yet (undefined) or the stream has died (null,
-  // written by StreamProvider's clearLive) — otherwise a dead stream would
-  // freeze this number instead of degrading back to the REST-polled figure.
-  // Note `live?.down ?? …` rather than a truthiness check on `down`: an idle
-  // but healthy stream legitimately reports 0, which must not fall back.
-  const down = live?.down ?? totalSpeed(jobs.data ?? []);
+  // The stream's `down` is preferred whenever a frame has arrived. The latest
+  // throughput sample is the existing REST-polled fallback, avoiding a global
+  // all-jobs request in chrome that mounts on every route.
+  const latestThroughput = charts.data?.throughput.at(-1)?.bytesPerSecond ?? 0;
+  const down = live?.down ?? latestThroughput;
   const lastPass = charts.data?.passes?.at(-1);
   const stale = useStalenessLabel(status.dataUpdatedAt);
 

@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useJobDetail, useJobEvents, useJobs } from '../api/queries';
+import { useAllJobs, useJobDetail, useJobEvents } from '../api/queries';
 import type { JobState, TransferDetail } from '../api/types';
 import JobActions, { isRetryEligible } from '../components/JobActions';
 import ParkedExplanation from '../components/ParkedExplanation';
@@ -44,7 +44,7 @@ function transferTone(tr: TransferDetail): { tone: TickTone; live: boolean } {
 export default function JobDetail() {
   const id = Number(useParams().id);
   const navigate = useNavigate();
-  const { data: jobs = [] } = useJobs();
+  const { data: jobs = [] } = useAllJobs();
   const detailQuery = useJobDetail(id);
   const eventsQuery = useJobEvents(id);
   const { data: detail } = detailQuery;

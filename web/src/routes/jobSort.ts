@@ -58,8 +58,8 @@ const comparators: Record<JobSortKey, (a: Job, b: Job) => number> = {
  *
  * Two properties are load-bearing, not incidental:
  *
- * - The input array is never mutated. `jobs` is typically the array held
- *   directly in the React Query cache (`useJobs().data`); sorting in place
+ * - The input array is never mutated. `jobs` is typically an array held
+ *   directly in the React Query all-jobs cache; sorting in place
  *   would rewrite that shared cache and silently change the order every other
  *   consumer of the same query sees. This always builds a fresh array first.
  *

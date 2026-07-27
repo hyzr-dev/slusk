@@ -71,7 +71,7 @@ describe('retry visibility', () => {
   it('shows Retry when the live job reports FAILED, even if the cached detail does not', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'FAILED' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'FAILED' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -83,7 +83,7 @@ describe('retry visibility', () => {
   it('shows Retry when the cached detail reports FAILED, even if the live job does not', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'FAILED' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -95,7 +95,7 @@ describe('retry visibility', () => {
   it('hides Retry when neither source reports FAILED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -109,7 +109,7 @@ describe('retry visibility', () => {
   it('shows Retry when the live job reports PARKED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'PARKED', status: 'parked' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'PARKED', status: 'parked' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'PARKED' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -125,7 +125,7 @@ describe('delete action', () => {
     const fetchMock = vi.fn(() => new Promise(() => {}));
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail());
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -154,7 +154,7 @@ describe('delete action', () => {
       vi.fn(() => Promise.resolve(new Response('job is importing\n', { status: 409 }))),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'IMPORTING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'IMPORTING', status: 'active' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'IMPORTING' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -170,7 +170,7 @@ describe('delete action', () => {
   it('disarms the delete confirm and falls back to the canned message when the server sends no body', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 500 }))));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail());
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -196,7 +196,7 @@ describe('meta row: nextAttemptAt and retries', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(
-      queryKeys.jobs,
+      queryKeys.jobsAll,
       [makeJob({ nextAttemptAt: '2026-01-01T12:00:00Z', retries: 2 })],
     );
     client.setQueryData(queryKeys.jobDetail(1), makeDetail());
@@ -211,7 +211,7 @@ describe('meta row: nextAttemptAt and retries', () => {
   it('hides nextAttemptAt and retries when unset', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ nextAttemptAt: '', retries: 0 })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ nextAttemptAt: '', retries: 0 })]);
     client.setQueryData(queryKeys.jobDetail(1), makeDetail());
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
@@ -259,7 +259,7 @@ describe('transfer live progress', () => {
   it('shows speed for a downloading transfer and queue position for a queued one', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([
@@ -283,7 +283,7 @@ describe('transfer live progress', () => {
   it('flares the tick bar for a transferring file but not for a queued one', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([
@@ -306,7 +306,7 @@ describe('transfer live progress', () => {
   it('omits speed and queue markers when the fields are absent', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobs, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([makeTransfer({ filename: '01.flac', state: 'ERRORED' })]),
@@ -366,7 +366,7 @@ describe('placeholder-data guard', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (url === '/api/jobs') return jsonResponse([]);
+        if (url === '/api/jobs/all') return jsonResponse([]);
         if (url === '/api/jobs/1/detail') return jsonResponse(job1Detail);
         if (url === '/api/jobs/1/events') return jsonResponse([]);
         if (url === '/api/jobs/2/detail') {
@@ -422,7 +422,7 @@ describe('file ordering', () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, placeholderData: keepPreviousData } },
     });
-    client.setQueryData(queryKeys.jobs, [makeJob()]);
+    client.setQueryData(queryKeys.jobsAll, [makeJob()]);
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
     client.setQueryData(
       queryKeys.jobDetail(1),

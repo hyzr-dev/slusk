@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { useCharts, useJobs, useStatus } from '../api/queries';
+import { useAllJobs, useCharts, useStatus } from '../api/queries';
 import type { Job } from '../api/types';
 import ThroughputAreaChart from '../components/charts/ThroughputAreaChart';
 import EmptyState from '../components/tui/EmptyState';
@@ -40,7 +40,7 @@ function tickTone(job: Job): TickTone {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const jobsQuery = useJobs();
+  const jobsQuery = useAllJobs();
   const statusQuery = useStatus();
   const chartsQuery = useCharts();
   const jobs = jobsQuery.data ?? [];

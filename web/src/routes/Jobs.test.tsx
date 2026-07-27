@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { queryKeys } from '../api/queries';
-import type { Job, JobDetail as JobDetailDTO, JobEvent } from '../api/types';
+import { DEFAULT_JOB_PAGE_PARAMS, queryKeys } from '../api/queries';
+import type { Job, JobDetail as JobDetailDTO, JobEvent, JobFacets, JobPage } from '../api/types';
 import { FlashProvider } from '../components/chrome/FlashContext';
 import StatusBar from '../components/chrome/StatusBar';
 import { t } from '../strings';
@@ -66,9 +66,42 @@ function sourceGroup() {
   return within(screen.getByRole('group', { name: t.jobs.sourceFilterLabel }));
 }
 
-function renderJobs(jobs: Job[], client?: QueryClient) {
+function facetsFor(jobs: Job[]): JobFacets {
+  const status: JobFacets['status'] = {
+    all: jobs.length,
+    active: 0,
+    importing: 0,
+    queued: 0,
+    stalled: 0,
+    failed: 0,
+    parked: 0,
+    done: 0,
+  };
+  for (const job of jobs) {
+    if (job.state === 'IMPORTING') status.importing += 1;
+    else status[job.status] += 1;
+  }
+  return {
+    status,
+    source: {
+      all: jobs.length,
+      manual: jobs.filter((job) => job.source === 'manual').length,
+      lidarr: jobs.filter((job) => job.source === 'lidarr').length,
+    },
+  };
+}
+
+function pageFor(jobs: Job[], total = jobs.length, facets = facetsFor(jobs)): JobPage {
+  return { jobs, total, facets };
+}
+
+function seedPage(qc: QueryClient, page: JobPage, params = DEFAULT_JOB_PAGE_PARAMS) {
+  qc.setQueryData(queryKeys.jobsPage(params), page);
+}
+
+function renderJobs(jobs: Job[], client?: QueryClient, total = jobs.length, facets = facetsFor(jobs)) {
   const qc = client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  qc.setQueryData(queryKeys.jobs, jobs);
+  seedPage(qc, pageFor(jobs, total, facets));
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -84,7 +117,7 @@ function renderJobs(jobs: Job[], client?: QueryClient) {
 // exactly as Layout does in the real app.
 function renderJobsWithChrome(jobs: Job[]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  qc.setQueryData(queryKeys.jobs, jobs);
+  seedPage(qc, pageFor(jobs));
   return render(
     <QueryClientProvider client={qc}>
       <FlashProvider>
@@ -175,120 +208,61 @@ describe('queue position rendering', () => {
   });
 });
 
-describe('chip filtering', () => {
-  it('filters by status chip and updates counts without being zeroed by the selected chip', () => {
+describe('server-owned filters and facets', () => {
+  it('shows global status and source facet counts rather than counting the current page', () => {
     stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', status: 'active', state: 'DOWNLOADING' }),
-      makeJob({ id: 2, title: 'Rounds', status: 'failed', state: 'FAILED' }),
-    ]);
+    const facets: JobFacets = {
+      status: { all: 42, active: 9, importing: 2, queued: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
+      source: { all: 31, manual: 11, lidarr: 20 },
+    };
+    renderJobs([makeJob()], undefined, 42, facets);
 
+    expect(within(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) })).getByText('6')).toBeInTheDocument();
+    expect(within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).getByText('11')).toBeInTheDocument();
+  });
+
+  it('requests source and status filters from the server instead of page-local filtering', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      requested.push(url);
+      const params = new URL(url, 'http://localhost').searchParams;
+      const jobs = params.get('source') === 'manual'
+        ? [makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'failed', state: 'FAILED' })]
+        : [makeJob()];
+      return Promise.resolve(new Response(JSON.stringify(pageFor(jobs)), { status: 200 }));
+    }));
+    renderJobs([makeJob()]);
+
+    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
+    await screen.findByText('Rounds');
     fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
 
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
-    // The ACTIVE chip's own counter still reads 1 even though it's not selected.
-    const activeChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) });
-    expect(within(activeChip).getByText('1')).toBeInTheDocument();
+    await waitFor(() => expect(requested.some((url) => url.includes('filter=failed') && url.includes('source=manual'))).toBe(true));
   });
 
-  // The source axis (Manual vs Lidarr) is a second, independent chip group —
-  // not drawn in the mock, but jobFilter.ts's SourceFilter is still live code
-  // that must stay reachable from this view (see Jobs.tsx's SOURCE_CHIP_ORDER).
-  it('filters by source chip', () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual' }),
-    ]);
+  it('resets to page one immediately while modestly debouncing search requests', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      requested.push(url);
+      const isSecondPage = new URL(url, 'http://localhost').searchParams.get('page') === '1';
+      const jobs = isSecondPage ? [makeJob({ id: 13, title: 'Page two' })] : [makeJob()];
+      return Promise.resolve(new Response(JSON.stringify(pageFor(jobs, 25)), { status: 200 }));
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seedPage(client, pageFor([makeJob()], 25));
+    seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
+    renderJobs([makeJob()], client, 25);
 
-    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    expect(await screen.findByText('Page two')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(t.jobs.searchPlaceholder), { target: { value: 'Miles & Blue' } });
 
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
-  });
-
-  it('shows the empty state when no job matches the filter', () => {
-    stubFetchIndefinitely();
-    renderJobs([makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr' })]);
-
-    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
-
-    expect(screen.getByText(new RegExp(t.jobs.noMatch))).toBeInTheDocument();
-  });
-
-  it("the status ALL chip's count reflects the search filter, not the unfiltered job list", () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', artist: 'Miles Davis', status: 'active' }),
-      makeJob({ id: 2, title: 'Rounds', artist: 'Four Tet', status: 'failed' }),
-      makeJob({ id: 3, title: 'Sound of Silver', artist: 'LCD Soundsystem', status: 'done' }),
-    ]);
-
-    fireEvent.change(screen.getByPlaceholderText(t.jobs.searchPlaceholder), { target: { value: 'Tet' } });
-
-    // Only "Rounds" (Four Tet) matches the search text — the status ALL
-    // chip's own counter must already read 1, not 3 (jobs.length).
-    const allChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
-    expect(within(allChip).getByText('1')).toBeInTheDocument();
-
-    fireEvent.click(allChip);
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
-  });
-
-  it("the status ALL chip's count reflects the source filter too, not the unfiltered job list", () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'failed' }),
-      makeJob({ id: 3, title: 'Sound of Silver', source: 'manual', status: 'done' }),
-    ]);
-
-    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
-
-    // Clicking MANUAL leaves 2 jobs — the status ALL chip's own counter must
-    // already read 2, not 3 (jobs.length).
-    const allChip = statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) });
-    expect(within(allChip).getByText('2')).toBeInTheDocument();
-
-    fireEvent.click(allChip);
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.getByText('Sound of Silver')).toBeInTheDocument();
-    expect(screen.queryByText('Kind of Blue')).not.toBeInTheDocument();
-  });
-
-  // Mirror of the test above, the other way round: the two axes must count
-  // by the same rule. Regression — the source ALL bucket used to reuse the
-  // status axis's own `allCount` (which respects the *source* filter and
-  // ignores *status*), so with a status chip selected it disagreed with
-  // MANUAL + LIDARR and clicking it showed more rows than it promised.
-  it("the source ALL chip's count reflects the status filter too, not the unfiltered job list", () => {
-    stubFetchIndefinitely();
-    renderJobs([
-      makeJob({ id: 1, title: 'Kind of Blue', source: 'lidarr', status: 'active' }),
-      makeJob({ id: 2, title: 'Rounds', source: 'manual', status: 'active' }),
-      makeJob({ id: 3, title: 'Sound of Silver', source: 'manual', status: 'done' }),
-    ]);
-
-    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.active) }));
-
-    // Clicking ACTIVE leaves 2 jobs (one manual, one lidarr) — the source
-    // ALL chip's own counter must already read 2, matching MANUAL (1) +
-    // LIDARR (1), not 3 (jobs.length).
-    const sourceAllChip = sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.all) });
-    expect(within(sourceAllChip).getByText('2')).toBeInTheDocument();
-    expect(
-      within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).getByText('1'),
-    ).toBeInTheDocument();
-    expect(
-      within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.lidarr) })).getByText('1'),
-    ).toBeInTheDocument();
-
-    fireEvent.click(sourceAllChip);
-    expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
-    expect(screen.getByText('Rounds')).toBeInTheDocument();
-    expect(screen.queryByText('Sound of Silver')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
+    expect(requested.some((url) => url.includes('q=Miles'))).toBe(false);
+    await waitFor(
+      () => expect(requested.some((url) => url.includes('page=0') && url.includes('q=Miles+%26+Blue'))).toBe(true),
+      { timeout: 1000 },
+    );
   });
 });
 
@@ -385,7 +359,7 @@ describe('row expansion', () => {
   it('the job title link is keyboard-navigable to the detail page', async () => {
     stubFetchIndefinitely();
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    qc.setQueryData(queryKeys.jobs, [makeJob({ id: 1 })]);
+    seedPage(qc, pageFor([makeJob({ id: 1 })]));
     render(
       <QueryClientProvider client={qc}>
         <MemoryRouter initialEntries={['/jobs']}>
@@ -443,8 +417,8 @@ describe('row expansion', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, init?: RequestInit) => {
-        if (url === '/api/jobs') {
-          return Promise.resolve(new Response(JSON.stringify(jobsPayload), { status: 200 }));
+        if (url.startsWith('/api/jobs?')) {
+          return Promise.resolve(new Response(JSON.stringify(pageFor(jobsPayload)), { status: 200 }));
         }
         if (url === '/api/jobs/1/detail') {
           return Promise.resolve(
@@ -467,6 +441,122 @@ describe('row expansion', () => {
     fireEvent.click(await screen.findByRole('button', { name: t.jobs.cancel }));
 
     expect(await screen.findByText(/cancelled/i)).toBeInTheDocument();
+  });
+});
+
+describe('sorting and pagination', () => {
+  it('makes only ST, ALBUM, PEER and TRY sortable, with accessible direction toggles', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      requested.push(url);
+      const body = url.endsWith('/detail')
+        ? { id: 1, title: 'Kind of Blue', artist: 'Miles Davis', state: 'DOWNLOADING', attempts: [] }
+        : pageFor([makeJob()]);
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    }));
+    renderJobs([makeJob()]);
+    const table = screen.getByRole('table');
+    const headers = within(table).getAllByRole('columnheader');
+
+    expect(headers.filter((header) => within(header).queryByRole('button'))).toHaveLength(4);
+    expect(within(headers[3]).queryByRole('button')).toBeNull();
+    expect(within(headers[4]).queryByRole('button')).toBeNull();
+    expect(within(headers[5]).queryByRole('button')).toBeNull();
+    expect(within(headers[6]).queryByRole('button')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+    fireEvent.click(within(table).getByRole('button', { name: t.jobs.gridHead.album }));
+    expect(screen.queryByRole('button', { name: t.jobs.hideDetails })).not.toBeInTheDocument();
+    await waitFor(() => expect(requested.some((url) => url.includes('sort=album') && url.includes('dir=asc'))).toBe(true));
+    expect(within(table).getByRole('columnheader', { name: /ALBUM/ })).toHaveAttribute('aria-sort', 'ascending');
+
+    fireEvent.click(within(table).getByRole('button', { name: /ALBUM/ }));
+    await waitFor(() => expect(requested.some((url) => url.includes('sort=album') && url.includes('dir=desc'))).toBe(true));
+    expect(within(table).getByRole('columnheader', { name: /ALBUM/ })).toHaveAttribute('aria-sort', 'descending');
+  });
+
+  it('renders bounded numbered controls, range/total, and clears expansion on page change', async () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seedPage(client, pageFor([makeJob({ id: 1 })], 120));
+    seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 120), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
+    renderJobs([makeJob({ id: 1 })], client, 120);
+
+    expect(screen.getByText(t.jobs.resultRange(1, 12, 120))).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.jobs.previousPage })).toBeDisabled();
+    expect(screen.getByRole('button', { name: t.jobs.pageLabel(10) })).toBeInTheDocument();
+    expect(screen.getAllByText('…')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+    expect(screen.getByRole('button', { name: t.jobs.hideDetails })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+
+    expect(await screen.findByText('Page two')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.jobs.hideDetails })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.jobs.previousPage })).toBeEnabled();
+  });
+
+  it('resets the page and expansion when a status filter changes', async () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seedPage(client, pageFor([makeJob()], 25));
+    seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
+    seedPage(
+      client,
+      pageFor([makeJob({ id: 20, title: 'Failed result', status: 'failed', state: 'FAILED' })]),
+      { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'failed' },
+    );
+    renderJobs([makeJob()], client, 25);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    expect(await screen.findByText('Page two')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+
+    expect(await screen.findByText('Failed result')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: t.jobs.hideDetails })).not.toBeInTheDocument();
+  });
+
+  it('supports comma/period shortcuts but ignores editable targets and modifiers', async () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seedPage(client, pageFor([makeJob()], 25));
+    seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
+    renderJobs([makeJob()], client, 25);
+
+    fireEvent.keyDown(document, { key: '.' });
+    expect(await screen.findByText('Page two')).toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText(t.jobs.searchPlaceholder);
+    fireEvent.keyDown(input, { key: ',' });
+    expect(screen.getByText('Page two')).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: ',', ctrlKey: true });
+    expect(screen.getByText('Page two')).toBeInTheDocument();
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    document.body.append(editable);
+    fireEvent.keyDown(editable, { key: ',' });
+    expect(screen.getByText('Page two')).toBeInTheDocument();
+    editable.remove();
+
+    fireEvent.keyDown(document, { key: ',' });
+    expect(await screen.findByText('Kind of Blue')).toBeInTheDocument();
+  });
+
+  it('clamps to the last valid page after the total shrinks', async () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seedPage(client, pageFor([makeJob()], 25));
+    const secondParams = { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 };
+    seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), secondParams);
+    renderJobs([makeJob()], client, 25);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    expect(await screen.findByText('Page two')).toBeInTheDocument();
+    act(() => seedPage(client, pageFor([], 1), secondParams));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page'));
   });
 });
 

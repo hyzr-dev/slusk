@@ -204,8 +204,8 @@ export const t = {
       done: 'DONE',
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
-    // the mock, but jobFilter.ts's SourceFilter needs a UI to reach it from;
-    // see Jobs.tsx's SOURCE_CHIP_ORDER. The group's own accessible name —
+    // the mock, but source filtering is an approved Jobs control. The group's
+    // own accessible name —
     // distinct from sourceLabel above, which is the expansion meta-tree's
     // (lowercase) row label and must stay free to reword independently.
     sourceFilterLabel: 'Source',
@@ -214,6 +214,11 @@ export const t = {
       manual: 'MANUAL',
       lidarr: 'LIDARR',
     },
+    paginationLabel: 'Job pages',
+    previousPage: '[,] PREV',
+    nextPage: 'NEXT [.]',
+    pageLabel: (page: number) => `Page ${page}`,
+    resultRange: (start: number, end: number, total: number) => `${start}–${end} of ${total} jobs`,
     // Compact peer-queue position for the dense PROGRESS cell, where "queue
     // #4" (queuePosition above) would overflow the column.
     queueShort: (n: number) => `P${n}`,

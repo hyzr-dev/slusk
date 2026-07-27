@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../../api/queries';
 import type { StatusReport } from '../../api/types';
 import { formatSpeed } from '../../format';
@@ -8,6 +8,8 @@ import { t } from '../../strings';
 import TopBar, { stalenessLabel } from './TopBar';
 
 const STALE_AFTER = 10_000;
+
+afterEach(() => vi.unstubAllGlobals());
 
 // Pure-function test, not wall-clock dependent: every argument is a plain
 // number supplied by the test, never Date.now().
@@ -39,7 +41,6 @@ describe('TopBar', () => {
   function renderTopBar(status: Partial<StatusReport> | undefined) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     if (status) client.setQueryData(queryKeys.status, status);
-    client.setQueryData(queryKeys.jobs, []);
     client.setQueryData(queryKeys.charts, { passes: [], throughput: [], cumulative: [] });
     return render(
       <QueryClientProvider client={client}>
@@ -80,36 +81,42 @@ describe('TopBar', () => {
 // null (not undefined) into the live cache, and a healthy but idle stream
 // legitimately reports 0.
 describe('download speed source', () => {
-  function renderWithLive(live: unknown, jobs: unknown[]) {
+  function renderWithLive(live: unknown, throughput = 2048) {
+    const fetchMock = vi.fn((_url: string) => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(queryKeys.status, {});
-    client.setQueryData(queryKeys.jobs, jobs);
-    client.setQueryData(queryKeys.charts, { passes: [], throughput: [], cumulative: [] });
+    client.setQueryData(queryKeys.charts, {
+      passes: [],
+      throughput: [{ at: '2026-01-01T00:00:00Z', bytesPerSecond: throughput, activeTransfers: 1 }],
+      cumulative: [],
+    });
     if (live !== undefined) client.setQueryData(queryKeys.live, live);
-    return render(
+    const rendered = render(
       <QueryClientProvider client={client}>
         <TopBar />
       </QueryClientProvider>,
     );
+    return { ...rendered, fetchMock };
   }
 
-  const activeJob = { id: 1, status: 'active', speed: 2048 };
-
-  it('prefers the stream figure over the jobs-derived sum', () => {
-    renderWithLive({ jobs: [], down: 4096 }, [activeJob]);
+  it('prefers the stream figure over the throughput fallback', () => {
+    renderWithLive({ jobs: [], down: 4096 });
     expect(screen.getByText(formatSpeed(4096))).toBeInTheDocument();
   });
 
-  it('falls back to the jobs sum when the stream has died', () => {
-    // clearLive writes null rather than undefined; reading `.down` off that
-    // would throw, so this asserts the header still renders at all.
-    renderWithLive(null, [activeJob]);
+  it('falls back to the latest throughput sample when the stream has died', () => {
+    renderWithLive(null);
     expect(screen.getByText(formatSpeed(2048))).toBeInTheDocument();
   });
 
+  it('does not fetch the all-jobs endpoint from persistent chrome', () => {
+    const { fetchMock } = renderWithLive(null);
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/jobs/all')).toBe(false);
+  });
+
   it('trusts a healthy stream reporting zero rather than falling back', () => {
-    // A ?? that mistook 0 for "no data" would show the stale jobs sum here.
-    renderWithLive({ jobs: [], down: 0 }, [activeJob]);
+    renderWithLive({ jobs: [], down: 0 });
     expect(screen.getByText(t.chrome.idle)).toBeInTheDocument();
   });
 });

@@ -5,7 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
-import { normalizeJobDetail, normalizeJobs, normalizeStatusReport } from './normalize';
+import { normalizeJobDetail, normalizeJobPage, normalizeJobs, normalizeStatusReport } from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -16,6 +16,8 @@ import type {
   Job,
   JobDetail,
   JobEvent,
+  JobPage,
+  JobPageParams,
   LiveJob,
   MarkReadResult,
   Peer,
@@ -28,6 +30,7 @@ import type {
   UploadsReport,
   WireJob,
   WireJobDetail,
+  WireJobPage,
   WireStatusReport,
 } from './types';
 
@@ -77,6 +80,17 @@ const THREAD_INTERVAL = 3000;
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
+  jobsPage: (params: JobPageParams) => [
+    'jobs',
+    'page',
+    params.page,
+    params.sort,
+    params.dir,
+    params.filter,
+    params.source,
+    params.q,
+  ] as const,
+  jobsAll: ['jobs', 'all'] as const,
   status: ['status'] as const,
   events: ['events'] as const,
   peers: ['peers'] as const,
@@ -137,6 +151,14 @@ export function mergeLiveJobs(jobs: Job[] | undefined, live: LiveJob[] | undefin
   });
 }
 
+// A page is an ordered server result, so live data may update fields only.
+// It must never splice stream-only IDs into the page or disturb its metadata.
+export function mergeLiveJobPage(page: JobPage | undefined, live: LiveJob[] | undefined): JobPage | undefined {
+  if (!page) return page;
+  const jobs = mergeLiveJobs(page.jobs, live);
+  return jobs === page.jobs ? page : { ...page, jobs: jobs! };
+}
+
 // Picks the job detail to render: the stream's when it carries one for this
 // job, otherwise REST's.
 //
@@ -179,10 +201,45 @@ export function mergeThroughputSamples(existing: ThroughputSample[], incoming: T
   return [...existing, ...deduped].slice(-THROUGHPUT_CAP);
 }
 
-export function useJobs() {
+export const JOBS_PAGE_SIZE = 12;
+
+export const DEFAULT_JOB_PAGE_PARAMS: JobPageParams = {
+  page: 0,
+  sort: 'st',
+  dir: 'asc',
+  filter: 'all',
+  source: 'all',
+  q: '',
+};
+
+export function jobsPageUrl(params: JobPageParams): string {
+  const query = new URLSearchParams();
+  query.set('page', String(params.page));
+  query.set('sort', params.sort);
+  query.set('dir', params.dir);
+  query.set('filter', params.filter);
+  query.set('source', params.source);
+  query.set('q', params.q);
+  return `/api/jobs?${query.toString()}`;
+}
+
+export function useJobs(params: JobPageParams) {
   const jobsQuery = useQuery({
-    queryKey: queryKeys.jobs,
-    queryFn: () => apiGet<WireJob[]>('/api/jobs').then(normalizeJobs),
+    queryKey: queryKeys.jobsPage(params),
+    queryFn: () => apiGet<WireJobPage>(jobsPageUrl(params)).then(normalizeJobPage),
+    refetchInterval: JOBS_INTERVAL,
+  });
+  const live = useLiveData();
+  return { ...jobsQuery, data: mergeLiveJobPage(jobsQuery.data, live?.jobs) };
+}
+
+// Only consumers that truly need the complete collection should use this.
+// The paged Jobs route must stay on useJobs so filtering and facets remain
+// globally correct on the server.
+export function useAllJobs() {
+  const jobsQuery = useQuery({
+    queryKey: queryKeys.jobsAll,
+    queryFn: () => apiGet<WireJob[]>('/api/jobs/all').then(normalizeJobs),
     refetchInterval: JOBS_INTERVAL,
   });
   const live = useLiveData();
