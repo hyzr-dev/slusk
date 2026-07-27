@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider, keepPreviousData } from '@tanstack/react-query';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { StreamProvider } from './api/stream';
 import Layout from './components/Layout';
 import Overview from './routes/Overview';
 import Jobs from './routes/Jobs';
@@ -32,21 +33,23 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route index element={<Overview />} />
-            <Route path="jobs" element={<Jobs />} />
-            <Route path="jobs/:id" element={<JobDetail />} />
-            <Route path="events" element={<Events />} />
-            <Route path="peers" element={<Peers />} />
-            <Route path="shares" element={<Shares />} />
-            <Route path="health" element={<Health />} />
-            <Route path="search" element={<Search />} />
-            <Route path="chat/:username?" element={<Chat />} />
-            <Route path="setup" element={<Setup />} />
-            <Route path="settings" element={<Settings />} />
-          </Route>
-        </Routes>
+        <StreamProvider>
+          <Routes>
+            <Route element={<Layout />}>
+              <Route index element={<Overview />} />
+              <Route path="jobs" element={<Jobs />} />
+              <Route path="jobs/:id" element={<JobDetail />} />
+              <Route path="events" element={<Events />} />
+              <Route path="peers" element={<Peers />} />
+              <Route path="shares" element={<Shares />} />
+              <Route path="health" element={<Health />} />
+              <Route path="search" element={<Search />} />
+              <Route path="chat/:username?" element={<Chat />} />
+              <Route path="setup" element={<Setup />} />
+              <Route path="settings" element={<Settings />} />
+            </Route>
+          </Routes>
+        </StreamProvider>
       </BrowserRouter>
     </QueryClientProvider>
   );

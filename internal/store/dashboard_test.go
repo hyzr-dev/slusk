@@ -556,6 +556,87 @@ func TestJobDetailIncludesAllAttemptsAndTransfersNewestFirst(t *testing.T) {
 	}
 }
 
+// TestTransferBytesByCandidateReturnsPerFileBytes covers the per-file byte
+// query backing internal/observ's live-bytes overlay (issue #161): given a
+// set of candidate ids, it returns each candidate's own files keyed by
+// filename, and does not leak another candidate's files into the result.
+func TestTransferBytesByCandidateReturnsPerFileBytes(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	jobA, _ := s.UpsertWantedJob(ctx, 61, now)
+	if err := s.InsertCandidates(ctx, jobA.ID, []NewCandidate{{Username: "peer_a", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates a: %v", err)
+	}
+	a, found, err := s.NextNewCandidate(ctx, jobA.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate a: found=%v (%v)", found, err)
+	}
+	tid1, _, err := s.RecordEnqueueIntent(ctx, a.ID, "peer_a", "01.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent a/01: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid1, core.TransferInProgress, 400, 1000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress a/01: %v", err)
+	}
+	tid2, _, err := s.RecordEnqueueIntent(ctx, a.ID, "peer_a", "02.flac", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatalf("RecordEnqueueIntent a/02: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, tid2, core.TransferCompleted, 2000, 2000, now); err != nil {
+		t.Fatalf("UpdateTransferProgress a/02: %v", err)
+	}
+
+	jobB, _ := s.UpsertWantedJob(ctx, 62, now)
+	if err := s.InsertCandidates(ctx, jobB.ID, []NewCandidate{{Username: "peer_b", Score: 1.0}}, now); err != nil {
+		t.Fatalf("InsertCandidates b: %v", err)
+	}
+	b, found, err := s.NextNewCandidate(ctx, jobB.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate b: found=%v (%v)", found, err)
+	}
+	// Same filename as candidate a's first file, to prove results are keyed
+	// per-candidate rather than colliding on filename alone.
+	if _, _, err := s.RecordEnqueueIntent(ctx, b.ID, "peer_b", "01.flac", now.Add(time.Hour), now); err != nil {
+		t.Fatalf("RecordEnqueueIntent b/01: %v", err)
+	}
+
+	got, err := s.TransferBytesByCandidate(ctx, []int64{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate: %v", err)
+	}
+	if got[a.ID]["01.flac"] != 400 || got[a.ID]["02.flac"] != 2000 {
+		t.Errorf("candidate a bytes = %+v, want 01.flac=400, 02.flac=2000", got[a.ID])
+	}
+	if got[b.ID]["01.flac"] != 0 {
+		t.Errorf("candidate b bytes = %+v, want 01.flac=0 (never enqueued progress)", got[b.ID])
+	}
+}
+
+// TestTransferBytesByCandidateEmptyAndUnknownIDs covers the two degenerate
+// inputs: no ids at all, and ids that don't match any candidate.
+func TestTransferBytesByCandidateEmptyAndUnknownIDs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	got, err := s.TransferBytesByCandidate(ctx, nil)
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate(nil): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map for nil ids, got %+v", got)
+	}
+
+	got, err = s.TransferBytesByCandidate(ctx, []int64{999999})
+	if err != nil {
+		t.Fatalf("TransferBytesByCandidate(unknown): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map for unknown candidate id, got %+v", got)
+	}
+}
+
 func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

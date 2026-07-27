@@ -512,6 +512,7 @@ func main() {
 		Restart:          restartFn,
 		ConnectionTester: connectionTester,
 		LiveTransfers:    liveTransfersFn,
+		TransferBytes:    st.TransferBytesByCandidate,
 		Charts:           chartsFn,
 		Shares:           sharesFn,
 		RescanShares:     rescanSharesFn,
@@ -521,6 +522,12 @@ func main() {
 		Thread:           threadFn,
 		Send:             sendMessageFn,
 		MarkRead:         markReadFn,
+		// Shutdown closes open GET /api/stream connections on graceful
+		// shutdown (issue #161); restartCtx is the same context every other
+		// long-lived goroutine below (soulCtx, the throughput recorder) is
+		// derived from, so a stream connection is torn down at the same
+		// point those are, rather than lingering until the client notices.
+		Shutdown: restartCtx.Done(),
 	})
 	var authenticator observ.Authenticator
 	if cfg.Observ.AuthToken != "" {
