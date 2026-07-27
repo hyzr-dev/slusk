@@ -107,6 +107,68 @@ func TestSumDownSpeedExcludesTerminal(t *testing.T) {
 	}
 }
 
+// Reproduces the backwards step seen in the lab after the per-file rewrite:
+// a file finishes, reconcile persists its final size and purges it from the
+// live set, but the hub's cached persisted map is up to
+// streamCorrelationInterval old and still holds the pre-completion figure.
+// jobBytesDone then reads that stale figure and the album total drops.
+func TestObserveLiveBytesFloorsStalePersistedAfterFileCompletes(t *testing.T) {
+	corr := []jobCorrelation{{
+		id: 1, candidateID: 7, username: "peer",
+		files: []core.CandidateFile{{Filename: "a.flac", Size: 200}, {Filename: "b.flac", Size: 200}},
+	}}
+	// The cached map is one refresh behind throughout: a.flac reads 50 here
+	// even after it has finished at 200.
+	stale := map[int64]map[string]int64{7: {"a.flac": 50, "b.flac": 10}}
+	hub := newStreamHub(nil, nil, nil, nil, time.Hour, time.Hour)
+
+	// Tick 1 — a.flac is live and mid-transfer.
+	live := []core.RemoteTransfer{
+		{Username: "peer", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 180},
+	}
+	got := hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
+	before := sumFileBytesDone("peer", corr[0].files, newLiveTransferIndex(live), got[7])
+	if before != 190 { // 180 live + 10 persisted
+		t.Fatalf("before completion = %d, want 190", before)
+	}
+
+	// Tick 2 — a.flac finished at 200 and was purged from the live set. The
+	// cached map has not refreshed, so without the floor this reads 50.
+	live = []core.RemoteTransfer{
+		{Username: "peer", Filename: "a.flac", State: core.TransferCompleted, BytesDone: 200},
+	}
+	got = hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
+
+	live = nil // purged
+	got = hub.observeLiveBytes(corr, newLiveTransferIndex(live), stale)
+	after := sumFileBytesDone("peer", corr[0].files, newLiveTransferIndex(live), got[7])
+	if after < before {
+		t.Errorf("album total regressed %d -> %d after the file completed", before, after)
+	}
+	if after != 210 { // 200 remembered + 10 persisted
+		t.Errorf("after completion = %d, want 210 (the floor, not the stale 50)", after)
+	}
+}
+
+func TestObserveLiveBytesForgetsOncePersistedCatchesUp(t *testing.T) {
+	corr := []jobCorrelation{{
+		id: 1, candidateID: 7, username: "peer",
+		files: []core.CandidateFile{{Filename: "a.flac", Size: 200}},
+	}}
+	hub := newStreamHub(nil, nil, nil, nil, time.Hour, time.Hour)
+	live := []core.RemoteTransfer{
+		{Username: "peer", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 200},
+	}
+	hub.observeLiveBytes(corr, newLiveTransferIndex(live), map[int64]map[string]int64{7: {"a.flac": 50}})
+
+	// The refresh lands: persisted now matches what was observed, so the
+	// memory has nothing left to contribute and must not linger.
+	hub.observeLiveBytes(corr, newLiveTransferIndex(nil), map[int64]map[string]int64{7: {"a.flac": 200}})
+	if got := hub.lastLiveBytes[7]["a.flac"]; got != 0 {
+		t.Errorf("floor for a.flac = %d, want it forgotten once persisted caught up", got)
+	}
+}
+
 func TestDownSpeedPrefersNewestThroughputSample(t *testing.T) {
 	t0 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	samples := []core.ThroughputSample{

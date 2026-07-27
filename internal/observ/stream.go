@@ -363,6 +363,11 @@ type streamHub struct {
 	corrMu           sync.RWMutex
 	correlation      []jobCorrelation
 	bytesByCandidate map[int64]map[string]int64
+	// lastLiveBytes remembers the highest live BytesDone seen per candidate
+	// file, bridging the window where a finished file has left the live set
+	// but the cached persisted map has not yet been refreshed. See
+	// mergeLiveByteFloor.
+	lastLiveBytes map[int64]map[string]int64
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -469,6 +474,88 @@ func (h *streamHub) bytesSnapshot() map[int64]map[string]int64 {
 	return h.bytesByCandidate
 }
 
+// mergeLiveByteFloor raises each persisted per-file figure to the highest
+// live figure previously observed for that same file, and is what keeps the
+// stream's album totals from regressing when a file finishes.
+//
+// The hub reads two sources that are fresh at different moments: live
+// transfers every tick, but persisted bytes only every
+// streamCorrelationInterval. jobBytesDone uses the live figure while a file
+// is in ListDownloads and the persisted one once it leaves — and reconcile
+// purges a file from the live backend immediately after persisting its final
+// byte count (internal/pipeline/downloading.go), so the handover is exact
+// against *fresh* persisted data. It is not exact against a cached snapshot:
+// for up to one refresh interval after a file completes, the cached map still
+// holds the pre-completion figure, and the album total drops by whatever the
+// file gained in between. Observed in the lab as a ~1.2 MB backwards step two
+// ticks after a file finished.
+//
+// The floor closes that window without another query: the last live figure
+// seen for a file is precisely what reconcile persisted before purging it, so
+// this restores the value the cache has not caught up to yet rather than
+// guessing. Applied only to candidates the persisted map already covers —
+// synthesising an entry would flip jobBytesDone out of its albumBytesDone
+// fallback on partial data.
+func mergeLiveByteFloor(persisted, floor map[int64]map[string]int64) map[int64]map[string]int64 {
+	if len(persisted) == 0 || len(floor) == 0 {
+		return persisted
+	}
+	out := make(map[int64]map[string]int64, len(persisted))
+	for candidateID, byFilename := range persisted {
+		seen := floor[candidateID]
+		if len(seen) == 0 {
+			out[candidateID] = byFilename
+			continue
+		}
+		merged := make(map[string]int64, len(byFilename))
+		for filename, done := range byFilename {
+			merged[filename] = done
+		}
+		for filename, done := range seen {
+			if done > merged[filename] {
+				merged[filename] = done
+			}
+		}
+		out[candidateID] = merged
+	}
+	return out
+}
+
+// observeLiveBytes records the highest live BytesDone seen per candidate file
+// (see mergeLiveByteFloor) and returns the persisted map with that floor
+// applied. Entries are dropped once the refreshed persisted map has caught up
+// to them, and candidates absent from the current correlation are forgotten
+// wholesale, so the memory tracks in-flight downloads rather than growing
+// with every file the process has ever seen.
+func (h *streamHub) observeLiveBytes(corr []jobCorrelation, idx liveTransferIndex, persisted map[int64]map[string]int64) map[int64]map[string]int64 {
+	h.corrMu.Lock()
+	defer h.corrMu.Unlock()
+
+	next := make(map[int64]map[string]int64, len(corr))
+	for _, c := range corr {
+		seen := h.lastLiveBytes[c.candidateID]
+		var kept map[string]int64
+		for _, f := range c.files {
+			done, ok := seen[f.Filename]
+			if lt, live := idx.matchFile(c.username, f.Filename); live && lt.BytesDone > done {
+				done, ok = lt.BytesDone, true
+			}
+			if !ok || done <= persisted[c.candidateID][f.Filename] {
+				continue // nothing worth remembering, or the cache caught up
+			}
+			if kept == nil {
+				kept = make(map[string]int64)
+			}
+			kept[f.Filename] = done
+		}
+		if kept != nil {
+			next[c.candidateID] = kept
+		}
+	}
+	h.lastLiveBytes = next
+	return mergeLiveByteFloor(persisted, next)
+}
+
 // atCapacity reports whether streamMaxSubscribers open connections are
 // already registered. Checked by registerStream before committing to a 200
 // response, so a rejection can still be a proper 503 rather than a stream
@@ -492,7 +579,9 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64) (id uint64, ch c
 	live := h.fetchLive(ctx)
 	throughputSamples := h.fetchThroughput(ctx)
 
-	initial = buildLivePayload(h.correlationSnapshot(), live, jobID, h.bytesSnapshot(), throughputSamples)
+	corr := h.correlationSnapshot()
+	persisted := h.observeLiveBytes(corr, newLiveTransferIndex(live), h.bytesSnapshot())
+	initial = buildLivePayload(corr, live, jobID, persisted, throughputSamples)
 	initial.Throughput = toThroughputDTO(throughputSamples)
 
 	sub := &streamSubscriber{
@@ -559,7 +648,11 @@ func (h *streamHub) tick(ctx context.Context) {
 	live := h.fetchLive(fetchCtx)
 	throughputSamples := h.fetchThroughput(fetchCtx)
 	cachedJobs := h.correlationSnapshot()
-	persisted := h.bytesSnapshot()
+	// Raises the cached per-file figures to the highest live figure seen, so
+	// a file that finished since the last correlation refresh doesn't read
+	// back at its pre-completion size. Takes corrMu, so it must stay outside
+	// h.mu below.
+	persisted := h.observeLiveBytes(cachedJobs, newLiveTransferIndex(live), h.bytesSnapshot())
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
