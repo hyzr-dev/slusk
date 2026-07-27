@@ -218,6 +218,58 @@ func TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted(t *testing.T) {
 	}
 }
 
+// Reconcile persists the terminal state before purging the transfer from the
+// live backend, so a finished file can still match a lingering live entry that
+// reports IN_PROGRESS at a stale speed. Bytes must still come from it; speed
+// and queue position must not, or a completed row renders as downloading.
+func TestToJobDetailDTOTerminalPersistedDropsLiveSpeedAndQueue(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
+	})
+
+	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	if tr.Speed != 0 {
+		t.Errorf("Speed = %d, want 0 (persisted state is terminal)", tr.Speed)
+	}
+	if tr.QueuePosition != 0 {
+		t.Errorf("QueuePosition = %d, want 0 (persisted state is terminal)", tr.QueuePosition)
+	}
+	if tr.BytesDone != 1000 {
+		t.Errorf("BytesDone = %d, want 1000 (bytes come from live in every state)", tr.BytesDone)
+	}
+}
+
+// STALLED is a durable retry intent, not an end state: the transfer is still in
+// flight and its live speed/queue position are real.
+func TestToJobDetailDTOStalledKeepsLiveSpeedAndQueue(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferStalled, BytesDone: 400, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 600, Speed: 1500, QueuePosition: 3},
+	})
+
+	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	if tr.Speed != 1500 || tr.QueuePosition != 3 {
+		t.Errorf("Speed/QueuePosition = %d/%d, want 1500/3 (STALLED is not terminal)", tr.Speed, tr.QueuePosition)
+	}
+}
+
 // match prefers the remote id and falls back to username+filename.
 func TestLiveTransferIndexMatch(t *testing.T) {
 	idx := newLiveTransferIndex([]core.RemoteTransfer{
