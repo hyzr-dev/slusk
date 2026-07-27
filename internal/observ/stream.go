@@ -232,13 +232,35 @@ func buildStreamFiles(job jobCorrelation, idx liveTransferIndex) []streamFileDTO
 	return out
 }
 
-// sumDownSpeed is the stream's `down` field: total live download throughput
-// summed across every non-terminal transfer, computed directly from
-// deps.LiveTransfers with no job correlation needed — unlike buildStreamJobs
-// it doesn't depend on the correlation cache, so it is accurate even before
-// the first correlation refresh has run. Non-terminal only, mirroring
-// aggregateLiveAlbum: a lingering terminal transfer's stale speed reading
-// must not inflate the header's total.
+// downSpeed is the stream's `down` field. It prefers the newest throughput
+// sample, which is a MEASURED rate — internal/soulseek's throughputTick sums
+// the actual bytesDone deltas over the actual elapsed time — and therefore
+// reports 0 the instant transfers stall. sumDownSpeed sums each transfer's
+// own speed estimate instead, and ListDownloads keeps serving those for up
+// to speedStaleAfter (3s) after a stall, so the estimate overstates exactly
+// when someone is most likely watching. Reading the same series the Overview
+// sparkline draws also means the header and the graph directly beneath it
+// cannot show different numbers for the same quantity.
+//
+// Falls back to the estimate when there is no series at all: the meter lives
+// in the native soulseek client, so cmd/slskdarr/main.go leaves
+// ServerDeps.Throughput nil on every other backend, and `down` would
+// otherwise read 0 while downloads were plainly running.
+//
+// Whether the throughput series should survive at all is issue #254; if it
+// goes, this reverts to the estimate and `down` gets less accurate, not more.
+func downSpeed(samples []core.ThroughputSample, live []core.RemoteTransfer) int64 {
+	if n := len(samples); n > 0 {
+		// Oldest-first, per ThroughputFunc's doc comment.
+		return samples[n-1].BytesPerSecond
+	}
+	return sumDownSpeed(live)
+}
+
+// sumDownSpeed sums the per-transfer speed estimates across every
+// non-terminal transfer. Non-terminal only, mirroring aggregateLiveAlbum: a
+// lingering terminal transfer's stale speed reading must not inflate the
+// total. Used only as downSpeed's fallback — prefer that.
 func sumDownSpeed(live []core.RemoteTransfer) int64 {
 	var total int64
 	for _, lt := range live {
@@ -255,13 +277,16 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 // from already-fetched inputs: cachedJobs (the hub's correlation cache),
 // live (this tick's deps.LiveTransfers), and jobID (0 for the unscoped
 // dashboard stream, >0 for a ?job= scoped subscriber). persisted is threaded
-// through to buildStreamJobs (issue #161). Pure and I/O-free by construction,
-// so it is table-testable without a server.
-func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64, persisted map[int64]map[string]int64) livePayload {
+// through to buildStreamJobs (issue #161). samples is this tick's full
+// throughput series — the whole series, not the per-subscriber delta the
+// caller sends as Throughput, because Down reads only its newest entry (see
+// downSpeed). Pure and I/O-free by construction, so it is table-testable
+// without a server.
+func buildLivePayload(cachedJobs []jobCorrelation, live []core.RemoteTransfer, jobID int64, persisted map[int64]map[string]int64, samples []core.ThroughputSample) livePayload {
 	idx := newLiveTransferIndex(live)
 	payload := livePayload{
 		Jobs: buildStreamJobs(cachedJobs, idx, persisted),
-		Down: sumDownSpeed(live),
+		Down: downSpeed(samples, live),
 	}
 	if jobID > 0 {
 		if job, ok := findJobCorrelation(cachedJobs, jobID); ok {
@@ -467,7 +492,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64) (id uint64, ch c
 	live := h.fetchLive(ctx)
 	throughputSamples := h.fetchThroughput(ctx)
 
-	initial = buildLivePayload(h.correlationSnapshot(), live, jobID, h.bytesSnapshot())
+	initial = buildLivePayload(h.correlationSnapshot(), live, jobID, h.bytesSnapshot(), throughputSamples)
 	initial.Throughput = toThroughputDTO(throughputSamples)
 
 	sub := &streamSubscriber{
@@ -551,7 +576,7 @@ func (h *streamHub) tick(ctx context.Context) {
 		return
 	}
 	for _, sub := range h.subs {
-		payload := buildLivePayload(cachedJobs, live, sub.jobID, persisted)
+		payload := buildLivePayload(cachedJobs, live, sub.jobID, persisted, throughputSamples)
 		fresh := newThroughputSince(throughputSamples, sub.lastThroughputAt)
 		next := livePayload{Jobs: payload.Jobs, Files: payload.Files, Down: payload.Down}
 		if !changedSinceLast(sub.last, next, len(fresh)) {

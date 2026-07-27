@@ -107,6 +107,50 @@ func TestSumDownSpeedExcludesTerminal(t *testing.T) {
 	}
 }
 
+func TestDownSpeedPrefersNewestThroughputSample(t *testing.T) {
+	t0 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	samples := []core.ThroughputSample{
+		{At: t0, BytesPerSecond: 111},
+		{At: t0.Add(time.Second), BytesPerSecond: 222},
+		{At: t0.Add(2 * time.Second), BytesPerSecond: 333}, // newest wins
+	}
+	live := []core.RemoteTransfer{{State: core.TransferInProgress, Speed: 999}}
+
+	if got := downSpeed(samples, live); got != 333 {
+		t.Errorf("downSpeed = %d, want 333 (newest sample, not the estimate)", got)
+	}
+}
+
+func TestDownSpeedReportsZeroWhenTransfersStall(t *testing.T) {
+	// The reason `down` reads the measured series at all: ListDownloads keeps
+	// serving a stalled transfer's last speed for up to speedStaleAfter (3s),
+	// so the estimate insists bytes are moving while the meter — which
+	// measures actual byte deltas — has already dropped to 0.
+	samples := []core.ThroughputSample{
+		{At: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC), BytesPerSecond: 0},
+	}
+	stalled := []core.RemoteTransfer{{State: core.TransferInProgress, Speed: 5_000_000}}
+
+	if got := downSpeed(samples, stalled); got != 0 {
+		t.Errorf("downSpeed = %d, want 0 — a stalled transfer's stale estimate must not win", got)
+	}
+}
+
+func TestDownSpeedFallsBackToEstimateWithoutSeries(t *testing.T) {
+	// No meter at all: cmd/slskdarr/main.go leaves ServerDeps.Throughput nil
+	// on every backend but the native soulseek client, and `down` reading 0
+	// while downloads plainly ran would be worse than a stale estimate.
+	live := []core.RemoteTransfer{
+		{State: core.TransferInProgress, Speed: 100},
+		{State: core.TransferQueued, Speed: 50},
+	}
+	for _, samples := range [][]core.ThroughputSample{nil, {}} {
+		if got := downSpeed(samples, live); got != 150 {
+			t.Errorf("downSpeed(%v) = %d, want 150", samples, got)
+		}
+	}
+}
+
 func TestNewThroughputSinceTableCases(t *testing.T) {
 	t0 := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	samples := []core.ThroughputSample{
@@ -165,17 +209,17 @@ func TestBuildLivePayloadFileScopingByJobID(t *testing.T) {
 	corr := []jobCorrelation{{id: 7, username: "alice", files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}, albumBytesTotal: 1000, albumBytesRemaining: 1000}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 500}}
 
-	unscoped := buildLivePayload(corr, live, 0, nil)
+	unscoped := buildLivePayload(corr, live, 0, nil, nil)
 	if unscoped.Files != nil {
 		t.Errorf("expected nil Files without ?job=, got %+v", unscoped.Files)
 	}
 
-	scoped := buildLivePayload(corr, live, 7, nil)
+	scoped := buildLivePayload(corr, live, 7, nil, nil)
 	if len(scoped.Files) != 1 || scoped.Files[0].Filename != "01.flac" {
 		t.Errorf("expected 1 file for ?job=7, got %+v", scoped.Files)
 	}
 
-	missing := buildLivePayload(corr, live, 999, nil)
+	missing := buildLivePayload(corr, live, 999, nil, nil)
 	if missing.Files != nil {
 		t.Errorf("expected nil Files for unknown job id, got %+v", missing.Files)
 	}
@@ -679,7 +723,7 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 func TestLivePayloadHasNoDBOnlyFields(t *testing.T) {
 	corr := []jobCorrelation{{id: 1, username: "alice", files: []core.CandidateFile{{Filename: "a.flac", Size: 20}}, albumBytesTotal: 20, albumBytesRemaining: 20}}
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
-	payload := buildLivePayload(corr, live, 1, nil)
+	payload := buildLivePayload(corr, live, 1, nil, nil)
 	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
 	body, err := json.Marshal(payload)
