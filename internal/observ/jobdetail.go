@@ -6,6 +6,7 @@ package observ
 
 import (
 	"context"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -14,7 +15,14 @@ import (
 // job detail panel.
 type transferDetailDTO struct {
 	Filename string `json:"filename"`
-	State    string `json:"state"`
+	// State is chosen by toJobDetailDTO's monotone terminal rule whenever a
+	// live match exists (issue #258): if EITHER side reports a terminal
+	// state the transfer is terminal, preferring the persisted state when
+	// both sides are terminal (reconcile is the authority on which terminal
+	// outcome it was); otherwise (neither side terminal) live supplies the
+	// state. See toJobDetailDTO for why neither side alone can be sole
+	// authority.
+	State string `json:"state"`
 	// BytesDone is overlaid with the live in-memory value whenever a live
 	// match exists, regardless of that match's state (issue #161) — mirroring
 	// jobDTO.BytesDone's album-level per-file overlay in observ.go (see
@@ -53,12 +61,27 @@ type attemptDetailDTO struct {
 	Transfers  []transferDetailDTO `json:"transfers"`
 }
 
-// jobDetailDTO is the JSON shape served at /api/jobs/{id}/detail.
+// jobDetailDTO is the JSON shape served at /api/jobs/{id}/detail:
+// { "job": { ...whole jobDTO... }, "attempts": [...] }. Job nests the whole
+// jobDTO as a NAMED field (issue #268) — built by the same toJobDTO GET
+// /api/jobs and the stream's job-list frames use — rather than a
+// hand-picked subset of its fields. JobDetail.tsx used to read effectively
+// all of jobDTO's fields (title, artist, status, state, queuePosition,
+// source, peer, bytesDone, bytesTotal, notBefore, nextAttemptAt,
+// maxCandidates, candidatesTried, retries, failReason) off a SEPARATE
+// GET /api/jobs/all response, purely to find its one row; duplicating that
+// subset here as named fields would only drift the moment either shape
+// changed. Nesting (not embedding) is deliberate: an embedded jobDTO would
+// marshal flattened, which would carry id/title/artist twice once the whole
+// object is present — two copies of one field is exactly the defect class
+// this whole line of work exists to remove, and the frontend's type
+// (`{ job: Job; attempts: AttemptDetail[] }`) expects the nested shape.
+// Nesting the SAME finished object still makes the two transports
+// structurally unable to disagree, and it is what lets a ?job=<id> stream
+// subscriber's header go live for free — the stream already sends this
+// whole body per frame.
 type jobDetailDTO struct {
-	ID       int64              `json:"id"`
-	Title    string             `json:"title"`
-	Artist   string             `json:"artist"`
-	State    string             `json:"state"`
+	Job      jobDTO             `json:"job"`
 	Attempts []attemptDetailDTO `json:"attempts"`
 }
 
@@ -74,12 +97,20 @@ func terminalTransferState(s core.TransferState) bool {
 // toJobDetailDTO flattens a core.JobDetail into the detail panel's
 // display-ready shape, enriching each transfer with live queue-position/speed
 // from the peer backend where a match exists (see liveTransferIndex).
-func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
+// Per-transfer State is chosen by a monotone rule when a live match exists —
+// see the inline comment at the match site for why neither the persisted
+// nor the live state can be sole authority.
+//
+// view is a separately-fetched core.JobView for the same job id (issue
+// #268): d (core.JobDetail) carries the attempt/transfer history but not
+// the job-level fields toJobDTO needs (status, retries, candidatesTried,
+// bytesDone, etc. — see jobDetailDTO's doc comment), so the header is built
+// from view via the exact same toJobDTO the job list uses. Callers are
+// responsible for fetching view and d for the SAME job id; this function
+// does not itself verify d.Job.ID == view.Job.ID.
+func toJobDetailDTO(view core.JobView, d core.JobDetail, live liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int) jobDetailDTO {
 	out := jobDetailDTO{
-		ID:       d.Job.ID,
-		Title:    d.Job.Title,
-		Artist:   d.Job.ArtistName,
-		State:    string(d.Job.State),
+		Job:      toJobDTO(view, failedRetryAfter, maxCandidates, live, persisted),
 		Attempts: make([]attemptDetailDTO, len(d.Attempts)),
 	}
 	for i, ad := range d.Attempts {
@@ -105,18 +136,48 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 				t.LastProgressAt = tr.LastProgressAt.Format(timeFormat)
 			}
 			if lt, ok := live.match(tr); ok {
-				// Queue position and speed describe work still in flight, so
-				// they are gated on the PERSISTED state rather than the live
-				// one. Reconcile commits the terminal state before purging the
-				// transfer from the live backend
-				// (internal/pipeline/downloading.go), so a persisted-terminal
-				// row can still match a lingering live entry — one that keeps
-				// reporting IN_PROGRESS at a speed that stays nonzero for up to
-				// speedStaleAfter. Reading either field off it renders a
-				// finished file as still downloading. Gating on lt.State
-				// instead would not help: it is precisely the field that has
-				// not caught up yet.
-				if !terminalTransferState(tr.State) {
+				// Neither side alone can be sole authority for State (issue
+				// #258): reconcile is best-effort about purging a transfer
+				// from the live backend once it commits the terminal
+				// persisted state (removeFromSlskd,
+				// internal/pipeline/downloading.go swallows non-404 errors),
+				// so a live entry can outlive its persisted terminal row and
+				// keep reporting IN_PROGRESS at a stale nonzero speed (#259's
+				// regression, restored below as
+				// TestToJobDetailDTOPersistedTerminalWinsOverLingeringLiveEntry).
+				// But the native client also sets a transfer's terminal state
+				// in memory the instant it finishes
+				// (internal/soulseek/downloads.go), while Postgres only
+				// catches up on the next Downloading reconcile (default
+				// 15s) — so a lingering PERSISTED non-terminal row can
+				// equally be the stale one
+				// (TestToJobDetailDTOTerminalLiveMatchDropsSpeedAndQueue).
+				//
+				// The monotone rule that covers both directions: a transfer
+				// cannot become unfinished, so if EITHER side reports a
+				// terminal state the transfer is terminal, and
+				// Speed/QueuePosition (which describe work still in flight)
+				// are dropped either way. When both sides are terminal but
+				// disagree on WHICH terminal state, prefer the persisted one
+				// — reconcile is the authority on the actual outcome, not
+				// ListDownloads' last snapshot before the entry was purged.
+				// Only when NEITHER side is terminal does live supply state,
+				// speed and queue position (TestToJobDetailDTOStalledKeepsLiveSpeedAndQueue).
+				liveTerminal := terminalTransferState(lt.State)
+				persistedTerminal := terminalTransferState(tr.State)
+				// Kept as three separate cases, even though the first two
+				// bodies are both a one-line assignment, because each maps
+				// 1:1 onto one of the three cases the doc comment above
+				// names and tests individually — collapsing persistedTerminal
+				// and liveTerminal into one arm would obscure which rule a
+				// future reader is looking at.
+				switch {
+				case persistedTerminal:
+					t.State = string(tr.State)
+				case liveTerminal:
+					t.State = string(lt.State)
+				default:
+					t.State = string(lt.State)
 					t.QueuePosition = lt.QueuePosition
 					t.Speed = lt.Speed
 				}
@@ -134,6 +195,13 @@ func toJobDetailDTO(d core.JobDetail, live liveTransferIndex) jobDetailDTO {
 // JobDetailFunc produces a job's full detail view (typically backed by the
 // store's JobDetail). found is false if no job has that id.
 type JobDetailFunc func(ctx context.Context, jobID int64) (core.JobDetail, bool, error)
+
+// JobViewFunc looks up a single job's live-computed core.JobView by id
+// (typically backed by the store's JobWithTransfer) — the same shape the
+// paged job list and stream job-list frames use, fetched via toJobDTO. found
+// is false if no job has that id. Backs /api/jobs/{id}/detail's embedded
+// jobDTO header (issue #268, see jobDetailDTO and toJobDetailDTO).
+type JobViewFunc func(ctx context.Context, jobID int64) (core.JobView, bool, error)
 
 // LiveTransfersFunc returns the peer backend's current in-flight transfers
 // (ListDownloads). The job detail endpoint calls it best-effort to enrich the

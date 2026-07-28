@@ -194,8 +194,9 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 const timeFormat = "2006-01-02T15:04:05Z07:00"
 
 // JobsFunc produces the current complete list of job views (typically backed
-// by the store's ListJobsWithTransfer). The stream and legacy all-jobs REST
-// endpoint deliberately retain this unpaged dependency.
+// by the store's ListJobsWithTransfer). The stream hub deliberately retains
+// this unpaged dependency (issue #268 removed its only other consumer, the
+// GET /api/jobs/all REST endpoint).
 type JobsFunc func(ctx context.Context) ([]core.JobView, error)
 
 // PagedJobsQuery is the validated persisted-only query for GET /api/jobs.
@@ -206,6 +207,12 @@ type PagedJobsQuery struct {
 	Filter string
 	Source string
 	Query  string
+	// PageSize is how many jobs one page holds — a bounded parameter (issue
+	// #268) so a caller with a smaller, fixed layout (Overview's TRANSFERS
+	// panel, 8 rows) can ask for exactly that instead of receiving the
+	// dashboard's own page size and truncating client-side. Defaults to
+	// jobsPageSize when the request omits it; see parsePagedJobsQuery.
+	PageSize int64
 }
 
 // JobStatusFacets contains counts for every dashboard status. All ignores the
@@ -315,9 +322,11 @@ type ServerDeps struct {
 	Version string
 	// Status reports the pipeline snapshot served at /status.
 	Status StatusFunc
-	// Jobs lists all job views for GET /api/jobs/all and GET /api/stream.
+	// Jobs lists every job view, unpaged, for GET /api/stream's hub (issue
+	// #268 removed its other consumer, GET /api/jobs/all — every REST job
+	// list is paged now).
 	Jobs JobsFunc
-	// PagedJobs backs GET /api/jobs without changing the all-jobs dependency.
+	// PagedJobs backs GET /api/jobs.
 	PagedJobs PagedJobsFunc
 	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
 	// /api/jobs/{id}.
@@ -328,10 +337,18 @@ type ServerDeps struct {
 	// CreateJob backs POST /api/jobs (manual jobs, see issue #155).
 	CreateJob CreateJobFunc
 	// JobDetail, JobEvents and RecentEvents back /api/jobs/{id}/detail,
-	// /api/jobs/{id}/events and /api/events.
+	// /api/jobs/{id}/events and /api/events. JobDetail supplies the
+	// attempt/transfer history; JobView (below) supplies the same
+	// endpoint's job-level header fields.
 	JobDetail    JobDetailFunc
 	JobEvents    JobEventsFunc
 	RecentEvents RecentEventsFunc
+	// JobView looks up a single job's live-computed view (typically backed by
+	// the store's JobWithTransfer) for /api/jobs/{id}/detail's embedded jobDTO
+	// header (issue #268, see jobDetailDTO) — the same shape toJobDTO builds
+	// for GET /api/jobs, fetched by id since the detail endpoint no longer has
+	// a whole-table result to pick a row out of (GET /api/jobs/all is gone).
+	JobView JobViewFunc
 	// Peers backs /api/peers.
 	Peers PeersFunc
 	// Live reports liveness for /healthz. Ready reports readiness for
@@ -513,15 +530,6 @@ func NewServer(deps ServerDeps) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	mux.HandleFunc("GET /api/jobs/all", func(w http.ResponseWriter, r *http.Request) {
-		views, err := deps.Jobs(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(enrichJobDTOs(r.Context(), views, deps))
-	})
 	mux.HandleFunc("/api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -650,6 +658,24 @@ func NewServer(deps ServerDeps) http.Handler {
 			http.Error(w, "job not found", http.StatusNotFound)
 			return
 		}
+		// view supplies the embedded jobDTO header (issue #268, see
+		// jobDetailDTO) — a second, separate lookup since GET /api/jobs/all
+		// is gone and there is no whole-table result left to pick a row out
+		// of. Fetched only after JobDetail confirms the job exists so an
+		// unknown id still costs one query, not two.
+		view, viewFound, err := deps.JobView(r.Context(), jobID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !viewFound {
+			// The job existed a moment ago (JobDetail found it) but is gone
+			// by the time JobView runs — e.g. deleted between the two
+			// queries. Treat it the same as never having existed rather
+			// than serving a detail body with no header.
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
 		// Live queue-position/speed is best-effort cosmetic enrichment: if
 		// ListDownloads fails, serve the persisted detail unenriched rather than
 		// failing the whole request. Fetched only after the job is found so a 404
@@ -658,8 +684,10 @@ func NewServer(deps ServerDeps) http.Handler {
 		if lt, liveErr := deps.LiveTransfers(r.Context()); liveErr == nil {
 			live = lt
 		}
+		idx := newLiveTransferIndex(live)
+		persisted := fetchPersistedBytes(r.Context(), []core.JobView{view}, idx, deps.TransferBytes)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toJobDetailDTO(d, newLiveTransferIndex(live)))
+		_ = json.NewEncoder(w).Encode(toJobDetailDTO(view, d, idx, persisted, deps.FailedRetryAfter, deps.MaxCandidates))
 	})
 	mux.HandleFunc("/api/jobs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -717,15 +745,22 @@ func NewServer(deps ServerDeps) http.Handler {
 	return mux
 }
 
+// jobsPageSize is the default PageSize when a request omits ?pageSize=, and
+// the dashboard jobs list's own page size. jobsPageSizeMin/Max bound the
+// explicit parameter (issue #268): 1 so a page can never be empty by
+// construction, 50 so a caller can't turn a paginated endpoint back into an
+// unbounded one by asking for a page the size of the whole table.
 const jobsPageSize int64 = 12
+const jobsPageSizeMin int64 = 1
+const jobsPageSizeMax int64 = 50
 
 func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
-	query := PagedJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"}
+	query := PagedJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all", PageSize: jobsPageSize}
 	values, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return PagedJobsQuery{}, errors.New("invalid query parameters")
 	}
-	allowed := map[string]struct{}{"page": {}, "sort": {}, "dir": {}, "filter": {}, "source": {}, "q": {}}
+	allowed := map[string]struct{}{"page": {}, "sort": {}, "dir": {}, "filter": {}, "source": {}, "q": {}, "pageSize": {}}
 	for key, value := range values {
 		if _, ok := allowed[key]; !ok {
 			return PagedJobsQuery{}, fmt.Errorf("unknown query parameter %q", key)
@@ -734,9 +769,18 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 			return PagedJobsQuery{}, fmt.Errorf("duplicate query parameter %q", key)
 		}
 	}
+	// pageSize is parsed before page: page's own overflow guard below divides
+	// by the actual page size in effect, so it must already be resolved.
+	if raw, ok := values["pageSize"]; ok {
+		pageSize, parseErr := strconv.ParseInt(raw[0], 10, 64)
+		if parseErr != nil || pageSize < jobsPageSizeMin || pageSize > jobsPageSizeMax {
+			return PagedJobsQuery{}, errors.New("invalid pageSize")
+		}
+		query.PageSize = pageSize
+	}
 	if raw, ok := values["page"]; ok {
 		page, parseErr := strconv.ParseInt(raw[0], 10, 64)
-		if parseErr != nil || page < 0 || page > (int64(^uint64(0)>>1)/jobsPageSize) {
+		if parseErr != nil || page < 0 || page > (int64(^uint64(0)>>1)/query.PageSize) {
 			return PagedJobsQuery{}, errors.New("invalid page")
 		}
 		query.Page = page
@@ -756,13 +800,20 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if raw, ok := values["q"]; ok {
 		query.Query = strings.TrimSpace(raw[0])
 	}
-	if !oneOf(query.Sort, "st", "album", "peer", "try") {
+	if !oneOf(query.Sort, "st", "album", "peer", "try", "transfer") {
 		return PagedJobsQuery{}, errors.New("invalid sort")
 	}
 	if !oneOf(query.Dir, "asc", "desc") {
 		return PagedJobsQuery{}, errors.New("invalid dir")
 	}
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done") {
+	// sort=transfer's whole purpose is a stable status-group-then-age
+	// ranking (see dashboardJobsOrder); reversing it with dir=desc would
+	// undermine that purpose rather than express a meaningful alternative
+	// order, so it is rejected outright rather than silently reinterpreted.
+	if query.Sort == "transfer" && query.Dir == "desc" {
+		return PagedJobsQuery{}, errors.New("dir=desc is not supported for sort=transfer")
+	}
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {
@@ -791,25 +842,40 @@ func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) [
 		}
 	}
 	liveIdx := newLiveTransferIndex(live)
-	// Exact per-file persisted bytes are fetched only for candidates that have
-	// a live match, bounded by concurrent downloads rather than result size.
-	var matchedIDs []int64
-	for _, view := range views {
-		if view.Attempt != nil && anyLiveMatch(view.Attempt.Username, view.Attempt.Files, liveIdx) {
-			matchedIDs = append(matchedIDs, view.Attempt.ID)
-		}
-	}
-	var persisted map[int64]map[string]int64
-	if len(matchedIDs) > 0 && deps.TransferBytes != nil {
-		if bytes, err := deps.TransferBytes(ctx, matchedIDs); err == nil {
-			persisted = bytes
-		}
-	}
+	persisted := fetchPersistedBytes(ctx, views, liveIdx, deps.TransferBytes)
 	dtos := make([]jobDTO, len(views))
 	for i, view := range views {
 		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted)
 	}
 	return dtos
+}
+
+// fetchPersistedBytes fetches per-file persisted bytes-done for exactly the
+// candidates among views that have at least one live match, in ANY state
+// (see anyLiveMatch) — the same bound jobBytesDone's overlay always used
+// (issue #161), factored out so the paged/all-jobs list (enrichJobDTOs) and
+// the single-job detail header (/api/jobs/{id}/detail, issue #268) fetch it
+// identically instead of drifting apart. Best-effort: a nil TransferBytes,
+// no live-matched candidates, or a failed fetch all yield a nil map, which
+// jobBytesDone/toJobDTO already treat as "fall back to AlbumBytesDone".
+func fetchPersistedBytes(ctx context.Context, views []core.JobView, idx liveTransferIndex, transferBytes TransferBytesFunc) map[int64]map[string]int64 {
+	if transferBytes == nil {
+		return nil
+	}
+	var matchedIDs []int64
+	for _, view := range views {
+		if view.Attempt != nil && anyLiveMatch(view.Attempt.Username, view.Attempt.Files, idx) {
+			matchedIDs = append(matchedIDs, view.Attempt.ID)
+		}
+	}
+	if len(matchedIDs) == 0 {
+		return nil
+	}
+	bytes, err := transferBytes(ctx, matchedIDs)
+	if err != nil {
+		return nil
+	}
+	return bytes
 }
 
 // createJobFileRequest is one file of a POST /api/jobs request body.

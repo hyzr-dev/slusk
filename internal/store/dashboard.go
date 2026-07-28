@@ -175,7 +175,10 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 	return out, rows.Err()
 }
 
-// DashboardJobsPageSize is the fixed number of jobs returned by one dashboard page.
+// DashboardJobsPageSize is the default number of jobs returned by one
+// dashboard page when a query doesn't specify DashboardJobsQuery.PageSize
+// (issue #268 made page size a bounded, per-request choice — see PageSize
+// and ListDashboardJobs).
 const DashboardJobsPageSize int64 = 12
 
 // DashboardJobsQuery is the validated, persisted-only query used by the
@@ -188,6 +191,13 @@ type DashboardJobsQuery struct {
 	Filter string
 	Source string
 	Query  string
+	// PageSize is how many jobs one page holds, bounded to [1, 50] by
+	// validateDashboardJobsQuery (issue #268). A zero value (the type's own
+	// zero value, e.g. from a caller or test predating #268 that never set
+	// it) is treated as "unset" by ListDashboardJobs and defaults to
+	// DashboardJobsPageSize, rather than failing validation on a bound
+	// nothing chose.
+	PageSize int64
 }
 
 // DashboardStatusFacets contains counts for each dashboard status. All ignores
@@ -248,11 +258,15 @@ const dashboardJobCountFrom = `
 	)`
 
 func validateDashboardJobsQuery(q DashboardJobsQuery) error {
-	if q.Page < 0 || q.Page > (int64(^uint64(0)>>1)/DashboardJobsPageSize) {
+	// Checked before Page's own overflow guard, which divides by it.
+	if q.PageSize < 1 || q.PageSize > 50 {
+		return fmt.Errorf("invalid dashboard jobs page size %d", q.PageSize)
+	}
+	if q.Page < 0 || q.Page > (int64(^uint64(0)>>1)/q.PageSize) {
 		return fmt.Errorf("invalid dashboard jobs page %d", q.Page)
 	}
 	switch q.Sort {
-	case "st", "album", "peer", "try":
+	case "st", "album", "peer", "try", "transfer":
 	default:
 		return fmt.Errorf("invalid dashboard jobs sort %q", q.Sort)
 	}
@@ -261,8 +275,14 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	default:
 		return fmt.Errorf("invalid dashboard jobs direction %q", q.Dir)
 	}
+	// sort=transfer's whole purpose is a stable status-group-then-age
+	// ranking (see dashboardJobsOrder) — reversing it is not a meaningful
+	// alternative order, so it's rejected rather than silently reinterpreted.
+	if q.Sort == "transfer" && q.Dir == "desc" {
+		return fmt.Errorf("dir=desc is not supported for dashboard jobs sort %q", q.Sort)
+	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -286,7 +306,15 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(t.username, '')), lower("+placeholder+")) > 0)")
 	}
 	if includeStatus && q.Filter != "all" {
-		clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
+		if q.Filter == "transferring" {
+			// The union of 'active' and 'stalled' (issue #268, Overview's
+			// TRANSFERS panel) — expressed against the same dashboardJobStatusSQL
+			// CASE every other status filter uses, rather than a second copy of
+			// the state predicates, so the two can never drift apart.
+			clauses = append(clauses, "("+dashboardJobStatusSQL+") IN ("+bind("active")+", "+bind("stalled")+")")
+		} else {
+			clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
+		}
 	}
 	if includeSource && q.Source != "all" {
 		clauses = append(clauses, "j.source = "+bind(q.Source))
@@ -311,6 +339,27 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 		return " ORDER BY (NULLIF(t.username, '') IS NULL) ASC, t.username " + direction + ", j.id ASC"
 	case "try":
 		return " ORDER BY j.retries " + direction + ", j.id ASC"
+	case "transfer":
+		// Overview's TRANSFERS panel (issue #268, formerly web/src/routes/jobSort.ts's
+		// 'transferOrder'): status group first (active ranks above stalled,
+		// everything else — including jobs the union filter never selects —
+		// sorts last), THEN created_at ascending within a group. The group
+		// comes before age deliberately: max_active sits well above the
+		// panel's row count, so a stalled job (old by construction, and
+		// staying that way) would otherwise pin a slot forever under pure
+		// age ordering and hide active jobs that started later. A row only
+		// moves when its status actually changes — real information — never
+		// merely because it aged relative to another row.
+		//
+		// Direction is hardcoded ASC, never `direction`: validation rejects
+		// dir=desc for this sort (see validateDashboardJobsQuery), since
+		// reversing a ranking whose whole purpose is stability isn't a
+		// meaningful alternative order. j.id ASC — never affected by dir —
+		// is the tiebreaker: without one, Postgres' order for equal
+		// (group, created_at) pairs is undefined, and the same job could
+		// appear on two pages while another never shows at all.
+		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
+			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 ELSE 3 END ASC, j.created_at ASC, j.id ASC`
 	default:
 		panic("dashboardJobsOrder called without validation")
 	}
@@ -320,6 +369,15 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 // repeatable-read snapshot. This keeps the page and its counts mutually
 // consistent even while pipeline modules update jobs concurrently.
 func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (DashboardJobsPage, error) {
+	if q.PageSize == 0 {
+		// Unset (the zero value) rather than an explicit invalid choice —
+		// every real caller (parsePagedJobsQuery) always sets a value in
+		// [1, 50] before reaching here, so this only ever fires for a
+		// caller/test that predates issue #268 and never mentioned
+		// PageSize. Defaulting it keeps those callers valid rather than
+		// failing validation on a bound nothing chose.
+		q.PageSize = DashboardJobsPageSize
+	}
 	if err := validateDashboardJobsQuery(q); err != nil {
 		return DashboardJobsPage{}, err
 	}
@@ -365,12 +423,12 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
 	}
 
-	args = append(args, DashboardJobsPageSize, q.Page*DashboardJobsPageSize)
+	args = append(args, q.PageSize, q.Page*q.PageSize)
 	rows, err := tx.QueryContext(ctx, jobViewSelect+where+dashboardJobsOrder(q)+fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
 	if err != nil {
 		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: page: %w", err)
 	}
-	page.Jobs = make([]core.JobView, 0, DashboardJobsPageSize)
+	page.Jobs = make([]core.JobView, 0, q.PageSize)
 	for rows.Next() {
 		view, scanErr := scanJobView(rows)
 		if scanErr != nil {

@@ -272,6 +272,7 @@ func main() {
 		page, err := st.ListDashboardJobs(ctx, store.DashboardJobsQuery{
 			Page: query.Page, Sort: query.Sort, Dir: query.Dir,
 			Filter: query.Filter, Source: query.Source, Query: query.Query,
+			PageSize: query.PageSize,
 		})
 		if err != nil {
 			return observ.PagedJobsResult{}, err
@@ -295,6 +296,9 @@ func main() {
 	}
 	jobDetailFn := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 		return st.JobDetail(ctx, jobID)
+	}
+	jobViewFn := func(ctx context.Context, jobID int64) (core.JobView, bool, error) {
+		return st.JobWithTransfer(ctx, jobID)
 	}
 	jobEventsFn := func(ctx context.Context, jobID int64) ([]core.JobEvent, error) {
 		return st.JobEvents(ctx, jobID)
@@ -536,6 +540,7 @@ func main() {
 		DeleteJob:            jobs.Delete,
 		CreateJob:            createJobFn,
 		JobDetail:            jobDetailFn,
+		JobView:              jobViewFn,
 		JobEvents:            jobEventsFn,
 		RecentEvents:         recentEventsFn,
 		Peers:                peersFn,

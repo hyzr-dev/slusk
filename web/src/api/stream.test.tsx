@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from './queries';
-import { StreamProvider } from './stream';
+import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope } from './stream';
 
 // EventSource does not exist in jsdom — this mock captures every instance
 // ever constructed (StreamProvider.tsx creates a new one per route change)
@@ -51,6 +52,37 @@ function NavigateOnClick({ to }: { to: string }) {
   return <button onClick={() => navigate(to)}>go</button>;
 }
 
+// Mirrors how Jobs.tsx calls useJobScope: publishes `ids` for as long as it's
+// mounted with them.
+function ScopePublisher({ ids }: { ids: number[] | undefined }) {
+  useJobScope(ids);
+  return null;
+}
+
+// A fresh array with the same content on every render — exactly what Jobs.tsx
+// produces on each 15s poll/rerender even when the page's ids haven't
+// actually changed.
+function SameContentScope() {
+  const [, forceRerender] = useState(0);
+  return (
+    <>
+      <ScopePublisher ids={[1, 2, 3]} />
+      <button onClick={() => forceRerender((n) => n + 1)}>rerender</button>
+    </>
+  );
+}
+
+// Toggles between two genuinely different id sets on each click.
+function TogglingScope() {
+  const [alt, setAlt] = useState(false);
+  return (
+    <>
+      <ScopePublisher ids={alt ? [4, 5] : [1, 2, 3]} />
+      <button onClick={() => setAlt((a) => !a)}>toggle</button>
+    </>
+  );
+}
+
 describe('StreamProvider', () => {
   it('opens the unscoped endpoint outside a job route', () => {
     const queryClient = new QueryClient();
@@ -84,6 +116,72 @@ describe('StreamProvider', () => {
     expect(MockEventSource.instances[0].closed).toBe(true);
     expect(MockEventSource.instances[1].url).toBe('/api/stream?job=2');
     expect(MockEventSource.instances[1].closed).toBe(false);
+  });
+
+  // useJobScope publishes into StreamProvider's own state, so mounting a
+  // publisher reopens the connection once with `?jobs=...` — the initial
+  // unscoped instance is a one-render artifact, closed as soon as the
+  // publisher's effect runs (issue #258).
+  it('opens ?jobs=<ids> once a route publishes a job scope', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <SameContentScope />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?jobs=1,2,3');
+    expect(MockEventSource.instances[1].closed).toBe(false);
+  });
+
+  // The ids array is rebuilt fresh on every render (exactly what Jobs.tsx
+  // does on its 15s poll), so useJobScope must dedupe on the joined ids
+  // string, not on array identity — otherwise every poll would reopen the
+  // connection in a loop.
+  it('does not reopen the connection when the same ids arrive as a new array instance', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <SameContentScope />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+
+    act(() => document.querySelector('button')!.click());
+
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[1].closed).toBe(false);
+  });
+
+  it('reopens the connection when the published scope changes to different ids', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <TogglingScope />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?jobs=1,2,3');
+
+    act(() => document.querySelector('button')!.click());
+
+    expect(MockEventSource.instances).toHaveLength(3);
+    expect(MockEventSource.instances[1].closed).toBe(true);
+    expect(MockEventSource.instances[2].url).toBe('/api/stream?jobs=4,5');
+    expect(MockEventSource.instances[2].closed).toBe(false);
   });
 
   it('invalidates the REST queries on open, including job detail when scoped to a job', () => {
@@ -127,6 +225,121 @@ describe('StreamProvider', () => {
       scopeJobId: 7,
       jobs: [{ id: 7, bytesDone: 1, bytesTotal: 2 }],
     });
+  });
+
+  // Issue #258's fix-round bug: `jobs` on the wire is a per-tick delta of
+  // changed jobs, not a snapshot of the live set. A frame that carries job1
+  // but not job2 means "job2 didn't change this tick", not "job2 has no live
+  // data" — so the cache must keep accumulating job2's last-known values
+  // rather than losing them the moment a frame doesn't mention it.
+  it('accumulates jobs across frames by id, keeping a job that drops out of a later frame', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 2, bytesDone: 49_000_000, bytesTotal: 49_000_000, state: 'IMPORTING' }],
+      down: 0,
+      up: 0,
+    }));
+    expect(queryClient.getQueryData(queryKeys.live)).toMatchObject({
+      jobs: [{ id: 2, bytesDone: 49_000_000, state: 'IMPORTING' }],
+    });
+
+    // Next tick: only job1 changed. job2 is absent from this frame but must
+    // still be present in the cache, unchanged from the previous frame.
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 1, bytesDone: 20, bytesTotal: 100 }],
+      down: 0,
+      up: 0,
+    }));
+    const live = queryClient.getQueryData(queryKeys.live) as { jobs: { id: number }[] };
+    expect(live.jobs).toHaveLength(2);
+    expect(live.jobs).toContainEqual(expect.objectContaining({ id: 1, bytesDone: 20 }));
+    expect(live.jobs).toContainEqual(expect.objectContaining({ id: 2, bytesDone: 49_000_000, state: 'IMPORTING' }));
+  });
+
+  // D1: an unscoped connection (Overview, JobDetail — neither calls
+  // useJobScope) never has its job ids narrowed, so without a cap the
+  // accumulator would grow for the connection's entire lifetime — every job
+  // that ever went live, never evicted, since the backend simply stops
+  // streaming a job once it leaves the live-matched set. Eviction is safe
+  // by construction (falling back to REST is always correct), and
+  // delete-then-set on every update means the least-recently-updated entry
+  // is always the one dropped, never an actively-changing job.
+  it('evicts the least-recently-updated job once the accumulator exceeds its cap', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // Fill the accumulator to its cap with ids 1..JOBS_CACHE_LIMIT.
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: Array.from({ length: JOBS_CACHE_LIMIT }, (_, i) => ({ id: i + 1, bytesDone: 1, bytesTotal: 2 })),
+      down: 0,
+      up: 0,
+    }));
+    let live = queryClient.getQueryData(queryKeys.live) as { jobs: { id: number }[] };
+    expect(live.jobs).toHaveLength(JOBS_CACHE_LIMIT);
+    expect(live.jobs.some((j) => j.id === 1)).toBe(true);
+
+    // One more, previously untracked id pushes it over the cap. Job 1 is the
+    // oldest untouched entry, so it's the one evicted; the freshly-touched
+    // job 2 (re-updated in this same frame) must not be.
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [
+        { id: 2, bytesDone: 5, bytesTotal: 10 },
+        { id: JOBS_CACHE_LIMIT + 1, bytesDone: 1, bytesTotal: 2 },
+      ],
+      down: 0,
+      up: 0,
+    }));
+    live = queryClient.getQueryData(queryKeys.live) as { jobs: { id: number }[] };
+    expect(live.jobs).toHaveLength(JOBS_CACHE_LIMIT);
+    expect(live.jobs.some((j) => j.id === 1)).toBe(false);
+    expect(live.jobs.some((j) => j.id === 2)).toBe(true);
+    expect(live.jobs.some((j) => j.id === JOBS_CACHE_LIMIT + 1)).toBe(true);
+  });
+
+  // clearLive resets the accumulator, which is correct because every
+  // reconnect is preceded by a fresh GET (onopen's invalidation) — so a job
+  // accumulated on a since-dropped connection must not leak into the next one.
+  it('resets the accumulated jobs when the connection errors', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 2, bytesDone: 49_000_000, bytesTotal: 49_000_000, state: 'IMPORTING' }],
+      down: 0,
+      up: 0,
+    }));
+    act(() => MockEventSource.instances[0].onerror?.());
+    expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
+
+    // A frame arriving right after (the browser's own automatic reconnect,
+    // same effect instance) starts the accumulation over — job2 is gone.
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 1, bytesDone: 20, bytesTotal: 100 }],
+      down: 0,
+      up: 0,
+    }));
+    const live = queryClient.getQueryData(queryKeys.live) as { jobs: { id: number }[] };
+    expect(live.jobs).toEqual([{ id: 1, bytesDone: 20, bytesTotal: 100 }]);
   });
 
   it('clears the live cache on error, so consumers fall back to REST', () => {

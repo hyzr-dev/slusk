@@ -15,8 +15,18 @@ export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
 // via POST /api/jobs (issue #155).
 export type JobSource = 'lidarr' | 'manual';
 
-/** GET /api/jobs query primitives. The backend fixes each page at 12 jobs. */
-export type JobPageSort = 'st' | 'album' | 'peer' | 'try';
+/**
+ * GET /api/jobs query primitives. The backend defaults each page to
+ * `jobsPageSize` (12) unless `pageSize` is given — see JobPageParams.
+ * 'transfer' and 'transferring' exist for Overview's TRANSFERS panel (issue
+ * #268): 'transfer' is `transferOrder` moved server-side (status group
+ * first — active before stalled — then createdAt ascending within the
+ * group, see the now-deleted client copy of this rule that used to live in
+ * web/src/routes/jobSort.ts), and 'transferring' is the `active`+`stalled`
+ * union as a single filter value, kept single-valued rather than turning
+ * `filter` into a multi-value parameter.
+ */
+export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer';
 export type JobPageDirection = 'asc' | 'desc';
 export type JobStatusFilter =
   | 'all'
@@ -26,7 +36,8 @@ export type JobStatusFilter =
   | 'stalled'
   | 'failed'
   | 'parked'
-  | 'done';
+  | 'done'
+  | 'transferring';
 export type JobSourceFilter = 'all' | JobSource;
 
 export interface JobPageParams {
@@ -36,6 +47,12 @@ export interface JobPageParams {
   filter: JobStatusFilter;
   source: JobSourceFilter;
   q: string;
+  /**
+   * Rows per page, 1-50. Omitted means the backend's default (`jobsPageSize`,
+   * 12) — the paged Jobs route relies on that default rather than sending it
+   * explicitly. Overview (issue #268) requests 8.
+   */
+  pageSize?: number;
 }
 
 export interface JobStatusFacets {
@@ -146,17 +163,24 @@ export interface AttemptDetail {
   transfers: TransferDetail[];
 }
 
-/** GET /api/jobs/{id}/detail — jobDetailDTO */
+/**
+ * GET /api/jobs/{id}/detail — jobDetailDTO. `job` is a whole jobDTO (issue
+ * #268), built by the same toJobDTO the REST job list and the live stream
+ * already use — not a hand-picked subset of fields chosen for whatever
+ * JobDetail.tsx happened to render at the time, which is what the previous
+ * flat `id/title/artist/state` shape was drifting toward. This is also what
+ * lets the detail header stay live for free: the stream's `?job=<id>` frame
+ * already carries the whole detail body, `job` included, so it updates in
+ * the same frame as everything else on the page (see pickJobDetail in
+ * queries.ts).
+ */
 export interface JobDetail {
-  id: number;
-  title: string;
-  artist: string;
-  state: JobState;
+  job: Job;
   attempts: AttemptDetail[];
 }
 
 /** GET /api/jobs/{id}/detail wire shape during the state-name transition. */
-export type WireJobDetail = Omit<JobDetail, 'state'> & { state: WireJobState };
+export type WireJobDetail = Omit<JobDetail, 'job'> & { job: WireJob };
 
 /** GET /api/events and /api/jobs/{id}/events — eventDTO */
 export interface JobEvent {
@@ -590,30 +614,12 @@ export interface ChartsReport {
 }
 
 /**
- * internal/observ/stream.go streamJobDTO — one job's live aggregate carried
- * by a GET /api/stream `event: live` frame. speed/queuePosition/etaSeconds
- * are omitempty on the Go side: absent means zero/unknown, not "0", same
- * convention as Job's own live fields.
- */
-export interface LiveJob {
-  id: number;
-  bytesDone: number;
-  bytesTotal: number;
-  speed?: number;
-  queuePosition?: number;
-  etaSeconds?: number;
-}
-
-/**
  * GET /api/stream's `event: live` JSON body — internal/observ/stream.go
- * livePayload. `jobs` is filtered server-side to jobs with at least one
- * matched, non-terminal live transfer *at this instant* — a job present in
- * one frame and absent from the next means "no live data for this job right
- * now", not "job gone". `throughput` and `uploadThroughput` carry only
- * samples newer than the previous frame — see api/queries.ts's
- * mergeThroughputSamples for how the client folds each direction independently
- * into the cached series. `down` and `up` are always present (the global live
- * rates for their directions, 0 when idle).
+ * livePayload. `throughput` and `uploadThroughput` carry only samples newer
+ * than the previous frame — see api/queries.ts's mergeThroughputSamples for
+ * how the client folds each direction independently into the cached series.
+ * `down` and `up` are always present (the global live rates for their
+ * directions, 0 when idle).
  *
  * `detail` is the whole `GET /api/jobs/{id}/detail` body, present only when
  * the connection was opened with `?job=<id>`, and built server-side by the
@@ -623,11 +629,28 @@ export interface LiveJob {
  * separate regressions in #161, because which source is fresher differs per
  * field and per moment.
  *
- * `jobs` is still an overlay (see mergeLiveJobs): "absent from this frame"
- * means fall back to REST, so losing the stream degrades cleanly.
+ * `jobs` (issue #258, replacing the old partial LiveJob overlay) carries full
+ * `Job` wire objects — the same shape `GET /api/jobs` returns per row, built
+ * by the same server-side function — but only the ones that *changed* since
+ * this subscriber's previous frame; omitted (not empty) when nothing did,
+ * matching the Go side's `json:"jobs,omitempty"`. A subscriber that opened
+ * the connection with `?jobs=1,2,3` only ever receives entries from that id
+ * set; one that didn't (no page to scope to, e.g. Overview) receives every
+ * currently live-matched job.
+ *
+ * Because this is a *delta* of changed jobs, not a snapshot of the live set,
+ * a job's absence from one frame does not mean "no live data for it right
+ * now" — it means "unchanged since the last frame that mentioned it".
+ * api/stream.tsx accumulates each frame's jobs by id (newest entry per id
+ * wins, entries persist across frames, reset on reconnect/error) before
+ * caching, precisely so that a job which stops changing isn't dropped back
+ * to a stale REST value while other jobs keep ticking. Client-side this
+ * accumulated set is still a whole-object *replace* by id, never a field
+ * merge, for the same reason as `detail` above — see replaceLiveJobs in
+ * api/queries.ts.
  */
 export interface LivePayload {
-  jobs: LiveJob[];
+  jobs?: WireJob[];
   detail?: JobDetail;
   throughput?: ThroughputSample[];
   uploadThroughput?: ThroughputSample[];

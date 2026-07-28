@@ -45,15 +45,12 @@ describe('wire compatibility normalization', () => {
       wireJob({ status: 'orphaned', state: 'ORPHANED' }),
     ]);
     const detail = normalizeJobDetail({
-      id: 1,
-      title: 'Kind of Blue',
-      artist: 'Miles Davis',
-      state: 'ORPHANED',
+      job: wireJob({ status: 'orphaned', state: 'ORPHANED' }),
       attempts: [],
     });
 
     expect(job).toMatchObject({ status: 'parked', state: 'PARKED' });
-    expect(detail.state).toBe('PARKED');
+    expect(detail.job).toMatchObject({ status: 'parked', state: 'PARKED' });
   });
 
   it('normalizes nested page jobs without losing total or facets', () => {

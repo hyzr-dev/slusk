@@ -38,7 +38,7 @@ export function normalizeJobPage(page: WireJobPage): JobPage {
 }
 
 export function normalizeJobDetail(detail: WireJobDetail): JobDetail {
-  return { ...detail, state: normalizeJobState(detail.state) };
+  return { ...detail, job: normalizeJob(detail.job) };
 }
 
 export function normalizeStatusReport(report: WireStatusReport): StatusReport {

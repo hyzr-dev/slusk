@@ -27,6 +27,20 @@ func detailWithTransfers(transfers []core.Transfer) JobDetailFunc {
 	}
 }
 
+// jobViewWithID builds a JobViewFunc that reports found=true for exactly the
+// given job id, echoing it into a minimal core.JobView — enough for tests
+// that only care about toJobDetailDTO's Attempts, not its embedded jobDTO
+// header (issue #268 requires deps.JobView to resolve before the detail
+// handler builds a body at all).
+func jobViewWithID(jobID int64) JobViewFunc {
+	return func(ctx context.Context, id int64) (core.JobView, bool, error) {
+		if id != jobID {
+			return core.JobView{}, false, nil
+		}
+		return core.JobView{Job: core.AlbumJob{ID: id}}, true, nil
+	}
+}
+
 // decodeTransferMaps returns each transfer of the single attempt as a raw key
 // map, so a test can assert whether an omitempty field is present at all rather
 // than only its value.
@@ -70,6 +84,7 @@ func TestJobDetailEnrichesTransfersWithLiveQueueAndSpeed(t *testing.T) {
 	}
 	deps := testServerDeps(reg)
 	deps.JobDetail = jobDetail
+	deps.JobView = jobViewWithID(7)
 	deps.LiveTransfers = live
 	h := NewServer(deps)
 
@@ -123,6 +138,7 @@ func TestJobDetailStillServedWhenLiveTransfersError(t *testing.T) {
 	}
 	deps := testServerDeps(reg)
 	deps.JobDetail = jobDetail
+	deps.JobView = jobViewWithID(7)
 	deps.LiveTransfers = live
 	h := NewServer(deps)
 
@@ -157,7 +173,7 @@ func TestToJobDetailDTOOverlaysBytesDoneForLiveMatch(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
 	})
 
-	dto := toJobDetailDTO(detail, live)
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 750 {
 		t.Errorf("BytesDone = %d, want 750 (live overlay)", tr.BytesDone)
@@ -181,7 +197,7 @@ func TestToJobDetailDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
 		}},
 	}
 
-	dto := toJobDetailDTO(detail, liveTransferIndex{})
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (persisted, no live match)", tr.BytesDone)
@@ -211,18 +227,23 @@ func TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
 	})
 
-	dto := toJobDetailDTO(detail, live)
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (terminal live match still supplies bytes)", tr.BytesDone)
 	}
 }
 
-// Reconcile persists the terminal state before purging the transfer from the
-// live backend, so a finished file can still match a lingering live entry that
-// reports IN_PROGRESS at a stale speed. Bytes must still come from it; speed
-// and queue position must not, or a completed row renders as downloading.
-func TestToJobDetailDTOTerminalPersistedDropsLiveSpeedAndQueue(t *testing.T) {
+// TestToJobDetailDTOPersistedTerminalWinsOverLingeringLiveEntry is #259's
+// original regression, restored: reconcile persists the terminal state
+// before purging the transfer from the live backend, but that purge
+// (removeFromSlskd) is best-effort and swallows non-404 errors, so a finished
+// file can still match a lingering live entry that keeps reporting
+// IN_PROGRESS at a stale speed. When both sides disagree on terminal-ness,
+// the monotone rule (toJobDetailDTO) prefers the PERSISTED terminal state —
+// reconcile is the authority on the actual outcome — and drops speed/queue
+// regardless, since the transfer is terminal either way.
+func TestToJobDetailDTOPersistedTerminalWinsOverLingeringLiveEntry(t *testing.T) {
 	detail := core.JobDetail{
 		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
 		Attempts: []core.AttemptDetail{{
@@ -236,7 +257,10 @@ func TestToJobDetailDTOTerminalPersistedDropsLiveSpeedAndQueue(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
 	})
 
-	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
+	if tr.State != string(core.TransferCompleted) {
+		t.Errorf("State = %q, want %q (persisted terminal wins over a lingering live entry)", tr.State, core.TransferCompleted)
+	}
 	if tr.Speed != 0 {
 		t.Errorf("Speed = %d, want 0 (persisted state is terminal)", tr.Speed)
 	}
@@ -245,6 +269,39 @@ func TestToJobDetailDTOTerminalPersistedDropsLiveSpeedAndQueue(t *testing.T) {
 	}
 	if tr.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (bytes come from live in every state)", tr.BytesDone)
+	}
+}
+
+// TestToJobDetailDTOTerminalLiveMatchDropsSpeedAndQueue is the reverse
+// direction the monotone rule also covers (issue #258's 18:15 comment): the
+// native client sets a transfer's terminal state in memory the instant it
+// finishes, while Postgres only catches up on the next Downloading reconcile
+// (default 15s) — so a lingering PERSISTED non-terminal row can equally be
+// the stale one. Here live alone is terminal, so it wins and speed/queue are
+// still dropped.
+func TestToJobDetailDTOTerminalLiveMatchDropsSpeedAndQueue(t *testing.T) {
+	detail := core.JobDetail{
+		Job: core.AlbumJob{ID: 1, Title: "Rounds", ArtistName: "Four Tet"},
+		Attempts: []core.AttemptDetail{{
+			Attempt: core.Candidate{ID: 1, Username: "peer_one"},
+			Transfers: []core.Transfer{
+				{SlskdID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 800, BytesTotal: 1000},
+			},
+		}},
+	}
+	live := newLiveTransferIndex([]core.RemoteTransfer{
+		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
+	})
+
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
+	if tr.State != string(core.TransferCompleted) {
+		t.Errorf("State = %q, want %q (live alone is terminal, so it wins)", tr.State, core.TransferCompleted)
+	}
+	if tr.Speed != 0 {
+		t.Errorf("Speed = %d, want 0 (chosen/live state is terminal)", tr.Speed)
+	}
+	if tr.QueuePosition != 0 {
+		t.Errorf("QueuePosition = %d, want 0 (chosen/live state is terminal)", tr.QueuePosition)
 	}
 }
 
@@ -264,7 +321,7 @@ func TestToJobDetailDTOStalledKeepsLiveSpeedAndQueue(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 600, Speed: 1500, QueuePosition: 3},
 	})
 
-	tr := toJobDetailDTO(detail, live).Attempts[0].Transfers[0]
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
 	if tr.Speed != 1500 || tr.QueuePosition != 3 {
 		t.Errorf("Speed/QueuePosition = %d/%d, want 1500/3 (STALLED is not terminal)", tr.Speed, tr.QueuePosition)
 	}

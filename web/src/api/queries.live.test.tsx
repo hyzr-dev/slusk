@@ -1,20 +1,19 @@
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_JOB_PAGE_PARAMS,
   jobsPageUrl,
-  mergeLiveJobPage,
+  replaceLiveJobPage,
   pickJobDetail,
-  mergeLiveJobs,
+  replaceLiveJobs,
   mergeThroughputSamples,
   queryKeys,
-  useAllJobs,
   useJobDetail,
   useJobs,
 } from './queries';
-import type { Job, JobDetail, JobPage, ScopedLivePayload, ThroughputSample } from './types';
+import type { Job, JobDetail, JobPage, ScopedLivePayload, ThroughputSample, WireJob } from './types';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -44,12 +43,11 @@ function makeJob(overrides: Partial<Job> = {}): Job {
   };
 }
 
+// jobDetailDTO carries a whole jobDTO under `job` (issue #268) rather than a
+// hand-picked subset of fields — see the JobDetail doc comment in types.ts.
 function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
   return {
-    id: 1,
-    title: 'Kind of Blue',
-    artist: 'Miles Davis',
-    state: 'DOWNLOADING',
+    job: makeJob({ state: 'DOWNLOADING' }),
     attempts: [
       {
         id: 1,
@@ -69,31 +67,63 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
   };
 }
 
-describe('mergeLiveJobs', () => {
-  it('overlays live fields onto the matching REST job', () => {
-    const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })];
-    const merged = mergeLiveJobs(jobs, [
-      { id: 1, bytesDone: 60, bytesTotal: 100, speed: 5000, queuePosition: 1, etaSeconds: 12 },
-    ]);
-    expect(merged?.[0]).toMatchObject({ bytesDone: 60, speed: 5000, queuePosition: 1, etaSeconds: 12 });
+describe('replaceLiveJobs', () => {
+  // Issue #258: the stream now carries full Job objects, and the client
+  // adopts one wholesale rather than overlaying individual fields — a
+  // streamed job replaces the REST row entirely, including fields the old
+  // partial LiveJob never touched (retries, failReason, ...).
+  it('replaces a job wholesale with its streamed counterpart', () => {
+    const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100, retries: 0 })];
+    const streamed: WireJob = makeJob({ id: 1, bytesDone: 60, bytesTotal: 100, speed: 5000, queuePosition: 1, etaSeconds: 12, retries: 2 });
+    const replaced = replaceLiveJobs(jobs, [streamed]);
+    expect(replaced?.[0]).toEqual(streamed);
   });
 
-  // The core #161 contract: a job present in one frame and absent from the
-  // next must revert to its REST-cached values, not keep a stale live speed.
-  it('leaves a job absent from the live set untouched (reverts to REST values)', () => {
+  // A job absent from this frame simply wasn't touched this tick — it is
+  // left exactly as REST last reported it, not reset or cleared.
+  it('leaves a job absent from the live frame untouched', () => {
     const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })];
-    // job 1 was live a moment ago...
-    const withLive = mergeLiveJobs(jobs, [{ id: 1, bytesDone: 90, bytesTotal: 100, speed: 9000 }]);
+    // job 1 changed a moment ago...
+    const withLive = replaceLiveJobs(jobs, [makeJob({ id: 1, bytesDone: 90, bytesTotal: 100, speed: 9000 })]);
     expect(withLive?.[0].speed).toBe(9000);
-    // ...then drops out of the next frame entirely.
-    const afterDrop = mergeLiveJobs(jobs, []);
+    // ...then is absent from the next frame entirely (nothing changed for it).
+    const afterDrop = replaceLiveJobs(jobs, []);
     expect(afterDrop).toBe(jobs); // untouched REST data, no lingering speed
     expect(afterDrop?.[0].speed).toBeUndefined();
   });
 
   it('passes through jobs unchanged when live data is undefined', () => {
     const jobs = [makeJob()];
-    expect(mergeLiveJobs(jobs, undefined)).toBe(jobs);
+    expect(replaceLiveJobs(jobs, undefined)).toBe(jobs);
+  });
+
+  // stream.tsx's accumulator never evicts an entry on its own (the backend
+  // stops streaming a job once it leaves the live-matched set, including
+  // post-terminal DB transitions that settle after the last live frame) — so
+  // presence in `live` can't be the tie-breaker, or a REST poll could never
+  // correct a job pinned at stale live values. `updatedAt` is: REST strictly
+  // newer means the DB genuinely moved since the pinned live object was
+  // built, so REST wins and the pin is released.
+  it('lets a newer REST row override a pinned live object once the DB has moved on', () => {
+    const pinned = makeJob({ id: 1, state: 'DOWNLOADING', status: 'active', speed: 0, updatedAt: '2026-07-27T10:00:00Z' });
+    const restAfterReconcile = makeJob({ id: 1, state: 'DONE', status: 'done', updatedAt: '2026-07-27T10:00:15Z' });
+
+    const replaced = replaceLiveJobs([restAfterReconcile], [pinned]);
+    expect(replaced?.[0]).toEqual(restAfterReconcile);
+
+    // A later poll with the same (already-correct) row must keep winning —
+    // the pin was released, not just skipped once.
+    const replacedAgain = replaceLiveJobs([restAfterReconcile], [pinned]);
+    expect(replacedAgain?.[0]).toEqual(restAfterReconcile);
+  });
+
+  // The mirror image: DB unchanged (equal updatedAt) means only live fields
+  // moved, so the live object still wins — this is the ordinary, expected
+  // case the accumulator exists for.
+  it('still prefers the live object when the REST row has not moved on (equal updatedAt)', () => {
+    const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100, updatedAt: '2026-07-27T10:00:00Z' })];
+    const streamed = makeJob({ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000, updatedAt: '2026-07-27T10:00:00Z' });
+    expect(replaceLiveJobs(jobs, [streamed])?.[0]).toEqual(streamed);
   });
 });
 
@@ -102,9 +132,19 @@ describe('paged jobs transport', () => {
     const params = { ...DEFAULT_JOB_PAGE_PARAMS, page: 2, sort: 'peer' as const, dir: 'desc' as const, filter: 'failed' as const, source: 'manual' as const, q: 'Miles & Blue' };
     const key = queryKeys.jobsPage(params);
 
-    expect(key).toEqual(['jobs', 'page', 2, 'peer', 'desc', 'failed', 'manual', 'Miles & Blue']);
+    expect(key).toEqual(['jobs', 'page', 2, 'peer', 'desc', 'failed', 'manual', 'Miles & Blue', undefined]);
     expect(queryKeys.jobsPage({ ...params, source: 'lidarr' })).not.toEqual(key);
     expect(jobsPageUrl(params)).toBe('/api/jobs?page=2&sort=peer&dir=desc&filter=failed&source=manual&q=Miles+%26+Blue');
+  });
+
+  // Overview (issue #268) requests a smaller page than the paged Jobs route,
+  // so pageSize has to isolate its own cache entry and reach the URL.
+  it('sends pageSize only when given, and isolates it in the query key', () => {
+    const withSize = { ...DEFAULT_JOB_PAGE_PARAMS, pageSize: 8 };
+    expect(queryKeys.jobsPage(withSize)).toEqual(['jobs', 'page', 0, 'st', 'asc', 'all', 'all', '', 8]);
+    expect(queryKeys.jobsPage(withSize)).not.toEqual(queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS));
+    expect(jobsPageUrl(withSize)).toBe('/api/jobs?page=0&sort=st&dir=asc&filter=all&source=all&q=&pageSize=8');
+    expect(jobsPageUrl(DEFAULT_JOB_PAGE_PARAMS)).not.toContain('pageSize');
   });
 
   it('overlays current-page IDs only while preserving order and metadata', () => {
@@ -116,9 +156,9 @@ describe('paged jobs transport', () => {
         source: { all: 25, manual: 5, lidarr: 20 },
       },
     };
-    const merged = mergeLiveJobPage(page, [
-      { id: 1, bytesDone: 99, bytesTotal: 100, speed: 5000 },
-      { id: 3, bytesDone: 10, bytesTotal: 20, speed: 1000 },
+    const merged = replaceLiveJobPage(page, [
+      makeJob({ id: 1, bytesDone: 99, bytesTotal: 100, speed: 5000 }),
+      makeJob({ id: 3, bytesDone: 10, bytesTotal: 20, speed: 1000 }),
     ]);
 
     expect(merged?.jobs.map((job) => job.id)).toEqual([2, 1]);
@@ -171,7 +211,7 @@ describe('pickJobDetail', () => {
   it('ignores a frame scoped to a different job (stale during a route change)', () => {
     const rest = makeDetail();
     const other = makeDetail();
-    other.id = 2;
+    other.job.id = 2;
     const live: ScopedLivePayload = { jobs: [], down: 0, up: 0, scopeJobId: 2, detail: other };
     expect(pickJobDetail(rest, live, 1)).toBe(rest);
   });
@@ -230,22 +270,8 @@ function makeWrapper(queryClient: QueryClient) {
   };
 }
 
-describe('all-jobs hook', () => {
-  it('uses the dedicated complete-collection endpoint and cache key', async () => {
-    const fetchMock = vi.fn((_url: string) => Promise.resolve(new Response('[]', { status: 200 })));
-    vi.stubGlobal('fetch', fetchMock);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-
-    const { result } = renderHook(() => useAllJobs(), { wrapper: makeWrapper(queryClient) });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-
-    expect(fetchMock).toHaveBeenCalledWith('/api/jobs/all');
-    expect(queryClient.getQueryData(queryKeys.jobsAll)).toEqual([]);
-  });
-});
-
-describe('useJobs live overlay', () => {
-  it('merges live fields into the page hook output as the live cache changes', () => {
+describe('useJobs live replace', () => {
+  it('replaces jobs wholesale in the page hook output as the live cache changes', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const page: JobPage = {
@@ -262,18 +288,68 @@ describe('useJobs live overlay', () => {
     expect(result.current.data?.jobs[0].speed).toBeUndefined();
 
     queryClient.setQueryData(queryKeys.live, {
-      jobs: [{ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 }],
+      jobs: [makeJob({ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 })],
       down: 4000,
       up: 0,
     });
     rerender();
     expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 80, speed: 4000 });
 
+    // A truly empty live cache (no jobs at all) reverts every row to REST —
+    // this is the post-reset/no-live-data-yet state (see stream.tsx's
+    // clearLive), not what a delta frame that simply didn't mention a job
+    // looks like. See the next describe block for that distinction.
     queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, up: 0 });
     rerender();
     expect(result.current.data?.jobs[0].bytesDone).toBe(50);
     expect(result.current.data?.jobs[0].speed).toBeUndefined();
     expect(result.current.data?.total).toBe(1);
+  });
+});
+
+describe('useJobs live replace across accumulated frames', () => {
+  // `jobs` on the wire is a per-tick delta of changed jobs, not a snapshot
+  // (issue #258's fix-round bug). stream.tsx accumulates each frame by id
+  // before ever writing queryKeys.live, so the cache replaceLiveJobs reads
+  // always holds the *union* of every job changed since the connection's
+  // last GET — never a bare single-frame delta. This test models that
+  // accumulated cache directly (bypassing stream.tsx) to pin down the
+  // contract: a job absent from the latest delta must keep the values an
+  // earlier frame gave it, for as long as the accumulated cache still
+  // carries it.
+  it('keeps a job at its last-known live values when a later frame does not mention it', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const page: JobPage = {
+      jobs: [
+        makeJob({ id: 1, bytesDone: 10, bytesTotal: 100 }),
+        makeJob({ id: 2, bytesDone: 44_000_000, bytesTotal: 49_000_000, speed: 1_000_000, state: 'DOWNLOADING' }),
+      ],
+      total: 2,
+      facets: {
+        status: { all: 2, active: 2, importing: 0, queued: 0, stalled: 0, failed: 0, parked: 0, done: 0 },
+        source: { all: 2, manual: 0, lidarr: 2 },
+      },
+    };
+    queryClient.setQueryData(queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS), page);
+
+    const { result, rerender } = renderHook(() => useJobs(DEFAULT_JOB_PAGE_PARAMS), { wrapper: makeWrapper(queryClient) });
+
+    // t=5s: job2 finishes.
+    const job2Done = makeJob({ id: 2, bytesDone: 49_000_000, bytesTotal: 49_000_000, state: 'IMPORTING' });
+    queryClient.setQueryData(queryKeys.live, { jobs: [job2Done], down: 0, up: 0 });
+    rerender();
+    expect(result.current.data?.jobs[1]).toMatchObject({ state: 'IMPORTING', bytesDone: 49_000_000 });
+
+    // t=6s: only job1 changed. The accumulated cache (what stream.tsx would
+    // actually write) still carries job2Done alongside job1's update — job2
+    // must not revert to its 44MB/DOWNLOADING REST snapshot just because
+    // this tick's delta didn't mention it.
+    const job1Changed = makeJob({ id: 1, bytesDone: 20, bytesTotal: 100 });
+    queryClient.setQueryData(queryKeys.live, { jobs: [job1Changed, job2Done], down: 0, up: 0 });
+    rerender();
+    expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 20 });
+    expect(result.current.data?.jobs[1]).toMatchObject({ state: 'IMPORTING', bytesDone: 49_000_000 });
   });
 });
 

@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { Job, JobDetail as JobDetailDTO, JobEvent, TransferDetail } from '../api/types';
+import type { AttemptDetail, Job, JobDetail as JobDetailDTO, JobEvent, TransferDetail } from '../api/types';
 import { t } from '../strings';
 import JobDetail from './JobDetail';
 
@@ -37,15 +37,12 @@ function makeJob(overrides: Partial<Job> = {}): Job {
   };
 }
 
-function makeDetail(overrides: Partial<JobDetailDTO> = {}): JobDetailDTO {
-  return {
-    id: 1,
-    title: 'Kind of Blue',
-    artist: 'Miles Davis',
-    state: 'DOWNLOADING',
-    attempts: [],
-    ...overrides,
-  };
+// jobDetailDTO now carries a whole jobDTO under `job` (issue #268) — built
+// by the same toJobDTO the REST job list and the stream use — rather than a
+// hand-picked subset of fields. `job` and `attempts` are independent
+// overrides so a test can shape either without repeating the other.
+function makeDetail(job: Partial<Job> = {}, attempts: AttemptDetail[] = []): JobDetailDTO {
+  return { job: makeJob(job), attempts };
 }
 
 function renderJobDetail(path: string, client: QueryClient) {
@@ -68,11 +65,13 @@ describe('retry visibility', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   }
 
-  it('shows Retry when the live job reports FAILED, even if the cached detail does not', () => {
+  // detail.job.state is the only source JobDetail reads now (issue #268) —
+  // there is no second, independently polled list to reconcile against, so
+  // these simply pin retry visibility to that one field.
+  it('shows Retry when detail.job reports FAILED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'FAILED' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'FAILED', status: 'failed' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -80,23 +79,10 @@ describe('retry visibility', () => {
     expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
   });
 
-  it('shows Retry when the cached detail reports FAILED, even if the live job does not', () => {
+  it('hides Retry when detail.job reports neither FAILED nor PARKED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'FAILED' }));
-    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
-
-    renderJobDetail('/jobs/1', client);
-
-    expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
-  });
-
-  it('hides Retry when neither source reports FAILED', () => {
-    stubFetchIndefinitely();
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING' }));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING', status: 'active' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -104,13 +90,11 @@ describe('retry visibility', () => {
     expect(screen.queryByRole('button', { name: t.jobs.retry })).not.toBeInTheDocument();
   });
 
-  // PARKED is the other retry-eligible state (issue #60) — JobDetail
-  // previously only checked FAILED here.
-  it('shows Retry when the live job reports PARKED', () => {
+  // PARKED is the other retry-eligible state (issue #60).
+  it('shows Retry when detail.job reports PARKED', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'PARKED', status: 'parked' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'PARKED' }));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'PARKED', status: 'parked' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -125,8 +109,7 @@ describe('delete action', () => {
     const fetchMock = vi.fn(() => new Promise(() => {}));
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING', status: 'active' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -154,8 +137,7 @@ describe('delete action', () => {
       vi.fn(() => Promise.resolve(new Response('job is importing\n', { status: 409 }))),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'IMPORTING', status: 'active' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'IMPORTING' }));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'IMPORTING', status: 'active' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -170,8 +152,7 @@ describe('delete action', () => {
   it('disarms the delete confirm and falls back to the canned message when the server sends no body', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('', { status: 500 }))));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'DOWNLOADING', status: 'active' }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -196,10 +177,9 @@ describe('meta row: nextAttemptAt and retries', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(
-      queryKeys.jobsAll,
-      [makeJob({ nextAttemptAt: '2026-01-01T12:00:00Z', retries: 2 })],
+      queryKeys.jobDetail(1),
+      makeDetail({ nextAttemptAt: '2026-01-01T12:00:00Z', retries: 2 }),
     );
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -211,8 +191,7 @@ describe('meta row: nextAttemptAt and retries', () => {
   it('hides nextAttemptAt and retries when unset', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ nextAttemptAt: '', retries: 0 })]);
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ nextAttemptAt: '', retries: 0 }));
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
 
     renderJobDetail('/jobs/1', client);
@@ -228,8 +207,9 @@ describe('transfer live progress', () => {
   }
 
   function detailWithTransfers(transfers: TransferDetail[]): JobDetailDTO {
-    return makeDetail({
-      attempts: [
+    return makeDetail(
+      { state: 'DOWNLOADING', status: 'active' },
+      [
         {
           id: 100,
           username: 'peer-one',
@@ -241,7 +221,7 @@ describe('transfer live progress', () => {
           transfers,
         },
       ],
-    });
+    );
   }
 
   function makeTransfer(overrides: Partial<TransferDetail> = {}): TransferDetail {
@@ -259,7 +239,6 @@ describe('transfer live progress', () => {
   it('shows speed for a downloading transfer and queue position for a queued one', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([
@@ -283,7 +262,6 @@ describe('transfer live progress', () => {
   it('flares the tick bar for a transferring file but not for a queued one', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([
@@ -306,7 +284,6 @@ describe('transfer live progress', () => {
   it('omits speed and queue markers when the fields are absent', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobsAll, [makeJob({ state: 'DOWNLOADING', status: 'active' })]);
     client.setQueryData(
       queryKeys.jobDetail(1),
       detailWithTransfers([makeTransfer({ filename: '01.flac', state: 'ERRORED' })]),
@@ -344,21 +321,18 @@ describe('placeholder-data guard', () => {
       resolveJob2Detail = resolve;
     });
 
-    const job1Detail = makeDetail({
-      id: 1,
-      attempts: [
-        {
-          id: 100,
-          username: 'peer-one',
-          fileCount: 1,
-          state: 'SUCCEEDED',
-          failReason: '',
-          createdAt: '2026-01-01T00:00:00Z',
-          updatedAt: '2026-01-01T00:00:00Z',
-          transfers: [],
-        },
-      ],
-    });
+    const job1Detail = makeDetail({ id: 1 }, [
+      {
+        id: 100,
+        username: 'peer-one',
+        fileCount: 1,
+        state: 'SUCCEEDED',
+        failReason: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        transfers: [],
+      },
+    ]);
 
     const jsonResponse = (body: unknown) =>
       Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
@@ -366,7 +340,6 @@ describe('placeholder-data guard', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (url === '/api/jobs/all') return jsonResponse([]);
         if (url === '/api/jobs/1/detail') return jsonResponse(job1Detail);
         if (url === '/api/jobs/1/events') return jsonResponse([]);
         if (url === '/api/jobs/2/detail') {
@@ -400,7 +373,7 @@ describe('placeholder-data guard', () => {
     expect(screen.queryByText('peer-one')).not.toBeInTheDocument();
     expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
 
-    resolveJob2Detail(makeDetail({ id: 2, attempts: [] }));
+    resolveJob2Detail(makeDetail({ id: 2 }));
 
     // EmptyState wraps the message in decorative dashes ("── … ──"), so match
     // by substring rather than the exact string (markup change, not content).
@@ -422,28 +395,25 @@ describe('file ordering', () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, placeholderData: keepPreviousData } },
     });
-    client.setQueryData(queryKeys.jobsAll, [makeJob()]);
     client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
     client.setQueryData(
       queryKeys.jobDetail(1),
-      makeDetail({
-        attempts: [
-          {
-            id: 1,
-            username: 'lossless_lars',
-            fileCount: 3,
-            state: 'ACTIVE',
-            failReason: '',
-            createdAt: '',
-            updatedAt: '',
-            transfers: [
-              transfer('music\\10 Flamenco Sketches.flac'),
-              transfer('music\\02 Freddie Freeloader.flac'),
-              transfer('music\\01 So What.flac'),
-            ],
-          },
-        ],
-      }),
+      makeDetail({}, [
+        {
+          id: 1,
+          username: 'lossless_lars',
+          fileCount: 3,
+          state: 'ACTIVE',
+          failReason: '',
+          createdAt: '',
+          updatedAt: '',
+          transfers: [
+            transfer('music\\10 Flamenco Sketches.flac'),
+            transfer('music\\02 Freddie Freeloader.flac'),
+            transfer('music\\01 So What.flac'),
+          ],
+        },
+      ]),
     );
 
     renderJobDetail('/jobs/1', client);
@@ -456,5 +426,29 @@ describe('file ordering', () => {
       '02 Freddie Freeloader.flac',
       '10 Flamenco Sketches.flac',
     ]);
+  });
+});
+
+describe('not-found / error path', () => {
+  // Collapsing the three-tier fallback to two (issue #268) must not turn a
+  // genuinely missing job into a blank page — QueryNotice still reports the
+  // failure via the loading/error phase, same as any other query.
+  it('shows the failed notice, not a blank page, when the detail fetch errors (e.g. a 404)', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('not found', { status: 404 }))));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    renderJobDetail('/jobs/999', client);
+
+    await waitFor(() => expect(screen.getAllByText(t.query.failed).length).toBeGreaterThan(0));
+    expect(screen.queryByRole('button', { name: t.jobs.retry })).not.toBeInTheDocument();
+  });
+
+  it('shows the loading notice while the detail fetch is still in flight', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
   });
 });

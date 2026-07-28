@@ -1,7 +1,7 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useAllJobs, useJobDetail, useJobEvents } from '../api/queries';
+import { useJobDetail, useJobEvents } from '../api/queries';
 import type { JobState, TransferDetail } from '../api/types';
-import JobActions, { isRetryEligible } from '../components/JobActions';
+import JobActions from '../components/JobActions';
 import ParkedExplanation from '../components/ParkedExplanation';
 import EmptyState from '../components/tui/EmptyState';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
@@ -44,7 +44,6 @@ function transferTone(tr: TransferDetail): { tone: TickTone; live: boolean } {
 export default function JobDetail() {
   const id = Number(useParams().id);
   const navigate = useNavigate();
-  const { data: jobs = [] } = useAllJobs();
   const detailQuery = useJobDetail(id);
   const eventsQuery = useJobEvents(id);
   const { data: detail } = detailQuery;
@@ -52,29 +51,18 @@ export default function JobDetail() {
   const detailPhase = queryPhase(detailQuery);
   const eventsPhase = queryPhase(eventsQuery);
 
-  const job = jobs.find((j) => j.id === id);
-
   // hasData() is exactly the old `detail !== undefined && !detailIsPlaceholder`
   // — see ownPhase() in QueryNotice.tsx, which carries the keepPreviousData
-  // rationale that used to live here.
+  // rationale that used to live here. `detail.job` is now the single source
+  // of everything the header renders (issue #268) — jobDetailDTO carries a
+  // whole jobDTO, built by the same toJobDTO the REST job list and the
+  // stream's own detail frame use, so there is no second, independently
+  // polled source left to reconcile against.
   const detailReady = hasData(detailPhase);
+  const job = detailReady ? detail?.job : undefined;
 
-  // JobActions decides button visibility from a single `state`, but the
-  // polled list and the detail response can disagree briefly and both are
-  // authoritative enough — so pick whichever source reports a retry-eligible
-  // state (FAILED/PARKED) first. The detail side only counts once it's
-  // confirmed to belong to this job (see detailReady above) — otherwise a
-  // stale placeholder from a previously viewed failed job could show Retry
-  // on an unrelated job.
-  const actionState: JobState = isRetryEligible(job?.state)
-    ? job!.state
-    : detailReady && isRetryEligible(detail?.state)
-      ? detail!.state
-      : (job?.state ?? detail?.state ?? 'WANTED');
-  const parkedState =
-    job?.state === 'PARKED' || (detailReady && detail?.state === 'PARKED')
-      ? 'PARKED'
-      : undefined;
+  const actionState: JobState = job?.state ?? 'WANTED';
+  const parkedState = job?.state === 'PARKED' ? 'PARKED' : undefined;
 
   // A notBefore in the past has no display relevance.
   const sleepingUntil =
@@ -84,8 +72,14 @@ export default function JobDetail() {
     <>
       <Link to="/jobs" className={styles.back}>{t.jobs.back}</Link>
 
-      {/* Three-tier fallback: live job, then cached detail, then loading. The
-          middle tier keeps the page useful after a job ages out of /api/jobs. */}
+      {/* Two-tier fallback: the job header (from detail.job), or loading/error
+          via QueryNotice — collapsed from three tiers now that detail.job is
+          a whole jobDTO rather than a hand-picked subset (issue #268). The
+          middle tier this replaces existed only to keep the page useful
+          after a job aged out of the now-deleted GET /api/jobs/all; that
+          concern is gone along with the endpoint. QueryNotice still reports
+          "loading" or "failed" (e.g. a genuinely missing job id) here, so
+          this never silently renders a blank page — see hasData/QueryNotice. */}
       {job ? (
         <>
           <SectionHeader label={job.title} meta={job.artist} prominent />
@@ -114,20 +108,6 @@ export default function JobDetail() {
             <div className={styles.subline}>{t.jobs.retries(job.retries)}</div>
           )}
           {job.failReason && <div className={styles.failReason}>{job.failReason}</div>}
-        </>
-      ) : detailReady && detail ? (
-        <>
-          <SectionHeader label={detail.title} meta={detail.artist} prominent />
-          <div className={styles.meta}>
-            {/* jobDetailDTO carries no `status` field (internal/observ/jobdetail.go),
-                so there's nothing to degrade to here — unlike stateLabel()'s
-                state->status->raw chain used elsewhere. This mirrors the legacy
-                dashboard's `STATE_LABEL[detail.state] || detail.state`: an
-                unrecognised state falls straight back to the raw value. `t.state`'s
-                keys are exactly the `JobState` union, so indexing it with
-                `detail.state` type-checks without a helper. */}
-            <span>{t.state[detail.state] ?? detail.state}</span>
-          </div>
         </>
       ) : (
         <QueryNotice phase={detailPhase} />

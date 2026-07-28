@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1239,4 +1240,207 @@ func TestListDashboardJobsPersistedSortsAndIDTieBreak(t *testing.T) {
 	assertOrder("album", "asc", []int64{alphaAID, alphaZID, betaID, aliceID})
 	assertOrder("peer", "desc", []int64{alphaAID, aliceID, betaID, alphaZID})
 	assertOrder("try", "desc", []int64{betaID, alphaAID, alphaZID, aliceID})
+}
+
+// TestListDashboardJobsFilterTransferringUnion is issue #268: filter=transferring
+// must select exactly the active+stalled union — nothing more, nothing less —
+// expressed against the same dashboardJobStatusSQL every other status filter
+// uses, not a second copy of the state predicates.
+func TestListDashboardJobsFilterTransferringUnion(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+
+	activeID := insertDashboardTestJob(t, s, 5001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "Artist", "peer_active", 0, now)
+	stalledID := insertDashboardTestJob(t, s, 5002, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "Artist", "peer_stalled", 0, now.Add(time.Second))
+	insertDashboardTestJob(t, s, 5003, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
+	insertDashboardTestJob(t, s, 5004, core.SourceLidarr, core.StateImporting, "", "Importing", "Artist", "", 0, now.Add(3*time.Second))
+	insertDashboardTestJob(t, s, 5005, core.SourceLidarr, core.StateFailed, "", "Failed", "Artist", "", 0, now.Add(4*time.Second))
+	insertDashboardTestJob(t, s, 5006, core.SourceLidarr, core.StateParked, "", "Parked", "Artist", "", 0, now.Add(5*time.Second))
+	insertDashboardTestJob(t, s, 5007, core.SourceLidarr, core.StateDone, "", "Done", "Artist", "", 0, now.Add(6*time.Second))
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "transferring", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	gotIDs := make([]int64, len(page.Jobs))
+	for i, job := range page.Jobs {
+		gotIDs[i] = job.Job.ID
+	}
+	wantIDs := []int64{activeID, stalledID}
+	if page.Total != 2 || fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
+		t.Fatalf("filter=transferring ids = %v total %d, want %v total 2", gotIDs, page.Total, wantIDs)
+	}
+	// Status facets must ignore the selected status (same contract every
+	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
+	// and so report the FULL unfiltered counts, not just the transferring subset.
+	if page.Facets.Status.All != 7 || page.Facets.Status.Active != 1 || page.Facets.Status.Stalled != 1 ||
+		page.Facets.Status.Queued != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Failed != 1 ||
+		page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
+		t.Errorf("status facets did not ignore filter=transferring: %+v", page.Facets.Status)
+	}
+}
+
+// TestListDashboardJobsSortTransferGroupsActiveBeforeStalledThenAge is issue
+// #268: sort=transfer ranks active above stalled above everything else, then
+// created_at ascending within a group — the same rule
+// web/src/routes/jobSort.ts's 'transferOrder' used client-side, now moved
+// into SQL. Deliberately includes a job outside the active/stalled union (the
+// "queued" one) unfiltered, to prove it sorts last rather than being merely
+// absent from a pre-filtered set.
+func TestListDashboardJobsSortTransferGroupsActiveBeforeStalledThenAge(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	activeNewerID := insertDashboardTestJob(t, s, 6001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active newer", "Artist", "peer_a1", 0, now.Add(4*time.Second))
+	activeOlderID := insertDashboardTestJob(t, s, 6002, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active older", "Artist", "peer_a2", 0, now)
+	stalledNewerID := insertDashboardTestJob(t, s, 6003, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled newer", "Artist", "peer_s1", 0, now.Add(3*time.Second))
+	stalledOlderID := insertDashboardTestJob(t, s, 6004, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled older", "Artist", "peer_s2", 0, now.Add(time.Second))
+	queuedID := insertDashboardTestJob(t, s, 6005, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "transfer", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, len(page.Jobs))
+	for i, job := range page.Jobs {
+		got[i] = job.Job.ID
+	}
+	want := []int64{activeOlderID, activeNewerID, stalledOlderID, stalledNewerID, queuedID}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("sort=transfer ids = %v, want %v (active-oldest-first, then stalled-oldest-first, then everything else)", got, want)
+	}
+}
+
+// TestListDashboardJobsSortTransferIDTieBreak covers the id tiebreak
+// specifically: two jobs in the same status group with an identical
+// created_at must come out in id order, since without a tiebreaker
+// Postgres' order for equal values is undefined and the same job could
+// appear on two pages while another never shows at all.
+func TestListDashboardJobsSortTransferIDTieBreak(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	firstID := insertDashboardTestJob(t, s, 6101, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "First", "Artist", "peer_1", 0, now)
+	secondID := insertDashboardTestJob(t, s, 6102, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Second", "Artist", "peer_2", 0, now)
+	if firstID >= secondID {
+		t.Fatalf("test setup: expected firstID < secondID, got %d and %d", firstID, secondID)
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "transfer", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, len(page.Jobs))
+	for i, job := range page.Jobs {
+		got[i] = job.Job.ID
+	}
+	want := []int64{firstID, secondID}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("tied active jobs = %v, want %v (id ascending)", got, want)
+	}
+}
+
+// TestDashboardJobsOrderTransferIgnoresDirection is a pure-function
+// counterpart to the id-tiebreak test above: sort=transfer's whole purpose
+// is a stable ranking, so dashboardJobsOrder must produce byte-identical SQL
+// (group ascending, age ascending, id ascending) regardless of Dir — proof
+// the ordering holds under both dir values even though
+// validateDashboardJobsQuery additionally rejects dir=desc outright as a
+// defense-in-depth measure (see TestValidateDashboardJobsQueryRejectsDescForTransferSort).
+func TestDashboardJobsOrderTransferIgnoresDirection(t *testing.T) {
+	asc := dashboardJobsOrder(DashboardJobsQuery{Sort: "transfer", Dir: "asc"})
+	desc := dashboardJobsOrder(DashboardJobsQuery{Sort: "transfer", Dir: "desc"})
+	if asc != desc {
+		t.Fatalf("dashboardJobsOrder(transfer) differs by Dir:\nasc  = %q\ndesc = %q", asc, desc)
+	}
+	if strings.Contains(asc, "DESC") {
+		t.Errorf("dashboardJobsOrder(transfer) = %q, must never contain DESC", asc)
+	}
+}
+
+// TestValidateDashboardJobsQueryRejectsDescForTransferSort covers the
+// decision issue #268 asked for explicitly: sort=transfer's ranking exists
+// to be stable, so dir=desc — which would only reverse that stability for no
+// meaningful alternative order — is rejected rather than silently
+// reinterpreted.
+func TestValidateDashboardJobsQueryRejectsDescForTransferSort(t *testing.T) {
+	err := validateDashboardJobsQuery(DashboardJobsQuery{
+		PageSize: DashboardJobsPageSize, Sort: "transfer", Dir: "desc", Filter: "all", Source: "all",
+	})
+	if err == nil {
+		t.Fatal("expected an error for sort=transfer, dir=desc")
+	}
+	if err := validateDashboardJobsQuery(DashboardJobsQuery{
+		PageSize: DashboardJobsPageSize, Sort: "transfer", Dir: "asc", Filter: "all", Source: "all",
+	}); err != nil {
+		t.Errorf("sort=transfer, dir=asc must be valid, got %v", err)
+	}
+}
+
+// TestValidateDashboardJobsQueryPageSizeBounds covers issue #268's bounded
+// pageSize: 1-50 inclusive, with 0 (Go's zero value, meaning "unset" — see
+// ListDashboardJobs) accepted only via that defaulting path, never directly
+// by validateDashboardJobsQuery itself.
+func TestValidateDashboardJobsQueryPageSizeBounds(t *testing.T) {
+	base := DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"}
+	for _, pageSize := range []int64{0, -1, 51} {
+		q := base
+		q.PageSize = pageSize
+		if err := validateDashboardJobsQuery(q); err == nil {
+			t.Errorf("PageSize=%d: expected an error", pageSize)
+		}
+	}
+	for _, pageSize := range []int64{1, 12, 50} {
+		q := base
+		q.PageSize = pageSize
+		if err := validateDashboardJobsQuery(q); err != nil {
+			t.Errorf("PageSize=%d: expected no error, got %v", pageSize, err)
+		}
+	}
+}
+
+// TestListDashboardJobsPageSizeDefaultsWhenUnset covers ListDashboardJobs'
+// own defaulting: a query that never sets PageSize (every store-level test
+// predating issue #268, and any future caller that genuinely doesn't care)
+// gets DashboardJobsPageSize rather than failing validation on a bound
+// nothing chose.
+func TestListDashboardJobsPageSizeDefaultsWhenUnset(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < int(DashboardJobsPageSize)+1; i++ {
+		insertDashboardTestJob(t, s, int64(7000+i), core.SourceLidarr, core.StateWanted, "", fmt.Sprintf("Album %02d", i), "Artist", "", 0, now.Add(time.Duration(i)*time.Second))
+	}
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "album", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if int64(len(page.Jobs)) != DashboardJobsPageSize {
+		t.Errorf("len(page.Jobs) = %d, want the default page size %d", len(page.Jobs), DashboardJobsPageSize)
+	}
+}
+
+// TestListDashboardJobsExplicitPageSize covers an explicit, smaller PageSize
+// (Overview's TRANSFERS panel requests 8, issue #268): the LIMIT actually
+// applied must match, and it must still compose with filter=transferring and
+// sort=transfer.
+func TestListDashboardJobsExplicitPageSize(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 10; i++ {
+		insertDashboardTestJob(t, s, int64(8000+i), core.SourceLidarr, core.StateDownloading, core.TransferInProgress, fmt.Sprintf("Active %02d", i), "Artist", fmt.Sprintf("peer_%d", i), 0, now.Add(time.Duration(i)*time.Second))
+	}
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{
+		Sort: "transfer", Dir: "asc", Filter: "transferring", Source: "all", PageSize: 8,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 8 || page.Total != 10 {
+		t.Errorf("len(page.Jobs) = %d total = %d, want 8 of 10", len(page.Jobs), page.Total)
+	}
 }
