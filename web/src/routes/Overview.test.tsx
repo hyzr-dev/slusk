@@ -220,7 +220,13 @@ describe('Overview', () => {
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
-  it('keeps an IMPORTING job in TRANSFERS with its importing tag and verifying path', () => {
+  // Defensive client-side case, not a reachable server state: Overview fetches
+  // filter: 'transferring', the server-side active+stalled union (see
+  // Overview.tsx), which never includes 'importing'. If a job with that
+  // status ever did land in this list — e.g. a future filter change — it
+  // must still render its importing tag and verifying path rather than
+  // something misleading.
+  it('renders an IMPORTING job with its importing tag and verifying path, if one ever reached this list', () => {
     renderOverview(makeJobPage([
       { ...baseJob, title: 'Importing Album', status: 'importing', state: 'IMPORTING' },
     ]));

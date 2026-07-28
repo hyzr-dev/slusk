@@ -84,7 +84,13 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
   // actually moving, as opposed to merely being counted 'active' while
   // sitting in a peer's queue.
   const downloading = job.status === 'active' && !queued;
-  const pct = percent(job.bytesDone, job.bytesTotal);
+  // A queued job may still point at a dead candidate's partial bytes (issue
+  // #269): the same aggregate-status fix that lets a SELECTING job hold a
+  // FAILED candidate's leftover AlbumBytesDone/Total also means the tick bar
+  // must not render that candidate's progress next to a label ('—') that
+  // says nothing is happening. Same condition as pctLabel below — a second,
+  // subtly different guard is exactly the kind of drift issue #269 was about.
+  const pct = job.status === 'queued' ? 0 : percent(job.bytesDone, job.bytesTotal);
   const tone = rowTone(job);
   const pctLabel = job.status === 'queued' ? '—' : queued ? t.jobs.queueShort(job.queuePosition!) : `${pct}%`;
 

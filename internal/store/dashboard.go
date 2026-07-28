@@ -78,12 +78,13 @@ const jobViewFrom = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
-			-- This literal is hardcoded, unlike every other transfer-state bind in
-			-- this package (e.g. string(core.TransferPending)). The reason is that
-			-- jobViewFrom is a const prefix its callers concatenate their own WHERE
-			-- clause onto, so the placeholder numbering space is shared: binding it
-			-- here would claim $1-$7 and shift every caller's own params (see the
-			-- StateCancelled and jobID binds below, both currently $1).
+			-- These literals are hardcoded, unlike every other transfer-state bind
+			-- in this package (e.g. string(core.TransferPending)). The reason is
+			-- that jobViewFrom is a const prefix its callers concatenate their own
+			-- WHERE clause onto, so the placeholder numbering space is shared:
+			-- binding them here would claim the leading placeholders and shift
+			-- every caller's own params (see the StateCancelled and jobID binds
+			-- below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
 				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining,
 			-- The four counters dashboardJobStatusSQL reads. Deriving status from
@@ -92,13 +93,47 @@ const jobViewFrom = `
 			-- ten files where only one is IN_PROGRESS and the rest are still
 			-- PENDING is "active", not whatever state the pointed-at row happened
 			-- to be in.
-			COUNT(*) FILTER (WHERE state = 'IN_PROGRESS')                            AS in_progress,
-			COUNT(*) FILTER (WHERE state = 'STALLED')                                AS stalled,
+			COUNT(*) FILTER (WHERE state = 'IN_PROGRESS')                              AS in_progress,
+			COUNT(*) FILTER (WHERE state = 'STALLED')                                  AS stalled,
 			COUNT(*) FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')) AS live,
-			COUNT(*) FILTER (WHERE state IN ('ERRORED', 'CANCELLED'))                 AS failed
+			COUNT(*) FILTER (WHERE state IN ('ERRORED', 'CANCELLED'))                  AS failed
 		FROM transfers
 		WHERE candidate_id = a.id
 	) agg ON true`
+
+// dashboardJobStatusSQL is the single source of truth for a job's dashboard
+// display status — selected as core.JobView.Status by jobViewSelect and
+// reused by every filter/facet/sort query below, so a job's rendered status
+// and the counts/ordering built around it can never drift apart (issue
+// #269 — the Go copy of this rule, observ.dashboardStatus, is gone; it had
+// already drifted from this one over IMPORTING).
+//
+// Job-level states are checked first because they're unambiguous regardless
+// of any transfer activity. SELECTING is deliberately mapped to 'queued', not
+// 'active': it's the pipeline's waiting room — candidates are cached but the
+// job is waiting for a MaxActive slot (the cap only counts
+// DOWNLOADING+IMPORTING). Counting it as active made the dashboard's Aktiv
+// figure grow past max_active, which read like a broken cap.
+//
+// Only once none of those apply does the CASE fall through to agg (see
+// jobViewFrom), which aggregates every transfer of the job's current
+// candidate rather than reading one arbitrarily-chosen row: any file actually
+// moving makes the job 'active', any file stalled (with none in progress)
+// makes it 'stalled', and a candidate whose transfers are all terminal with
+// at least one failure reports 'failed'. A DOWNLOADING job with no transfer
+// activity yet (agg.live > 0 but nothing in progress or errored, e.g. all
+// still PENDING) falls through to 'queued' — nothing is happening yet.
+const dashboardJobStatusSQL = `CASE
+	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
+	WHEN j.state = 'FAILED' THEN 'failed'
+	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
+	WHEN j.state = 'IMPORTING' THEN 'importing'
+	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
+	WHEN agg.in_progress > 0 THEN 'active'
+	WHEN agg.stalled > 0 THEN 'stalled'
+	WHEN agg.live = 0 AND agg.failed > 0 THEN 'failed'
+	ELSE 'queued'
+END`
 
 // jobViewSelect projects one row per album_job (see jobViewFrom for the
 // joins) plus a.files, included so the observ package can aggregate
@@ -170,8 +205,9 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	return v, nil
 }
 
-// ListJobsWithTransfer returns every non-cancelled album job joined with its
-// most recent transfer, newest job first. Used by the dashboard's Queue view.
+// ListJobsWithTransfer returns every non-cancelled album job with its current
+// candidate and that candidate's aggregated transfer progress (see
+// jobViewFrom), newest job first. Used by the dashboard's Queue view.
 func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error) {
 	rows, err := s.db.QueryContext(ctx, jobViewSelect+` WHERE j.state != $1 ORDER BY j.updated_at DESC`, string(core.StateCancelled))
 	if err != nil {
@@ -250,40 +286,6 @@ type DashboardJobsPage struct {
 	Total  int64
 	Facets DashboardJobsFacets
 }
-
-// dashboardJobStatusSQL is the single source of truth for a job's dashboard
-// display status — selected as core.JobView.Status by jobViewSelect and
-// reused by every filter/facet/sort query below, so a job's rendered status
-// and the counts/ordering built around it can never drift apart (issue
-// #269 — the Go copy of this rule, observ.dashboardStatus, is gone; it had
-// already drifted from this one over IMPORTING).
-//
-// Job-level states are checked first because they're unambiguous regardless
-// of any transfer activity. SELECTING is deliberately mapped to 'queued', not
-// 'active': it's the pipeline's waiting room — candidates are cached but the
-// job is waiting for a MaxActive slot (the cap only counts
-// DOWNLOADING+IMPORTING). Counting it as active made the dashboard's Aktiv
-// figure grow past max_active, which read like a broken cap.
-//
-// Only once none of those apply does the CASE fall through to agg (see
-// jobViewFrom), which aggregates every transfer of the job's current
-// candidate rather than reading one arbitrarily-chosen row: any file actually
-// moving makes the job 'active', any file stalled (with none in progress)
-// makes it 'stalled', and a candidate whose transfers are all terminal with
-// at least one failure reports 'failed'. A DOWNLOADING job with no transfer
-// activity yet (agg.live > 0 but nothing in progress or errored, e.g. all
-// still PENDING) falls through to 'queued' — nothing is happening yet.
-const dashboardJobStatusSQL = `CASE
-	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
-	WHEN j.state = 'FAILED' THEN 'failed'
-	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
-	WHEN j.state = 'IMPORTING' THEN 'importing'
-	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
-	WHEN agg.in_progress > 0 THEN 'active'
-	WHEN agg.stalled > 0 THEN 'stalled'
-	WHEN agg.live = 0 AND agg.failed > 0 THEN 'failed'
-	ELSE 'queued'
-END`
 
 func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	// Checked before Page's own overflow guard, which divides by it.
@@ -478,8 +480,9 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	return page, nil
 }
 
-// JobWithTransfer looks up a single job (regardless of state) with its most
-// recent transfer for dashboard-facing actions and detail. It is a one-row
+// JobWithTransfer looks up a single job (regardless of state) with its current
+// candidate and that candidate's aggregated transfer progress (see
+// jobViewFrom) for dashboard-facing actions and detail. It is a one-row
 // projection, not a lifecycle work list. found is false if no job has that id.
 func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
 	row := s.db.QueryRowContext(ctx, jobViewSelect+` WHERE j.id = $1`, jobID)

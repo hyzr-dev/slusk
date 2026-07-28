@@ -1507,9 +1507,13 @@ func TestListJobsWithTransferPrefersActiveOverNewerNeverTried(t *testing.T) {
 }
 
 // TestListJobsWithTransferPrefersSucceededOverNeverTried covers a finished
-// job (IMPORTING) whose SUCCEEDED candidate must still supply the bytes and
-// peer, never a higher-id NEW candidate left behind by a later, unrelated
-// search pass.
+// (DONE) job whose SUCCEEDED candidate must still supply the bytes and peer,
+// never a higher-id NEW candidate left behind by a later, unrelated search
+// pass. The job reaches DONE the way the real pipeline does it:
+// DOWNLOADING→IMPORTING via AdvanceJobStateFrom (candidate stays ACTIVE, see
+// internal/pipeline/downloading.go), then IMPORTING→DONE via
+// SucceedCandidateAndAdvance (see internal/pipeline/importing.go), which is
+// the only transition that ever marks a candidate SUCCEEDED.
 func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -1539,13 +1543,16 @@ func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
 	if err := s.UpdateTransferProgress(ctx, transfers[0].ID, core.TransferCompleted, 2000, 2000, now.Add(time.Minute)); err != nil {
 		t.Fatalf("UpdateTransferProgress: %v", err)
 	}
-	if ok, err := s.SucceedCandidateAndAdvance(ctx, winner.ID, job.ID, core.StateDownloading, core.StateImporting, now.Add(2*time.Minute)); err != nil || !ok {
+	if ok, err := s.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateImporting, now.Add(2*time.Minute)); err != nil || !ok {
+		t.Fatalf("AdvanceJobStateFrom: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.SucceedCandidateAndAdvance(ctx, winner.ID, job.ID, core.StateImporting, core.StateDone, now.Add(3*time.Minute)); err != nil || !ok {
 		t.Fatalf("SucceedCandidateAndAdvance: ok=%v err=%v", ok, err)
 	}
 
 	// A later, unrelated search pass leaves several never-tried candidates
 	// with higher ids than winner's.
-	later := now.Add(3 * time.Minute)
+	later := now.Add(4 * time.Minute)
 	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
 		{Username: "later_peer_1", Score: 3.0, Files: []core.CandidateFile{{Filename: "x.flac", Size: 1}}},
 		{Username: "later_peer_2", Score: 1.0, Files: []core.CandidateFile{{Filename: "y.flac", Size: 1}}},
@@ -1557,8 +1564,8 @@ func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
 	}
-	if view.Status != "importing" {
-		t.Errorf("Status = %q, want importing", view.Status)
+	if view.Status != "done" {
+		t.Errorf("Status = %q, want done", view.Status)
 	}
 	if view.AlbumBytesDone != 2000 || view.AlbumBytesTotal != 2000 {
 		t.Errorf("AlbumBytes = %d/%d, want 2000/2000 (the succeeded candidate)", view.AlbumBytesDone, view.AlbumBytesTotal)
@@ -1626,6 +1633,47 @@ func TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow(t *testing.
 	}
 	if view.Status != "active" {
 		t.Errorf("Status = %q, want active (one file is still IN_PROGRESS)", view.Status)
+	}
+}
+
+// TestJobWithTransferCandidatelessDownloadingJobIsQueued covers a DOWNLOADING
+// job with zero candidates — a.id is NULL, so jobViewFrom's agg LATERAL
+// aggregates over no rows. This is correct by construction (an ungrouped
+// aggregate always returns exactly one row; COUNT(*) FILTER yields 0, never
+// NULL, so dashboardJobStatusSQL's CASE cannot fall through on three-valued
+// logic), but nothing pinned it before this test. DOWNLOADING is used rather
+// than a job-level state (DONE, FAILED, ...) because those short-circuit
+// dashboardJobStatusSQL before it ever reaches the agg branches.
+//
+// The real pipeline never leaves a DOWNLOADING job without an ACTIVE
+// candidate, so this fixture is built with direct SQL rather than the
+// store's public API, the same way insertDashboardTestJob already does for
+// other unreachable-via-API shapes in this file.
+func TestJobWithTransferCandidatelessDownloadingJobIsQueued(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	var jobID int64
+	if err := s.db.QueryRowContext(ctx,
+		`INSERT INTO album_jobs (lidarr_album_id, source, state, retries, created_at, updated_at, title, artist_name)
+		 VALUES ($1, $2, $3, $4, $5, $5, $6, $7) RETURNING id`,
+		9010, string(core.SourceLidarr), string(core.StateDownloading), 0, now, "No Candidate", "Artist").Scan(&jobID); err != nil {
+		t.Fatalf("insert candidateless job: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "queued" {
+		t.Errorf("Status = %q, want queued", view.Status)
+	}
+	if view.AlbumBytesDone != 0 || view.AlbumBytesTotal != 0 || view.AlbumBytesRemaining != 0 {
+		t.Errorf("AlbumBytes = %d/%d remaining=%d, want all zero", view.AlbumBytesDone, view.AlbumBytesTotal, view.AlbumBytesRemaining)
+	}
+	if view.Attempt != nil {
+		t.Errorf("Attempt = %+v, want nil", view.Attempt)
 	}
 }
 
@@ -1699,5 +1747,92 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 	}
 	if len(seen) != len(fixtures) {
 		t.Fatalf("expected every fixture job returned, got %d of %d", len(seen), len(fixtures))
+	}
+}
+
+// TestListDashboardJobsAggregateActiveMatchesFacetAndFilter is the
+// ListDashboardJobs-level counterpart of
+// TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow: that test
+// covers the aggregate rule only through JobWithTransfer's single-row path.
+// Here a job's candidate has many transfers with exactly one IN_PROGRESS and
+// the rest PENDING/COMPLETED, so the drift issue #269 removed — per-row
+// status, the status facet count, and filter=active — can only be caught by
+// checking all three against the same fixture.
+func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 9020, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "multi_peer", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000},
+			{Filename: "02.flac", Size: 1000},
+			{Filename: "03.flac", Size: 1000},
+		}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+	transfers, err := s.TransfersForCandidate(ctx, cand.ID)
+	if err != nil || len(transfers) != 3 {
+		t.Fatalf("TransfersForCandidate: %v (%d transfers)", err, len(transfers))
+	}
+	byFilename := map[string]core.Transfer{}
+	for _, tr := range transfers {
+		byFilename[tr.Filename] = tr
+	}
+	// One IN_PROGRESS, one COMPLETED, one left PENDING (untouched since
+	// activation) — exactly the mixed aggregate the "most recently updated
+	// row" join used to get wrong.
+	if err := s.UpdateTransferProgress(ctx, byFilename["01.flac"].ID, core.TransferInProgress, 500, 1000, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 01: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, byFilename["02.flac"].ID, core.TransferCompleted, 1000, 1000, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 02: %v", err)
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	var row *core.JobView
+	for i := range page.Jobs {
+		if page.Jobs[i].Job.ID == job.ID {
+			row = &page.Jobs[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("job %d not found in all-jobs page", job.ID)
+	}
+	if row.Status != "active" {
+		t.Errorf("row Status = %q, want active", row.Status)
+	}
+	if page.Facets.Status.Active != 1 {
+		t.Errorf("Status facet Active = %d, want 1", page.Facets.Status.Active)
+	}
+
+	filtered, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "active", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs filter=active: %v", err)
+	}
+	found = false
+	for _, fj := range filtered.Jobs {
+		if fj.Job.ID == job.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("job %d not returned by filter=active", job.ID)
 	}
 }
