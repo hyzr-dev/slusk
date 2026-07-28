@@ -2,8 +2,12 @@
 // drift has a single place to be caught. See spec 2026-07-20.
 
 // Canonical UI values. Legacy wire values are kept separate below and
-// normalized before React Query caches a response.
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'done' | 'failed' | 'parked';
+// normalized before React Query caches a response. 'importing' is a real
+// per-job status now (issue #269) — the backend used to serialize an
+// IMPORTING job's status as 'active' (Tag derived the IM tag separately from
+// `state`), a drift between the SQL and Go copies of this rule that this
+// value removes the need for.
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked';
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
   | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';

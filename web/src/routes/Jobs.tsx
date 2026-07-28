@@ -84,9 +84,17 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
   // actually moving, as opposed to merely being counted 'active' while
   // sitting in a peer's queue.
   const downloading = job.status === 'active' && !queued;
-  const pct = percent(job.bytesDone, job.bytesTotal);
+  // A queued job may still point at a dead candidate's partial bytes (issue
+  // #269): the same aggregate-status fix that lets a SELECTING job hold a
+  // FAILED candidate's leftover AlbumBytesDone/Total also means the tick bar
+  // must not render that candidate's progress next to a label ('—') that says
+  // nothing is happening. Bar and label read one binding, not two matching
+  // expressions — a second, independently editable guard is exactly the kind
+  // of drift issue #269 was about.
+  const noProgress = job.status === 'queued';
+  const pct = noProgress ? 0 : percent(job.bytesDone, job.bytesTotal);
   const tone = rowTone(job);
-  const pctLabel = job.status === 'queued' ? '—' : queued ? t.jobs.queueShort(job.queuePosition!) : `${pct}%`;
+  const pctLabel = noProgress ? '—' : queued ? t.jobs.queueShort(job.queuePosition!) : `${pct}%`;
 
   return (
     <Fragment>
@@ -100,7 +108,7 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
             28px column holding two glyphs, but see .albumCell below for the
             case where it is not. */}
         <span role="cell">
-          <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} bare />
+          <Tag status={job.status} queuePosition={job.queuePosition} bare />
         </span>
         <div role="cell" className={styles.albumCell}>
           <button

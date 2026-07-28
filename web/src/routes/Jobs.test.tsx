@@ -206,6 +206,26 @@ describe('queue position rendering', () => {
     expect(screen.getByTitle(t.tagTitle.ST)).toHaveTextContent('ST');
     expect(screen.getByText('25%')).toBeInTheDocument();
   });
+
+  // Issue #269: currentCandidateSubquery can leave a SELECTING (status
+  // 'queued') job pointed at a candidate that already failed, so
+  // AlbumBytesDone/Total can be non-zero even though nothing is happening.
+  // The '—' label already says so; the tick bar must agree rather than
+  // showing a dead attempt's leftover progress next to it.
+  it('shows an empty tick bar for a queued job carrying a dead candidate\'s bytes', () => {
+    stubFetchIndefinitely();
+    const { container } = renderJobs([
+      makeJob({ id: 1, status: 'queued', state: 'SELECTING', bytesDone: 40, bytesTotal: 100 }),
+    ]);
+
+    const pctLabel = container.querySelector('[class*="pct_"]') as HTMLElement;
+    expect(pctLabel).toHaveTextContent('—');
+    const ticks = container.querySelectorAll('[data-tick]');
+    expect(ticks.length).toBeGreaterThan(0);
+    for (const tick of ticks) {
+      expect((tick as HTMLElement).style.background).toBe('var(--tick-off)');
+    }
+  });
 });
 
 describe('server-owned filters and facets', () => {

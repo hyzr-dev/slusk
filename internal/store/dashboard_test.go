@@ -65,14 +65,18 @@ func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 	if v.Job.Title != "Rounds" || v.Job.ArtistName != "Four Tet" {
 		t.Errorf("title/artist = %q / %q, want Rounds / Four Tet", v.Job.Title, v.Job.ArtistName)
 	}
-	if v.Transfer != nil {
-		t.Errorf("expected nil Transfer for a job with no candidate, got %+v", v.Transfer)
-	}
 	if v.Peer != "" {
 		t.Errorf("expected empty Peer, got %q", v.Peer)
 	}
 }
 
+// TestListJobsWithTransferJoinsLatestTransfer covers two candidates from two
+// separate search passes (distinct created_at, unlike the same-batch
+// scenario TestListJobsWithTransferPrefersActiveOverNewerNeverTried
+// reproduces): both stay NEW here, so currentCandidateSubquery's tiebreak
+// (updated_at DESC, id DESC) picks the more recently touched one — peer_two's
+// candidate, whose own transfer aggregate must be what AlbumBytesDone/Total
+// and Peer reflect.
 func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -118,14 +122,11 @@ func TestListJobsWithTransferJoinsLatestTransfer(t *testing.T) {
 		t.Fatalf("expected 1 view, got %d", len(views))
 	}
 	v := views[0]
-	if v.Transfer == nil {
-		t.Fatalf("expected non-nil Transfer")
-	}
 	if v.Peer != "peer_two" {
 		t.Errorf("Peer = %q, want peer_two (the newer candidate)", v.Peer)
 	}
-	if v.Transfer.State != core.TransferInProgress || v.Transfer.BytesDone != 512 {
-		t.Errorf("Transfer = %+v, want state IN_PROGRESS bytesDone 512", v.Transfer)
+	if v.AlbumBytesDone != 512 || v.AlbumBytesTotal != 1024 {
+		t.Errorf("AlbumBytes = %d/%d, want 512/1024 (peer_two's own transfer)", v.AlbumBytesDone, v.AlbumBytesTotal)
 	}
 }
 
@@ -152,7 +153,9 @@ func TestListJobsWithTransferExcludesCancelled(t *testing.T) {
 // multi-track-album scenario: a single candidate gets one transfer row per
 // file (see pipeline.Selecting, one RecordEnqueueIntent call per
 // cand.Files entry). ListJobsWithTransfer must still return exactly one
-// JobView per job, picking the most recently updated transfer.
+// JobView per job — its AlbumBytes* aggregate across every file of the
+// candidate (issue #269), not just whichever transfer happens to be most
+// recently updated.
 func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -194,23 +197,20 @@ func TestListJobsWithTransferDedupesMultiTransferAttempt(t *testing.T) {
 		t.Fatalf("expected 1 view (one job, not one per transfer), got %d", len(views))
 	}
 	v := views[0]
-	if v.Transfer == nil {
-		t.Fatalf("expected non-nil Transfer")
+	// track1 was never given a size (RecordEnqueueIntent alone leaves
+	// bytes_total 0), so the album total is track2's alone.
+	if v.AlbumBytesDone != 128 || v.AlbumBytesTotal != 1024 {
+		t.Errorf("AlbumBytes = %d/%d, want 128/1024 (track2, the only file with progress)", v.AlbumBytesDone, v.AlbumBytesTotal)
 	}
-	if v.Transfer.Filename != "track2.flac" {
-		t.Errorf("Transfer.Filename = %q, want track2.flac (the more recently updated transfer)", v.Transfer.Filename)
-	}
-	if v.Transfer.State != core.TransferInProgress || v.Transfer.BytesDone != 128 {
-		t.Errorf("Transfer = %+v, want state IN_PROGRESS bytesDone 128", v.Transfer)
+	if v.Peer != "album_peer" {
+		t.Errorf("Peer = %q, want album_peer", v.Peer)
 	}
 }
 
 // TestListJobsWithTransferAggregatesAlbumBytes reproduces the multi-track
 // album progress-bar bug (issue #174): AlbumBytesDone/Total must be the SUM
-// across every transfer of the candidate, not just the latest transfer's
-// numbers — while Transfer must still hold the latest row (identity for
-// Cancel/Delete), so a regression that repurposes the t join instead of
-// adding the lateral agg join is caught.
+// across every transfer of the candidate, not just one arbitrarily-chosen
+// transfer's numbers.
 func TestListJobsWithTransferAggregatesAlbumBytes(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -263,14 +263,8 @@ func TestListJobsWithTransferAggregatesAlbumBytes(t *testing.T) {
 	if v.AlbumBytesRemaining != 3700 {
 		t.Errorf("AlbumBytesRemaining = %d, want 3700 ((2000-1000)+(3000-300))", v.AlbumBytesRemaining)
 	}
-
-	// Transfer identity must still be the latest row (track2), unchanged by
-	// the aggregate join.
-	if v.Transfer == nil {
-		t.Fatalf("expected non-nil Transfer")
-	}
-	if v.Transfer.Filename != "track2.flac" || v.Transfer.BytesDone != 300 || v.Transfer.BytesTotal != 3000 {
-		t.Errorf("Transfer = %+v, want the latest row (track2.flac, bytesDone 300, bytesTotal 3000)", v.Transfer)
+	if v.Peer != "album_peer" {
+		t.Errorf("Peer = %q, want album_peer", v.Peer)
 	}
 }
 
@@ -295,8 +289,8 @@ func TestListJobsWithTransferAlbumBytesZeroWithoutAttempt(t *testing.T) {
 	if v.Job.ID != job.ID {
 		t.Fatalf("unexpected job in result: %+v", v.Job)
 	}
-	if v.Transfer != nil {
-		t.Errorf("expected nil Transfer, got %+v", v.Transfer)
+	if v.Attempt != nil {
+		t.Errorf("expected nil Attempt, got %+v", v.Attempt)
 	}
 	if v.AlbumBytesDone != 0 || v.AlbumBytesTotal != 0 || v.AlbumBytesRemaining != 0 {
 		t.Errorf("AlbumBytes* = %d/%d/%d, want all zero for a job with no candidate", v.AlbumBytesDone, v.AlbumBytesTotal, v.AlbumBytesRemaining)
@@ -1442,5 +1436,403 @@ func TestListDashboardJobsExplicitPageSize(t *testing.T) {
 	}
 	if len(page.Jobs) != 8 || page.Total != 10 {
 		t.Errorf("len(page.Jobs) = %d total = %d, want 8 of 10", len(page.Jobs), page.Total)
+	}
+}
+
+// TestListJobsWithTransferPrefersActiveOverNewerNeverTried is issue #269: a
+// job's status/bytes/peer must come from its ACTIVE candidate, never from a
+// same-batch NEW candidate that merely has a higher id. InsertCandidates
+// writes every candidate of one search pass with an identical created_at, so
+// the naive "most recently created" ordering this view used to use falls
+// back to id DESC — and since NextNewCandidate tries candidates
+// best-score-first, that tiebreak deterministically picks the WORST-ranked,
+// never-attempted candidate. On the pre-fix join that candidate has zero
+// transfers, so the job read back as queued/0 bytes/no peer despite actively
+// downloading.
+func TestListJobsWithTransferPrefersActiveOverNewerNeverTried(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 100, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	// Both candidates inserted in the same batch, so they share created_at —
+	// exactly InsertCandidates' real-world behavior for one search pass.
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "active_peer", Score: 2.0, Files: []core.CandidateFile{{Filename: "01.flac", Size: 1000}}},
+		{Username: "never_tried_peer", Score: 1.0, Files: []core.CandidateFile{{Filename: "01.flac", Size: 500}}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+
+	// NextNewCandidate tries best-score-first, so this is active_peer's
+	// candidate — inserted first, so it also has the LOWER id; the untried
+	// never_tried_peer candidate has the higher one.
+	winner, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	if winner.Username != "active_peer" {
+		t.Fatalf("expected active_peer picked first (best score), got %q", winner.Username)
+	}
+
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+	transfers, err := s.TransfersForCandidate(ctx, winner.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("TransfersForCandidate: %v (%d transfers)", err, len(transfers))
+	}
+	if err := s.UpdateTransferProgress(ctx, transfers[0].ID, core.TransferInProgress, 400, 1000, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "active" {
+		t.Errorf("Status = %q, want active (the pre-fix join reports queued here)", view.Status)
+	}
+	if view.AlbumBytesDone != 400 {
+		t.Errorf("AlbumBytesDone = %d, want 400 (the pre-fix join reports 0 here)", view.AlbumBytesDone)
+	}
+	if view.Peer != "active_peer" {
+		t.Errorf("Peer = %q, want active_peer (the pre-fix join reports the untried candidate's peer)", view.Peer)
+	}
+}
+
+// TestListJobsWithTransferPrefersSucceededOverNeverTried covers a finished
+// (DONE) job whose SUCCEEDED candidate must still supply the bytes and peer,
+// never a higher-id NEW candidate left behind by a later, unrelated search
+// pass. The job reaches DONE the way the real pipeline does it:
+// DOWNLOADING→IMPORTING via AdvanceJobStateFrom (candidate stays ACTIVE, see
+// internal/pipeline/downloading.go), then IMPORTING→DONE via
+// SucceedCandidateAndAdvance (see internal/pipeline/importing.go), which is
+// the only transition that ever marks a candidate SUCCEEDED.
+func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 101, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "winner_peer", Score: 5.0, Files: []core.CandidateFile{{Filename: "01.flac", Size: 2000}}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates winner: %v", err)
+	}
+	winner, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+	transfers, err := s.TransfersForCandidate(ctx, winner.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("TransfersForCandidate: %v (%d transfers)", err, len(transfers))
+	}
+	if err := s.UpdateTransferProgress(ctx, transfers[0].ID, core.TransferCompleted, 2000, 2000, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+	if ok, err := s.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateImporting, now.Add(2*time.Minute)); err != nil || !ok {
+		t.Fatalf("AdvanceJobStateFrom: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.SucceedCandidateAndAdvance(ctx, winner.ID, job.ID, core.StateImporting, core.StateDone, now.Add(3*time.Minute)); err != nil || !ok {
+		t.Fatalf("SucceedCandidateAndAdvance: ok=%v err=%v", ok, err)
+	}
+
+	// A later, unrelated search pass leaves several never-tried candidates
+	// with higher ids than winner's.
+	later := now.Add(4 * time.Minute)
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "later_peer_1", Score: 3.0, Files: []core.CandidateFile{{Filename: "x.flac", Size: 1}}},
+		{Username: "later_peer_2", Score: 1.0, Files: []core.CandidateFile{{Filename: "y.flac", Size: 1}}},
+	}, later); err != nil {
+		t.Fatalf("InsertCandidates later: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "done" {
+		t.Errorf("Status = %q, want done", view.Status)
+	}
+	if view.AlbumBytesDone != 2000 || view.AlbumBytesTotal != 2000 {
+		t.Errorf("AlbumBytes = %d/%d, want 2000/2000 (the succeeded candidate)", view.AlbumBytesDone, view.AlbumBytesTotal)
+	}
+	if view.Peer != "winner_peer" {
+		t.Errorf("Peer = %q, want winner_peer", view.Peer)
+	}
+}
+
+// TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow is issue
+// #269's aggregate case: a candidate with several transfers where only ONE
+// is IN_PROGRESS, and the most recently updated row is actually COMPLETED —
+// the job is still 'active', which a single-latest-transfer join could only
+// report correctly by accident (whenever the in-progress row happened to
+// also be the most recently touched one).
+func TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 102, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "multi_peer", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000},
+			{Filename: "02.flac", Size: 1000},
+			{Filename: "03.flac", Size: 1000},
+		}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+	transfers, err := s.TransfersForCandidate(ctx, cand.ID)
+	if err != nil || len(transfers) != 3 {
+		t.Fatalf("TransfersForCandidate: %v (%d transfers)", err, len(transfers))
+	}
+	byFilename := map[string]core.Transfer{}
+	for _, tr := range transfers {
+		byFilename[tr.Filename] = tr
+	}
+
+	// Touched first: the file that stays IN_PROGRESS.
+	if err := s.UpdateTransferProgress(ctx, byFilename["01.flac"].ID, core.TransferInProgress, 500, 1000, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 01: %v", err)
+	}
+	// Touched LAST, so it — not the in-progress file — is the row a
+	// single-latest-transfer join would have picked.
+	if err := s.UpdateTransferProgress(ctx, byFilename["02.flac"].ID, core.TransferCompleted, 1000, 1000, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 02: %v", err)
+	}
+	// 03.flac stays PENDING, untouched since activation.
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "active" {
+		t.Errorf("Status = %q, want active (one file is still IN_PROGRESS)", view.Status)
+	}
+}
+
+// TestJobWithTransferCandidatelessDownloadingJobIsQueued covers a DOWNLOADING
+// job with zero candidates — a.id is NULL, so jobViewFrom's agg LATERAL
+// aggregates over no rows. This is correct by construction (an ungrouped
+// aggregate always returns exactly one row; COUNT(*) FILTER yields 0, never
+// NULL, so dashboardJobStatusSQL's CASE cannot fall through on three-valued
+// logic), but nothing pinned it before this test. DOWNLOADING is used rather
+// than a job-level state (DONE, FAILED, ...) because those short-circuit
+// dashboardJobStatusSQL before it ever reaches the agg branches.
+//
+// The real pipeline never leaves a DOWNLOADING job without an ACTIVE
+// candidate, so this fixture is built with direct SQL rather than the
+// store's public API, the same way insertDashboardTestJob already does for
+// other unreachable-via-API shapes in this file.
+func TestJobWithTransferCandidatelessDownloadingJobIsQueued(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	var jobID int64
+	if err := s.db.QueryRowContext(ctx,
+		`INSERT INTO album_jobs (lidarr_album_id, source, state, retries, created_at, updated_at, title, artist_name)
+		 VALUES ($1, $2, $3, $4, $5, $5, $6, $7) RETURNING id`,
+		9010, string(core.SourceLidarr), string(core.StateDownloading), 0, now, "No Candidate", "Artist").Scan(&jobID); err != nil {
+		t.Fatalf("insert candidateless job: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "queued" {
+		t.Errorf("Status = %q, want queued", view.Status)
+	}
+	if view.AlbumBytesDone != 0 || view.AlbumBytesTotal != 0 || view.AlbumBytesRemaining != 0 {
+		t.Errorf("AlbumBytes = %d/%d remaining=%d, want all zero", view.AlbumBytesDone, view.AlbumBytesTotal, view.AlbumBytesRemaining)
+	}
+	if view.Attempt != nil {
+		t.Errorf("Attempt = %+v, want nil", view.Attempt)
+	}
+}
+
+// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter guards the drift
+// issue #269 found between this package's dashboardJobStatusSQL and the Go
+// copy that used to live in observ.dashboardStatus (IMPORTING mapped to
+// 'importing' here but 'active' there). Now that jobDTO.Status is read
+// straight from core.JobView.Status — computed once by dashboardJobStatusSQL
+// and reused by every filter — a per-row status, its own filter, and the
+// facet count built around the same CASE can never disagree. This checks
+// that invariant across one fixture of every dashboard status.
+func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+
+	fixtures := []struct {
+		id     int64
+		state  core.AlbumJobState
+		tstate core.TransferState
+		peer   string
+		status string
+	}{
+		{9001, core.StateDownloading, core.TransferInProgress, "peer_active", "active"},
+		{9002, core.StateImporting, "", "", "importing"},
+		{9003, core.StateWanted, "", "", "queued"},
+		{9004, core.StateDownloading, core.TransferStalled, "peer_stalled", "stalled"},
+		{9005, core.StateDownloading, core.TransferErrored, "peer_failed", "failed"},
+		{9006, core.StateParked, "", "", "parked"},
+		{9007, core.StateDone, "", "", "done"},
+	}
+	statusByID := map[int64]string{}
+	for i, f := range fixtures {
+		id := insertDashboardTestJob(t, s, f.id, core.SourceLidarr, f.state, f.tstate, fmt.Sprintf("Job %d", i), "Artist", f.peer, 0, now.Add(time.Duration(i)*time.Second))
+		statusByID[id] = f.status
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != len(fixtures) {
+		t.Fatalf("expected %d jobs, got %d", len(fixtures), len(page.Jobs))
+	}
+	seen := map[int64]bool{}
+	for _, job := range page.Jobs {
+		want, ok := statusByID[job.Job.ID]
+		if !ok {
+			t.Fatalf("unexpected job id %d in page", job.Job.ID)
+		}
+		seen[job.Job.ID] = true
+		if job.Status != want {
+			t.Errorf("job %d: Status = %q, want %q", job.Job.ID, job.Status, want)
+		}
+
+		// The per-row status must also be exactly the value its own filter
+		// selects it under.
+		filtered, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: want, Source: "all"})
+		if err != nil {
+			t.Fatalf("ListDashboardJobs filter=%s: %v", want, err)
+		}
+		found := false
+		for _, fj := range filtered.Jobs {
+			if fj.Job.ID == job.Job.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("job %d (status %q) not found when filtering by its own status", job.Job.ID, want)
+		}
+	}
+	if len(seen) != len(fixtures) {
+		t.Fatalf("expected every fixture job returned, got %d of %d", len(seen), len(fixtures))
+	}
+}
+
+// TestListDashboardJobsAggregateActiveMatchesFacetAndFilter is the
+// ListDashboardJobs-level counterpart of
+// TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow: that test
+// covers the aggregate rule only through JobWithTransfer's single-row path.
+// Here a job's candidate has many transfers with exactly one IN_PROGRESS and
+// the rest PENDING/COMPLETED, so the drift issue #269 removed — per-row
+// status, the status facet count, and filter=active — can only be caught by
+// checking all three against the same fixture.
+func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 9020, now)
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "multi_peer", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: "01.flac", Size: 1000},
+			{Filename: "02.flac", Size: 1000},
+			{Filename: "03.flac", Size: 1000},
+		}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
+	}
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+	transfers, err := s.TransfersForCandidate(ctx, cand.ID)
+	if err != nil || len(transfers) != 3 {
+		t.Fatalf("TransfersForCandidate: %v (%d transfers)", err, len(transfers))
+	}
+	byFilename := map[string]core.Transfer{}
+	for _, tr := range transfers {
+		byFilename[tr.Filename] = tr
+	}
+	// One IN_PROGRESS, one COMPLETED, one left PENDING (untouched since
+	// activation) — exactly the mixed aggregate the "most recently updated
+	// row" join used to get wrong.
+	if err := s.UpdateTransferProgress(ctx, byFilename["01.flac"].ID, core.TransferInProgress, 500, 1000, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 01: %v", err)
+	}
+	if err := s.UpdateTransferProgress(ctx, byFilename["02.flac"].ID, core.TransferCompleted, 1000, 1000, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("UpdateTransferProgress 02: %v", err)
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	var row *core.JobView
+	for i := range page.Jobs {
+		if page.Jobs[i].Job.ID == job.ID {
+			row = &page.Jobs[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("job %d not found in all-jobs page", job.ID)
+	}
+	if row.Status != "active" {
+		t.Errorf("row Status = %q, want active", row.Status)
+	}
+	if page.Facets.Status.Active != 1 {
+		t.Errorf("Status facet Active = %d, want 1", page.Facets.Status.Active)
+	}
+
+	filtered, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "active", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs filter=active: %v", err)
+	}
+	found = false
+	for _, fj := range filtered.Jobs {
+		if fj.Job.ID == job.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("job %d not returned by filter=active", job.ID)
 	}
 }

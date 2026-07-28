@@ -13,44 +13,69 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-// jobViewSelect joins each album_job with its most recently created candidate
-// row (a), and that candidate is in turn joined twice for two different
-// purposes:
+// currentCandidateSubquery picks the one candidate of album_jobs j that
+// represents the job everywhere the dashboard reads a "current" candidate:
+// its state and progress, its peer, and (via jobViewFrom's agg lateral) the
+// job's dashboard status.
 //
-//   - t is the candidate's single most recent transfer (by updated_at). It
-//     must stay a single row rather than becoming an aggregate because
-//     observ.dashboardStatus derives a job's stalled/active/failed status from
-//     Transfer.State, and scanJobView copies t.username into JobView.Peer,
-//     which the jobs list renders. These read one arbitrary file's row as if
-//     it spoke for the album — the same conflation issue #174 fixed for the
-//     byte columns, left in place here because changing it would change what
-//     those two values mean. Manual cancellation does not use this projection;
-//     its store transaction captures every live transfer across all candidates.
-//   - agg sums bytes_done/bytes_total/remaining across every transfer of the
-//     candidate. ActivateCandidateWithTransfers and CreateManualJob insert a
-//     transfers row for every file of the album upfront (state PENDING,
-//     bytes_total from the file size), so this sum is already album-complete
+// The naive "most recently created" ordering (created_at DESC, id DESC) looks
+// correct but is not: InsertCandidates writes every candidate of one search
+// pass in a single batch, so created_at is identical across them and id DESC
+// is the real tiebreak. NextNewCandidate tries candidates best-score-first
+// (ORDER BY score DESC, id ASC), so id DESC deterministically selects the
+// WORST-ranked candidate — usually one that was never attempted and has zero
+// transfers (issue #269).
+//
+// Instead:
+//   - an ACTIVE candidate always wins. A job has at most one at a time
+//     (see Store.ActiveCandidate), and it stays ACTIVE through both
+//     DOWNLOADING and IMPORTING.
+//   - otherwise, prefer a candidate that was actually attempted: NEW sorts
+//     last, so a never-tried candidate can never displace a finished job's
+//     real SUCCEEDED/FAILED one.
+//   - updated_at DESC, id DESC break any remaining tie deterministically.
+//
+// One consequence is deliberate: FailCandidateAndAdvance returns a job to
+// SELECTING without deleting the failed candidate's transfers, so a job
+// between attempts points at that FAILED candidate and reports its peer and
+// its partial bytes. The peer reads as "last attempted", which is more useful
+// than the blank the deleted transfer join produced. The bytes are not — a
+// dead attempt's progress must not render as the job's own, so the jobs view
+// zeroes it for queued rows (see noProgress in web/src/routes/Jobs.tsx).
+const currentCandidateSubquery = `
+		SELECT id FROM candidates WHERE album_job_id = j.id
+		ORDER BY (state = 'ACTIVE') DESC, (state = 'NEW') ASC, updated_at DESC, id DESC
+		LIMIT 1`
+
+// jobViewFrom is the FROM clause shared by every dashboard read of
+// album_jobs: the row projection (jobViewSelect) and the count/facet/filter/
+// sort queries (ListDashboardJobs) all join through it, so they can never
+// disagree about which candidate or which transfer aggregate a job's status
+// is computed from.
+//
+//   - a is the job's current candidate (currentCandidateSubquery). Earlier
+//     versions of this view additionally joined the candidate's single most
+//     recently updated transfer (aliased t) to answer "is this job stalled/
+//     active/failed" and to supply JobView.Peer — but a transfer belongs to
+//     one file, and "most recently updated" has no relationship to whether
+//     that file, or the album as a whole, is actually progressing (issue
+//     #269). That join is gone: agg below aggregates every transfer of the
+//     candidate instead, and Peer is a.username — the candidate's own peer,
+//     unambiguous without picking a single file.
+//   - agg aggregates every transfer of the candidate: summed bytes (issue
+//     #174; ActivateCandidateWithTransfers and CreateManualJob insert a
+//     transfers row for every file of the album upfront, state PENDING with
+//     bytes_total from the file size, so the sum is already album-complete
 //     even for files the per-peer throttle (#20) hasn't released to the peer
-//     backend yet — see core.JobView.AlbumBytes* and issue #174.
+//     backend yet — see core.JobView.AlbumBytes*) and per-state counts used
+//     by dashboardJobStatusSQL to decide active/stalled/failed from the
+//     aggregate rather than one arbitrarily-chosen row.
 //
-// A job with no candidates yet still appears, with NULL candidate/transfer
-// columns and agg's COALESCE-guarded zeros. a.files is included (additive; no
-// new JOINs or aggregates) so the observ package can aggregate album-level
-// live speed/ETA across every file of the candidate rather than just the one
-// transfer this view already joins (issue #157) — see core.Candidate.Files.
-// Callers append their own WHERE clause.
-const jobViewSelect = `
-	SELECT
-		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
-		t.id, t.candidate_id, t.slskd_id, t.username, t.filename, t.state, t.bytes_done, t.bytes_total, t.deadline, t.last_progress_at, t.updated_at,
-		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
-		agg.bytes_done, agg.bytes_total, agg.bytes_remaining
+// A job with no candidates yet still appears, with NULL candidate columns and
+// agg's COALESCE-guarded zeros. Callers append their own WHERE clause.
+const jobViewFrom = `
 	FROM album_jobs j
-	LEFT JOIN candidates a ON a.id = (
-		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC, id DESC LIMIT 1
-	)
-	LEFT JOIN transfers t ON t.id = (
-		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC, id DESC LIMIT 1
+	LEFT JOIN candidates a ON a.id = (` + currentCandidateSubquery + `
 	)
 	LEFT JOIN LATERAL (
 		SELECT
@@ -61,26 +86,79 @@ const jobViewSelect = `
 			-- future non-terminal state counts as remaining by default rather than
 			-- silently dropping out. PENDING/QUEUED/IN_PROGRESS/STALLED all count:
 			-- STALLED can still recover or be retried.
-			-- This literal is hardcoded, unlike every other transfer-state bind in
-			-- this package (e.g. string(core.TransferPending)). The reason is that
-			-- jobViewSelect is a const prefix its callers concatenate their own WHERE
-			-- clause onto, so the placeholder numbering space is shared: binding it
-			-- here would claim $1-$3 and shift every caller's own params (see the
-			-- StateCancelled and jobID binds below, both currently $1).
+			-- These literals are hardcoded, unlike every other transfer-state bind
+			-- in this package (e.g. string(core.TransferPending)). The reason is
+			-- that jobViewFrom is a const prefix its callers concatenate their own
+			-- WHERE clause onto, so the placeholder numbering space is shared:
+			-- binding them here would claim the leading placeholders and shift
+			-- every caller's own params (see the StateCancelled and jobID binds
+			-- below, both currently $1).
 			COALESCE(SUM(GREATEST(bytes_total - bytes_done, 0))
-				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining
+				FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')), 0) AS bytes_remaining,
+			-- The four counters dashboardJobStatusSQL reads. Deriving status from
+			-- an aggregate over every transfer of the candidate (rather than one
+			-- arbitrarily-chosen row) is the fix for issue #269: a candidate with
+			-- ten files where only one is IN_PROGRESS and the rest are still
+			-- PENDING is "active", not whatever state the pointed-at row happened
+			-- to be in.
+			COUNT(*) FILTER (WHERE state = 'IN_PROGRESS')                              AS in_progress,
+			COUNT(*) FILTER (WHERE state = 'STALLED')                                  AS stalled,
+			COUNT(*) FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')) AS live,
+			COUNT(*) FILTER (WHERE state IN ('ERRORED', 'CANCELLED'))                  AS failed
 		FROM transfers
 		WHERE candidate_id = a.id
 	) agg ON true`
 
+// dashboardJobStatusSQL is the single source of truth for a job's dashboard
+// display status — selected as core.JobView.Status by jobViewSelect and
+// reused by every filter/facet/sort query below, so a job's rendered status
+// and the counts/ordering built around it can never drift apart (issue
+// #269 — the Go copy of this rule, observ.dashboardStatus, is gone; it had
+// already drifted from this one over IMPORTING).
+//
+// Job-level states are checked first because they're unambiguous regardless
+// of any transfer activity. SELECTING is deliberately mapped to 'queued', not
+// 'active': it's the pipeline's waiting room — candidates are cached but the
+// job is waiting for a MaxActive slot (the cap only counts
+// DOWNLOADING+IMPORTING). Counting it as active made the dashboard's Aktiv
+// figure grow past max_active, which read like a broken cap.
+//
+// Only once none of those apply does the CASE fall through to agg (see
+// jobViewFrom), which aggregates every transfer of the job's current
+// candidate rather than reading one arbitrarily-chosen row: any file actually
+// moving makes the job 'active', any file stalled (with none in progress)
+// makes it 'stalled', and a candidate whose transfers are all terminal with
+// at least one failure reports 'failed'. A DOWNLOADING job with no transfer
+// activity yet (agg.live > 0 but nothing in progress or errored, e.g. all
+// still PENDING) falls through to 'queued' — nothing is happening yet.
+const dashboardJobStatusSQL = `CASE
+	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
+	WHEN j.state = 'FAILED' THEN 'failed'
+	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
+	WHEN j.state = 'IMPORTING' THEN 'importing'
+	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
+	WHEN agg.in_progress > 0 THEN 'active'
+	WHEN agg.stalled > 0 THEN 'stalled'
+	WHEN agg.live = 0 AND agg.failed > 0 THEN 'failed'
+	ELSE 'queued'
+END`
+
+// jobViewSelect projects one row per album_job (see jobViewFrom for the
+// joins) plus a.files, included so the observ package can aggregate
+// album-level live speed/ETA across every file of the candidate rather than
+// just a single transfer (issue #157) — see core.Candidate.Files. Callers
+// append their own WHERE clause.
+const jobViewSelect = `
+	SELECT
+		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
+		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
+		agg.bytes_done, agg.bytes_total, agg.bytes_remaining,
+		(` + dashboardJobStatusSQL + `) AS status
+	` + jobViewFrom
+
 func scanJobView(r rowScanner) (core.JobView, error) {
 	var v core.JobView
 	var jState, jSource string
-	var tID sql.NullInt64
-	var tCandidateID sql.NullInt64
-	var tSlskdID, tUsername, tFilename, tState sql.NullString
-	var tBytesDone, tBytesTotal sql.NullInt64
-	var tDeadline, tLastProgressAt, tUpdatedAt sql.NullTime
 	var aID, aAlbumJobID sql.NullInt64
 	var aUsername, aState, aFailReason sql.NullString
 	var aScore sql.NullFloat64
@@ -91,9 +169,9 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 
 	err := r.Scan(
 		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
-		&tID, &tCandidateID, &tSlskdID, &tUsername, &tFilename, &tState, &tBytesDone, &tBytesTotal, &tDeadline, &tLastProgressAt, &tUpdatedAt,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
 		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
+		&v.Status,
 	)
 	if err != nil {
 		return core.JobView{}, err
@@ -113,27 +191,6 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 		v.Job.Format = &f
 	}
 
-	if tID.Valid {
-		tr := &core.Transfer{
-			ID:          tID.Int64,
-			CandidateID: tCandidateID.Int64,
-			SlskdID:     tSlskdID.String,
-			Username:    tUsername.String,
-			Filename:    tFilename.String,
-			State:       core.TransferState(tState.String),
-			BytesDone:   tBytesDone.Int64,
-			BytesTotal:  tBytesTotal.Int64,
-			Deadline:    tDeadline.Time,
-			UpdatedAt:   tUpdatedAt.Time,
-		}
-		if tLastProgressAt.Valid {
-			lp := tLastProgressAt.Time
-			tr.LastProgressAt = &lp
-		}
-		v.Transfer = tr
-		v.Peer = tUsername.String
-	}
-
 	if aID.Valid {
 		attempt := &core.Candidate{
 			ID:         aID.Int64,
@@ -151,12 +208,14 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 			}
 		}
 		v.Attempt = attempt
+		v.Peer = aUsername.String
 	}
 	return v, nil
 }
 
-// ListJobsWithTransfer returns every non-cancelled album job joined with its
-// most recent transfer, newest job first. Used by the dashboard's Queue view.
+// ListJobsWithTransfer returns every non-cancelled album job with its current
+// candidate and that candidate's aggregated transfer progress (see
+// jobViewFrom), newest job first. Used by the dashboard's Queue view.
 func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error) {
 	rows, err := s.db.QueryContext(ctx, jobViewSelect+` WHERE j.state != $1 ORDER BY j.updated_at DESC`, string(core.StateCancelled))
 	if err != nil {
@@ -236,27 +295,6 @@ type DashboardJobsPage struct {
 	Facets DashboardJobsFacets
 }
 
-const dashboardJobStatusSQL = `CASE
-	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
-	WHEN j.state = 'FAILED' THEN 'failed'
-	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
-	WHEN j.state = 'IMPORTING' THEN 'importing'
-	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
-	WHEN t.state = 'STALLED' THEN 'stalled'
-	WHEN t.state = 'IN_PROGRESS' THEN 'active'
-	WHEN t.state IN ('ERRORED', 'CANCELLED') THEN 'failed'
-	ELSE 'queued'
-END`
-
-const dashboardJobCountFrom = `
-	FROM album_jobs j
-	LEFT JOIN candidates a ON a.id = (
-		SELECT id FROM candidates WHERE album_job_id = j.id ORDER BY created_at DESC, id DESC LIMIT 1
-	)
-	LEFT JOIN transfers t ON t.id = (
-		SELECT id FROM transfers WHERE candidate_id = a.id ORDER BY updated_at DESC, id DESC LIMIT 1
-	)`
-
 func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	// Checked before Page's own overflow guard, which divides by it.
 	if q.PageSize < 1 || q.PageSize > 50 {
@@ -303,7 +341,7 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 	}
 	if q.Query != "" {
 		placeholder := bind(q.Query)
-		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(t.username, '')), lower("+placeholder+")) > 0)")
+		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(a.username, '')), lower("+placeholder+")) > 0)")
 	}
 	if includeStatus && q.Filter != "all" {
 		if q.Filter == "transferring" {
@@ -336,7 +374,7 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 	case "album":
 		return " ORDER BY lower(j.title) " + direction + ", lower(j.artist_name) " + direction + ", j.id ASC"
 	case "peer":
-		return " ORDER BY (NULLIF(t.username, '') IS NULL) ASC, t.username " + direction + ", j.id ASC"
+		return " ORDER BY (NULLIF(a.username, '') IS NULL) ASC, a.username " + direction + ", j.id ASC"
 	case "try":
 		return " ORDER BY j.retries " + direction + ", j.id ASC"
 	case "transfer":
@@ -396,7 +434,7 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 		COUNT(*) FILTER (WHERE status = 'failed'),
 		COUNT(*) FILTER (WHERE status = 'parked'),
 		COUNT(*) FILTER (WHERE status = 'done')
-		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + dashboardJobCountFrom + statusWhere + `) dashboard_jobs`
+		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
 	var page DashboardJobsPage
 	if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
 		&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
@@ -410,7 +448,7 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	sourceSQL := `SELECT COUNT(*),
 		COUNT(*) FILTER (WHERE source = 'manual'),
 		COUNT(*) FILTER (WHERE source = 'lidarr')
-		FROM (SELECT j.source AS source` + dashboardJobCountFrom + sourceWhere + `) dashboard_jobs`
+		FROM (SELECT j.source AS source` + jobViewFrom + sourceWhere + `) dashboard_jobs`
 	if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
 		&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
 	); err != nil {
@@ -418,7 +456,7 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	}
 
 	where, args := dashboardJobsWhere(q, true, true)
-	countSQL := `SELECT COUNT(*)` + dashboardJobCountFrom + where
+	countSQL := `SELECT COUNT(*)` + jobViewFrom + where
 	if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
 		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
 	}
@@ -450,8 +488,9 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	return page, nil
 }
 
-// JobWithTransfer looks up a single job (regardless of state) with its most
-// recent transfer for dashboard-facing actions and detail. It is a one-row
+// JobWithTransfer looks up a single job (regardless of state) with its current
+// candidate and that candidate's aggregated transfer progress (see
+// jobViewFrom) for dashboard-facing actions and detail. It is a one-row
 // projection, not a lifecycle work list. found is false if no job has that id.
 func (s *Store) JobWithTransfer(ctx context.Context, jobID int64) (core.JobView, bool, error) {
 	row := s.db.QueryRowContext(ctx, jobViewSelect+` WHERE j.id = $1`, jobID)

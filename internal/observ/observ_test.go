@@ -325,8 +325,9 @@ func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
 		gotQuery = query
 		return PagedJobsResult{
 			Jobs: []core.JobView{{
-				Job:  core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateImporting, Source: core.SourceLidarr},
-				Peer: "flac_hoarder",
+				Job:    core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateImporting, Source: core.SourceLidarr},
+				Peer:   "flac_hoarder",
+				Status: "importing",
 			}},
 			Total: 25,
 			Facets: JobFacets{
@@ -356,8 +357,8 @@ func TestPagedJobsEndpointReturnsPageAndFacets(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Jobs) != 1 || got.Jobs[0].ID != 7 || got.Jobs[0].Status != "active" || got.Jobs[0].State != string(core.StateImporting) {
-		t.Errorf("jobs = %+v, want IMPORTING job serialized with active status", got.Jobs)
+	if len(got.Jobs) != 1 || got.Jobs[0].ID != 7 || got.Jobs[0].Status != "importing" || got.Jobs[0].State != string(core.StateImporting) {
+		t.Errorf("jobs = %+v, want IMPORTING job serialized with importing status", got.Jobs)
 	}
 	if got.Total != 25 || got.Facets.Status.Importing != 2 || got.Facets.Source.Lidarr != 6 {
 		t.Errorf("page metadata = total %d facets %+v", got.Total, got.Facets)
@@ -523,7 +524,7 @@ func TestJobsEndpointReturnsJobList(t *testing.T) {
 		return []core.JobView{
 			{
 				Job:                 core.AlbumJob{ID: 7, Title: "Rounds", ArtistName: "Four Tet", State: core.StateDownloading, Source: core.SourceLidarr},
-				Transfer:            &core.Transfer{State: core.TransferInProgress, BytesDone: 100, BytesTotal: 200},
+				Status:              "active",
 				Peer:                "flac_hoarder",
 				AlbumBytesDone:      900,
 				AlbumBytesTotal:     2400,
