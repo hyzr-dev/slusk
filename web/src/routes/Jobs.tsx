@@ -100,7 +100,7 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
             28px column holding two glyphs, but see .albumCell below for the
             case where it is not. */}
         <span role="cell">
-          <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} bare />
+          <Tag status={job.status} queuePosition={job.queuePosition} bare />
         </span>
         <div role="cell" className={styles.albumCell}>
           <button

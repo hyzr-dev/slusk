@@ -147,7 +147,7 @@ export default function Overview() {
                     onClick={() => navigate(`/jobs/${job.id}`)}
                   >
                     <div className={styles.transferHead}>
-                      <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
+                      <Tag status={job.status} queuePosition={job.queuePosition} />
                       <span className={styles.transferTitle}>{job.title}</span>
                       <span className={styles.transferSpeed}>{formatSpeed(job.speed)}</span>
                       <span

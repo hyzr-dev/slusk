@@ -220,9 +220,9 @@ describe('Overview', () => {
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
-  it('keeps an IMPORTING active job in TRANSFERS with its importing tag and verifying path', () => {
+  it('keeps an IMPORTING job in TRANSFERS with its importing tag and verifying path', () => {
     renderOverview(makeJobPage([
-      { ...baseJob, title: 'Importing Album', status: 'active', state: 'IMPORTING' },
+      { ...baseJob, title: 'Importing Album', status: 'importing', state: 'IMPORTING' },
     ]));
 
     expect(screen.getByText('Importing Album')).toBeInTheDocument();

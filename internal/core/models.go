@@ -118,14 +118,22 @@ type PeerReliability struct {
 	Global ReliabilityCounters
 }
 
-// JobView is a read-only projection joining an AlbumJob with its most recent
-// transfer and its album-wide byte aggregates, for display purposes only
-// (e.g. the dashboard). It is never written back to the store.
+// JobView is a read-only projection joining an AlbumJob with its current
+// candidate's aggregated transfer progress, for display purposes only (e.g.
+// the dashboard). It is never written back to the store.
 type JobView struct {
-	Job      AlbumJob
-	Transfer *Transfer  // nil if the job has no candidate/transfer yet
-	Peer     string     // convenience copy of Transfer.Username; "" if Transfer is nil
-	Attempt  *Candidate // nil if the job has no candidate yet
+	Job AlbumJob
+	// Peer is the job's current candidate's username (store.jobViewFrom's a.
+	// username) — the album's peer, unambiguous since a job has exactly one
+	// current candidate (see store.currentCandidateSubquery). "" if Attempt
+	// is nil.
+	Peer string
+	// Status is the dashboard's coarse display status (queued/active/
+	// stalled/importing/failed/parked/done), computed once by the store's
+	// dashboardJobStatusSQL so that a job's rendered status and every
+	// filter/facet/sort built around it can never disagree (issue #269).
+	Status  string
+	Attempt *Candidate // nil if the job has no candidate yet
 	// AlbumBytesDone and AlbumBytesTotal are summed over every transfer of
 	// the job's current candidate (Attempt) — i.e. every file of the album,
 	// since candidate activation (ActivateCandidateWithTransfers) and manual

@@ -84,7 +84,7 @@ export default function JobDetail() {
         <>
           <SectionHeader label={job.title} meta={job.artist} prominent />
           <div className={styles.meta}>
-            <Tag status={job.status} state={job.state} queuePosition={job.queuePosition} />
+            <Tag status={job.status} queuePosition={job.queuePosition} />
             {job.source === 'manual' && (
               <span className={styles.sourceDot} title={t.source.manual}>●</span>
             )}

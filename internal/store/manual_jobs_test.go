@@ -65,9 +65,6 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 	if view.Attempt == nil || view.Attempt.State != core.CandidateActive {
 		t.Fatalf("JobWithTransfer attempt = %+v, want ACTIVE", view.Attempt)
 	}
-	if view.Transfer == nil || view.Transfer.State != core.TransferPending {
-		t.Fatalf("JobWithTransfer transfer = %+v, want PENDING", view.Transfer)
-	}
 	if view.Peer != "peer1" {
 		t.Errorf("JobWithTransfer peer = %q, want peer1", view.Peer)
 	}

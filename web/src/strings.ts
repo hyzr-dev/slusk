@@ -60,6 +60,7 @@ export const t = {
     queued: 'Queued',
     active: 'Active',
     stalled: 'Stalled',
+    importing: 'Importing',
     done: 'Done',
     failed: 'Failed',
     parked: 'Parked',
