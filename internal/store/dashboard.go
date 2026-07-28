@@ -34,6 +34,14 @@ import (
 //     last, so a never-tried candidate can never displace a finished job's
 //     real SUCCEEDED/FAILED one.
 //   - updated_at DESC, id DESC break any remaining tie deterministically.
+//
+// One consequence is deliberate: FailCandidateAndAdvance returns a job to
+// SELECTING without deleting the failed candidate's transfers, so a job
+// between attempts points at that FAILED candidate and reports its peer and
+// its partial bytes. The peer reads as "last attempted", which is more useful
+// than the blank the deleted transfer join produced. The bytes are not — a
+// dead attempt's progress must not render as the job's own, so the jobs view
+// zeroes it for queued rows (see noProgress in web/src/routes/Jobs.tsx).
 const currentCandidateSubquery = `
 		SELECT id FROM candidates WHERE album_job_id = j.id
 		ORDER BY (state = 'ACTIVE') DESC, (state = 'NEW') ASC, updated_at DESC, id DESC
