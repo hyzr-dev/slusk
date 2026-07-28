@@ -3,11 +3,23 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { ChartsReport, Job, JobStatus, StatusReport } from '../api/types';
+import type { ChartsReport, Job, JobFacets, JobPage, JobPageParams, JobStatus, StatusReport } from '../api/types';
 import { t } from '../strings';
 import Overview from './Overview';
 
 afterEach(() => vi.unstubAllGlobals());
+
+// Mirrors the exact params Overview.tsx passes to useJobs (issue #268) — the
+// query key has to match for setQueryData to seed the cache useJobs reads.
+const TRANSFER_PARAMS: JobPageParams = {
+  page: 0,
+  filter: 'transferring',
+  sort: 'transfer',
+  dir: 'asc',
+  source: 'all',
+  q: '',
+  pageSize: 8,
+};
 
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
   return {
@@ -18,11 +30,6 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
     peer: status === 'active' ? 'someuser' : '',
     bytesDone: status === 'active' ? 50 : 0,
     bytesTotal: status === 'active' ? 100 : 0,
-    // A realistic ISO-8601 timestamp, not '': an empty string would make
-    // every job compare equal on createdAt, collapsing the TRANSFERS sort to
-    // its id tie-break and hiding a broken or removed sortJobs call. Tests
-    // that care about ordering pass an explicit createdAt override instead
-    // of relying on this default.
     createdAt: '2026-07-01T10:00:00Z',
     updatedAt: '2026-07-01T10:00:00Z',
     state: 'DOWNLOADING',
@@ -39,13 +46,37 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
   };
 }
 
+// Facets only need to be plausible — Overview reads exactly one field from
+// them (facets.status.done, issue #268); the rest of the stat grid comes
+// from /status, not from this page.
+function makeFacets(jobs: Job[]): JobFacets {
+  return {
+    status: {
+      all: jobs.length,
+      active: 0,
+      importing: 0,
+      queued: 0,
+      stalled: 0,
+      failed: 0,
+      parked: 0,
+      done: jobs.filter((j) => j.status === 'done').length,
+    },
+    source: { all: jobs.length, manual: 0, lidarr: jobs.length },
+  };
+}
+
+// Builds the exact JobPage shape GET /api/jobs returns, which is what
+// useJobs's cache now holds instead of a raw Job[] (queryKeys.jobsAll).
+function makeJobPage(jobs: Job[]): JobPage {
+  return { jobs, total: jobs.length, facets: makeFacets(jobs) };
+}
+
 const baseJob = makeJob(1, 'Kind of Blue', 'Miles Davis', 'active');
 
-const jobs: Job[] = [
+const jobPage: JobPage = makeJobPage([
   baseJob,
-  makeJob(2, 'Song A', 'Artist B', 'queued'),
-  makeJob(3, 'Song C', 'Artist D', 'done'),
-];
+  makeJob(2, 'Song A', 'Artist B', 'active'),
+]);
 
 const status: StatusReport = {
   queued: 1,
@@ -66,7 +97,7 @@ const charts: ChartsReport = {
 };
 
 function renderOverview(
-  jobsData: Job[] = jobs,
+  jobsData: JobPage = jobPage,
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
 ) {
@@ -74,7 +105,7 @@ function renderOverview(
   // keep it pending indefinitely so the seeded data is what's asserted on.
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  queryClient.setQueryData(queryKeys.jobsAll, jobsData);
+  queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -99,11 +130,36 @@ describe('Overview', () => {
     expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
-  it('shows only active and stalled jobs in TRANSFERS, ignoring queued and done', () => {
-    renderOverview();
-    expect(screen.getByText('Kind of Blue')).toBeInTheDocument();
-    expect(screen.queryByText('Song A')).not.toBeInTheDocument();
-    expect(screen.queryByText('Song C')).not.toBeInTheDocument();
+  // The governing principle of #268: the frontend shows exactly what the
+  // backend returns for this page — no client-side filter, sort or slice
+  // anywhere in the path. Seeding an order the server would never actually
+  // produce (queued/done rows mixed in, out of transferOrder) and asserting
+  // it renders verbatim is what proves there is no leftover client logic
+  // silently re-deriving the same result the old jobSort.ts used to.
+  it('renders exactly the rows the endpoint returns, in the order given, unmodified', () => {
+    const page = makeJobPage([
+      makeJob(2, 'Song A', 'Artist B', 'queued'),
+      makeJob(1, 'Kind of Blue', 'Miles Davis', 'active'),
+      makeJob(3, 'Song C', 'Artist D', 'done'),
+    ]);
+    renderOverview(page);
+
+    const rowTitles = Array.from(
+      document.querySelectorAll(`[class*="transferRow"] [class*="transferTitle"]`),
+    ).map((el) => el.textContent);
+    expect(rowTitles).toEqual(['Song A', 'Kind of Blue', 'Song C']);
+  });
+
+  // facets.status.done (server-computed, issue #268) drives the DONE stat
+  // cell now — not a client-side count over whatever page happened to load,
+  // which would be wrong the moment DONE jobs aren't even part of this page.
+  it('takes the DONE counter from facets.status.done, not from the rendered rows', () => {
+    const page = makeJobPage([baseJob]); // no 'done' job on this page at all
+    page.facets.status.done = 7;
+    renderOverview(page);
+
+    const doneCell = screen.getByText('Done').closest('[class*="statCell"]') as HTMLElement;
+    expect(doneCell.textContent).toContain('7');
   });
 
   it('renders the TRANSFERS, THROUGHPUT and RECONCILE panels with seeded data', () => {
@@ -118,7 +174,7 @@ describe('Overview', () => {
   });
 
   it('shows the empty reconcile state when the charts report has no passes', () => {
-    renderOverview(jobs, {
+    renderOverview(jobPage, {
       passes: [],
       completedByHour: charts.completedByHour,
       throughput: [],
@@ -128,7 +184,7 @@ describe('Overview', () => {
   });
 
   it('renders independently-scaled download and upload throughput charts', () => {
-    renderOverview(jobs, {
+    renderOverview(jobPage, {
       ...charts,
       throughput: [
         { at: '2026-07-01T10:00:00Z', bytesPerSecond: 1024, activeTransfers: 1 },
@@ -157,61 +213,21 @@ describe('Overview', () => {
 
   it('shows a peer-queued job as queued rather than downloading', () => {
     // Job is active but has queuePosition 4 — no bytes are moving.
-    renderOverview([
+    renderOverview(makeJobPage([
       { ...baseJob, status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
-    ]);
+    ]));
     expect(screen.getByText('QU')).toBeInTheDocument();
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
   it('keeps an IMPORTING active job in TRANSFERS with its importing tag and verifying path', () => {
-    renderOverview([
+    renderOverview(makeJobPage([
       { ...baseJob, title: 'Importing Album', status: 'active', state: 'IMPORTING' },
-    ]);
+    ]));
 
     expect(screen.getByText('Importing Album')).toBeInTheDocument();
     expect(screen.getByText('IM')).toBeInTheDocument();
     expect(screen.getByText(t.jobs.verifying)).toBeInTheDocument();
-  });
-
-  it('ranks active above stalled in TRANSFERS, so an older stalled job never evicts an active one (#233)', () => {
-    // 7 active jobs (more than fit alongside any stalled ones once
-    // MAX_TRANSFER_ROWS (8) is applied) plus 3 stalled jobs. The stalled jobs'
-    // createdAt (2020) is far older than every active job's (2026) — if the
-    // panel sorted by age alone rather than status group first, the ancient
-    // stalled jobs would win every slot and every active job (including the
-    // one "created" most recently, job 1) would be evicted. Active createdAt
-    // is itself scrambled relative to array/id order, so the test also still
-    // proves the createdAt-ascending ordering *within* the active group.
-    const active: Job[] = Array.from({ length: 7 }, (_, i) => {
-      const n = i + 1;
-      return {
-        ...baseJob,
-        id: n,
-        title: `Active ${n}`,
-        status: 'active',
-        createdAt: `2026-07-01T10:${String(8 - n).padStart(2, '0')}:00Z`,
-      };
-    });
-    const stalled: Job[] = [
-      { ...baseJob, id: 8, title: 'Stalled 8', status: 'stalled', createdAt: '2020-01-01T00:03:00Z' },
-      { ...baseJob, id: 9, title: 'Stalled 9', status: 'stalled', createdAt: '2020-01-01T00:01:00Z' },
-      { ...baseJob, id: 10, title: 'Stalled 10', status: 'stalled', createdAt: '2020-01-01T00:02:00Z' },
-    ];
-    renderOverview([...active, ...stalled]);
-
-    const rowTitles = Array.from(
-      document.querySelectorAll(`[class*="transferRow"] [class*="transferTitle"]`),
-    ).map((el) => el.textContent);
-
-    // All 7 active jobs first, oldest-createdAt-first (Active 7 through
-    // Active 1), then the single remaining slot goes to the oldest stalled
-    // job (Stalled 9) — never to an active job being displaced.
-    expect(rowTitles).toEqual([
-      'Active 7', 'Active 6', 'Active 5', 'Active 4', 'Active 3', 'Active 2', 'Active 1', 'Stalled 9',
-    ]);
-    expect(screen.queryByText('Stalled 8')).not.toBeInTheDocument();
-    expect(screen.queryByText('Stalled 10')).not.toBeInTheDocument();
   });
 
   it('flares the tick bar for a genuinely transferring row but not a peer-queued one', () => {
@@ -219,10 +235,10 @@ describe('Overview', () => {
     // queue is moving no bytes, so its tick bar must never flare as though
     // data were arriving — the one failure mode here that actively misinforms.
     // Scoped per row so one row's state can't be mistaken for the other's.
-    renderOverview([
+    renderOverview(makeJobPage([
       { ...baseJob, id: 1, title: 'Transferring Album', status: 'active', state: 'DOWNLOADING', queuePosition: 0, speed: 1000 },
       { ...baseJob, id: 2, title: 'Queued Album', status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
-    ]);
+    ]));
 
     const transferringRow = screen.getByText('Transferring Album').closest('[class*="transferRow"]') as HTMLElement;
     const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;

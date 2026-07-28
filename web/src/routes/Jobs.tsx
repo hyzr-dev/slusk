@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { JOBS_PAGE_SIZE, useJobs } from '../api/queries';
+import { useJobScope } from '../api/stream';
 import type {
   Job,
   JobPageDirection,
@@ -20,7 +21,10 @@ import styles from './Jobs.module.css';
 
 // The approved status row keeps the mock's seven chips. IMPORTING remains a
 // supported server filter/facet and is represented under ALL by its IM tag.
-type ChipKey = Exclude<JobStatusFilter, 'importing'>;
+// TRANSFERRING (issue #268) exists only for Overview's own useJobs call —
+// it's not a chip a user picks here, so JobStatusFacets has no count for it
+// either.
+type ChipKey = Exclude<JobStatusFilter, 'importing' | 'transferring'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
@@ -253,6 +257,9 @@ export default function Jobs() {
   const result = jobsQuery.data;
   const jobs = result?.jobs ?? [];
   const total = result?.total ?? 0;
+  // Scopes the SSE connection to exactly this page's jobs (issue #258) so a
+  // stream frame's `jobs` only ever needs to cover what's actually on screen.
+  useJobScope(jobs.map((job) => job.id));
   const phase = queryPhase(jobsQuery);
   const totalPages = Math.max(1, Math.ceil(total / JOBS_PAGE_SIZE));
 

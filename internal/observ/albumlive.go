@@ -45,10 +45,13 @@ func etaSeconds(remaining, avgSpeed int64) int64 {
 // one (the album's download effectively starts once its first file starts),
 // and matched: whether at least one file matched a non-terminal live
 // transfer at all, independent of whether that transfer happened to report
-// zero speed. The SSE stream (buildStreamJobs, stream.go) uses matched to
-// decide whether this job belongs in the live set at all; toJobDTO
-// (observ.go) ignores it, since REST always reports every job regardless of
-// live data. candidate == nil (a job with no candidate yet) yields all
+// zero speed. toJobDTO (observ.go), currently the only caller, ignores
+// matched — REST and the stream's job-list frames both report every
+// requested/live-visible job regardless of live data (issue #268 removed
+// the SSE stream's own use of it, which decided whether an unscoped
+// subscriber's job belonged in an inferred live set; the job list is always
+// explicitly scoped now). Kept in the signature since a future caller may
+// still need it. candidate == nil (a job with no candidate yet) yields all
 // zeros / false.
 //
 // BytesDone is deliberately NOT computed here — see jobBytesDone's doc
@@ -124,7 +127,7 @@ func sumFileBytesDone(username string, files []core.CandidateFile, idx liveTrans
 }
 
 // jobBytesDone computes one job's album-level BytesDone the same way for
-// REST (toJobDTO, observ.go) and the SSE stream (buildStreamJobs, stream.go),
+// REST (toJobDTO, observ.go) and the SSE stream (buildJobsDelta, stream.go),
 // so the two transports can never disagree about a given job's BytesDone
 // (issue #161).
 //

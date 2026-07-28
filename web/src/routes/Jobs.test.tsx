@@ -267,14 +267,35 @@ describe('server-owned filters and facets', () => {
 });
 
 describe('row expansion', () => {
-  function makeDetail(overrides: Partial<JobDetailDTO> = {}): JobDetailDTO {
+  // jobDetailDTO carries a whole jobDTO under `job` (issue #268) — see the
+  // JobDetail doc comment in types.ts. JobExpansion only ever reads
+  // detail.attempts (its header comes from the row's own `job` prop, not
+  // from this fetch), so the nested job's fields are unused filler here.
+  function makeDetail(attempts: JobDetailDTO['attempts'] = []): JobDetailDTO {
     return {
-      id: 1,
-      title: 'Kind of Blue',
-      artist: 'Miles Davis',
-      state: 'DOWNLOADING',
-      attempts: [],
-      ...overrides,
+      job: {
+        id: 1,
+        title: 'Kind of Blue',
+        artist: 'Miles Davis',
+        status: 'active',
+        peer: '',
+        bytesDone: 0,
+        bytesTotal: 0,
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        state: 'DOWNLOADING',
+        candidatesTried: 0,
+        maxCandidates: 3,
+        failReason: '',
+        nextAttemptAt: '',
+        retries: 0,
+        notBefore: '',
+        source: 'lidarr',
+        year: null,
+        tracks: null,
+        format: null,
+      },
+      attempts,
     };
   }
 
@@ -305,7 +326,7 @@ describe('row expansion', () => {
   it('explains a parked job and offers Retry in the list expansion', () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'PARKED' }));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
     renderJobs([makeJob({ id: 1, status: 'parked', state: 'PARKED' })], client);
 
     expect(screen.getByTitle(t.tagTitle.PA)).toHaveTextContent('PA');

@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
-import { useAllJobs, useCharts, useStatus } from '../api/queries';
+import { useCharts, useJobs, useStatus } from '../api/queries';
+import { useJobScope } from '../api/stream';
 import type { Job } from '../api/types';
 import ThroughputAreaChart from '../components/charts/ThroughputAreaChart';
 import EmptyState from '../components/tui/EmptyState';
@@ -9,17 +10,17 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
-import { sortJobs } from './jobSort';
 import styles from './Overview.module.css';
 
-// At most this many rows in the TRANSFERS panel — matches the mock
+// Rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:102) rather than the full jobs list.
-// Jobs are ranked active-before-stalled, oldest-first within each group,
-// before slicing (#233, 'transferOrder' in jobSort.ts) — max_active defaults
-// to 30 (config.example.toml), so the active|stalled set routinely exceeds
-// this cap, and this ranking is what decides who gets cut: a stalled job
-// never displaces an active one, however long it's been stalled.
-const MAX_TRANSFER_ROWS = 8;
+// Selection, ordering and this row count are all server-side now (issue
+// #268): filter=transferring (active+stalled union), sort=transfer
+// (status group first — active before stalled — then createdAt ascending
+// within the group, the same 'transferOrder' rule the client used to apply
+// itself in the now-deleted jobSort.ts), pageSize=8. The client renders
+// result.jobs exactly as returned — no filter, sort or slice here.
+const TRANSFER_PAGE_SIZE = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
 // Per-row tick resolution in TRANSFERS, matching the mock exactly.
@@ -40,12 +41,19 @@ function tickTone(job: Job): TickTone {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const jobsQuery = useAllJobs();
+  const jobsQuery = useJobs({ page: 0, filter: 'transferring', sort: 'transfer', dir: 'asc', source: 'all', q: '', pageSize: TRANSFER_PAGE_SIZE });
   const statusQuery = useStatus();
   const chartsQuery = useCharts();
-  const jobs = jobsQuery.data ?? [];
+  const result = jobsQuery.data;
+  const transferRows = result?.jobs ?? [];
   const status = statusQuery.data;
   const charts = chartsQuery.data;
+
+  // Scopes the SSE connection to exactly these rows (issue #268), the same
+  // mechanism Jobs.tsx uses for its page — this is what lets the backend's
+  // job-delta bookkeeping stay bounded for the Overview surface too, not
+  // just the paged Jobs list (see #258's accumulator work).
+  useJobScope(transferRows.map((job) => job.id));
 
   // Three independent polls feeding three independent regions: a dead
   // /api/charts must not blank the transfer list, and a dead /api/jobs must
@@ -65,7 +73,7 @@ export default function Overview() {
     { label: t.status.queued, value: status?.queued ?? 0, phase: statusPhase },
     { label: t.status.stalled, value: status?.stalled ?? 0, phase: statusPhase },
     { label: t.status.parked, value: status?.parked ?? 0, phase: statusPhase },
-    { label: t.status.done, value: jobs.filter((j) => j.status === 'done').length, phase: jobsPhase },
+    { label: t.status.done, value: result?.facets.status.done ?? 0, phase: jobsPhase },
   ];
 
   // ACTIVE remains download-only: it counts pipeline download jobs and its
@@ -75,17 +83,6 @@ export default function Overview() {
   const uploadThroughput = charts?.uploadThroughput ?? [];
   const sparklineSamples = throughput.slice(-SPARKLINE_SAMPLES);
   const sparklinePeak = Math.max(1, ...sparklineSamples.map((s) => s.bytesPerSecond));
-
-  // Ranked active-before-stalled, then createdAt ascending within each group
-  // (see 'transferOrder' in jobSort.ts) — rather than the backend's own
-  // updated_at DESC ordering, so a row stays in place for its whole lifetime
-  // instead of jumping to the top on every progress update, and a long-stalled
-  // job can never permanently occupy a slot that an active transfer needs (#233).
-  const transferRows = sortJobs(
-    jobs.filter((j) => j.status === 'active' || j.status === 'stalled'),
-    'transferOrder',
-    'asc',
-  ).slice(0, MAX_TRANSFER_ROWS);
 
   // SearchPass carries no id of its own, and the window this slices from is
   // capped at 20 and slides — a position-based number would look like a

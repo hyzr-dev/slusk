@@ -5,7 +5,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
-import { normalizeJobDetail, normalizeJobPage, normalizeJobs, normalizeStatusReport } from './normalize';
+import { normalizeJob, normalizeJobDetail, normalizeJobPage, normalizeStatusReport } from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -18,7 +18,6 @@ import type {
   JobEvent,
   JobPage,
   JobPageParams,
-  LiveJob,
   MarkReadResult,
   Peer,
   PrivateMessage,
@@ -89,8 +88,8 @@ export const queryKeys = {
     params.filter,
     params.source,
     params.q,
+    params.pageSize,
   ] as const,
-  jobsAll: ['jobs', 'all'] as const,
   status: ['status'] as const,
   events: ['events'] as const,
   peers: ['peers'] as const,
@@ -106,14 +105,14 @@ export const queryKeys = {
   // thread's own message pages.
   conversations: ['messages', 'conversations'] as const,
   thread: (username: string) => ['messages', 'thread', username] as const,
-  // Not backed by a queryFn — see useLiveData. api/stream.ts's StreamProvider
+  // Not backed by a queryFn — see useLiveData. api/stream.tsx's StreamProvider
   // is the only writer, via setQueryData on every `event: live` frame (and
   // clears it to null on stream error/close — null rather than undefined
   // because setQueryData ignores undefined; see the comment there).
   live: ['live'] as const,
 };
 
-// Reads the SSE stream's latest frame (see api/stream.ts's StreamProvider)
+// Reads the SSE stream's latest frame (see api/stream.tsx's StreamProvider)
 // without ever fetching it itself: queryFn is never invoked because
 // `enabled` is false, but the query still subscribes to cache updates, so a
 // component re-renders whenever StreamProvider calls
@@ -129,33 +128,46 @@ export function useLiveData(): ScopedLivePayload | null | undefined {
   }).data;
 }
 
-// Overlays a job's live fields on top of its REST values — never a
-// destructive replace. A job absent from `live` (not currently reporting a
-// matched, non-terminal live transfer — see LivePayload's doc comment) is
-// returned untouched, which is exactly "fall back to REST" since `jobs`
-// already carries whatever REST last reported for it.
-export function mergeLiveJobs(jobs: Job[] | undefined, live: LiveJob[] | undefined): Job[] | undefined {
+// Chooses between a job's REST row and its accumulated streamed counterpart
+// at read time — never a field-by-field merge (issue #258, the same shape as
+// pickJobDetail below: both objects are built by the same server-side
+// function, so whichever wins is a complete, self-consistent replacement,
+// not a partial view to overlay).
+//
+// The choice is `updatedAt`, not simple presence in `live`: stream.tsx
+// accumulates jobs by id and never evicts an entry on its own (see its doc
+// comment), because the backend deliberately stops streaming a job once it
+// leaves the live-matched set — including the post-terminal DB transitions
+// that only settle after the last live frame (e.g. DOWNLOADING -> IMPORTING
+// -> COMPLETED once a transfer finishes and reconcile runs). If presence in
+// `live` were enough to win, a job would stay pinned at its last live values
+// for the remaining lifetime of the connection, and REST's 15s poll — the
+// only source left correcting those trailing DB transitions — could never
+// self-heal it. Comparing `updatedAt` fixes that: REST strictly newer means
+// the DB genuinely moved since the pinned live object was produced, so REST
+// wins and the pin is released; otherwise (DB unchanged, only live fields
+// moved) the live object wins, exactly as before.
+//
+// A job absent from `live` entirely (never streamed since the last reset —
+// see LivePayload's doc comment) trivially falls back to REST, since there
+// is nothing to compare against.
+export function replaceLiveJobs(jobs: Job[] | undefined, live: WireJob[] | undefined): Job[] | undefined {
   if (!jobs || !live || live.length === 0) return jobs;
-  const byId = new Map(live.map((j) => [j.id, j]));
+  const byId = new Map(live.map((j) => [j.id, normalizeJob(j)]));
   return jobs.map((job) => {
-    const l = byId.get(job.id);
-    if (!l) return job;
-    return {
-      ...job,
-      bytesDone: l.bytesDone,
-      bytesTotal: l.bytesTotal,
-      speed: l.speed,
-      queuePosition: l.queuePosition,
-      etaSeconds: l.etaSeconds,
-    };
+    const streamed = byId.get(job.id);
+    if (!streamed) return job;
+    const restIsNewer = new Date(job.updatedAt).getTime() > new Date(streamed.updatedAt).getTime();
+    return restIsNewer ? job : streamed;
   });
 }
 
-// A page is an ordered server result, so live data may update fields only.
-// It must never splice stream-only IDs into the page or disturb its metadata.
-export function mergeLiveJobPage(page: JobPage | undefined, live: LiveJob[] | undefined): JobPage | undefined {
+// A page is an ordered server result, so live data may replace existing rows
+// only. It must never splice stream-only IDs into the page or disturb its
+// metadata.
+export function replaceLiveJobPage(page: JobPage | undefined, live: WireJob[] | undefined): JobPage | undefined {
   if (!page) return page;
-  const jobs = mergeLiveJobs(page.jobs, live);
+  const jobs = replaceLiveJobs(page.jobs, live);
   return jobs === page.jobs ? page : { ...page, jobs: jobs! };
 }
 
@@ -221,6 +233,11 @@ export function jobsPageUrl(params: JobPageParams): string {
   query.set('filter', params.filter);
   query.set('source', params.source);
   query.set('q', params.q);
+  // Omitted (not defaulted to JOBS_PAGE_SIZE here) so the paged Jobs route's
+  // URL is unchanged from before pageSize existed — the backend's own
+  // default already matches JOBS_PAGE_SIZE, and only a caller that actually
+  // wants a different size (Overview, issue #268) needs to send it.
+  if (params.pageSize !== undefined) query.set('pageSize', String(params.pageSize));
   return `/api/jobs?${query.toString()}`;
 }
 
@@ -231,20 +248,7 @@ export function useJobs(params: JobPageParams) {
     refetchInterval: JOBS_INTERVAL,
   });
   const live = useLiveData();
-  return { ...jobsQuery, data: mergeLiveJobPage(jobsQuery.data, live?.jobs) };
-}
-
-// Only consumers that truly need the complete collection should use this.
-// The paged Jobs route must stay on useJobs so filtering and facets remain
-// globally correct on the server.
-export function useAllJobs() {
-  const jobsQuery = useQuery({
-    queryKey: queryKeys.jobsAll,
-    queryFn: () => apiGet<WireJob[]>('/api/jobs/all').then(normalizeJobs),
-    refetchInterval: JOBS_INTERVAL,
-  });
-  const live = useLiveData();
-  return { ...jobsQuery, data: mergeLiveJobs(jobsQuery.data, live?.jobs) };
+  return { ...jobsQuery, data: replaceLiveJobPage(jobsQuery.data, live?.jobs) };
 }
 
 export function useStatus() {
