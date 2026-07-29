@@ -5,18 +5,19 @@
   font-size: 11.5px;
 }
 
-/* A group is one section of the form (Lidarr, slskd, Pipeline, ...) — no
-   card chrome, just a top rule separating it from the section above,
-   matching the unboxed list idiom the rest of the app uses. */
-.group {
-  border-top: 1px solid var(--line);
+/* Every card (one section of the form: Lidarr, slskd, Pipeline, ...) is now
+   its own Panel — see CollapsibleSection and Settings() — so the stack that
+   holds them only needs a gap, not the border-top each card used to draw to
+   separate itself from the one above. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-/* Danger zone keeps the same unboxed shape but reads as higher-stakes via a
-   left accent rather than a full border, since a boxed card would be the
-   one card-like shape left in the view. */
-.dangerGroup {
-  border-top: 1px solid var(--line);
+/* Danger zone reads as higher-stakes via a left accent on top of its Panel
+   border, rather than a full second border. */
+.dangerAccent {
   border-left: 2px solid var(--bad);
 }
 
@@ -275,7 +276,6 @@
   gap: 12px;
   flex-wrap: wrap;
   padding: 16px;
-  border-top: 1px solid var(--line);
 }
 
 .saveError { font-size: 11px; color: var(--bad); }

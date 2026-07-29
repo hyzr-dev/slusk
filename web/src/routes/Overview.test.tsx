@@ -118,15 +118,14 @@ function renderOverview(
 }
 
 describe('Overview', () => {
-  it('renders the five stat cells, with no failed cell', () => {
+  it('renders the four stat cells (#281 restyle)', () => {
     renderOverview();
-    expect(screen.getByText('Active')).toBeInTheDocument();
-    expect(screen.getByText('Queued')).toBeInTheDocument();
-    expect(screen.getByText('Stalled')).toBeInTheDocument();
-    expect(screen.getByText('Parked')).toBeInTheDocument();
-    expect(screen.getByText('Done')).toBeInTheDocument();
+    expect(screen.getByText(t.overview.statInFlight)).toBeInTheDocument();
+    expect(screen.getByText(t.overview.statQueued)).toBeInTheDocument();
+    expect(screen.getByText(t.overview.statImported)).toBeInTheDocument();
+    expect(screen.getByText(t.overview.statAttention)).toBeInTheDocument();
     // Unlike the old dashboard, failed jobs have no stat cell here — the
-    // mock and spec only cover active/queued/stalled/parked/done.
+    // mock and spec only cover active/queued/imported/attention.
     expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
@@ -150,16 +149,24 @@ describe('Overview', () => {
     expect(rowTitles).toEqual(['Song A', 'Kind of Blue', 'Song C']);
   });
 
-  // facets.status.done (server-computed, issue #268) drives the DONE stat
-  // cell now — not a client-side count over whatever page happened to load,
-  // which would be wrong the moment DONE jobs aren't even part of this page.
-  it('takes the DONE counter from facets.status.done, not from the rendered rows', () => {
-    const page = makeJobPage([baseJob]); // no 'done' job on this page at all
-    page.facets.status.done = 7;
-    renderOverview(page);
+  // IMPORTED 24H sums /api/charts' completedByHour (issue #281 correction) —
+  // a rolling 24h window of attempt_succeeded events, not a snapshot of jobs
+  // currently in state DONE (facets.status.done), which would be wrong the
+  // moment a job leaves DONE.
+  it('sums completedByHour for IMPORTED 24H, ignoring facets.status.done', () => {
+    const page = makeJobPage([baseJob]);
+    page.facets.status.done = 999; // must be ignored
+    renderOverview(page, {
+      ...charts,
+      completedByHour: [
+        { hour: '2026-07-01T09:00:00Z', count: 3 },
+        { hour: '2026-07-01T10:00:00Z', count: 4 },
+      ],
+    });
 
-    const doneCell = screen.getByText('Done').closest('[class*="statCell"]') as HTMLElement;
-    expect(doneCell.textContent).toContain('7');
+    const importedCell = screen.getByText(t.overview.statImported).closest('[class*="statCell"]') as HTMLElement;
+    expect(importedCell.textContent).toContain('7');
+    expect(importedCell.textContent).not.toContain('999');
   });
 
   it('renders the TRANSFERS, THROUGHPUT and RECONCILE panels with seeded data', () => {
@@ -204,11 +211,6 @@ describe('Overview', () => {
     expect(screen.getByRole('img', {
       name: t.overview.uploadThroughputAriaLabel('8 KB/s'),
     })).toBeInTheDocument();
-
-    // ACTIVE is download-only: its sparkline has one bar per download sample,
-    // not one per upload sample or a combined series.
-    const activeCell = screen.getByText(t.status.active).closest('[class*="statCell"]') as HTMLElement;
-    expect(activeCell.querySelectorAll('[class*="sparkline"] span')).toHaveLength(2);
   });
 
   it('shows a peer-queued job as queued rather than downloading', () => {

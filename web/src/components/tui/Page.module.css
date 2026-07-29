@@ -1,0 +1,39 @@
+.page {
+  padding: 26px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  max-width: 1320px;
+  /* Fills <main>'s height (which is itself a stretched flex item of the 100vh
+     frame) so a view whose panel is meant to reach the status bar — Chat — can
+     say `flex: 1` and mean it. Views whose content is shorter are unaffected:
+     children of this column only grow if they ask to, so a short page still
+     stacks from the top. Safe against the padding above because global.css
+     sets border-box everywhere. */
+  min-height: 100%;
+}
+
+.head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+/* Neutralize the browser's default <h1> styling — every visual property
+   below comes from this class instead, the same trick SectionHeader plays
+   on its own <h2>. */
+.title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: 0.2px;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: var(--faint);
+  margin-top: 6px;
+  letter-spacing: 0.2px;
+}

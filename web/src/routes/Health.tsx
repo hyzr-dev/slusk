@@ -2,6 +2,8 @@ import { useCharts, useShares, useStatus, useUploads } from '../api/queries';
 import CumulativeAreaChart from '../components/charts/CumulativeAreaChart';
 import PassBarChart from '../components/charts/PassBarChart';
 import EmptyState from '../components/tui/EmptyState';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { formatTime } from '../format';
@@ -43,18 +45,18 @@ export default function Health() {
   ];
 
   return (
-    <>
+    <Page title={t.page.health.title} subtitle={t.page.health.subtitle}>
       <QueryNotice phase={statusPhase} />
-      {hasData(statusPhase) && (
-        <div className={styles.depGrid}>
-          {names.length === 0 ? (
-            <EmptyState message={t.health.empty} />
-          ) : (
-            names.map((name) => {
+      {hasData(statusPhase) &&
+        (names.length === 0 ? (
+          <EmptyState message={t.health.empty} />
+        ) : (
+          <div className={styles.depGrid}>
+            {names.map((name) => {
               const m = modules[name];
               const label = m.lastAttempt ? formatTime(m.lastAttempt) : t.health.neverRun;
               return (
-                <div key={name} className={styles.depCard}>
+                <Panel key={name} className={styles.depCard}>
                   <div className={styles.depHead}>
                     <span className={m.ready ? styles.dotOk : styles.dotBad}>■</span>
                     <span className={styles.depName}>{name.replace(/_/g, ' ')}</span>
@@ -71,31 +73,30 @@ export default function Health() {
                     {m.consecutiveFailures > 0 &&
                       ` (${t.health.consecutiveFailures(m.consecutiveFailures)})`}
                   </div>
-                </div>
+                </Panel>
               );
-            })
-          )}
-        </div>
-      )}
+            })}
+          </div>
+        ))}
 
       <QueryNotice phase={chartsPhase} />
       <div className={styles.chartsGrid}>
-        <div className={styles.chartCol}>
+        <Panel>
           <SectionHeader label={t.health.reconcileRateHeading} meta={t.health.reconcileRateMeta} />
           <div className={styles.chartBody}>
             {hasData(chartsPhase) && <PassBarChart passes={charts?.passes ?? []} />}
           </div>
-        </div>
-        <div>
+        </Panel>
+        <Panel>
           <SectionHeader label={t.health.completedHeading} meta={t.health.completedMeta} />
           <div className={styles.chartBody}>
             {hasData(chartsPhase) && <CumulativeAreaChart buckets={charts?.completedByHour ?? []} />}
           </div>
-        </div>
+        </Panel>
       </div>
 
-      <SectionHeader label={t.health.metricsHeading} meta={t.health.metricsMeta} />
-      <div>
+      <Panel>
+        <SectionHeader label={t.health.metricsHeading} meta={t.health.metricsMeta} />
         <QueryNotice phase={metricsPhase} />
         {metricRows.map((row) => (
           <div key={row.key} className={styles.metricRow}>
@@ -103,7 +104,7 @@ export default function Health() {
             <span className={styles.metricValue}>{hasData(row.phase) ? row.value : '—'}</span>
           </div>
         ))}
-      </div>
-    </>
+      </Panel>
+    </Page>
   );
 }

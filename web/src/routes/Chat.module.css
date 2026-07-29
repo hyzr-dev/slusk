@@ -1,9 +1,14 @@
 /* Two-pane layout (docs/design/slskdarr-tui.dc.html CHAT block). Only the
-   message pane scrolls — the rail and composer stay fixed. */
+   message pane scrolls — the rail and composer stay fixed. `flex: 1` grows
+   this to the bottom of the Page column, which fills <main> (see Page.module
+   .css's min-height), reproducing the mock's `flex:1` + `min-height:280px`
+   pair: fill the frame, but never collapse below a usable height on a short
+   viewport. `min-height: 0` is what lets the message pane's own overflow
+   actually scroll instead of stretching this box. */
 .root {
-  height: 100%;
+  flex: 1;
+  min-height: 280px;
   display: flex;
-  min-height: 0;
 }
 
 .rail {

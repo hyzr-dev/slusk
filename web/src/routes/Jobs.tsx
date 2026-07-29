@@ -11,6 +11,8 @@ import type {
 } from '../api/types';
 import Chip from '../components/tui/Chip';
 import EmptyState from '../components/tui/EmptyState';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
@@ -34,9 +36,6 @@ const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', '
 // so it stays in the same TUI chip idiom as the status row, visually separated
 // by a divider so it reads as a second axis rather than more status values.
 const SOURCE_CHIP_ORDER: JobSourceFilter[] = ['all', 'manual', 'lidarr'];
-
-// Per-row tick resolution in the jobs grid, matching the mock exactly.
-const ROW_TICKS = 26;
 
 // A non-zero queuePosition only means something while the job is still
 // 'active' — a stalled/failed job can carry a stale one from its last
@@ -142,7 +141,7 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
         <span role="cell" className={`${styles.mono} ${styles.formatCell}`}>{job.format ?? '—'}</span>
         <div role="cell" className={styles.progressCell}>
           <div className={styles.ticksWrap}>
-            <Ticks percent={pct} count={ROW_TICKS} tone={tone} live={downloading} height={9} />
+            <Ticks percent={pct} tone={tone} live={downloading} height={9} />
           </div>
           <span className={`${styles.pct} ${toneClass(tone)}`}>{pctLabel}</span>
         </div>
@@ -326,102 +325,108 @@ export default function Jobs() {
   const end = Math.min(total, (page + 1) * JOBS_PAGE_SIZE);
 
   return (
-    <>
-      <div className={styles.controlsRow}>
-        <div className={styles.filterBox}>
-          <span aria-hidden className={styles.filterSlash}>/</span>
-          <input
-            className={styles.filterInput}
-            type="text"
-            placeholder={t.jobs.searchPlaceholder}
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              resetPage();
-            }}
-          />
-        </div>
-        <div className={styles.chipGroup} role="group" aria-label={t.columns.status}>
-          {CHIP_ORDER.map((key) => (
-            <Chip
-              key={key}
-              label={t.jobs.chipLabel[key]}
-              count={hasData(phase) ? result?.facets.status[key] : undefined}
-              active={status === key}
-              onClick={() => {
-                setStatus(key);
+    <Page title={t.page.jobs.title} subtitle={t.page.jobs.subtitle}>
+      <Panel>
+        <div className={styles.controlsRow}>
+          <div className={styles.filterBox}>
+            <span aria-hidden className={styles.filterSlash}>/</span>
+            <input
+              className={styles.filterInput}
+              type="text"
+              placeholder={t.jobs.searchPlaceholder}
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
                 resetPage();
               }}
             />
-          ))}
-        </div>
-        <span aria-hidden className={styles.chipDivider} />
-        <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceFilterLabel}>
-          {SOURCE_CHIP_ORDER.map((key) => (
-            <Chip
-              key={key}
-              label={t.jobs.sourceChipLabel[key]}
-              count={hasData(phase) ? result?.facets.source[key] : undefined}
-              active={source === key}
-              onClick={() => {
-                setSource(key);
-                resetPage();
-              }}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div role="table">
-        <div role="row" className={`${styles.grid} ${styles.head}`}>
-          <SortHeader label={t.jobs.gridHead.status} sortKey="st" activeSort={sort} direction={direction} onSort={changeSort} />
-          <SortHeader label={t.jobs.gridHead.album} sortKey="album" activeSort={sort} direction={direction} onSort={changeSort} />
-          <SortHeader label={t.jobs.gridHead.peer} sortKey="peer" activeSort={sort} direction={direction} onSort={changeSort} />
-          <span role="columnheader">{t.jobs.gridHead.format}</span>
-          <span role="columnheader">{t.jobs.gridHead.progress}</span>
-          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.speed}</span>
-          <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.eta}</span>
-          <SortHeader label={t.jobs.gridHead.tries} sortKey="try" activeSort={sort} direction={direction} onSort={changeSort} right />
-        </div>
-
-        {hasData(phase) && jobs.map((job) => (
-          <JobRow key={job.id} job={job} expanded={expandedId === job.id} onToggle={toggleExpanded} />
-        ))}
-      </div>
-
-      {/* These sit outside the table because `role="table"` admits only rows. */}
-      <QueryNotice phase={phase} />
-      {hasData(phase) && jobs.length === 0 && <EmptyState message={t.jobs.noMatch} />}
-
-      {hasData(phase) && (
-        <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
-          <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
-          <div className={styles.pageButtons}>
-            <button type="button" className={styles.pageButton} disabled={page === 0} onClick={() => goToPage(page - 1)}>
-              {t.jobs.previousPage}
-            </button>
-            {paginationItems(page, totalPages).map((item, index) =>
-              item === 'ellipsis' ? (
-                <span key={`ellipsis-${index}`} className={styles.ellipsis} aria-hidden>…</span>
-              ) : (
-                <button
-                  type="button"
-                  key={item}
-                  className={`${styles.pageButton} ${item === page ? styles.pageButtonActive : ''}`}
-                  aria-current={item === page ? 'page' : undefined}
-                  aria-label={t.jobs.pageLabel(item + 1)}
-                  onClick={() => goToPage(item)}
-                >
-                  {item + 1}
-                </button>
-              ),
-            )}
-            <button type="button" className={styles.pageButton} disabled={page + 1 >= totalPages} onClick={() => goToPage(page + 1)}>
-              {t.jobs.nextPage}
-            </button>
           </div>
-        </nav>
-      )}
-    </>
+          <div className={styles.chipGroup} role="group" aria-label={t.columns.status}>
+            {CHIP_ORDER.map((key) => (
+              <Chip
+                key={key}
+                label={t.jobs.chipLabel[key]}
+                count={hasData(phase) ? result?.facets.status[key] : undefined}
+                active={status === key}
+                onClick={() => {
+                  setStatus(key);
+                  resetPage();
+                }}
+              />
+            ))}
+          </div>
+          <span aria-hidden className={styles.chipDivider} />
+          <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceFilterLabel}>
+            {SOURCE_CHIP_ORDER.map((key) => (
+              <Chip
+                key={key}
+                label={t.jobs.sourceChipLabel[key]}
+                count={hasData(phase) ? result?.facets.source[key] : undefined}
+                active={source === key}
+                onClick={() => {
+                  setSource(key);
+                  resetPage();
+                }}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div role="table">
+          <div role="row" className={`${styles.grid} ${styles.head}`}>
+            <SortHeader label={t.jobs.gridHead.status} sortKey="st" activeSort={sort} direction={direction} onSort={changeSort} />
+            <SortHeader label={t.jobs.gridHead.album} sortKey="album" activeSort={sort} direction={direction} onSort={changeSort} />
+            <SortHeader label={t.jobs.gridHead.peer} sortKey="peer" activeSort={sort} direction={direction} onSort={changeSort} />
+            <span role="columnheader">{t.jobs.gridHead.format}</span>
+            <span role="columnheader">{t.jobs.gridHead.progress}</span>
+            <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.speed}</span>
+            <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.eta}</span>
+            {/* Not sortable, like PROGRESS/SPEED/ETA beside it (mock's plain(),
+                docs/design/slskdarr-tui.dc.html:1174): TRY is a live field, and
+                only the three stable columns (ST, ALBUM, PEER) can reorder rows
+                without a row jumping mid-poll. */}
+            <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.tries}</span>
+          </div>
+
+          {hasData(phase) && jobs.map((job) => (
+            <JobRow key={job.id} job={job} expanded={expandedId === job.id} onToggle={toggleExpanded} />
+          ))}
+        </div>
+
+        {/* These sit outside the table because `role="table"` admits only rows. */}
+        <QueryNotice phase={phase} />
+        {hasData(phase) && jobs.length === 0 && <EmptyState message={t.jobs.noMatch} />}
+
+        {hasData(phase) && (
+          <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
+            <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
+            <div className={styles.pageButtons}>
+              <button type="button" className={styles.pageButton} disabled={page === 0} onClick={() => goToPage(page - 1)}>
+                {t.jobs.previousPage}
+              </button>
+              {paginationItems(page, totalPages).map((item, index) =>
+                item === 'ellipsis' ? (
+                  <span key={`ellipsis-${index}`} className={styles.ellipsis} aria-hidden>…</span>
+                ) : (
+                  <button
+                    type="button"
+                    key={item}
+                    className={`${styles.pageButton} ${item === page ? styles.pageButtonActive : ''}`}
+                    aria-current={item === page ? 'page' : undefined}
+                    aria-label={t.jobs.pageLabel(item + 1)}
+                    onClick={() => goToPage(item)}
+                  >
+                    {item + 1}
+                  </button>
+                ),
+              )}
+              <button type="button" className={styles.pageButton} disabled={page + 1 >= totalPages} onClick={() => goToPage(page + 1)}>
+                {t.jobs.nextPage}
+              </button>
+            </div>
+          </nav>
+        )}
+      </Panel>
+    </Page>
   );
 }

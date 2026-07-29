@@ -1,3 +1,5 @@
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import { t } from '../strings';
 import styles from './Placeholder.module.css';
 
@@ -8,10 +10,14 @@ import styles from './Placeholder.module.css';
  */
 export default function Search() {
   return (
-    <div className={styles.wrap}>
-      <div className={styles.title}>{t.placeholder.searchTitle}</div>
-      <div className={styles.body}>{t.placeholder.searchBody}</div>
-      <div className={styles.issue}>{t.placeholder.searchIssue}</div>
-    </div>
+    <Page title={t.page.search.title} subtitle={t.page.search.subtitle}>
+      <Panel>
+        <div className={styles.wrap}>
+          <div className={styles.title}>{t.placeholder.searchTitle}</div>
+          <div className={styles.body}>{t.placeholder.searchBody}</div>
+          <div className={styles.issue}>{t.placeholder.searchIssue}</div>
+        </div>
+      </Panel>
+    </Page>
   );
 }

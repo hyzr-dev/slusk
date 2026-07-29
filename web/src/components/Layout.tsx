@@ -45,23 +45,17 @@ export default function Layout() {
     },
   ];
 
-  // SectionHeader renders each panel's own label as an <h2>, but nothing
-  // upstream of that gave the document a top-level heading once PageHeading
-  // was removed from every route — Events and Peers use neither, so they had
-  // no heading at all. A single <h1> here, visually hidden but present in
-  // the accessibility tree, restores one correct, view-specific heading per
-  // route without adding a second <h1> on the routes that already have a
-  // SectionHeader. It is derived from the same nav definition the sidebar
-  // renders, so it can never name a view differently than the link that
-  // leads to it. Prefix items (e.g. /jobs matching /jobs/:id) are checked
-  // after exact/`end` matches so a nested route still resolves to its
-  // parent's label.
+  // Every top-level route now renders its own visible <h1> via the <Page>
+  // shell (the 27 July TUI restyle, #281) — a second, hidden one here would
+  // just duplicate it. JobDetail is the one route with no <Page> of its own
+  // (it isn't a top-level nav destination, and its SectionHeader already
+  // renders the album title as an <h2>), so it's still the one case that
+  // needs a synthesized, visually-hidden <h1> to give the document exactly
+  // one heading at that level. Named after the parent 'jobs' nav entry
+  // (matching the sidebar link a user actually followed to get there) rather
+  // than the job title, which lives one level down as the <h2> instead.
   const location = useLocation();
-  const navItems = groups.flatMap((g) => g.items);
-  const currentItem =
-    navItems.find((item) => location.pathname === item.to) ??
-    navItems.find((item) => !item.end && location.pathname.startsWith(item.to)) ??
-    navItems[0];
+  const isJobDetail = /^\/jobs\/[^/]+\/?$/.test(location.pathname);
 
   return (
     <FlashProvider>
@@ -70,7 +64,7 @@ export default function Layout() {
         <div className={styles.body}>
           <SideNav groups={groups} />
           <main className={styles.main}>
-            <h1 className={styles.visuallyHidden}>{currentItem.label}</h1>
+            {isJobDetail && <h1 className={styles.visuallyHidden}>{t.nav.jobs}</h1>}
             <Outlet />
           </main>
         </div>

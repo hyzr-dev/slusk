@@ -1,5 +1,6 @@
 import { useUploads } from '../api/queries';
 import EmptyState from '../components/tui/EmptyState';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import Ticks from '../components/tui/Ticks';
@@ -7,9 +8,6 @@ import tagStyles from '../components/tui/Tag.module.css';
 import { formatSize, formatVirtualPath, percent } from '../format';
 import { t } from '../strings';
 import styles from './Shares.module.css';
-
-// Per-row tick resolution, matching Overview's TRANSFERS panel and the mock exactly.
-const UPLOAD_TICKS = 104;
 
 // A separate component rather than inline JSX in Shares, deliberately: hooks
 // cannot be conditional, so a useUploads() call at the top of Shares would
@@ -30,7 +28,7 @@ export default function UploadsPanel() {
   if (data && !data.enabled) return null;
 
   return (
-    <div className={styles.uploadsSection}>
+    <Panel className={styles.uploadsSection}>
       <SectionHeader
         label={t.uploads.panelTitle}
         // active/slots are unknown until the report arrives; "0 of 0 slots"
@@ -69,7 +67,7 @@ export default function UploadsPanel() {
               </span>
             </div>
             <div className={styles.uploadTicks}>
-              <Ticks percent={pct} count={UPLOAD_TICKS} tone={u.active ? 'bar' : 'queued'} live={u.active} height={12} />
+              <Ticks percent={pct} tone={u.active ? 'bar' : 'queued'} live={u.active} height={12} />
             </div>
             <div className={styles.uploadSub}>
               <span>
@@ -90,6 +88,6 @@ export default function UploadsPanel() {
       })}
 
       {data && data.truncated > 0 && <div className={styles.footerNote}>{t.uploads.truncated(data.truncated)}</div>}
-    </div>
+    </Panel>
   );
 }

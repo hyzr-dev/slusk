@@ -5,6 +5,8 @@ import { ApiError } from '../api/client';
 import { useConversations, useMarkConversationRead, useSendMessage, useThread } from '../api/queries';
 import Button from '../components/tui/Button';
 import EmptyState from '../components/tui/EmptyState';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { formatShortTime, localDayKey } from '../format';
@@ -201,126 +203,134 @@ export default function Chat() {
 
   if (status503) {
     return (
-      <div role="status">
-        <EmptyState message={t.chat.disabledNotice} />
-      </div>
+      <Page title={t.page.chat.title} subtitle={t.page.chat.subtitle}>
+        <div role="status">
+          <EmptyState message={t.chat.disabledNotice} />
+        </div>
+      </Page>
     );
   }
 
   return (
-    <div className={styles.root}>
-      <div className={styles.rail}>
-        <SectionHeader label={t.chat.railHeading} />
-        <NewConversation onPendingChange={setStarterPending} />
-        <QueryNotice phase={conversationsPhase} />
-        {hasData(conversationsPhase) && conversations.length === 0 && (
-          <EmptyState message={t.chat.empty} />
-        )}
-        {hasData(conversationsPhase) &&
-          conversations.map((c) => {
-            const active = c.username === username;
-            return (
-              <Link
-                key={c.username}
-                to={`/chat/${encodeURIComponent(c.username)}`}
-                className={active ? styles.rowActive : styles.row}
-                aria-current={active ? 'page' : undefined}
-                aria-label={t.chat.threadLabel(c.username, c.unread, c.online)}
-              >
-                {c.online !== undefined && (
-                  <span
-                    aria-hidden="true"
-                    className={`${styles.presenceDot} ${c.online ? styles.presenceOnline : styles.presenceOffline}`}
-                  >
-                    ■
-                  </span>
-                )}
-                <span className={styles.rowName}>{c.username}</span>
-                {c.unread > 0 && <span className={styles.rowUnread}>{c.unread}</span>}
-              </Link>
-            );
-          })}
-      </div>
-
-      {username !== undefined && (
-        // A single key on this wrapper — not on the log div and Composer
-        // separately — remounts both together on a thread switch. Two
-        // sibling elements sharing the same literal key value (both keyed
-        // by `username`) is invalid and confuses React's reconciliation:
-        // it produces "duplicate key" warnings and can leave a stale
-        // sibling's DOM node behind instead of removing it. One key on
-        // their shared parent gets the same remount with no such risk.
-        <div key={username} className={styles.pane}>
-          <SectionHeader
-            label={username}
-            truncateLabel
-            meta={
-              selectedConversation?.online !== undefined ? (
-                <span
-                  className={`${styles.presenceChip} ${selectedConversation.online ? styles.presenceOnline : styles.presenceOffline}`}
-                >
-                  {selectedConversation.online ? t.chat.online : t.chat.offline}
-                </span>
-              ) : undefined
-            }
-          />
-          {threadQuery.hasNextPage && (
-            // Outside the role="log" region below, deliberately: it is a
-            // pagination control, not a new-message announcement, and
-            // living inside aria-relevant="additions" would make a screen
-            // reader read the entire freshly-prepended page aloud.
-            <div className={styles.loadOlderWrap}>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={handleLoadOlder}
-                disabled={threadQuery.isFetchingNextPage}
-              >
-                {t.chat.loadOlder}
-              </Button>
-            </div>
+    <Page title={t.page.chat.title} subtitle={t.page.chat.subtitle}>
+      {/* One Panel around both panes, matching the mock's single bordered
+          <section> (docs/design/slskdarr-tui.dc.html CHAT block) — the rail's
+          border-right stays as the internal divider between them, the same
+          way a table's row dividers stay untouched by this restyle. */}
+      <Panel className={styles.root}>
+        <div className={styles.rail}>
+          <SectionHeader label={t.chat.railHeading} />
+          <NewConversation onPendingChange={setStarterPending} />
+          <QueryNotice phase={conversationsPhase} />
+          {hasData(conversationsPhase) && conversations.length === 0 && (
+            <EmptyState message={t.chat.empty} />
           )}
-          <div
-            ref={paneRef}
-            role="log"
-            aria-live="polite"
-            aria-relevant="additions"
-            aria-label={username}
-            className={styles.messages}
-            onScroll={handleScroll}
-          >
-            <QueryNotice phase={threadPhase} />
-            {hasData(threadPhase) && messages.length === 0 && (
-              <EmptyState message={t.chat.threadEmpty} />
-            )}
-            {hasData(threadPhase) &&
-              messages.map((m, i) => {
-                // A divider is emitted whenever the local day changes, and
-                // always before the first message: a thread whose every
-                // message predates today would otherwise still carry no date
-                // at all, which is the whole bug (#247).
-                const day = localDayKey(m.sentAt);
-                const showDivider = i === 0 || day !== localDayKey(messages[i - 1].sentAt);
-                return (
-                  <Fragment key={m.id}>
-                    {showDivider && <DayDivider day={day} />}
-                    <div className={styles.messageLine}>
-                      <span className={styles.messageTime}>{formatShortTime(m.sentAt)}</span>
-                      <span className={m.direction === 'OUT' ? styles.whoYou : styles.whoPeer}>
-                        {m.direction === 'OUT' ? t.chat.you : t.chat.peer(username)}
-                      </span>
-                      <span className={m.direction === 'OUT' ? styles.bodyOut : styles.bodyIn}>
-                        {m.body}
-                      </span>
-                    </div>
-                  </Fragment>
-                );
-              })}
-          </div>
-          <Composer username={username} />
+          {hasData(conversationsPhase) &&
+            conversations.map((c) => {
+              const active = c.username === username;
+              return (
+                <Link
+                  key={c.username}
+                  to={`/chat/${encodeURIComponent(c.username)}`}
+                  className={active ? styles.rowActive : styles.row}
+                  aria-current={active ? 'page' : undefined}
+                  aria-label={t.chat.threadLabel(c.username, c.unread, c.online)}
+                >
+                  {c.online !== undefined && (
+                    <span
+                      aria-hidden="true"
+                      className={`${styles.presenceDot} ${c.online ? styles.presenceOnline : styles.presenceOffline}`}
+                    >
+                      ■
+                    </span>
+                  )}
+                  <span className={styles.rowName}>{c.username}</span>
+                  {c.unread > 0 && <span className={styles.rowUnread}>{c.unread}</span>}
+                </Link>
+              );
+            })}
         </div>
-      )}
-    </div>
+
+        {username !== undefined && (
+          // A single key on this wrapper — not on the log div and Composer
+          // separately — remounts both together on a thread switch. Two
+          // sibling elements sharing the same literal key value (both keyed
+          // by `username`) is invalid and confuses React's reconciliation:
+          // it produces "duplicate key" warnings and can leave a stale
+          // sibling's DOM node behind instead of removing it. One key on
+          // their shared parent gets the same remount with no such risk.
+          <div key={username} className={styles.pane}>
+            <SectionHeader
+              label={username}
+              truncateLabel
+              meta={
+                selectedConversation?.online !== undefined ? (
+                  <span
+                    className={`${styles.presenceChip} ${selectedConversation.online ? styles.presenceOnline : styles.presenceOffline}`}
+                  >
+                    {selectedConversation.online ? t.chat.online : t.chat.offline}
+                  </span>
+                ) : undefined
+              }
+            />
+            {threadQuery.hasNextPage && (
+              // Outside the role="log" region below, deliberately: it is a
+              // pagination control, not a new-message announcement, and
+              // living inside aria-relevant="additions" would make a screen
+              // reader read the entire freshly-prepended page aloud.
+              <div className={styles.loadOlderWrap}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={handleLoadOlder}
+                  disabled={threadQuery.isFetchingNextPage}
+                >
+                  {t.chat.loadOlder}
+                </Button>
+              </div>
+            )}
+            <div
+              ref={paneRef}
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+              aria-label={username}
+              className={styles.messages}
+              onScroll={handleScroll}
+            >
+              <QueryNotice phase={threadPhase} />
+              {hasData(threadPhase) && messages.length === 0 && (
+                <EmptyState message={t.chat.threadEmpty} />
+              )}
+              {hasData(threadPhase) &&
+                messages.map((m, i) => {
+                  // A divider is emitted whenever the local day changes, and
+                  // always before the first message: a thread whose every
+                  // message predates today would otherwise still carry no
+                  // date at all, which is the whole bug (#247).
+                  const day = localDayKey(m.sentAt);
+                  const showDivider = i === 0 || day !== localDayKey(messages[i - 1].sentAt);
+                  return (
+                    <Fragment key={m.id}>
+                      {showDivider && <DayDivider day={day} />}
+                      <div className={styles.messageLine}>
+                        <span className={styles.messageTime}>{formatShortTime(m.sentAt)}</span>
+                        <span className={m.direction === 'OUT' ? styles.whoYou : styles.whoPeer}>
+                          {m.direction === 'OUT' ? t.chat.you : t.chat.peer(username)}
+                        </span>
+                        <span className={m.direction === 'OUT' ? styles.bodyOut : styles.bodyIn}>
+                          {m.body}
+                        </span>
+                      </div>
+                    </Fragment>
+                  );
+                })}
+            </div>
+            <Composer username={username} />
+          </div>
+        )}
+      </Panel>
+    </Page>
   );
 }
 

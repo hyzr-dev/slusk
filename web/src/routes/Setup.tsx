@@ -2,6 +2,8 @@ import { useConfig, useShares, useTestConnection } from '../api/queries';
 import type { UseMutationResult } from '@tanstack/react-query';
 import type { ConnectionTestResult } from '../api/types';
 import Button from '../components/tui/Button';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
@@ -101,9 +103,9 @@ export default function Setup() {
   // brief loading notice beats flashing every step as NOT ENABLED.
   if (!config) {
     return (
-      <div className={styles.wrap}>
+      <Page title={t.page.setup.title} subtitle={t.page.setup.subtitle} maxWidth={820}>
         <QueryNotice phase={configPhase} />
-      </div>
+      </Page>
     );
   }
 
@@ -113,7 +115,7 @@ export default function Setup() {
   const sharesState: StepState = (shares?.files ?? 0) > 0 ? 'ok' : 'untested';
 
   return (
-    <div className={styles.wrap}>
+    <Page title={t.page.setup.title} subtitle={t.page.setup.subtitle} maxWidth={820}>
       <div className={styles.header}>
         <div className={styles.title}>{t.setup.title}</div>
         <div className={styles.intro}>{t.setup.intro}</div>
@@ -121,60 +123,67 @@ export default function Setup() {
 
       <QueryNotice phase={configPhase} />
 
-      <div className={styles.step}>
-        <StepHeader
-          num={1}
-          title={t.setup.stepSoulseek}
-          state={soulseek.state}
-          onTest={soulseekEnabled ? () => soulseekTest.mutate() : undefined}
-        />
-        <div className={styles.fields}>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldUsername}</span>
-            <span className={styles.fieldValue}>{config.soulseek.username}</span>
+      {/* One Panel around all three steps, matching the mock's single
+          bordered <section> (docs/design/slskdarr-tui.dc.html SETUP block)
+          — each step's own border-top stays as the internal divider between
+          them, the same way a table's row dividers stay untouched by this
+          restyle. */}
+      <Panel>
+        <div className={styles.step}>
+          <StepHeader
+            num={1}
+            title={t.setup.stepSoulseek}
+            state={soulseek.state}
+            onTest={soulseekEnabled ? () => soulseekTest.mutate() : undefined}
+          />
+          <div className={styles.fields}>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldUsername}</span>
+              <span className={styles.fieldValue}>{config.soulseek.username}</span>
+            </div>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldPassword}</span>
+              <span className={styles.fieldValue}>{secretValue(config.soulseek.passwordConfigured)}</span>
+            </div>
+            {soulseek.state === 'failed' && soulseek.error && <ErrorCard message={soulseek.error} />}
           </div>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldPassword}</span>
-            <span className={styles.fieldValue}>{secretValue(config.soulseek.passwordConfigured)}</span>
-          </div>
-          {soulseek.state === 'failed' && soulseek.error && <ErrorCard message={soulseek.error} />}
         </div>
-      </div>
 
-      <div className={styles.step}>
-        <StepHeader num={2} title={t.setup.stepLidarr} state={lidarr.state} onTest={() => lidarrTest.mutate()} />
-        <div className={styles.fields}>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldUrl}</span>
-            <span className={styles.fieldValue}>{config.lidarr.url}</span>
+        <div className={styles.step}>
+          <StepHeader num={2} title={t.setup.stepLidarr} state={lidarr.state} onTest={() => lidarrTest.mutate()} />
+          <div className={styles.fields}>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldUrl}</span>
+              <span className={styles.fieldValue}>{config.lidarr.url}</span>
+            </div>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldApiKey}</span>
+              <span className={styles.fieldValue}>{secretValue(config.lidarr.apiKeyConfigured)}</span>
+            </div>
+            {lidarr.state === 'failed' && lidarr.error && <ErrorCard message={lidarr.error} />}
           </div>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldApiKey}</span>
-            <span className={styles.fieldValue}>{secretValue(config.lidarr.apiKeyConfigured)}</span>
-          </div>
-          {lidarr.state === 'failed' && lidarr.error && <ErrorCard message={lidarr.error} />}
         </div>
-      </div>
 
-      <div className={styles.step}>
-        <StepHeader num={3} title={t.setup.stepShares} state={hasData(sharesPhase) ? sharesState : undefined} />
-        <QueryNotice phase={sharesPhase} />
-        <div className={styles.fields}>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldFolders}</span>
-            <span className={styles.fieldValue}>{t.setup.foldersCount(config.soulseek.sharedFolders.length)}</span>
-          </div>
-          <div className={styles.field}>
-            <span className={styles.fieldKey}>{t.setup.fieldIndex}</span>
-            <span className={styles.fieldValue}>
-              {hasData(sharesPhase) ? t.setup.indexCount(shares?.files ?? 0) : '—'}
-            </span>
-          </div>
-          <div className={styles.field}>
-            <span className={styles.fieldValue}>{t.setup.sharesNoTest}</span>
+        <div className={styles.step}>
+          <StepHeader num={3} title={t.setup.stepShares} state={hasData(sharesPhase) ? sharesState : undefined} />
+          <QueryNotice phase={sharesPhase} />
+          <div className={styles.fields}>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldFolders}</span>
+              <span className={styles.fieldValue}>{t.setup.foldersCount(config.soulseek.sharedFolders.length)}</span>
+            </div>
+            <div className={styles.field}>
+              <span className={styles.fieldKey}>{t.setup.fieldIndex}</span>
+              <span className={styles.fieldValue}>
+                {hasData(sharesPhase) ? t.setup.indexCount(shares?.files ?? 0) : '—'}
+              </span>
+            </div>
+            <div className={styles.field}>
+              <span className={styles.fieldValue}>{t.setup.sharesNoTest}</span>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </Panel>
+    </Page>
   );
 }

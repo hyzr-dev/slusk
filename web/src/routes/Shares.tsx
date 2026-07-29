@@ -3,6 +3,8 @@ import { ApiError } from '../api/client';
 import { useRescanShares, useShares } from '../api/queries';
 import { useFlash } from '../components/chrome/FlashContext';
 import EmptyState from '../components/tui/EmptyState';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { formatDateTime, formatSize } from '../format';
@@ -37,11 +39,19 @@ export default function Shares() {
   // everything below: queryKeys.shares is a constant key, so keepPreviousData
   // can never substitute another key's response into it.
   if (!data) {
-    return <QueryNotice phase={phase} />;
+    return (
+      <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
+        <QueryNotice phase={phase} />
+      </Page>
+    );
   }
 
   if (!data.enabled) {
-    return <div className={styles.notice}>{t.shares.disabledNotice}</div>;
+    return (
+      <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
+        <div className={styles.notice}>{t.shares.disabledNotice}</div>
+      </Page>
+    );
   }
 
   const scanning = data.scanning || rescan.isPending;
@@ -62,7 +72,7 @@ export default function Shares() {
   const indexedLabel = data.indexedAt ? formatDateTime(data.indexedAt) : t.shares.statNever;
 
   return (
-    <>
+    <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
       <QueryNotice phase={phase} />
       {data.folders.length === 0 && (
         <div className={styles.warningCard}>
@@ -93,60 +103,62 @@ export default function Shares() {
         </div>
       )}
 
-      <SectionHeader
-        label={t.shares.panelTitle}
-        meta={
-          <span className={styles.headerActions}>
-            <span>{t.shares.summary(data.folders.length, data.files, formatSize(data.totalBytes))}</span>
-            <span className={stale ? styles.indexedBad : styles.indexedOk}>
-              {t.shares.indexedAt(indexedLabel)}
-            </span>
-            {scanning && (
-              <span className={styles.indexing}>
-                <span className={styles.spinner} aria-hidden="true" />
-                {t.shares.indexing}
+      <Panel>
+        <SectionHeader
+          label={t.shares.panelTitle}
+          meta={
+            <span className={styles.headerActions}>
+              <span>{t.shares.summary(data.folders.length, data.files, formatSize(data.totalBytes))}</span>
+              <span className={stale ? styles.indexedBad : styles.indexedOk}>
+                {t.shares.indexedAt(indexedLabel)}
               </span>
-            )}
-            <button
-              type="button"
-              className={styles.rescanButton}
-              disabled={scanning}
-              onClick={() =>
-                rescan.mutate(undefined, { onSuccess: () => flash(t.shares.rescanStarted) })
-              }
-            >
-              {t.shares.rescan}
-            </button>
-          </span>
-        }
-      />
-      {/* The live region stays mounted and only takes on styling once it has
-          content: a role="status" node inserted at the same moment as its
-          text is unreliably announced, and .rescanError carries padding and
-          a background that would otherwise show as an empty bar. */}
-      <div className={rescanMessage ? styles.rescanError : undefined} role="status">
-        {rescanMessage}
-      </div>
-
-      <div role="table">
-        <div role="row" className={styles.folderGridHead}>
-          <span role="columnheader">{t.shares.gridHead.path}</span>
-          <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.files}</span>
-          <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.size}</span>
+              {scanning && (
+                <span className={styles.indexing}>
+                  <span className={styles.spinner} aria-hidden="true" />
+                  {t.shares.indexing}
+                </span>
+              )}
+              <button
+                type="button"
+                className={styles.rescanButton}
+                disabled={scanning}
+                onClick={() =>
+                  rescan.mutate(undefined, { onSuccess: () => flash(t.shares.rescanStarted) })
+                }
+              >
+                {t.shares.rescan}
+              </button>
+            </span>
+          }
+        />
+        {/* The live region stays mounted and only takes on styling once it has
+            content: a role="status" node inserted at the same moment as its
+            text is unreliably announced, and .rescanError carries padding and
+            a background that would otherwise show as an empty bar. */}
+        <div className={rescanMessage ? styles.rescanError : undefined} role="status">
+          {rescanMessage}
         </div>
-        {data.folders.map((f) => (
-          <div key={f.path} role="row" className={styles.folderRow}>
-            <span role="cell" className={styles.folderPath}>{f.path}</span>
-            <span role="cell" className={styles.folderDim}>{f.files}</span>
-            <span role="cell" className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
+
+        <div role="table">
+          <div role="row" className={styles.folderGridHead}>
+            <span role="columnheader">{t.shares.gridHead.path}</span>
+            <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.files}</span>
+            <span role="columnheader" className={styles.alignRight}>{t.shares.gridHead.size}</span>
           </div>
-        ))}
-      </div>
-      {/* Outside the table: `role="table"` admits only rows, so an empty
-          state nested inside would be invalid ARIA. */}
-      {data.folders.length === 0 && <EmptyState message={t.shares.empty} />}
+          {data.folders.map((f) => (
+            <div key={f.path} role="row" className={styles.folderRow}>
+              <span role="cell" className={styles.folderPath}>{f.path}</span>
+              <span role="cell" className={styles.folderDim}>{f.files}</span>
+              <span role="cell" className={styles.folderDim}>{formatSize(f.totalBytes)}</span>
+            </div>
+          ))}
+        </div>
+        {/* Outside the table: `role="table"` admits only rows, so an empty
+            state nested inside would be invalid ARIA. */}
+        {data.folders.length === 0 && <EmptyState message={t.shares.empty} />}
+      </Panel>
 
       <UploadsPanel />
-    </>
+    </Page>
   );
 }

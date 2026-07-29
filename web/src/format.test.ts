@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, localDayKey, percent } from './format';
+import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatDuration, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, localDayKey, percent } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -33,6 +33,35 @@ describe('formatSpeed', () => {
   it('scales to MB/s at or above 1 MB/s', () => {
     expect(formatSpeed(1024 * 1024)).toBe('1.0 MB/s');
     expect(formatSpeed(1536 * 1024)).toBe('1.5 MB/s');
+  });
+});
+
+describe('formatDuration', () => {
+  // The whole reason this exists apart from formatEta: a reconcile pass that
+  // finishes in a fraction of a second is a measurement, not a missing value,
+  // so it must never render as the em dash formatEta gives any falsy input.
+  it('reports a sub-second measurement instead of an em dash', () => {
+    expect(formatDuration(0)).toBe('0.0 s');
+    expect(formatDuration(0.4)).toBe('0.4 s');
+    expect(formatEta(0)).toBe('—');
+  });
+
+  it('keeps one decimal below ten seconds, where these actually land', () => {
+    expect(formatDuration(1.24)).toBe('1.2 s');
+    expect(formatDuration(9.96)).toBe('10.0 s');
+  });
+
+  it('defers to whole units from ten seconds up', () => {
+    expect(formatDuration(12.4)).toBe('12 s');
+    expect(formatDuration(90)).toBe('2 min');
+  });
+
+  it('returns an em dash only for genuinely unknown input', () => {
+    // NaN is an unparseable timestamp; a negative is clock skew between the
+    // two stamps. Both are real unknowns, unlike zero.
+    expect(formatDuration(Number.NaN)).toBe('—');
+    expect(formatDuration(-3)).toBe('—');
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe('—');
   });
 });
 

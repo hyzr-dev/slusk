@@ -22,12 +22,6 @@ import {
 import { candidateStateLabel, eventLabel, t } from '../strings';
 import styles from './JobDetail.module.css';
 
-// Per-transfer tick resolution, matching the mock's TRANSFERS panel
-// (docs/design/slskdarr-tui.dc.html:~102) rather than the coarser 26 ticks
-// used in the dense Jobs grid — a single job's own detail page has room for
-// the finer bar.
-const TRANSFER_TICKS = 104;
-
 // Tick colour and live-flare eligibility for one transfer. A non-zero
 // queuePosition means the transfer is waiting in the peer's queue with no
 // bytes moving, so it must never flare — that is the one failure mode in
@@ -146,7 +140,7 @@ export default function JobDetail() {
                   <div key={tr.filename} className={styles.transfer}>
                     <span className={styles.transferName}>{basename(tr.filename)}</span>
                     <div className={styles.ticksWrap}>
-                      <Ticks percent={pct} count={TRANSFER_TICKS} tone={tone} live={live} height={7} />
+                      <Ticks percent={pct} tone={tone} live={live} height={7} />
                     </div>
                     <span className={`${table.mono} ${styles.transferBytes}`}>
                       {formatSize(tr.bytesDone)} / {formatSize(tr.bytesTotal)}
