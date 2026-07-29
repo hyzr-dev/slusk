@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_JOB_PAGE_PARAMS,
@@ -382,5 +382,89 @@ describe('useJobDetail live detail', () => {
     rerender();
     expect(result.current.data?.attempts[0].transfers[0].bytesDone).toBe(400);
     expect(result.current.data?.attempts[0].transfers[0].speed).toBeUndefined();
+  });
+});
+
+// Issue #274: the fetch half of the same predicate. pickJobDetail's four
+// branches are unit-tested above; these two pin down that refetchInterval
+// follows them rather than polling unconditionally underneath.
+describe('useJobDetail poll gating', () => {
+  afterEach(() => vi.useRealTimers());
+
+  // The detail body served here is irrelevant to what is being measured — only
+  // the call count is — but it has to resolve, because React Query never
+  // starts an interval refetch while a fetch is still in flight.
+  function stubDetailFetch() {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(makeDetail()) } as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('stops polling while the stream carries this job\'s detail, and resumes when it drops', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubDetailFetch();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    const { rerender } = renderHook(() => useJobDetail(1), { wrapper: makeWrapper(queryClient) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    // The mount GET always happens: REST is still the source of truth for the
+    // snapshot, and the stream has said nothing yet.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, up: 0, scopeJobId: 1, detail: makeDetail() });
+    });
+    rerender();
+    // Three whole JOB_DETAIL_INTERVALs with a live scoped stream: not one
+    // further GET. This is the issue's own acceptance check ("count GET
+    // /api/jobs/{id}/detail on an open /jobs/:id: zero after the first").
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Stream drops — StreamProvider's clearLive writes null — and the poll is
+    // the fallback again.
+    act(() => { queryClient.setQueryData(queryKeys.live, null); });
+    rerender();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_500); });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  // The trap the issue calls out: a live stream scoped to *other* jobs (the
+  // /jobs list's ?jobs=<ids> connection, under an expanded JobExpansion row)
+  // carries no detail for this one. Gating on "is the stream up?" instead of
+  // "is it scoped to this job?" would freeze the panel — polling off, nothing
+  // arriving to replace it.
+  it('keeps polling when the live frame is scoped to a different job', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubDetailFetch();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(queryKeys.live, { jobs: [makeJob({ id: 2 })], down: 0, up: 0, scopeJobId: 2, detail: makeDetail() });
+
+    renderHook(() => useJobDetail(1), { wrapper: makeWrapper(queryClient) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_500); });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  // The scope alone is not enough to hand ownership over. A ?job=<id>
+  // connection can be open and framing while the hub still has no detail body
+  // to send for it — buildStreamDetail returns nil until both the cached
+  // detail and the job view are populated (internal/observ/stream.go). Gating
+  // on scope without checking for a body would stop the poll in exactly that
+  // window, leaving the view with no writer at all.
+  it('keeps polling when a frame scoped to this job carries no detail', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubDetailFetch();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(queryKeys.live, { jobs: [], down: 0, up: 0, scopeJobId: 1 });
+
+    renderHook(() => useJobDetail(1), { wrapper: makeWrapper(queryClient) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_500); });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
   });
 });
