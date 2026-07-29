@@ -21,6 +21,13 @@
 
   --line: #191d20;
   --line2: #252b30;
+  /* Divider between rows *inside* a panel, one step quieter than --line so a
+     dense table's internal rules recede against the panel's own border
+     (docs/design/slskdarr-tui.dc.html uses this raw hex for every
+     `border-bottom` within a table body). Named here for the same reason as
+     the scroll colours below: a hex sitting in a .module.css is invisible to
+     any check that reasons about the palette. */
+  --line-inner: #131619;
 
   --ok: #4f9e80;
   --bad: #b5595c;

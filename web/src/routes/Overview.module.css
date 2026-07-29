@@ -54,7 +54,7 @@
 
 .transferRow {
   padding: 10px 17px;
-  border-bottom: 1px solid #131619;
+  border-bottom: 1px solid var(--line-inner);
   font-size: 11.5px;
   cursor: pointer;
 }
@@ -132,7 +132,7 @@
   grid-template-columns: 56px 1fr 58px;
   gap: 12px;
   padding: 7px 17px;
-  border-bottom: 1px solid #131619;
+  border-bottom: 1px solid var(--line-inner);
   font-size: 11.5px;
   align-items: center;
 }
