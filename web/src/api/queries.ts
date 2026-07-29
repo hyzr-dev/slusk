@@ -42,17 +42,15 @@ const JOBS_INTERVAL = 15000;
 // JOBS_INTERVAL. The stream only carries a detail for the job its connection
 // was opened with (/api/stream?job=<id>, set on the /jobs/:id route), but
 // JobExpansion renders the same per-file transfers inline on the /jobs list,
-// where the connection is unscoped and REST is the only source. Slowing this
-// to 15s would make an expanded row's file progress update 5x slower than
-// before #161 — a regression the stream does not compensate for on that
-// route. The #161 design's poll-interval table changes `jobs`, not the
-// detail query.
+// where the connection is scoped to a page of ids and carries no detail at
+// all — REST is the only source there. Slowing this to 15s would make an
+// expanded row's file progress update 5x slower than before #161 — a
+// regression the stream does not compensate for on that route. The #161
+// design's poll-interval table changes `jobs`, not the detail query.
 //
-// On /jobs/:id the poll is not redundant either: it keeps this cache key
-// warm as the fallback the moment the stream drops, and it stays the only
-// *writer* of the key — pickJobDetail chooses between the two objects at
-// read time rather than writing the stream's into the cache, so there is
-// never more than one author of the cached value (issue #258).
+// This is the interval for the views the stream does *not* serve. On
+// /jobs/:id, where it does, useJobDetail switches the poll off entirely
+// (issue #274) — see streamCarriesJobDetail.
 const JOB_DETAIL_INTERVAL = 3000;
 const EVENTS_INTERVAL = 3000;
 // Exported because the top bar derives its staleness threshold from it: a
@@ -171,6 +169,29 @@ export function replaceLiveJobPage(page: JobPage | undefined, live: WireJob[] | 
   return jobs === page.jobs ? page : { ...page, jobs: jobs! };
 }
 
+// True when the live stream is currently the authority for this job's
+// detail: the connection was opened as /api/stream?job=<id> for this very id
+// *and* the frame actually carries a body (buildStreamDetail in
+// internal/observ/stream.go omits it until the hub has both a cached detail
+// and a job view for the id).
+//
+// Deliberately the single expression of that condition, shared by the read
+// side (pickJobDetail) and the fetch side (useJobDetail's refetchInterval).
+// Two copies of it is precisely the drift issue #269 was about, and here the
+// two sides must agree exactly: a fetch side that disabled polling under a
+// weaker condition than the read side accepts the stream's value would leave
+// the view with neither source — frozen on whatever REST last returned.
+//
+// `live` being null rather than undefined is what makes a dropped stream
+// flip this back to false; see StreamProvider's clearLive for why it must be
+// null.
+function streamCarriesJobDetail(
+  live: ScopedLivePayload | null | undefined,
+  id: number,
+): live is ScopedLivePayload & { detail: JobDetail } {
+  return !!live && live.scopeJobId === id && !!live.detail;
+}
+
 // Picks the job detail to render: the stream's when it carries one for this
 // job, otherwise REST's.
 //
@@ -189,7 +210,7 @@ export function replaceLiveJobPage(page: JobPage | undefined, live: WireJob[] | 
 // connection was opened with, so a stale frame arriving mid-reconnect after
 // navigating between jobs must never be adopted by the job now on screen.
 export function pickJobDetail(detail: JobDetail | undefined, live: ScopedLivePayload | null | undefined, id: number): JobDetail | undefined {
-  if (!live || live.scopeJobId !== id || !live.detail) return detail;
+  if (!streamCarriesJobDetail(live, id)) return detail;
   return live.detail;
 }
 
@@ -283,16 +304,36 @@ export function usePeers() {
 // only mounts JobExpansion — and therefore only calls this hook — once a row
 // is expanded, so the fetch is naturally scoped to expanded rows rather than
 // firing for every row up front.
+//
+// The poll stops while the stream carries this job's detail (issue #274).
+// #161's design makes REST the source of truth for snapshots and polling the
+// fallback "if the stream dies", but until now only the read half honoured
+// that: on /jobs/:id the stream delivered a detail every second while this
+// query fetched the identical object — same server-side toJobDetailDTO, so a
+// whole response, not a partial view — every three seconds and pickJobDetail
+// threw it away.
+//
+// Switching the interval off does not strand the cache key. StreamProvider
+// invalidates it on every `onopen`, and invalidateQueries refetches an active
+// query regardless of its interval, so each connection (including the
+// browser's own automatic reconnect) still opens with a fresh GET — the
+// "chain always starts with a GET" principle that this poll was masking
+// rather than implementing. And REST remains the key's only writer:
+// pickJobDetail chooses at read time and never writes the stream's object
+// into the cache (issue #258).
 export function useJobDetail(id: number) {
+  const live = useLiveData();
   const detailQuery = useQuery({
     queryKey: queryKeys.jobDetail(id),
     queryFn: () => apiGet<WireJobDetail>(`/api/jobs/${id}/detail`).then(normalizeJobDetail),
-    refetchInterval: JOB_DETAIL_INTERVAL,
+    refetchInterval: streamCarriesJobDetail(live, id) ? false : JOB_DETAIL_INTERVAL,
   });
-  const live = useLiveData();
   return { ...detailQuery, data: pickJobDetail(detailQuery.data, live, id) };
 }
 
+// Unconditional, unlike useJobDetail above despite sharing its interval: the
+// stream carries no job events at all (livePayload has no such field), so
+// polling is the only source here on every route.
 export function useJobEvents(id: number) {
   return useQuery({
     queryKey: queryKeys.jobEvents(id),
