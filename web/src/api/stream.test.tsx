@@ -342,6 +342,9 @@ describe('StreamProvider', () => {
     expect(live.jobs).toEqual([{ id: 1, bytesDone: 20, bytesTotal: 100 }]);
   });
 
+  // Contrast with the reconnect case below (issue #276): a scope change must
+  // NOT clear, but a genuine stream failure still has to — and since the
+  // cleanup no longer clears, this is the only path that does mid-session.
   it('clears the live cache on error, so consumers fall back to REST', () => {
     const queryClient = new QueryClient();
     render(
@@ -360,6 +363,67 @@ describe('StreamProvider', () => {
     // toBeUndefined() here would pass against a no-op clear that silently
     // left the last frame overlaid — which is the bug this test guards.
     act(() => MockEventSource.instances[0].onerror?.());
+    expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
+  });
+
+  // Issue #276: Overview/Jobs republish their scope on every 15s poll as job
+  // state churns (see useJobScope), which reopens the connection via this
+  // exact dep-array change. That must not blank every row on screen for the
+  // gap until the new connection's first frame lands.
+  it('keeps accumulated live data across a scope change, before any new frame arrives', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <TogglingScope />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+
+    act(() => MockEventSource.instances[1].emit('live', {
+      jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
+      down: 0,
+      up: 0,
+    }));
+    expect(queryClient.getQueryData(queryKeys.live)).toMatchObject({
+      jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
+    });
+
+    // Reopens the connection (different published ids) — the old data must
+    // survive until a new frame actually arrives.
+    act(() => document.querySelector('button')!.click());
+    expect(MockEventSource.instances).toHaveLength(3);
+    expect(MockEventSource.instances[1].closed).toBe(true);
+    expect(queryClient.getQueryData(queryKeys.live)).toMatchObject({
+      jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
+    });
+  });
+
+  // The other half of the reconnect-vs-unmount distinction: a real unmount
+  // (leaving the app / tearing down StreamProvider) must still clear, or a
+  // stale live overlay would linger in the cache forever — the exact
+  // failure the REST fallback exists to prevent.
+  it('clears the live cache when StreamProvider genuinely unmounts', () => {
+    const queryClient = new QueryClient();
+    const { unmount } = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[0].emit('live', {
+      jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
+      down: 0,
+      up: 0,
+    }));
+    expect(queryClient.getQueryData(queryKeys.live)).not.toBeNull();
+
+    act(() => unmount());
     expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
   });
 

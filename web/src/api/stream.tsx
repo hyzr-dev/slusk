@@ -76,8 +76,8 @@ export function useJobScope(ids: number[] | undefined): void {
  * changes.
  *
  * Every `event: live` frame is written into queryKeys.live via
- * setQueryData, and cleared to undefined on error/close so every consumer
- * (useJobs, useJobDetail, TopBar) reverts to plain REST values — see
+ * setQueryData, and cleared to null on a genuine stream failure so every
+ * consumer (useJobs, useJobDetail, TopBar) reverts to plain REST values — see
  * queries.ts's merge functions for the read side. There is deliberately no
  * custom reconnect logic: `EventSource` reconnects on its own and the
  * server sets `retry:` (internal/observ/stream.go); `onopen` instead
@@ -93,10 +93,10 @@ export function useJobScope(ids: number[] | undefined): void {
  * while others keep ticking would fall out of the very next frame and
  * appear to revert to its last REST value until the next 15s poll (issue
  * #258's fix-round bug: a finished download would flash back to
- * downloading). `jobsById` is reset whenever `clearLive` runs — on error and
- * on cleanup — which is safe because every reconnect is preceded by a fresh
- * GET (the `onopen` invalidation above), matching the issue's "the chain
- * always starts with a GET" principle.
+ * downloading). `jobsById` itself is always fresh per connection (reset at
+ * the top of this effect), but the *cache* (queryKeys.live) is deliberately
+ * NOT cleared just because this effect reruns to open a new connection —
+ * see the effect body for why (issue #276).
  *
  * Independently of the job-detail scope above, a route with a bounded page
  * of jobs on screen can narrow `jobs` in the `live` frame to that page via
@@ -204,17 +204,50 @@ export function StreamProvider({ children }: { children: ReactNode }) {
 
     // EventSource's error event fires both for a genuine failure and for
     // the moment just before its own automatic reconnect — either way there
-    // is currently no live stream, so clearing here (rather than only in the
-    // cleanup below) is what makes a mid-session drop revert consumers to
-    // REST immediately instead of only at the next route change.
+    // is currently no live stream. Since the cleanup below deliberately no
+    // longer clears (issue #276), this is the ONLY path that reverts
+    // consumers to REST mid-session, which makes it load-bearing rather than
+    // one of two redundant clears.
     source.onerror = clearLive;
 
+    // Deliberately does NOT call clearLive: this effect reruns whenever
+    // jobId/jobsScopeKey changes, which is the common case (Overview and
+    // Jobs republish their scope on every poll as job state churns — see
+    // useJobScope), not just on a genuine unmount. The accumulated jobsById
+    // entries are still valid values for jobs that stay in scope, and the
+    // new connection's initial snapshot (streamHub.subscribe on the Go side)
+    // resends every job in the new scope regardless — that is what bounds
+    // the gap to one round trip, and it holds because a fresh subscriber's
+    // lastJobs map starts empty, so buildJobsDelta treats every in-scope job
+    // as changed. Not clearing here depends on that; a server change making
+    // the first frame a true delta would reintroduce the blank window
+    // silently, since no test spans both sides — so wiping the cache
+    // here only produced a visible blank frame for no benefit (issue #276:
+    // every /api/jobs poll that shifted the Overview panel's active+stalled
+    // membership blanked every row on screen). The one path that must still
+    // clear on close is a real stream failure, handled above by onerror; a
+    // genuine unmount of StreamProvider itself is handled by the separate
+    // effect below.
     return () => {
       source.close();
-      clearLive();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- jobsScopeKey stands in for jobsScope, see above
   }, [queryClient, jobId, jobsScopeKey]);
+
+  // Clears the live cache only when StreamProvider itself unmounts — as
+  // opposed to the effect above, which reruns (closing and reopening the
+  // connection) on every scope change without touching the cache. Empty-ish
+  // deps ([queryClient], stable for the app's lifetime) means this cleanup
+  // fires exactly once, on real unmount, not on a reconnect. StreamProvider
+  // is mounted above <Routes> (see its own doc comment), so in practice this
+  // only fires if the whole provider tree is torn down — but leaving a stale
+  // live overlay cached indefinitely in that case is exactly the failure the
+  // REST fallback exists to prevent.
+  useEffect(() => {
+    return () => {
+      queryClient.setQueryData(queryKeys.live, null);
+    };
+  }, [queryClient]);
 
   return (
     <JobScopeSetterContext.Provider value={setJobsScope}>
