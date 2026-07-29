@@ -4,6 +4,8 @@ import { apiGet, ApiError } from '../api/client';
 import { queryKeys, useConfig, useTestConnection, useUpdateConfig } from '../api/queries';
 import type { AppConfig, ConfigUpdateRequest, SharedFolderDTO } from '../api/types';
 import Button from '../components/tui/Button';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
@@ -15,7 +17,7 @@ export default function Settings() {
   const phase = queryPhase(configQuery);
 
   return (
-    <>
+    <Page title={t.page.settings.title} subtitle={t.page.settings.subtitle} maxWidth={900}>
       {/* The connections section below reads config only to decide whether to
           offer the Soulseek test, so it renders throughout — but until #201
           nothing said why the ~40-field form above it was missing. */}
@@ -23,23 +25,30 @@ export default function Settings() {
       {config && !config.writable && (
         <div className={styles.notice}>{t.settings.notWritableNotice}</div>
       )}
-      {config && <ConfigForm config={config} />}
+      {/* Every card (ConfigForm's six accordions plus Connections below) is
+          its own Panel now, so this stack's own gap replaces the border-top
+          each card used to draw to separate itself from the one above. */}
+      <div className={styles.stack}>
+        {config && <ConfigForm config={config} />}
 
-      {/* Not collapsible (unlike the cards above), so this uses the plain
-          SectionHeader primitive rather than CollapsibleSection's
-          accordion. */}
-      <section className={styles.group}>
-        <SectionHeader label={t.settings.connections} />
-        <div className={styles.sectionBody}>
-          <ConnectionTest label={t.settings.lidarr} dependency="lidarr" />
-          {/* Only offer the Soulseek test when the native client is enabled —
-              otherwise there is nothing to connect to. */}
-          {config?.soulseek.enabled && (
-            <ConnectionTest label={t.settings.soulseek} dependency="soulseek" />
-          )}
-        </div>
-      </section>
-    </>
+        {/* Not collapsible (unlike the cards above), so this uses the plain
+            SectionHeader primitive rather than CollapsibleSection's
+            accordion. */}
+        <Panel>
+          <section>
+            <SectionHeader label={t.settings.connections} />
+            <div className={styles.sectionBody}>
+              <ConnectionTest label={t.settings.lidarr} dependency="lidarr" />
+              {/* Only offer the Soulseek test when the native client is
+                  enabled — otherwise there is nothing to connect to. */}
+              {config?.soulseek.enabled && (
+                <ConnectionTest label={t.settings.soulseek} dependency="soulseek" />
+              )}
+            </div>
+          </section>
+        </Panel>
+      </div>
+    </Page>
   );
 }
 
@@ -342,27 +351,34 @@ function CollapsibleSection({
   children: ReactNode;
 }) {
   return (
-    <section className={danger ? styles.dangerGroup : styles.group}>
-      <div className={styles.sectionHeader}>
-        <h2 className={danger ? styles.dangerTitle : styles.groupTitle}>
-          <button
-            type="button"
-            className={styles.sectionHeaderButton}
-            aria-expanded={open}
-            onClick={onToggle}
-          >
-            {title}
-          </button>
-        </h2>
-        <span className={styles.sectionHeaderRight}>
-          {changed && <span className={styles.changedBadge}>{t.settings.changedBadge}</span>}
-          <span className={styles.chevron} aria-hidden="true">
-            {open ? '▾' : '▸'}
+    // Panel supplies the card's box border; a danger card adds only the
+    // left accent (its own border-top is dropped as redundant — see
+    // Settings.module.css). The <section> underneath is unstyled — it's
+    // kept only because Settings.test.tsx's cardFor() locates a card by
+    // `heading.closest('section')`.
+    <Panel className={danger ? styles.dangerAccent : undefined}>
+      <section>
+        <div className={styles.sectionHeader}>
+          <h2 className={danger ? styles.dangerTitle : styles.groupTitle}>
+            <button
+              type="button"
+              className={styles.sectionHeaderButton}
+              aria-expanded={open}
+              onClick={onToggle}
+            >
+              {title}
+            </button>
+          </h2>
+          <span className={styles.sectionHeaderRight}>
+            {changed && <span className={styles.changedBadge}>{t.settings.changedBadge}</span>}
+            <span className={styles.chevron} aria-hidden="true">
+              {open ? '▾' : '▸'}
+            </span>
           </span>
-        </span>
-      </div>
-      {open && <div className={styles.sectionBody}>{children}</div>}
-    </section>
+        </div>
+        {open && <div className={styles.sectionBody}>{children}</div>}
+      </section>
+    </Panel>
   );
 }
 

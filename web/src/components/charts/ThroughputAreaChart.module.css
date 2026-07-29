@@ -1,11 +1,15 @@
 .wrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 25px; }
+.head { display: flex; align-items: baseline; gap: 9px; min-height: 25px; }
 .direction {
   font-size: 9.5px;
   font-weight: 600;
   letter-spacing: 1.1px;
   color: var(--text-dim);
 }
+/* The live rate right now, next to the direction label — distinct from
+   .peak, which stays pinned to the far right of the same row. */
+.current { font-size: 12.5px; color: var(--fg); }
+.headSpacer { flex: 1; }
 .peak {
   font-family: var(--font-mono);
   font-size: 17px;

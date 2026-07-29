@@ -19,9 +19,17 @@ export type ThroughputDirection = 'download' | 'upload';
 export default function ThroughputAreaChart({
   samples,
   direction,
+  showAxis = true,
 }: {
   samples: ThroughputSample[];
   direction: ThroughputDirection;
+  /**
+   * The 27 July restyle (#281) stacks DOWN above UP under one shared axis
+   * row rather than one per chart (docs/design/slskdarr-tui.dc.html:174) —
+   * Overview renders that shared row itself and passes `false` here for
+   * both directions.
+   */
+  showAxis?: boolean;
 }) {
   const upload = direction === 'upload';
   const directionLabel = upload ? t.overview.uploadThroughput : t.overview.downloadThroughput;
@@ -31,11 +39,16 @@ export default function ThroughputAreaChart({
 
   const values = samples.map((s) => s.bytesPerSecond);
   const peak = values.length > 0 ? Math.max(...values) : 0;
+  // The most recent sample, i.e. the live rate right now — shown next to the
+  // direction label, distinct from PEAK on the right of the same row.
+  const current = values.length > 0 ? values[values.length - 1] : 0;
 
   return (
     <div className={`${styles.wrap} ${upload ? styles.upload : styles.download}`}>
       <div className={styles.head}>
         <span className={styles.direction}>{directionLabel}</span>
+        {samples.length > 0 && <span className={styles.current}>{formatSpeed(current)}</span>}
+        <span className={styles.headSpacer} />
         {samples.length > 0 && (
           <span className={styles.peak}>
             <span className={styles.peakLabel}>{t.overview.peak}</span>{' '}
@@ -47,7 +60,7 @@ export default function ThroughputAreaChart({
       {samples.length === 0 ? (
         <div className={styles.empty}>{emptyLabel}</div>
       ) : (
-        <Chart samples={samples} values={values} peak={peak} direction={direction} />
+        <Chart samples={samples} values={values} peak={peak} direction={direction} showAxis={showAxis} />
       )}
     </div>
   );
@@ -58,11 +71,13 @@ function Chart({
   values,
   peak,
   direction,
+  showAxis,
 }: {
   samples: ThroughputSample[];
   values: number[];
   peak: number;
   direction: ThroughputDirection;
+  showAxis: boolean;
 }) {
   // Clamped to 1 so an all-zero window divides cleanly instead of by zero —
   // every point then lands on the baseline.
@@ -95,10 +110,12 @@ function Chart({
         <path d={area} className={styles.area} />
         <path d={line} className={styles.line} />
       </svg>
-      <div className={styles.axis}>
-        <span>{formatShortTime(samples[0].at)}</span>
-        <span>{t.overview.chartRangeEnd}</span>
-      </div>
+      {showAxis && (
+        <div className={styles.axis}>
+          <span>{formatShortTime(samples[0].at)}</span>
+          <span>{t.overview.chartRangeEnd}</span>
+        </div>
+      )}
     </>
   );
 }

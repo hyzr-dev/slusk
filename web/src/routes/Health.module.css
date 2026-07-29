@@ -1,13 +1,11 @@
 .depGrid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  border-bottom: 1px solid var(--line);
+  gap: 12px;
 }
 
 .depCard {
   padding: 15px 16px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
 }
 
 .depHead {
@@ -43,10 +41,8 @@
 .chartsGrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  border-bottom: 1px solid var(--line);
+  gap: 12px;
 }
-
-.chartCol { border-right: 1px solid var(--line); }
 
 .chartBody { padding: 14px 16px 10px; }
 
@@ -55,7 +51,7 @@
   grid-template-columns: 1fr 90px;
   gap: 12px;
   padding: 6px 16px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid #131619;
   font-size: 11.5px;
 }
 
@@ -74,7 +70,6 @@
 
 @media (max-width: 900px) {
   .chartsGrid { grid-template-columns: 1fr; }
-  .chartCol { border-right: none; border-bottom: 1px solid var(--line); }
 }
 
 @media (max-width: 640px) {

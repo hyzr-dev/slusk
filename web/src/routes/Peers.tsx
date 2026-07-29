@@ -2,6 +2,8 @@ import { Fragment, useState } from 'react';
 import { usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
 import EmptyState from '../components/tui/EmptyState';
+import Page from '../components/tui/Page';
+import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { formatScore, formatShortTime } from '../format';
 import { t } from '../strings';
@@ -57,7 +59,8 @@ export default function Peers() {
   };
 
   return (
-    <>
+    <Page title={t.page.peers.title} subtitle={t.page.peers.subtitle}>
+      <Panel>
       <div role="table">
         <div role="row" className={`${styles.grid} ${styles.head}`}>
           <span role="columnheader">{t.peers.gridHead.peer}</span>
@@ -135,6 +138,7 @@ export default function Peers() {
           so a notice or an empty state nested inside would be invalid ARIA. */}
       <QueryNotice phase={phase} />
       {hasData(phase) && sorted.length === 0 && <EmptyState message={t.peers.empty} />}
-    </>
+      </Panel>
+    </Page>
   );
 }

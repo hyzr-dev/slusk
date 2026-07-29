@@ -43,11 +43,11 @@ function renderAt(path: string, queryClient: QueryClient = new QueryClient()) {
 }
 
 describe('route tree', () => {
-  // Every route below is asserted on stable visible text. Layout renders a
-  // single visually-hidden <h1> per route (see the dedicated heading tests
-  // further down) — PageHeading is gone everywhere, but the heading itself
-  // isn't, so these checks focus on each route's own content instead of
-  // duplicating that coverage per route.
+  // Every route below is asserted on stable visible text. Each route renders
+  // its own <h1> — via <Page> (#281) for every top-level route, or a
+  // Layout-synthesized one for JobDetail (see the dedicated heading tests
+  // further down) — so these checks focus on each route's own content
+  // instead of duplicating that coverage per route.
   it('renders /settings without crashing', () => {
     // No seeded query data, so useConfig() never resolves and the whole
     // ConfigForm stays unrendered — the static Connections section (which
@@ -122,14 +122,13 @@ describe('route tree', () => {
     expect(screen.getByRole('link', { name: t.nav.jobs }).className).toMatch(/itemActive/);
   });
 
-  it('gives the route exactly one <h1>, named after the matching nav entry', () => {
-    // Events and Peers use neither PageHeading nor SectionHeader for a page
-    // title — their ARIA tables above are unnamed too — so this <h1> is the
-    // only heading either view has. Layout derives it from the same nav
-    // definition the sidebar renders, so it can't drift from the link label.
+  it('gives the route exactly one <h1>, from its own <Page> title', () => {
+    // Every top-level route (#281) renders its own visible <h1> via <Page>
+    // now, rather than a hidden one Layout used to synthesize from the nav
+    // label — so this asserts the <Page> title instead of t.nav.peers.
     renderAt('/peers');
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
-    expect(screen.getByRole('heading', { level: 1, name: t.nav.peers })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: t.page.peers.title })).toBeInTheDocument();
   });
 
   it('names the nested job-detail route after its parent nav entry', () => {

@@ -220,11 +220,8 @@ describe('queue position rendering', () => {
 
     const pctLabel = container.querySelector('[class*="pct_"]') as HTMLElement;
     expect(pctLabel).toHaveTextContent('—');
-    const ticks = container.querySelectorAll('[data-tick]');
-    expect(ticks.length).toBeGreaterThan(0);
-    for (const tick of ticks) {
-      expect((tick as HTMLElement).style.background).toBe('var(--tick-off)');
-    }
+    const fill = container.querySelector('[data-fill]') as HTMLElement;
+    expect(fill.style.width).toBe('0%');
   });
 });
 
@@ -486,7 +483,7 @@ describe('row expansion', () => {
 });
 
 describe('sorting and pagination', () => {
-  it('makes only ST, ALBUM, PEER and TRY sortable, with accessible direction toggles', async () => {
+  it('makes only ST, ALBUM and PEER sortable, with accessible direction toggles', async () => {
     const requested: string[] = [];
     vi.stubGlobal('fetch', vi.fn((url: string) => {
       requested.push(url);
@@ -499,11 +496,16 @@ describe('sorting and pagination', () => {
     const table = screen.getByRole('table');
     const headers = within(table).getAllByRole('columnheader');
 
-    expect(headers.filter((header) => within(header).queryByRole('button'))).toHaveLength(4);
+    // PROGRESS, SPEED, ETA and TRY are all live fields and none are
+    // sortable — only ST, ALBUM and PEER can reorder rows without a row
+    // jumping mid-poll (see the comment above the TRY column header in
+    // Jobs.tsx).
+    expect(headers.filter((header) => within(header).queryByRole('button'))).toHaveLength(3);
     expect(within(headers[3]).queryByRole('button')).toBeNull();
     expect(within(headers[4]).queryByRole('button')).toBeNull();
     expect(within(headers[5]).queryByRole('button')).toBeNull();
     expect(within(headers[6]).queryByRole('button')).toBeNull();
+    expect(within(headers[7]).queryByRole('button')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
     fireEvent.click(within(table).getByRole('button', { name: t.jobs.gridHead.album }));

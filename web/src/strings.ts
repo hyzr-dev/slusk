@@ -26,6 +26,57 @@ export const t = {
     groupSoulseek: 'SOULSEEK',
     groupSystem: 'SYSTEM',
   },
+  // Each route's <Page> title and subtitle (the 27 July TUI restyle, #281).
+  // Title case here, unlike `nav` above: the sidebar keeps the mock's
+  // lowercase terminal idiom, but a page's own <h1> reads as ordinary prose.
+  // Shares and Settings deliberately don't reuse their nav/settings labels —
+  // the mock titles those pages "Sharing" and "Config" respectively.
+  page: {
+    overview: {
+      title: 'Overview',
+      subtitle: 'Lidarr wanted list, reconciled against Soulseek every 45s',
+    },
+    jobs: {
+      title: 'Jobs',
+      subtitle: 'Every album slskdarr is tracking, from queued to imported',
+    },
+    search: {
+      title: 'Search',
+      subtitle: 'Query the Soulseek network directly and import straight into Lidarr',
+    },
+    health: {
+      title: 'Health',
+      subtitle: 'Dependencies, reconcile throughput and raw metrics',
+    },
+    shares: {
+      title: 'Sharing',
+      subtitle: 'What you give back to the network — and who is pulling from you',
+    },
+    chat: {
+      title: 'Chat',
+      subtitle: 'Direct messages with peers — useful when a transfer needs a nudge',
+    },
+    setup: {
+      title: 'Setup',
+      subtitle: 'slskdarr validates the config you already wrote — it never writes it',
+    },
+    settings: {
+      title: 'Config',
+      subtitle: 'Resolved runtime configuration, as slskdarr sees it',
+    },
+    // Not in the mock (docs/design/slskdarr-tui.dc.html drops both views),
+    // but Events and Peers are still shipped — see Page.tsx's doc comment.
+    // Titles/subtitles are invented here in the same voice as the rest of
+    // this object rather than left unstyled.
+    events: {
+      title: 'Events',
+      subtitle: 'The raw job-event log across every job, newest first',
+    },
+    peers: {
+      title: 'Peers',
+      subtitle: 'Everyone slskdarr has downloaded from, ranked by reliability',
+    },
+  },
   chrome: {
     live: 'LIVE',
     // Shown in place of LIVE once polling has visibly stopped keeping up, so a
@@ -254,6 +305,38 @@ export const t = {
     activeCountMeta: (n: number) => `${n} active`,
     // The peer-queue special case: an "active" job with no bytes moving.
     queuePos: (n: number) => `queue pos ${n}`,
+    // The dense TRANSFERS table's SIZE column for the same case (mock: 'pos
+    // '+queuePos) — shorter than queuePos above because it shares a column
+    // with a byte count, not a full sentence.
+    queuePosShort: (n: number) => `pos ${n}`,
+    // The four stat cells (#281 restyle) — 'IMPORTED 24H' rather than the
+    // mock's 'IMPORTED TODAY': there is no calendar-day counter, only
+    // /api/charts' completedByHour, a rolling 24h window (see Overview.tsx).
+    statInFlight: 'In flight',
+    statQueued: 'Queued',
+    statImported: 'Imported 24h',
+    statAttention: 'Needs attention',
+    subInFlight: (peers: number) => `downloading from ${peers} peers`,
+    subQueued: 'awaiting a free slot',
+    subImported: (n: number) => `${n} verifying now`,
+    subAttention: (stalled: number, parked: number) => `${stalled} stalled · ${parked} parked`,
+    // The TRANSFERS table's column headers (mock line 103).
+    gridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      peer: 'PEER',
+      progress: 'PROGRESS',
+      speed: 'SPEED',
+      size: 'SIZE',
+    },
+    // The RECONCILE table's column headers. Three, not the mock's four
+    // (mock line 135 has WHEN/PASS/RESULT/DUR) — see the no-id comment in
+    // Overview.tsx for why PASS is omitted.
+    reconcileGridHead: {
+      when: 'WHEN',
+      result: 'RESULT',
+      dur: 'DUR',
+    },
     downloadThroughput: 'DOWNLOAD',
     uploadThroughput: 'UPLOAD',
     peak: 'PEAK',

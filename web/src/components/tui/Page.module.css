@@ -1,0 +1,32 @@
+.page {
+  padding: 26px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  max-width: 1320px;
+}
+
+.head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+/* Neutralize the browser's default <h1> styling — every visual property
+   below comes from this class instead, the same trick SectionHeader plays
+   on its own <h2>. */
+.title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: 0.2px;
+}
+
+.subtitle {
+  font-size: 12px;
+  color: var(--faint);
+  margin-top: 6px;
+  letter-spacing: 0.2px;
+}

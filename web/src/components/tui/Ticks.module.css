@@ -1,5 +1,18 @@
-.row { display: flex; gap: 1px; align-items: flex-end; }
+.row { height: 100%; }
 
-.tick { flex: 1; min-width: 1px; height: 100%; }
+/* The dense-tick track, now drawn as a single repeating gradient
+   (docs/design/slskdarr-tui.dc.html's `fill()` helper, commit 688d52c)
+   rather than one <span> per tick — see Ticks.tsx for why. */
+.track {
+  position: relative;
+  height: 100%;
+  background: repeating-linear-gradient(90deg, var(--tick-off) 0 1px, transparent 1px 2px);
+}
 
-.flare { animation: tui-flare 0.9s ease-out; }
+.fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  overflow: hidden;
+}

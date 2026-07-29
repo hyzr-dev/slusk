@@ -61,10 +61,10 @@ function renderShares(client: QueryClient) {
 
 describe('loading state', () => {
   it('renders only a loading placeholder before data arrives', () => {
-    // PageHeading is gone from this view (TUI reskin, #198); Layout supplies
-    // the route's <h1> instead, outside this component, so it isn't a
-    // signal this test can use — the loading placeholder text is the only
-    // one available before the query settles.
+    // <Page>'s own <h1> renders even before the query settles (#281), so it
+    // isn't a signal this test can use for the loading state specifically —
+    // the loading placeholder text is the only one available before the
+    // query settles.
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     renderShares(newClient());
     expect(screen.getByText(t.query.loading)).toBeInTheDocument();

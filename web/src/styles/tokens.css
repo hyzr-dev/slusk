@@ -5,6 +5,11 @@
    see docs/superpowers/specs/2026-07-25-tui-reskin-design.md. */
 :root {
   --bg: #08090a;
+  /* Card surface for the 27 July TUI restyle (docs/design/slskdarr-tui.dc.html,
+     commit 688d52c): panels now stand free on --bg, separated by gap rather
+     than by the dividing lines the previous idiom used, so this needs its
+     own token distinct from --bg. */
+  --panel: #0a0b0c;
 
   --fg: #e8eaec;
   --dim: #7d868c;
