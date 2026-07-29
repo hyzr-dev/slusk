@@ -1,10 +1,13 @@
 /* Two-pane layout (docs/design/slskdarr-tui.dc.html CHAT block). Only the
-   message pane scrolls — the rail and composer stay fixed. Page (the shared
-   per-route shell, see components/tui/Page.tsx) doesn't propagate a height
-   down to its children, so — like the mock's own `min-height:280px` fallback
-   — this is a floor, not a guaranteed fill to the viewport's bottom edge. */
+   message pane scrolls — the rail and composer stay fixed. `flex: 1` grows
+   this to the bottom of the Page column, which fills <main> (see Page.module
+   .css's min-height), reproducing the mock's `flex:1` + `min-height:280px`
+   pair: fill the frame, but never collapse below a usable height on a short
+   viewport. `min-height: 0` is what lets the message pane's own overflow
+   actually scroll instead of stretching this box. */
 .root {
-  min-height: 480px;
+  flex: 1;
+  min-height: 280px;
   display: flex;
 }
 

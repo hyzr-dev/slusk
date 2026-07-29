@@ -104,6 +104,30 @@ export function formatEta(etaSeconds: number | null | undefined): string {
   return `${Math.round(etaSeconds)} s`;
 }
 
+/**
+ * Formats an elapsed time that has already been *measured*, as opposed to
+ * formatEta's projection of one still to come.
+ *
+ * The difference that matters is the zero case. formatEta renders any falsy
+ * input as '—' on purpose: an absent ETA must not be dressed up as "0 s", and
+ * its callers read an optional field where absent means "no claim". A measured
+ * duration is the opposite — 0 means the work finished faster than the clock's
+ * resolution, which is an answer, not a gap. Reconcile passes routinely
+ * complete in a fraction of a second, so reusing formatEta for them rendered
+ * every row of the DUR column as '—'.
+ *
+ * Sub-10s durations keep one decimal because that is the range these actually
+ * land in, and rounding them to whole seconds throws away the distinction the
+ * column exists to show. NaN (an unparseable timestamp) and negatives (clock
+ * skew between the two stamps) are the only genuine unknowns, and those do
+ * return '—'.
+ */
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 10) return `${seconds.toFixed(1)} s`;
+  return formatEta(Math.round(seconds));
+}
+
 // The scaling byte formatter: use it wherever a value can leave the MB range,
 // such as aggregate share/library sizes (routinely hundreds of GB or several
 // TB) or an individual transfer of a large file. It steps up through GB and TB

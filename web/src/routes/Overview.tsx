@@ -10,7 +10,7 @@ import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice'
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
-import { formatEta, formatShortTime, formatSize, formatSpeed, percent } from '../format';
+import { formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
 import styles from './Overview.module.css';
 
@@ -226,16 +226,18 @@ export default function Overview() {
                 </div>
                 {reconcileRows.map((pass) => {
                   const matched = pass.matched > 0;
-                  const durationSeconds = Math.round(
-                    (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000,
-                  );
+                  // Deliberately not rounded here — formatDuration owns the
+                  // precision, and rounding first would collapse every
+                  // sub-second pass to 0 before it ever got the chance.
+                  const durationSeconds =
+                    (new Date(pass.finishedAt).getTime() - new Date(pass.startedAt).getTime()) / 1000;
                   return (
                     <div key={pass.startedAt} role="row" className={styles.reconcileGrid}>
                       <span role="cell" className={styles.reconcileTime}>{formatShortTime(pass.finishedAt)}</span>
                       <span role="cell" className={matched ? styles.reconcileMatch : styles.reconcileNoMatch}>
                         {matched ? t.overview.reconcileMatched(pass.matched) : t.overview.reconcileNoMatch}
                       </span>
-                      <span role="cell" className={styles.reconcileDur}>{formatEta(durationSeconds)}</span>
+                      <span role="cell" className={styles.reconcileDur}>{formatDuration(durationSeconds)}</span>
                     </div>
                   );
                 })}

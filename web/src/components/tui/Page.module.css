@@ -4,6 +4,13 @@
   flex-direction: column;
   gap: 22px;
   max-width: 1320px;
+  /* Fills <main>'s height (which is itself a stretched flex item of the 100vh
+     frame) so a view whose panel is meant to reach the status bar — Chat — can
+     say `flex: 1` and mean it. Views whose content is shorter are unaffected:
+     children of this column only grow if they ask to, so a short page still
+     stacks from the top. Safe against the padding above because global.css
+     sets border-box everywhere. */
+  min-height: 100%;
 }
 
 .head {
