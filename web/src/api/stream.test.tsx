@@ -342,6 +342,9 @@ describe('StreamProvider', () => {
     expect(live.jobs).toEqual([{ id: 1, bytesDone: 20, bytesTotal: 100 }]);
   });
 
+  // Contrast with the reconnect case below (issue #276): a scope change must
+  // NOT clear, but a genuine stream failure still has to — and since the
+  // cleanup no longer clears, this is the only path that does mid-session.
   it('clears the live cache on error, so consumers fall back to REST', () => {
     const queryClient = new QueryClient();
     render(
@@ -397,29 +400,6 @@ describe('StreamProvider', () => {
     expect(queryClient.getQueryData(queryKeys.live)).toMatchObject({
       jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
     });
-  });
-
-  // Contrast with the reconnect case above: a genuine stream failure still
-  // has to clear immediately, reverting every consumer to REST.
-  it('still clears the live cache on a genuine error', () => {
-    const queryClient = new QueryClient();
-    render(
-      <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={['/']}>
-          <StreamProvider>{null}</StreamProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-
-    act(() => MockEventSource.instances[0].emit('live', {
-      jobs: [{ id: 1, bytesDone: 10, bytesTotal: 100 }],
-      down: 0,
-      up: 0,
-    }));
-    expect(queryClient.getQueryData(queryKeys.live)).not.toBeNull();
-
-    act(() => MockEventSource.instances[0].onerror?.());
-    expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
   });
 
   // The other half of the reconnect-vs-unmount distinction: a real unmount

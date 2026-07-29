@@ -107,8 +107,10 @@ export const queryKeys = {
   thread: (username: string) => ['messages', 'thread', username] as const,
   // Not backed by a queryFn — see useLiveData. api/stream.tsx's StreamProvider
   // is the only writer, via setQueryData on every `event: live` frame (and
-  // clears it to null on stream error/close — null rather than undefined
-  // because setQueryData ignores undefined; see the comment there).
+  // clears it to null on stream error, or when StreamProvider itself
+  // unmounts — deliberately NOT when the connection merely reopens with a
+  // new scope, see issue #276. null rather than undefined because
+  // setQueryData ignores undefined; see the comment there).
   live: ['live'] as const,
 };
 

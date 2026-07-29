@@ -204,9 +204,10 @@ export function StreamProvider({ children }: { children: ReactNode }) {
 
     // EventSource's error event fires both for a genuine failure and for
     // the moment just before its own automatic reconnect — either way there
-    // is currently no live stream, so clearing here (rather than only in the
-    // cleanup below) is what makes a mid-session drop revert consumers to
-    // REST immediately instead of only at the next route change.
+    // is currently no live stream. Since the cleanup below deliberately no
+    // longer clears (issue #276), this is the ONLY path that reverts
+    // consumers to REST mid-session, which makes it load-bearing rather than
+    // one of two redundant clears.
     source.onerror = clearLive;
 
     // Deliberately does NOT call clearLive: this effect reruns whenever
@@ -215,7 +216,12 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     // useJobScope), not just on a genuine unmount. The accumulated jobsById
     // entries are still valid values for jobs that stay in scope, and the
     // new connection's initial snapshot (streamHub.subscribe on the Go side)
-    // resends every job in the new scope regardless — so wiping the cache
+    // resends every job in the new scope regardless — that is what bounds
+    // the gap to one round trip, and it holds because a fresh subscriber's
+    // lastJobs map starts empty, so buildJobsDelta treats every in-scope job
+    // as changed. Not clearing here depends on that; a server change making
+    // the first frame a true delta would reintroduce the blank window
+    // silently, since no test spans both sides — so wiping the cache
     // here only produced a visible blank frame for no benefit (issue #276:
     // every /api/jobs poll that shifted the Overview panel's active+stalled
     // membership blanked every row on screen). The one path that must still
