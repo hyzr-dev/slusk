@@ -17,7 +17,7 @@
   /* The quietest readable step. The mock uses this raw hex in ~30 places for
      column headers, timestamps and disabled glyphs; it is named here rather
      than repeated. */
-  --text-dim: #5f696f;
+  --text-dim: #758189;
 
   --line: #191d20;
   --line2: #252b30;
@@ -30,7 +30,7 @@
   --line-inner: #131619;
 
   --ok: #4f9e80;
-  --bad: #b5595c;
+  --bad: #c56164;
   /* Fill color for progress ticks. Deliberately not --fg: a full bar of --fg
      next to --fg text has no contrast, and the mock draws bars one step down. */
   --bar: #c8ccd0;

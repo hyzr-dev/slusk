@@ -11,5 +11,5 @@
 .primary { border: 1px solid var(--dim); background: var(--btn); color: var(--fg); }
 .ghost { border: 1px solid var(--line2); color: var(--dim); }
 .ghost:hover:not(:disabled) { border-color: var(--dim); color: var(--fg); }
-.danger { border: 1px solid rgba(181, 89, 92, 0.4); color: var(--bad); }
+.danger { border: 1px solid rgba(197, 97, 100, 0.4); color: var(--bad); }
 .danger:hover:not(:disabled) { border-color: var(--bad); }
