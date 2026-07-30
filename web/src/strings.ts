@@ -341,6 +341,20 @@ export const t = {
       result: 'RESULT',
       dur: 'DUR',
     },
+    // The RECENTLY FINISHED panel (#287): jobs that reached DONE or FAILED
+    // within the backend's window (store.DashboardFinishedWindow).
+    finishedHeading: 'RECENTLY FINISHED',
+    // Deliberately says nothing about how long "recently" is: the window is a
+    // Go constant (store.DashboardFinishedWindow) and this is a TypeScript
+    // string, so no test in either suite could catch them contradicting each
+    // other. An agnostic phrasing cannot go out of date.
+    noneFinished: 'Nothing finished recently',
+    finishedGridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      peer: 'PEER',
+      when: 'WHEN',
+    },
     downloadThroughput: 'DOWNLOAD',
     uploadThroughput: 'UPLOAD',
     peak: 'PEAK',

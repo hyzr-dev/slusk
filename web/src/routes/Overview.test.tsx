@@ -21,6 +21,18 @@ const TRANSFER_PARAMS: JobPageParams = {
   pageSize: 8,
 };
 
+// Mirrors the params Overview.tsx passes for the recently-finished panel.
+const FINISHED_PARAMS: JobPageParams = {
+  page: 0,
+  filter: 'finished',
+  sort: 'recent',
+  dir: 'desc',
+  source: 'all',
+  q: '',
+  pageSize: 5,
+  skipFacets: true,
+};
+
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
   return {
     id,
@@ -103,12 +115,14 @@ function renderOverview(
   jobsData: JobPage = jobPage,
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
+  finishedData: JobPage | undefined = makeJobPage([]),
 ) {
   // A real refetch on mount would otherwise hit the unmocked global fetch;
   // keep it pending indefinitely so the seeded data is what's asserted on.
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
+  queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -278,6 +292,46 @@ describe('Overview', () => {
     const rows = Array.from({ length: 8 }, (_, i) => ({ ...baseJob, id: i + 1, title: `Row ${i + 1}`, status: 'active' as JobStatus }));
     renderOverview(makeJobPage(rows, 12));
     expect(screen.getByText(t.overview.inFlightTruncatedMeta(8, 12))).toBeInTheDocument();
+  });
+
+  it('renders a done row and a failed row in the recently finished panel', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([
+      { ...baseJob, id: 90, title: 'Finished Album', artist: 'Artist A', status: 'done', state: 'DONE', peer: 'someuser', updatedAt: new Date(Date.now() - 12 * 60 * 1000).toISOString() },
+      { ...baseJob, id: 91, title: 'Dead Album', artist: 'Artist B', status: 'failed', state: 'FAILED', peer: '', updatedAt: new Date(Date.now() - 41 * 60 * 1000).toISOString() },
+    ]));
+
+    expect(screen.getByText(t.overview.finishedHeading)).toBeInTheDocument();
+    expect(screen.getByText('Finished Album')).toBeInTheDocument();
+    expect(screen.getByText('Dead Album')).toBeInTheDocument();
+    // formatAge on updatedAt — a one-hour window can only ever produce minutes.
+    expect(screen.getByText('12m')).toBeInTheDocument();
+    expect(screen.getByText('41m')).toBeInTheDocument();
+  });
+
+  it('shows a window-agnostic empty state when nothing finished recently', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([]));
+    expect(screen.getByText(`── ${t.overview.noneFinished} ──`)).toBeInTheDocument();
+    // The copy must not name the window: the length is a Go constant and no
+    // test in either suite could catch the two drifting apart.
+    expect(t.overview.noneFinished).not.toMatch(/hour|minute|\d/i);
+  });
+
+  it('keeps the transfers panel alive when the finished query has no data', () => {
+    renderOverview(jobPage, charts, status, undefined);
+    // A dead poll for one region must never blank another (issue #201).
+    expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
+    expect(document.querySelectorAll('[class*="transferRow"]').length).toBeGreaterThan(0);
+  });
+
+  it('renders both panels from their own independent queries', () => {
+    renderOverview(
+      makeJobPage([{ ...baseJob, id: 1, title: 'In Flight', status: 'active' }]),
+      charts,
+      status,
+      makeJobPage([{ ...baseJob, id: 90, title: 'Finished Album', status: 'done', state: 'DONE' }]),
+    );
+    expect(screen.getByText('In Flight')).toBeInTheDocument();
+    expect(screen.getByText('Finished Album')).toBeInTheDocument();
   });
 });
 
