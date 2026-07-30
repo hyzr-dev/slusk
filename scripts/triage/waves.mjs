@@ -16,6 +16,43 @@ export function filesConflict(a, b) {
 }
 
 /**
+ * True when a `touches` entry names a directory rather than an individual file.
+ *
+ * Recognised two ways, because this module is pure computation and cannot stat
+ * anything: a trailing slash, or a final path segment with no dot in it.
+ *
+ * `internal/pipeline/` and `web/src/api` both come back true; extensionless
+ * files that really exist (`Makefile`, `Dockerfile`) come back true as well.
+ * That false positive is the safe direction -- it excludes an issue from the
+ * waves and says so out loud, where the failure it guards against is silent --
+ * and a reader who sees `Makefile` in the excluded list can fix the judgement in
+ * one line.
+ */
+export function namesDirectory(path) {
+  const trimmed = path.trim()
+  if (trimmed.endsWith('/')) return true
+  return !trimmed.slice(trimmed.lastIndexOf('/') + 1).includes('.')
+}
+
+/**
+ * True when any of an issue's `touches` entries names a directory.
+ *
+ * A directory entry is unusable, not merely untidy. `filesConflict` compares
+ * paths for exact equality, so `"web/src/api"` never collides with the
+ * `web/src/api/stream.tsx` or `web/src/api/queries.ts` another issue reports:
+ * the entry looks like it declares a file set and in fact declares nothing the
+ * scheduler can see. The result is a false negative in the dangerous direction
+ * -- two agents scheduled into one file, which is the exact cost the waves exist
+ * to avoid -- and unlike an empty `touches`, which conflicts with everything and
+ * so fails safe, this one fails silent. The first real run produced such an
+ * entry (issue 58, `"web/src/api"`) while the judge prompt already forbade it,
+ * which is why the check belongs here and not in the prompt.
+ */
+export function hasDirectoryTouch(issue) {
+  return (issue.touches ?? []).some(namesDirectory)
+}
+
+/**
  * Names of the shared contracts an issue touches. A side is a list of path
  * prefixes, so both a file and a directory can name a side.
  */
@@ -83,11 +120,22 @@ export function rank(issue) {
  *
  * Cyclic blockers (A blocks B, B blocks A) do not hang; one is silently placed
  * before its own blocker. Cyclic input is malformed and resolved arbitrarily.
+ *
+ * Two exclusions are returned rather than scheduled, and they are kept apart
+ * because they need different repairs: `unassessable` means the judgement's
+ * `prodImpact` or `effort` was not a recognised value, `unschedulable` means its
+ * `touches` named a directory (see hasDirectoryTouch) and so cannot be compared
+ * against anything. An issue failing both is reported as `unassessable` only --
+ * there is no ranking to schedule either way, and listing it twice would
+ * double-count it in the report.
  */
 export function computeWaves(issues, contracts) {
   const issueNumbers = new Set(issues.map(i => i.number))
-  const assessable = issues.filter(isAssessable)
   const unassessable = issues.filter(i => !isAssessable(i)).map(i => i.number)
+  const unschedulable = issues
+    .filter(i => isAssessable(i) && hasDirectoryTouch(i))
+    .map(i => i.number)
+  const assessable = issues.filter(i => isAssessable(i) && !hasDirectoryTouch(i))
 
   const ordered = [...assessable].sort((a, b) => {
     const aHasBlockers = (a.statedBlockers ?? []).some(n => issueNumbers.has(n))
@@ -118,7 +166,8 @@ export function computeWaves(issues, contracts) {
 
   return {
     waves: waves.map(wave => wave.map(issue => issue.number)),
-    unassessable
+    unassessable,
+    unschedulable
   }
 }
 

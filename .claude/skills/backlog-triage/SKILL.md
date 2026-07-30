@@ -259,10 +259,24 @@ skew is silent and green, because each side is tested against its own mock.
 If a contract is missing from `contracts.json`, the waves cannot see it. Add it there when
 you find one.
 
-This also returns `unassessable`: issue numbers whose `prodImpact` or `effort` was not one
-of the recognised values (a typo, an omitted field, anything else `isAssessable()` rejects).
-These issues are excluded from every wave — they never got ranked, they did not rank last.
-Keep this list; it goes in the report and in `state.json` (step 4).
+This also returns two lists of issues it refused to schedule. Both are excluded from every
+wave — they never got ranked, they did not rank last — and both go in the report and in
+`state.json` (step 4). They are kept apart because they need different repairs:
+
+- `unassessable` — `prodImpact` or `effort` was not one of the recognised values (a typo, an
+  omitted field, anything else `isAssessable()` rejects). Fix the judgement's enum value.
+- `unschedulable` — a `touches` entry named a directory rather than a file. Fix the
+  judgement's `touches` to name the individual files. The judge prompt already forbids
+  directories, but a prompt cannot enforce anything: the first real run reported
+  `"web/src/api"` on issue 58 anyway. `filesConflict` compares paths for exact equality, so
+  that entry never collides with the `web/src/api/stream.tsx` another issue reports — the
+  false negative in the dangerous direction, two agents in one file. An issue failing both
+  checks is reported as `unassessable` only.
+
+A `touches` entry counts as a directory when it ends in a slash or its last segment has no
+dot in it, which is the only signal available to a module that cannot stat the tree. An
+extensionless real file (`Makefile`) is therefore excluded too — say so in the report if one
+shows up rather than quietly dropping it; it is a one-line fix to the judgement.
 
 ### 4. Write the report
 
@@ -354,10 +368,17 @@ anywhere in the report without stating one too.
    value, so the wave computation excluded it. This is a bad judgement worth reading, a
    different failure from Unassessed — keep the two sections separate so a reader can tell
    which happened.
-10. **Candidates to close** — the browser verdicts that came back `PASS`: what was observed,
+10. **Unschedulable** — the `unschedulable` issue numbers from step 3, listed by issue
+    number, descending: the judgement was rankable, but one of its `touches` entries named a
+    directory instead of a file, so the wave computation excluded it. Name the offending
+    entry for each, because that is the whole repair. A third failure mode, distinct from
+    both sections above it: Unassessed has no judgement, Unassessable has one that cannot be
+    ranked, this one has a judgement that ranks fine and a file set nothing can be compared
+    against.
+11. **Candidates to close** — the browser verdicts that came back `PASS`: what was observed,
     listed by issue number, descending. Not a conclusion: "I could not reproduce it" and "it
     is fixed" are different claims, and the second is the maintainer's.
-11. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
+12. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
     command that would unblock it. Printing
     that command is the whole job here; running it yourself is not — that is exactly the PR
     lab / browser-verification territory this capability stays out of.
@@ -372,6 +393,7 @@ are actual strings:
   "issues": { "<issue number as a string key>": <judgement object, with its digest stitched on> },
   "waves": [[<issue numbers>]],
   "unassessable": [<issue numbers>],
+  "unschedulable": [<issue numbers>],
   "unassessed": [<issue numbers>]
 }
 ```
@@ -384,10 +406,11 @@ git rev-parse HEAD
 
 `issues` holds every judgement this run knows about — reused and newly judged — keyed by
 issue number as a string, so next run's `invalidate` step can find them. `waves` is what
-makes the report checkable after the fact. `unassessable` (from step 3's result) and
-`unassessed` (from step 2's result) are kept apart deliberately: one is a judgement with a
-value the scheduler didn't recognise, the other is no judgement at all. Collapsing them
-would hide which failure mode actually happened.
+makes the report checkable after the fact. `unassessable` and `unschedulable` (both from step
+3's result) and `unassessed` (from step 2's result) are kept apart deliberately: a judgement
+with a value the scheduler didn't recognise, a judgement whose `touches` named a directory,
+and no judgement at all. Collapsing any two of them would hide which failure mode actually
+happened, and each takes a different repair.
 
 **Leave both files unstaged and uncommitted.** Writing a file and committing it is the
 reflex in this repo, but this capability never commits anything — that is the prohibition
@@ -466,7 +489,8 @@ and heredocs, which fish does not support at all.
 | Passed `fresh` issue numbers as `args.cached` | The workflow needs judgement *objects*; look each `fresh` number up in `state.json` first |
 | Went looking for `unassessed` in the log output | It's a field on the return value (`result.unassessed`), always an array; read it directly |
 | Skipped the code-change axis when `computedAt` didn't resolve | Treat everything as stale instead — an unresolvable diff is not evidence nothing changed |
-| Merged `unassessable` and `unassessed` into one bucket | They are different failure modes; keep them apart in the report and in `state.json` |
+| Merged `unassessable`, `unschedulable` and `unassessed` into one bucket | Three different failure modes with three different repairs; keep them apart in the report and in `state.json` |
+| Assumed the prompt's "never a directory in `touches`" rule holds | `computeWaves` enforces it now, because the prompt didn't — such an issue lands in `unschedulable` and in no wave; report it and fix the judgement |
 | Committed the report or `state.json` | Leave both unstaged; this capability never commits anything, including its own output |
 | Called a browser check PASS without rendering | That is BLOCKED; `verifying-ui-in-browser` owns the contract |
 | Left an `ISSUES_FOUND` verdict out of the report | It has its own section, above Waves — a defect confirmed live in a browser is the strongest evidence in the report, and `PASS`/`BLOCKED` sections have no room for it |

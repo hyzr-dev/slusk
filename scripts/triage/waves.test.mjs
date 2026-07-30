@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { filesConflict, contractsTouched, conflicts, rank, isAssessable, computeWaves } from './waves.mjs'
+import { filesConflict, contractsTouched, conflicts, rank, isAssessable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
 
 test('issues touching the same file conflict', () => {
   const a = { number: 1, touches: ['internal/pipeline/importing.go'] }
@@ -19,6 +19,62 @@ test('an issue with no known touches conflicts with everything', () => {
   const b = { number: 2, touches: ['web/src/App.tsx'] }
   assert.equal(filesConflict(a, b), true)
   assert.equal(filesConflict(b, a), true)
+})
+
+test('a touches entry naming a directory is caught, with and without a trailing slash', () => {
+  assert.equal(namesDirectory('web/src/api'), true)
+  assert.equal(namesDirectory('web/src/api/'), true)
+  assert.equal(namesDirectory('internal/pipeline/'), true)
+  assert.equal(namesDirectory('internal/store/migrations'), true)
+})
+
+test('a normal file path is not caught', () => {
+  assert.equal(namesDirectory('web/src/api/stream.tsx'), false)
+  assert.equal(namesDirectory('internal/pipeline/importing.go'), false)
+  assert.equal(namesDirectory('config.example.toml'), false)
+})
+
+test('hasDirectoryTouch flags an issue with one directory among real files', () => {
+  // The shape the first real run actually produced: issue 58 reported
+  // "web/src/api" beside two genuine files.
+  const issue = { number: 58, touches: ['web/src/api', 'web/src/views/Jobs.tsx'] }
+  assert.equal(hasDirectoryTouch(issue), true)
+  assert.equal(hasDirectoryTouch({ number: 59, touches: ['web/src/api/stream.tsx'] }), false)
+  assert.equal(hasDirectoryTouch({ number: 60 }), false)
+})
+
+test('an issue whose touches name a directory is reported, not scheduled', () => {
+  const issues = [
+    { number: 58, prodImpact: 'degraded', effort: 'M', touches: ['web/src/api'] },
+    { number: 59, prodImpact: 'outage', effort: 'S', touches: ['web/src/api/stream.tsx'] },
+  ]
+  const result = computeWaves(issues, [])
+  // Without the exclusion #58's directory entry never collides with #59's file,
+  // so both would share wave one and two agents would land in web/src/api.
+  assert.deepEqual(result.waves, [[59]])
+  assert.deepEqual(result.unschedulable, [58])
+  assert.deepEqual(result.unassessable, [])
+})
+
+test('a trailing-slash directory touch is excluded the same way', () => {
+  const issues = [
+    { number: 70, prodImpact: 'degraded', effort: 'M', touches: ['internal/pipeline/'] },
+    { number: 71, prodImpact: 'cosmetic', effort: 'S', touches: ['internal/pipeline/importing.go'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[71]])
+  assert.deepEqual(result.unschedulable, [70])
+})
+
+test('an issue failing both checks is reported as unassessable only', () => {
+  const issues = [
+    { number: 80, prodImpact: 'sever', effort: 'S', touches: ['web/src/api'] },
+    { number: 81, prodImpact: 'outage', effort: 'S', touches: ['a.go'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[81]])
+  assert.deepEqual(result.unassessable, [80])
+  assert.deepEqual(result.unschedulable, [])
 })
 
 const CONTRACTS = [
@@ -234,7 +290,7 @@ test('the CLI computes waves from stdin JSON', () => {
     contracts: [],
   })
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
-  assert.deepEqual(JSON.parse(out), { waves: [[1], [2]], unassessable: [] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1], [2]], unassessable: [], unschedulable: [] })
 })
 
 test('the CLI reports unassessable issues alongside the waves', () => {
@@ -246,7 +302,7 @@ test('the CLI reports unassessable issues alongside the waves', () => {
     contracts: [],
   })
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
-  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [2] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [2], unschedulable: [] })
 })
 
 test('the CLI rejects an unknown mode with a non-zero exit', () => {
@@ -269,7 +325,7 @@ test('the CLI round-trips a large multi-byte payload through stdin', () => {
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], {
     input, maxBuffer: 10 * 1024 * 1024,
   })
-  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [], unschedulable: [] })
 })
 
 test('decodeChunks reassembles a multi-byte character split across a chunk boundary', () => {
