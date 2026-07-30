@@ -81,8 +81,28 @@ const VERDICT = {
   },
 }
 
-const issues = args?.issues ?? []
+// Validate args before spending anything on a baseline agent: a malformed
+// invocation should cost nothing, not burn an agent before the emptiness is
+// discovered.
+if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+  log(`args must be passed as an actual JSON object, not ${typeof args} -- a JSON string is the
+     specific mistake to avoid. Expected shape: { issues: number[], cached: object[] }. Received: ${JSON.stringify(args)}`)
+  return { judgements: [], baseline: null, browser: [], unassessed: [], aborted: 'bad-args' }
+}
+
 const cached = args?.cached ?? []
+
+// args.issues missing, not an array, or empty is fine BY ITSELF -- an empty
+// issues array with a populated cache is the normal second-run case (every
+// issue cached, nothing stale) and must NOT abort. It's only meaningless when
+// there is ALSO nothing cached: no fresh issue to judge and nothing to report
+// on either.
+const issuesArr = Array.isArray(args?.issues) ? args.issues : null
+if ((!issuesArr || issuesArr.length === 0) && cached.length === 0) {
+  log(`no issues to triage: args.issues is ${issuesArr ? `empty` : `missing or not an array (${typeof args?.issues})`} and args.cached is empty -- nothing to judge and nothing cached to report on`)
+  return { judgements: [], baseline: null, browser: [], unassessed: [], aborted: 'no-issues' }
+}
+const issues = issuesArr ?? []
 
 // Baseline first and on its own: ranking thirty issues against a broken
 // baseline is ranking fiction, so a failure that is not known noise aborts.
