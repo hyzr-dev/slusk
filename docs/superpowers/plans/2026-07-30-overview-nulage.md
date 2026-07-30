@@ -1164,12 +1164,18 @@ function renderOverview(
   jobsData: JobPage = jobPage,
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
-  finishedData: JobPage | undefined = makeJobPage([]),
+  // `null` means "leave this key unseeded" so the query stays pending —
+  // distinct from the default, which seeds a ready but empty page. The two
+  // are different states and a test asserting on one must not silently get
+  // the other (see the gate test below).
+  finishedData: JobPage | null = makeJobPage([]),
 ) {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
-  queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  if (finishedData !== null) {
+    queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  }
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -1208,7 +1214,15 @@ it('shows a window-agnostic empty state when nothing finished recently', () => {
 });
 
 it('keeps the transfers panel alive when the finished query has no data', () => {
-  renderOverview(jobPage, charts, status, undefined);
+  // Passing `undefined` here would NOT work: renderOverview's 4th parameter
+  // has a JS default (`= makeJobPage([])`), and an explicit `undefined`
+  // triggers that default regardless of the declared type — so the test
+  // would seed a ready, empty page and prove nothing. `null` is the sentinel
+  // for "do not seed this key at all", leaving the query pending (fetch is
+  // stubbed to hang forever). That is what makes this test able to fail:
+  // if both regions shared one gate, a pending finished query would suppress
+  // the transfers rows too.
+  renderOverview(jobPage, charts, status, null);
   // A dead poll for one region must never blank another (issue #201).
   expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
   expect(document.querySelectorAll('[class*="transferRow"]').length).toBeGreaterThan(0);
