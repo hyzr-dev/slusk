@@ -83,25 +83,67 @@ func TestBuildJobsDeltaSameNowUnchangedJobStaysOmitted(t *testing.T) {
 	}
 }
 
-// TestBuildJobsDeltaDifferentNowResendsUnchangedJob is the converse: two
-// different now values on an otherwise-identical job must resend it — a
-// FramedAt-only refresh is exactly what should re-freshen the client's
-// freshness signal (issue #285), not something the delta should suppress.
-func TestBuildJobsDeltaDifferentNowResendsUnchangedJob(t *testing.T) {
+// TestBuildJobsDeltaDifferentNowResendsUnchangedLiveMatchedJob is the
+// converse of same-now: for a job that is LIVE-MATCHED (anyLiveMatch true on
+// its candidate), two different now values on an otherwise-identical job
+// must resend it — a FramedAt-only refresh is exactly what should
+// re-freshen the client's freshness signal (issue #285), which matters for
+// the stalled-but-live case: identical byte/speed values tick to tick must
+// still get a fresh FramedAt or the client incorrectly falls back to REST
+// despite the job still being live. FramedAt must only ever be bumped to
+// `now` for a live-matched job — see the code-review regression this test
+// guards against in TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable.
+func TestBuildJobsDeltaDifferentNowResendsUnchangedLiveMatchedJob(t *testing.T) {
+	view := core.JobView{
+		Job:     core.AlbumJob{ID: 7, Title: "Rounds"},
+		Attempt: &core.Candidate{ID: 1, Username: "alice", Files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}},
+	}
+	views := map[int64]core.JobView{7: view}
+	sub := &streamSubscriber{jobIDs: map[int64]struct{}{7: {}}}
+
+	// Stalled: same speed/bytes on both ticks, but the file still has a live
+	// counterpart (State: TransferQueued), so the job stays live-matched.
+	idx := newLiveTransferIndex([]core.RemoteTransfer{
+		{Username: "alice", Filename: "a.flac", State: core.TransferQueued, Speed: 0},
+	})
+
+	first := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
+	if len(first) != 1 || first[0].ID != 7 || first[0].FramedAt != testNow.Format(timeFormat) {
+		t.Fatalf("first tick: expected job 7 framed at testNow, got %+v", first)
+	}
+
+	later := testNow.Add(time.Second)
+	second := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates, later)
+	if len(second) != 1 || second[0].ID != 7 || second[0].FramedAt != later.Format(timeFormat) {
+		t.Fatalf("different now, still live-matched: expected job 7 resent with the new FramedAt, got %+v", second)
+	}
+}
+
+// TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable is the regression
+// test for what code review found in #285: tick() used to compute ONE
+// shared `now` per tick and thread it into every scoped job's FramedAt
+// unconditionally, so a job that is NOT live-matched (no candidate, or a
+// candidate with no current live counterpart) got a different FramedAt every
+// tick even though nothing about it actually changed — resending every
+// scoped job, including fully terminal ones, on every single tick forever,
+// defeating delta encoding. A non-live-matched job must keep whatever
+// FramedAt it was last assigned across ticks with different `now`, so once
+// its other fields stop changing, it is correctly omitted from the delta.
+func TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable(t *testing.T) {
 	views := map[int64]core.JobView{
 		7: {Job: core.AlbumJob{ID: 7, Title: "Rounds"}},
 	}
 	sub := &streamSubscriber{jobIDs: map[int64]struct{}{7: {}}}
 
 	first := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
-	if len(first) != 1 || first[0].ID != 7 {
-		t.Fatalf("first tick: expected job 7, got %+v", first)
+	if len(first) != 1 || first[0].ID != 7 || first[0].FramedAt != testNow.Format(timeFormat) {
+		t.Fatalf("first tick: expected job 7 framed at testNow, got %+v", first)
 	}
 
 	later := testNow.Add(time.Second)
 	second := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, later)
-	if len(second) != 1 || second[0].ID != 7 || second[0].FramedAt != later.Format(timeFormat) {
-		t.Fatalf("different now: expected job 7 resent with the new FramedAt, got %+v", second)
+	if len(second) != 0 {
+		t.Fatalf("different now, not live-matched, nothing else changed: expected an empty delta (FramedAt must not have been bumped), got %+v", second)
 	}
 }
 

@@ -225,6 +225,21 @@ func liveMatchedFileSet(cachedJobs []jobCorrelation, idx liveTransferIndex) map[
 // deleted rather than maintained (issue #258 review findings B3/C2/C3
 // existed only to correct a set that could shrink).
 //
+// FramedAt is only ever set to this tick's `now` for a job that is currently
+// live-matched (anyLiveMatch on its candidate) — the case #285 actually
+// needs: a stalled-but-live job whose other fields tick-to-tick are
+// identical still needs a fresh FramedAt, or the client's freshness check
+// would incorrectly fall back to REST despite the job still being live. A
+// job NOT live-matched this tick (including one that never had a candidate)
+// instead keeps whatever FramedAt it was last assigned — from sub.lastJobs,
+// or `now` the first time it's ever framed for this subscriber — so once its
+// other fields stop changing, reflect.DeepEqual correctly sees no change and
+// this function correctly stops resending it, exactly like every other field
+// (see issue #285 review: computing one shared `now` per tick regardless of
+// live-match status made FramedAt differ every tick for EVERY scoped job,
+// including terminal ones, defeating delta encoding's whole purpose by
+// resending every job on every tick forever).
+//
 // Mutates sub.lastJobs to exactly this tick's computed set. Sorted by job id
 // for deterministic output.
 func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) []jobDTO {
@@ -235,7 +250,16 @@ func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx
 		if !ok {
 			continue
 		}
-		dto := toJobDTO(view, failedRetryAfter, maxCandidates, idx, persisted, now)
+		framedAt := now
+		liveMatched := view.Attempt != nil && anyLiveMatch(view.Attempt.Username, view.Attempt.Files, idx)
+		if !liveMatched {
+			if prev, had := sub.lastJobs[id]; had {
+				if t, err := time.Parse(timeFormat, prev.FramedAt); err == nil {
+					framedAt = t
+				}
+			}
+		}
+		dto := toJobDTO(view, failedRetryAfter, maxCandidates, idx, persisted, framedAt)
 		nextLast[id] = dto
 		if prev, had := sub.lastJobs[id]; !had || !reflect.DeepEqual(prev, dto) {
 			delta = append(delta, dto)
