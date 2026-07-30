@@ -215,7 +215,10 @@ const judged = await pipeline(
      why there is no production impact instead of leaving it empty. A reviewer
      will open the reference you give against the actual file: one that doesn't
      resolve, or doesn't say what you claimed, is worse than an honest lower
-     prodImpact.
+     prodImpact. If a range is cited, it must contain every element of the
+     claim -- name two separate references rather than one range that spans
+     them but only actually contains one, since a range that opens to real code
+     but omits part of what it claims reads as verified when it is not.
 
      touches must list the repo-relative paths an implementation would change.
      Be accurate: these paths decide which issues are scheduled in parallel, and
