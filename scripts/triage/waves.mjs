@@ -151,13 +151,26 @@ export function invalidate({ state, openIssues, changedPaths }) {
   return { fresh, stale }
 }
 
+/**
+ * Reassemble a stdin byte stream captured as an array of chunks into text.
+ * Buffers must be concatenated before decoding -- decoding each chunk to a
+ * string independently and joining the strings corrupts any multi-byte
+ * character that a chunk boundary happens to split in half, which for this
+ * repo's Swedish issue titles (å, ä, ö) is not a corner case: it is routine
+ * as soon as the backlog is large enough for stdin to arrive in more than
+ * one chunk.
+ */
+export function decodeChunks(chunks) {
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 // CLI entry point. The skill shells out to this rather than reimplementing the
 // rules, so the tested code and the running code are the same code.
 if (process.argv[1] && process.argv[1].endsWith('waves.mjs')) {
   const mode = process.argv[2]
   const chunks = []
   for await (const chunk of process.stdin) chunks.push(chunk)
-  const input = JSON.parse(chunks.join('') || '{}')
+  const input = JSON.parse(decodeChunks(chunks) || '{}')
 
   if (mode === 'waves') {
     process.stdout.write(JSON.stringify(computeWaves(input.issues ?? [], input.contracts ?? [])))

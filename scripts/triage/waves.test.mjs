@@ -214,6 +214,7 @@ test('a missing state file makes every open issue stale', () => {
 })
 
 import { execFileSync } from 'node:child_process'
+import { decodeChunks } from './waves.mjs'
 
 test('the CLI computes waves from stdin JSON', () => {
   const input = JSON.stringify({
@@ -242,4 +243,36 @@ test('the CLI reports unassessable issues alongside the waves', () => {
 test('the CLI rejects an unknown mode with a non-zero exit', () => {
   assert.throws(() =>
     execFileSync('node', ['scripts/triage/waves.mjs', 'nonsense'], { input: '{}', stdio: 'pipe' }))
+})
+
+test('the CLI round-trips a large multi-byte payload through stdin', () => {
+  // A long dense run of two-byte characters guarantees that stdin arrives in
+  // more than one chunk, exercising the same multi-chunk path a large
+  // real-world (Swedish) backlog would take. This alone cannot prove chunks
+  // are reassembled correctly -- see decodeChunks below for that -- but it
+  // does confirm the CLI survives a payload this size without truncating or
+  // throwing.
+  const path = 'å'.repeat(200_000) + '.go'
+  const input = JSON.stringify({
+    issues: [{ number: 1, prodImpact: 'outage', effort: 'S', touches: [path] }],
+    contracts: [],
+  })
+  const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], {
+    input, maxBuffer: 10 * 1024 * 1024,
+  })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [] })
+})
+
+test('decodeChunks reassembles a multi-byte character split across a chunk boundary', () => {
+  // Hand-split the buffer inside the two-byte UTF-8 encoding of "å" (0xC3
+  // 0xA5), rather than relying on the OS to chunk stdin at a particular size.
+  // Real stdin chunking is deterministic for a given payload and platform,
+  // but where exactly a boundary lands relative to a multi-byte character
+  // depends on incidental byte offsets earlier in the payload -- picking the
+  // split by hand is what makes this test fail on the bug every time instead
+  // of only when the surrounding JSON happens to have an unlucky length.
+  const utf8 = Buffer.from('touches å', 'utf8')
+  const splitAt = utf8.indexOf(0xc3) + 1 // midway through å's two bytes
+  const chunks = [utf8.subarray(0, splitAt), utf8.subarray(splitAt)]
+  assert.equal(decodeChunks(chunks), 'touches å')
 })
