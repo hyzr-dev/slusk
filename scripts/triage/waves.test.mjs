@@ -154,8 +154,6 @@ test('circular blockers resolve arbitrarily', () => {
     { number: 91, prodImpact: 'outage', effort: 'S', touches: ['b.go'], statedBlockers: [90] },
   ]
   const result = computeWaves(issues, [])
-  assert.ok(result.waves.length === 2)
-  assert.ok(result.waves[0].length === 1)
-  assert.ok(result.waves[1].length === 1)
+  assert.deepEqual(result.waves, [[90], [91]])
   assert.deepEqual(result.unassessable, [])
 })
