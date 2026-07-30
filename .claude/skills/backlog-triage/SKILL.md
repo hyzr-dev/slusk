@@ -117,6 +117,17 @@ open issue number as `args.issues` and `args.cached: []`.
 
 ### 2. Run the workflow
 
+**This step cannot be delegated to a subagent.** The Workflow tool is only available in the
+main session — a subagent's tool set does not include it, the same way it does not include
+every tool the main session has. This is a capability boundary, not a rule someone chose to
+apply: there is nothing to request permission for, because the tool is simply not present to
+grant. If you are a subagent and find no Workflow tool available, stop here and hand this
+step back to the main session rather than substitute the Agent tool for it. A pipeline
+hand-rolled from Agent calls exercises something other than
+`.claude/workflows/backlog-triage.js` — its baseline check, its abort logic, its judgement
+schema are all reimplemented ad hoc, or skipped — so a report produced that way says nothing
+about whether this capability actually works, while looking exactly like a report that does.
+
 **Before invoking the Workflow tool**, record the PIDs of any matching processes already
 running — step 5 needs this to know which ones it started:
 
@@ -317,6 +328,7 @@ and heredocs, which fish does not support at all.
 | Piped JSON to `waves.mjs` with `echo '...' \| node ...` | Breaks on the first apostrophe in the content; write the payload to a file and redirect it in with `<` |
 | Concatenated `cached` onto `result.judgements` before computing waves | `result.judgements` already includes the cached ones; concatenating duplicates them, and a duplicate conflicts with itself, faking a dependency |
 | Wrote `state.json`'s template values as quoted strings | Only `computedAt` and the map keys are strings; judgements, numbers and arrays are not — a literal string copy breaks every future cache hit |
+| A subagent hand-rolled an Agent-call pipeline when the Workflow tool wasn't available | Stop and hand step 2 back to the main session; a substitute pipeline tests itself, not `.claude/workflows/backlog-triage.js` |
 | Judged an issue from its text | Read the code it points at; a summary is not a judgement |
 | An agent decided the waves | The waves come from `waves.mjs`; agents supply `touches`, not scheduling |
 | Ranked issues against a red baseline | The script aborts for a reason — report which `aborted` value fired and stop |
