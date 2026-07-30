@@ -74,6 +74,14 @@ const CONVERSATIONS_INTERVAL = 5000;
 // CONVERSATIONS_INTERVAL: a chat view lagging behind the peer by 5s reads as
 // broken in a way a sidebar badge lagging that much does not.
 const THREAD_INTERVAL = 3000;
+// How long a streamed job's server-computed framedAt may age before
+// replaceLiveJobs stops trusting it and falls back to REST (issue #285).
+// Comfortably above internal/observ's streamCorrelationInterval (5s,
+// stream.go) — the worst-case gap between two genuine view refreshes for
+// a job that's still actually live — and below JOBS_INTERVAL (15s), so a
+// job that has truly left the live-matched set unpins before REST's own
+// next poll would have corrected it anyway.
+const LIVE_JOB_FRESH_MS = 10000;
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -134,7 +142,7 @@ export function useLiveData(): ScopedLivePayload | null | undefined {
 // function, so whichever wins is a complete, self-consistent replacement,
 // not a partial view to overlay).
 //
-// The choice is `updatedAt`, not simple presence in `live`: stream.tsx
+// The choice is `framedAt`, not simple presence in `live`: stream.tsx
 // accumulates jobs by id and never evicts an entry on its own (see its doc
 // comment), because the backend deliberately stops streaming a job once it
 // leaves the live-matched set — including the post-terminal DB transitions
@@ -143,10 +151,22 @@ export function useLiveData(): ScopedLivePayload | null | undefined {
 // `live` were enough to win, a job would stay pinned at its last live values
 // for the remaining lifetime of the connection, and REST's 15s poll — the
 // only source left correcting those trailing DB transitions — could never
-// self-heal it. Comparing `updatedAt` fixes that: REST strictly newer means
-// the DB genuinely moved since the pinned live object was produced, so REST
-// wins and the pin is released; otherwise (DB unchanged, only live fields
-// moved) the live object wins, exactly as before.
+// self-heal it.
+//
+// An earlier version compared `updatedAt` instead. That measured the wrong
+// thing (issue #285): REST's updatedAt and the stream's updatedAt are read
+// from two independently-cached copies of the same DB row, with different
+// staleness windows (REST: up to 15s stale via React Query; stream: up to
+// 5s stale via the server's own correlation cache) — so the comparison
+// told you which cache last happened to read the DB, not which side's data
+// was actually fresher. A stale streamed row could therefore win forever
+// once its job left the live-matched set.
+//
+// `framedAt` fixes that: it's server-set to the instant the DTO instance was
+// computed (see internal/observ's jobDTO.FramedAt), so it directly measures
+// how old the streamed object is, independent of either side's cache. The
+// streamed row wins only while its framedAt is within LIVE_JOB_FRESH_MS of
+// now; once it ages past that, REST wins and the pin releases.
 //
 // A job absent from `live` entirely (never streamed since the last reset —
 // see LivePayload's doc comment) trivially falls back to REST, since there
@@ -157,8 +177,8 @@ export function replaceLiveJobs(jobs: Job[] | undefined, live: WireJob[] | undef
   return jobs.map((job) => {
     const streamed = byId.get(job.id);
     if (!streamed) return job;
-    const restIsNewer = new Date(job.updatedAt).getTime() > new Date(streamed.updatedAt).getTime();
-    return restIsNewer ? job : streamed;
+    const stale = Date.now() - new Date(streamed.framedAt).getTime() > LIVE_JOB_FRESH_MS;
+    return stale ? job : streamed;
   });
 }
 

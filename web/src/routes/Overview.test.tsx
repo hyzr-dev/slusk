@@ -32,6 +32,7 @@ function makeJob(id: number, title: string, artist: string, status: JobStatus): 
     bytesTotal: status === 'active' ? 100 : 0,
     createdAt: '2026-07-01T10:00:00Z',
     updatedAt: '2026-07-01T10:00:00Z',
+    framedAt: '2026-07-01T10:00:00Z',
     state: 'DOWNLOADING',
     candidatesTried: 1,
     maxCandidates: 3,

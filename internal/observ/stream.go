@@ -227,7 +227,7 @@ func liveMatchedFileSet(cachedJobs []jobCorrelation, idx liveTransferIndex) map[
 //
 // Mutates sub.lastJobs to exactly this tick's computed set. Sorted by job id
 // for deterministic output.
-func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int) []jobDTO {
+func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) []jobDTO {
 	nextLast := make(map[int64]jobDTO, len(sub.jobIDs))
 	var delta []jobDTO
 	for id := range sub.jobIDs {
@@ -235,7 +235,7 @@ func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx
 		if !ok {
 			continue
 		}
-		dto := toJobDTO(view, failedRetryAfter, maxCandidates, idx, persisted)
+		dto := toJobDTO(view, failedRetryAfter, maxCandidates, idx, persisted, now)
 		nextLast[id] = dto
 		if prev, had := sub.lastJobs[id]; !had || !reflect.DeepEqual(prev, dto) {
 			delta = append(delta, dto)
@@ -256,11 +256,11 @@ func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx
 // jobDTO header needs both) hasn't been cached for it yet, which omits the
 // field rather than sending an incomplete object the frontend would mistake
 // for "this job has no attempts".
-func buildStreamDetail(view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int) *jobDetailDTO {
+func buildStreamDetail(view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) *jobDetailDTO {
 	if !hasDetail || !hasView {
 		return nil
 	}
-	dto := toJobDetailDTO(view, detail, idx, persisted, failedRetryAfter, maxCandidates)
+	dto := toJobDetailDTO(view, detail, idx, persisted, failedRetryAfter, maxCandidates, now)
 	return &dto
 }
 
@@ -320,13 +320,13 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 // down/up/detail it is delta-encoded per subscriber rather than a shared
 // snapshot (see buildJobsDelta). Pure and I/O-free by construction, so it is
 // table-testable without a server.
-func buildLiveSnapshot(live []core.RemoteTransfer, jobID int64, throughput core.ThroughputSeries, view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int) livePayload {
+func buildLiveSnapshot(live []core.RemoteTransfer, jobID int64, throughput core.ThroughputSeries, view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) livePayload {
 	payload := livePayload{
 		Down: downSpeed(throughput.Download, live),
 		Up:   upSpeed(throughput.Upload),
 	}
 	if jobID > 0 {
-		payload.Detail = buildStreamDetail(view, hasView, detail, hasDetail, idx, persisted, failedRetryAfter, maxCandidates)
+		payload.Detail = buildStreamDetail(view, hasView, detail, hasDetail, idx, persisted, failedRetryAfter, maxCandidates, now)
 	}
 	return payload
 }
@@ -775,14 +775,18 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 	detail, hasDetail := h.detailSnapshot(jobID)
 	view, hasView := views[jobID]
 
+	// This runs outside tick() (a subscriber's first frame, on connect), so
+	// it computes its own shared now — see jobDTO.FramedAt.
+	now := time.Now()
+
 	sub := &streamSubscriber{
 		ch:     make(chan livePayload, 1),
 		jobID:  jobID,
 		jobIDs: jobIDs,
 	}
-	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates)
+	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 
-	initial = buildLiveSnapshot(live, jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates)
+	initial = buildLiveSnapshot(live, jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 	initial.Jobs = jobsDelta
 	initial.Throughput = toThroughputDTO(throughput.Download)
 	initial.UploadThroughput = toThroughputDTO(throughput.Upload)
@@ -857,6 +861,9 @@ func (h *streamHub) tick(ctx context.Context) {
 	live := h.fetchLive(fetchCtx)
 	throughput := h.fetchThroughput(fetchCtx)
 	liveIdx := newLiveTransferIndex(live)
+	// One shared now for every subscriber's frame this tick — see
+	// jobDTO.FramedAt.
+	now := time.Now()
 
 	cachedJobs := h.correlationSnapshot()
 	// The set of live-matched candidate FILES changed since the last refresh:
@@ -903,8 +910,8 @@ func (h *streamHub) tick(ctx context.Context) {
 	for _, sub := range h.subs {
 		detail, hasDetail := details[sub.jobID]
 		view, hasView := views[sub.jobID]
-		next := buildLiveSnapshot(live, sub.jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates)
-		jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates)
+		next := buildLiveSnapshot(live, sub.jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
+		jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 		freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
 		freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
 		if !changedSinceLast(sub.last, next, len(jobsDelta), len(freshDownload), len(freshUpload)) {

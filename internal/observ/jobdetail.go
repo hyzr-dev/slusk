@@ -108,9 +108,9 @@ func terminalTransferState(s core.TransferState) bool {
 // from view via the exact same toJobDTO the job list uses. Callers are
 // responsible for fetching view and d for the SAME job id; this function
 // does not itself verify d.Job.ID == view.Job.ID.
-func toJobDetailDTO(view core.JobView, d core.JobDetail, live liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int) jobDetailDTO {
+func toJobDetailDTO(view core.JobView, d core.JobDetail, live liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) jobDetailDTO {
 	out := jobDetailDTO{
-		Job:      toJobDTO(view, failedRetryAfter, maxCandidates, live, persisted),
+		Job:      toJobDTO(view, failedRetryAfter, maxCandidates, live, persisted, now),
 		Attempts: make([]attemptDetailDTO, len(d.Attempts)),
 	}
 	for i, ad := range d.Attempts {

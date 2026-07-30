@@ -104,8 +104,20 @@ type jobDTO struct {
 	// changes on progress/state updates, so the frontend uses it (not
 	// UpdatedAt) to sort the TRANSFERS panel by start order (#233): sorting by
 	// UpdatedAt reorders the panel on every progress tick.
-	CreatedAt       string  `json:"createdAt"`
-	UpdatedAt       string  `json:"updatedAt"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+	// FramedAt is when this DTO instance was computed — not the DB row's
+	// UpdatedAt, and not copied from any cache. On the stream path every job
+	// sent in the same tick's frame shares one value (see tick()); on REST
+	// every job in one response shares one value (see enrichJobDTOs). The
+	// frontend uses it, not UpdatedAt, to decide whether a job's streamed
+	// values are still worth trusting over REST's — see replaceLiveJobs in
+	// web/src/api/queries.ts and issue #285 for why UpdatedAt could not do
+	// this job: REST's and the stream's UpdatedAt values are read from two
+	// independently-cached copies of the DB row with different staleness
+	// windows, so comparing them measured which cache last happened to read
+	// the DB, not which side's data was actually fresher.
+	FramedAt        string  `json:"framedAt"`
 	State           string  `json:"state"`
 	CandidatesTried int     `json:"candidatesTried"`
 	MaxCandidates   int     `json:"maxCandidates"`
@@ -147,8 +159,10 @@ type jobDTO struct {
 // none. persisted supplies each live-matched candidate's exact per-file
 // persisted bytes (see jobBytesDone, Store.TransferBytesByCandidate); nil is
 // a valid "not fetched" map — every job then simply falls back to its own
-// AlbumBytesDone.
-func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveTransferIndex, persisted map[int64]map[string]int64) jobDTO {
+// AlbumBytesDone. now is when this DTO instance is being computed — callers
+// share one value across every job in the same response/frame so the
+// frontend's freshness check compares like with like (see jobDTO.FramedAt).
+func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int, live liveTransferIndex, persisted map[int64]map[string]int64, now time.Time) jobDTO {
 	d := jobDTO{
 		ID:              v.Job.ID,
 		Title:           v.Job.Title,
@@ -157,6 +171,7 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 		Peer:            v.Peer,
 		CreatedAt:       v.Job.CreatedAt.Format(timeFormat),
 		UpdatedAt:       v.Job.UpdatedAt.Format(timeFormat),
+		FramedAt:        now.Format(timeFormat),
 		State:           string(v.Job.State),
 		CandidatesTried: v.Job.CandidatesTried,
 		MaxCandidates:   maxCandidates,
@@ -687,7 +702,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		idx := newLiveTransferIndex(live)
 		persisted := fetchPersistedBytes(r.Context(), []core.JobView{view}, idx, deps.TransferBytes)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toJobDetailDTO(view, d, idx, persisted, deps.FailedRetryAfter, deps.MaxCandidates))
+		_ = json.NewEncoder(w).Encode(toJobDetailDTO(view, d, idx, persisted, deps.FailedRetryAfter, deps.MaxCandidates, time.Now()))
 	})
 	mux.HandleFunc("/api/jobs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -843,9 +858,11 @@ func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) [
 	}
 	liveIdx := newLiveTransferIndex(live)
 	persisted := fetchPersistedBytes(ctx, views, liveIdx, deps.TransferBytes)
+	// One shared now for the whole response — see jobDTO.FramedAt.
+	now := time.Now()
 	dtos := make([]jobDTO, len(views))
 	for i, view := range views {
-		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted)
+		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted, now)
 	}
 	return dtos
 }
@@ -948,7 +965,7 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 	case err == nil:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(toJobDTO(view, failedRetryAfter, maxCandidates, liveTransferIndex{}, nil))
+		_ = json.NewEncoder(w).Encode(toJobDTO(view, failedRetryAfter, maxCandidates, liveTransferIndex{}, nil, time.Now()))
 	case errors.Is(err, app.ErrRemoteFileBusy):
 		writeConfigError(w, http.StatusConflict, err.Error(), nil)
 	default:
