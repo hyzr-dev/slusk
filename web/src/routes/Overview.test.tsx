@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { ChartsReport, Job, JobFacets, JobPage, JobPageParams, JobStatus, StatusReport } from '../api/types';
@@ -142,6 +143,108 @@ function renderOverview(
     </QueryClientProvider>,
   );
 }
+
+// Real-navigation variant of renderOverview, in the style already used for
+// Jobs.tsx (Jobs.test.tsx: 'the job title link is keyboard-navigable...') —
+// a MemoryRouter with an actual /jobs/:id route rendering a sentinel proves
+// navigate() actually fired, rather than mocking useNavigate and asserting
+// on the mock's call args.
+function renderOverviewWithNavigation(jobsData: JobPage, finishedData: JobPage) {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
+  queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  queryClient.setQueryData(queryKeys.status, status);
+  queryClient.setQueryData(queryKeys.charts, charts);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Overview />} />
+          <Route path="/jobs/:id" element={<div>Job detail page</div>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+// Issue #292: both panels' rows are clickable (div role="row" with onClick)
+// but were unreachable by keyboard — tabIndex -1, no keydown handler. Covers
+// both TRANSFERS and RECENTLY FINISHED explicitly: a fix touching only
+// TRANSFERS would silently skip the finished panel, whose onClick only
+// arrived with #287.
+describe('Overview row keyboard access (#292)', () => {
+  const transferPage = makeJobPage([makeJob(1, 'Kind of Blue', 'Miles Davis', 'active')]);
+  const finishedPage = makeJobPage([makeJob(90, 'Finished Album', 'Some Artist', 'done')]);
+
+  it('gives the TRANSFERS row a tabIndex of 0', () => {
+    renderOverviewWithNavigation(transferPage, makeJobPage([]));
+    const row = screen.getByText('Kind of Blue').closest('[role="row"]') as HTMLElement;
+    expect(row).toHaveAttribute('tabIndex', '0');
+  });
+
+  it('gives the RECENTLY FINISHED row a tabIndex of 0', () => {
+    renderOverviewWithNavigation(makeJobPage([]), finishedPage);
+    const row = screen.getByText('Finished Album').closest('[role="row"]') as HTMLElement;
+    expect(row).toHaveAttribute('tabIndex', '0');
+  });
+
+  it('navigates to the job detail page on Enter from a focused TRANSFERS row', async () => {
+    renderOverviewWithNavigation(transferPage, makeJobPage([]));
+    const row = screen.getByText('Kind of Blue').closest('[role="row"]') as HTMLElement;
+    row.focus();
+    await userEvent.setup().keyboard('{Enter}');
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  it('navigates to the job detail page on Enter from a focused RECENTLY FINISHED row', async () => {
+    renderOverviewWithNavigation(makeJobPage([]), finishedPage);
+    const row = screen.getByText('Finished Album').closest('[role="row"]') as HTMLElement;
+    row.focus();
+    await userEvent.setup().keyboard('{Enter}');
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  it('navigates to the job detail page on Space from a focused TRANSFERS row', async () => {
+    renderOverviewWithNavigation(transferPage, makeJobPage([]));
+    const row = screen.getByText('Kind of Blue').closest('[role="row"]') as HTMLElement;
+    row.focus();
+    await userEvent.setup().keyboard(' ');
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  it('navigates to the job detail page on Space from a focused RECENTLY FINISHED row', async () => {
+    renderOverviewWithNavigation(makeJobPage([]), finishedPage);
+    const row = screen.getByText('Finished Album').closest('[role="row"]') as HTMLElement;
+    row.focus();
+    await userEvent.setup().keyboard(' ');
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  // Guards against an overly broad keydown handler that activates on any key.
+  it('does not navigate on a non-activating key from either row', () => {
+    renderOverviewWithNavigation(transferPage, finishedPage);
+    const transferRow = screen.getByText('Kind of Blue').closest('[role="row"]') as HTMLElement;
+    const finishedRow = screen.getByText('Finished Album').closest('[role="row"]') as HTMLElement;
+
+    fireEvent.keyDown(transferRow, { key: 'ArrowDown' });
+    fireEvent.keyDown(finishedRow, { key: 'ArrowDown' });
+
+    expect(screen.queryByText('Job detail page')).not.toBeInTheDocument();
+  });
+
+  it('still navigates on a mouse click on either row, unchanged', () => {
+    renderOverviewWithNavigation(transferPage, makeJobPage([]));
+    fireEvent.click(screen.getByText('Kind of Blue').closest('[role="row"]') as HTMLElement);
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+
+  it('still navigates on a mouse click on the RECENTLY FINISHED row, unchanged', () => {
+    renderOverviewWithNavigation(makeJobPage([]), finishedPage);
+    fireEvent.click(screen.getByText('Finished Album').closest('[role="row"]') as HTMLElement);
+    expect(screen.getByText('Job detail page')).toBeInTheDocument();
+  });
+});
 
 describe('Overview', () => {
   it('renders the four stat cells (#281 restyle)', () => {

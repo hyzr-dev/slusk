@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCharts, useJobs, useStatus } from '../api/queries';
 import { useJobScope } from '../api/stream';
@@ -60,6 +61,25 @@ function finishedAge(updatedAt: string): string {
   const ms = Date.now() - new Date(updatedAt).getTime();
   if (Number.isNaN(ms)) return '—';
   return formatAge(Math.max(0, Math.floor(ms / 1000)));
+}
+
+/**
+ * Enter/Space activation for a whole clickable row (issue #292).
+ *
+ * The row itself is the keyboard target here, on purpose — unlike Jobs.tsx,
+ * where the row deliberately is NOT the target. A Jobs row holds two actions
+ * (the details-toggle button and the title link), and making the row itself
+ * handle Enter once broke native Enter-on-link activation: the row's keydown
+ * handler ran preventDefault() for every Enter, including one bubbling up
+ * from a focused nested <Link>, cancelling the browser's own navigation
+ * before it fired (see the regression comment in Jobs.test.tsx). An Overview
+ * row has exactly one action and no nested interactive element, so that trap
+ * does not apply — do not "unify" this with Jobs' pattern.
+ */
+function handleRowKeyDown(event: KeyboardEvent, onActivate: () => void) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault(); // Space would otherwise scroll the page
+  onActivate();
 }
 
 export default function Overview() {
@@ -223,8 +243,10 @@ export default function Overview() {
                   <div
                     key={job.id}
                     role="row"
+                    tabIndex={0}
                     className={`${styles.transferGrid} ${styles.transferRow}`}
                     onClick={() => navigate(`/jobs/${job.id}`)}
+                    onKeyDown={(event) => handleRowKeyDown(event, () => navigate(`/jobs/${job.id}`))}
                   >
                     <span role="cell">
                       <Tag status={job.status} queuePosition={job.queuePosition} bare />
@@ -270,8 +292,10 @@ export default function Overview() {
                 <div
                   key={job.id}
                   role="row"
+                  tabIndex={0}
                   className={`${styles.finishedGrid} ${styles.transferRow}`}
                   onClick={() => navigate(`/jobs/${job.id}`)}
+                  onKeyDown={(event) => handleRowKeyDown(event, () => navigate(`/jobs/${job.id}`))}
                 >
                   <span role="cell">
                     <Tag status={job.status} bare />
