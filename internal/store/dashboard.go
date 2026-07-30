@@ -320,7 +320,7 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 		return fmt.Errorf("dir=desc is not supported for dashboard jobs sort %q", q.Sort)
 	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring", "inflight":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -344,13 +344,23 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(a.username, '')), lower("+placeholder+")) > 0)")
 	}
 	if includeStatus && q.Filter != "all" {
-		if q.Filter == "transferring" {
+		switch q.Filter {
+		case "transferring":
 			// The union of 'active' and 'stalled' (issue #268, Overview's
 			// TRANSFERS panel) — expressed against the same dashboardJobStatusSQL
 			// CASE every other status filter uses, rather than a second copy of
 			// the state predicates, so the two can never drift apart.
 			clauses = append(clauses, "("+dashboardJobStatusSQL+") IN ("+bind("active")+", "+bind("stalled")+")")
-		} else {
+		case "inflight":
+			// Everything the pipeline currently holds a MaxActive slot for
+			// (issue #287, Overview's TRANSFERS panel). Deliberately keyed on
+			// j.state, not on dashboardJobStatusSQL: a DOWNLOADING job whose
+			// transfers all errored reports status 'failed' while still being
+			// in flight, so a status-keyed predicate would put it in this
+			// region AND in 'finished' at the same time. A job has exactly one
+			// state, which makes the two regions disjoint by construction.
+			clauses = append(clauses, "j.state IN ("+bind(string(core.StateDownloading))+", "+bind(string(core.StateImporting))+")")
+		default:
 			clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
 		}
 	}

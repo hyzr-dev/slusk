@@ -1836,3 +1836,70 @@ func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
 		t.Errorf("job %d not returned by filter=active", job.ID)
 	}
 }
+
+func TestListDashboardJobsFilterInflightSelectsByStateNotStatus(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// DOWNLOADING with a file actually moving -> status 'active'.
+	moving := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Moving", "A", "peer1", 0, now)
+	// DOWNLOADING with everything still PENDING -> status 'queued', which the
+	// transferring union never selected. This is the whole point of inflight.
+	pending := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferPending, "Pending", "B", "peer2", 0, now.Add(time.Second))
+	// DOWNLOADING with a stalled file -> status 'stalled'.
+	stalled := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "C", "peer3", 0, now.Add(2*time.Second))
+	// IMPORTING -> status 'importing', also never in the transferring union.
+	importing := insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateImporting, "", "Importing", "D", "peer4", 0, now.Add(3*time.Second))
+	// Excluded: not yet started, and already finished.
+	insertDashboardTestJob(t, s, 5, core.SourceLidarr, core.StateWanted, "", "Wanted", "E", "", 0, now.Add(4*time.Second))
+	insertDashboardTestJob(t, s, 6, core.SourceLidarr, core.StateSelecting, "", "Selecting", "F", "", 0, now.Add(5*time.Second))
+	insertDashboardTestJob(t, s, 7, core.SourceLidarr, core.StateDone, "", "Done", "G", "", 0, now.Add(6*time.Second))
+	insertDashboardTestJob(t, s, 8, core.SourceLidarr, core.StateFailed, "", "Failed", "H", "", 0, now.Add(7*time.Second))
+	insertDashboardTestJob(t, s, 9, core.SourceLidarr, core.StateParked, "", "Parked", "I", "", 0, now.Add(8*time.Second))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "st", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, view := range page.Jobs {
+		got[view.Job.ID] = true
+	}
+	for _, want := range []int64{moving, pending, stalled, importing} {
+		if !got[want] {
+			t.Errorf("job %d missing from inflight page", want)
+		}
+	}
+	if len(page.Jobs) != 4 {
+		t.Fatalf("len(jobs) = %d, want 4; got ids %v", len(page.Jobs), got)
+	}
+	if page.Total != 4 {
+		t.Errorf("Total = %d, want 4", page.Total)
+	}
+}
+
+func TestListDashboardJobsFilterInflightAndFinishedAreDisjoint(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// A DOWNLOADING job whose only transfer errored reports status 'failed'
+	// via the candidate aggregate (dashboard.go:142) while its state is still
+	// DOWNLOADING. Filtering on status would place it in BOTH regions; both
+	// filters go through j.state precisely so it cannot.
+	id := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDownloading, core.TransferErrored, "Errored", "A", "peer1", 0, now)
+
+	inflight, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "st", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("inflight: %v", err)
+	}
+	if len(inflight.Jobs) != 1 || inflight.Jobs[0].Job.ID != id {
+		t.Fatalf("inflight jobs = %+v, want exactly job %d", inflight.Jobs, id)
+	}
+	if inflight.Jobs[0].Status != "failed" {
+		t.Errorf("Status = %q, want %q (the aggregate-derived status is unchanged)", inflight.Jobs[0].Status, "failed")
+	}
+}
