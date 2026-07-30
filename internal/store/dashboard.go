@@ -406,8 +406,16 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 		// is the tiebreaker: without one, Postgres' order for equal
 		// (group, created_at) pairs is undefined, and the same job could
 		// appear on two pages while another never shows at all.
+		//
+		// Four groups since issue #287 widened the panel's filter from the
+		// active+stalled union to every in-flight job: a job waiting for more
+		// files ('queued') and a job past download ('importing') used to be
+		// unreachable here and both collapsed into the old ELSE, which made
+		// their relative order fall out of created_at alone. They now rank
+		// explicitly, in pipeline order — moving, stuck, waiting, importing.
 		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
-			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 ELSE 3 END ASC, j.created_at ASC, j.id ASC`
+			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 WHEN 'queued' THEN 3
+			WHEN 'importing' THEN 4 ELSE 5 END ASC, j.created_at ASC, j.id ASC`
 	default:
 		panic("dashboardJobsOrder called without validation")
 	}

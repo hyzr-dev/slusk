@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1901,5 +1902,50 @@ func TestListDashboardJobsFilterInflightAndFinishedAreDisjoint(t *testing.T) {
 	}
 	if inflight.Jobs[0].Status != "failed" {
 		t.Errorf("Status = %q, want %q (the aggregate-derived status is unchanged)", inflight.Jobs[0].Status, "failed")
+	}
+}
+
+func TestListDashboardJobsSortTransferRanksImportingAfterWaiting(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// Inserted in reverse rank order so a passing test cannot be an accident
+	// of insertion order: importing first, active last.
+	importing := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateImporting, "", "Importing", "A", "peer1", 0, now)
+	waiting := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferPending, "Waiting", "B", "peer2", 0, now.Add(time.Second))
+	stalled := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "C", "peer3", 0, now.Add(2*time.Second))
+	active := insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "D", "peer4", 0, now.Add(3*time.Second))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, 0, len(page.Jobs))
+	for _, view := range page.Jobs {
+		got = append(got, view.Job.ID)
+	}
+	want := []int64{active, stalled, waiting, importing}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v (active, stalled, waiting, importing)", got, want)
+	}
+}
+
+func TestListDashboardJobsSortTransferKeepsAgeOrderWithinGroup(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	older := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateImporting, "", "Older", "A", "peer1", 0, now)
+	newer := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateImporting, "", "Newer", "B", "peer2", 0, now.Add(time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 2 || page.Jobs[0].Job.ID != older || page.Jobs[1].Job.ID != newer {
+		t.Fatalf("order = %+v, want [%d %d] (created_at ascending within a group)", page.Jobs, older, newer)
 	}
 }
