@@ -13,7 +13,10 @@ nyss" — inte bara "vad laddar ner just nu".
 
 ## Vad Overview ska visa
 
-Två regioner, samma vänsterkolumn, TRANSFERS överst och en ny sektion under:
+Två regioner staplade på varandra: TRANSFERS överst (full bredd, som idag efter
+TUI-omstilningen i #281) och en ny sektion direkt under, också full bredd,
+ovanför `mainGrid` med RECONCILE och THROUGHPUT. Läsordningen uppifrån och ner
+är "nu" följt av "nyss".
 
 **Region 1 — TRANSFERS (befintlig panel, nytt urval).**
 `state IN (DOWNLOADING, IMPORTING)` — exakt den mängd `MaxActive` begränsar.
@@ -79,9 +82,9 @@ satt; anropare som läser dem (Jobs-sidan) sätter aldrig fältet, så
 
 **Region 1** byter bara query-parametrar (`filter: 'inflight'`). Befintlig
 radrendering hanterar redan de nya medlemmarna: IMPORTING-rader visar
-`t.jobs.verifying` (Overview.tsx:139-140), väntande DOWNLOADING-rader får
-`formatSpeed(0) → '—'` och ingen tick-flare (`live` kräver
-`status === 'active'`, Overview.tsx:136).
+`t.jobs.verifying` i SIZE-kolumnen (`Overview.tsx:177-178`), väntande
+DOWNLOADING-rader får `formatSpeed(0) → '—'` och ingen tick-flare (`live`
+kräver `status === 'active'`, `Overview.tsx:174`).
 
 Sektionsrubrikens meta byter från `status.active` till `result.total` —
 den bredare mängden gör att `active`-räknaren annars systematiskt
@@ -91,21 +94,23 @@ underskattar vad panelen visar.
 pageSize: 5, skipFacets: true`. Egen `queryPhase`/`QueryNotice`-gate (samma
 mönster som #201: en död poll för denna region blankar aldrig TRANSFERS).
 
-Radanatomi, ingen tick-bar (allt är 100 % eller dött):
+Radanatomi: samma `role="table"`-grid som TRANSFERS använder efter #281, med
+egen kolumnuppsättning och egen `grid-template-columns`. Ingen PROGRESS-kolumn
+— allt är 100 % eller dött, så en tick-bar bär ingen information:
 
 ```
-[OK]  Album Title                          12m
-      Artist · peer
-
-[FA]  Another Album                        41m
-      Artist · —
+ST   ALBUM                      PEER        WHEN
+OK   Album Title                someuser     12m
+     Artist
+FA   Another Album              —            41m
+     Artist
 ```
 
-`Tag` täcker redan OK/FA. Ålder är `formatAge` på `updatedAt` (redan
-existerande formatter). Ingen `failReason` på raden — den finns i
-jobbdetaljens accordion (klick navigerar till `/jobs/:id`, samma som
-region 1); Overview förblir en yta man klickar sig vidare från, inte en
-detaljvy.
+`Tag` täcker redan OK/FA (`bare`-varianten, som TRANSFERS). Ålder är
+`formatAge` på `updatedAt` (`format.ts:157`, redan existerande formatter).
+Ingen `failReason` på raden — den finns i jobbdetaljen (klick navigerar till
+`/jobs/:id`, samma som region 1); Overview förblir en yta man klickar sig
+vidare från, inte en detaljvy.
 
 **Tom-vy-copy är fönster-agnostisk**: "Inget avslutat nyligen" snarare än
 "...senaste timmen". Fönstrets längd är en Go-konstant, copyn är en sträng
@@ -189,12 +194,19 @@ Ingen egen issue för det ännu — noterat i #286 så det inte glöms.
   redan (`JobExpansion.tsx`) med egen `useJobDetail`-query, `JobActions`,
   fillistor. Att duplicera det på Overview drar mot #274 (som nyss gick i
   motsatt riktning: sluta detalj-polla när strömmen bär det).
-- **Region 2 i vänsterkolumnen under TRANSFERS, inte i högerkolumnen och
-  inte istället för RECONCILE.** Samma radbredd/-anatomi som TRANSFERS
-  (albumtitel, artist, tid) — högerkolumnen är byggd för kompakt innehåll
-  (11px-rader) och skulle trunkera långa titlar. RECONCILE är den enda ytan
-  som visar att Discovery faktiskt söker; att ta bort den vore ett separat,
-  medvetet beslut.
+- **Region 2 som egen full-breddspanel direkt under TRANSFERS, inte inne i
+  `mainGrid` och inte istället för RECONCILE.** Samma radbredd som TRANSFERS,
+  så grid-idiomet med kolumnrubriker återanvänds rakt av och långa
+  albumtitlar får plats. `mainGrid` är två kolumner (`1.15fr 1fr`) byggda för
+  kompakt innehåll — en tredje panel där skulle trunkera titlar och kräva att
+  gridden görs om. RECONCILE är den enda ytan som visar att Discovery faktiskt
+  söker; att ta bort den vore ett separat, medvetet beslut.
+
+  *Placeringen omtolkades efter att TUI-omstilningen (#281) landade mitt under
+  designarbetet: den ursprungliga formuleringen sa "i vänsterkolumnen under
+  TRANSFERS", men den layouten finns inte längre — TRANSFERS är numera en
+  full-breddspanel ovanför `mainGrid`. Avsikten (läsordning "nu" → "nyss",
+  full radbredd) är oförändrad.*
 - **"Väntar på mer" och "väntar på import" delar sorteringsgrupp** (grupp 3
   i `sort=transfer`). De är särskiljbara i UI:t via `bytesRemaining = 0`,
   men att splittra dem i backend kräver en femte gren i
@@ -235,11 +247,17 @@ en död `finished`-poll blankar inte TRANSFERS, SSE-scope innehåller bara
 region 1:s id:n.
 
 **Browser (obligatoriskt, inte valfritt).** `web/`-sviten kör i jsdom, som
-varken beräknar layout eller ritar — en ny sektion i vänsterkolumnen kan
-aldrig fällas av ett test. Verifiera i riktig browser: `mainGrid`s
-`1.6fr 1fr`-balans med en längre vänsterkolumn, samt brytpunkterna 1000px
-och 640px (`Overview.module.css:134-147`) där gridden kollapsar till en
-kolumn.
+varken beräknar layout eller ritar — en ny panel kan aldrig fällas av ett
+test. Verifiera i riktig browser: att region 2:s `grid-template-columns`
+håller ihop vid långa albumtitlar och tomma peer-värden, att sidan inte
+växer så mycket på höjden att `mainGrid` hamnar under vikningen, samt
+brytpunkterna 900px (`mainGrid` → en kolumn) och 640px (`statGrid` → två
+kolumner), `Overview.module.css:168-174`.
+
+Klickbara rader inuti `role="cell"`-wrappers har en känd fälla: en wrapper
+kan degradera ett grid-item till inline och halvera träffytan. Region 2:s
+rader klickar på radnivå (som TRANSFERS gör), inte på ett element inuti en
+cell — verifiera träffytans höjd i browsern.
 
 **Deploy.** Ingen ny config-nyckel, ingen migration. Verifiering i
 `testenv/`-labbet före merge, enligt sedvanlig rutin — `feat:`-prefix
