@@ -1110,8 +1110,15 @@ Byt `SectionHeader`-metan (rad 146-151):
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cd web && npx vitest run src/routes/Overview.test.tsx src/strings.test.ts && npx tsc --noEmit`
-Expected: PASS. `strings.test.ts` bekräftar att `activeCountMeta` inte längre refereras någonstans.
+Run: `cd web && npx vitest run src/routes/Overview.test.tsx && npx tsc --noEmit`
+Expected: PASS.
+
+Verifiera sedan att den gamla nyckeln verkligen är borta:
+
+Run: `grep -rn "activeCountMeta" web/src`
+Expected: inga träffar.
+
+Detta måste vara en grep, inte ett test: `strings.test.ts` testar bara tre label-uppslagsfunktioner och vaktar inte oanvända nycklar, och `tsc` bryr sig inte om en oanvänd objektegenskap. Ingenting utom greppen fångar en kvarlämnad nyckel.
 
 - [ ] **Step 6: Commit**
 
@@ -1207,9 +1214,7 @@ it('keeps the transfers panel alive when the finished query has no data', () => 
   expect(document.querySelectorAll('[class*="transferRow"]').length).toBeGreaterThan(0);
 });
 
-it('scopes the stream to the in-flight rows only, never the finished ones', () => {
-  // Finished jobs are terminal and produce no deltas, so paying for stream
-  // bookkeeping on them would buy updates that never arrive.
+it('renders both panels from their own independent queries', () => {
   renderOverview(
     makeJobPage([{ ...baseJob, id: 1, title: 'In Flight', status: 'active' }]),
     charts,
@@ -1220,6 +1225,15 @@ it('scopes the stream to the in-flight rows only, never the finished ones', () =
   expect(screen.getByText('Finished Album')).toBeInTheDocument();
 });
 ```
+
+**Ingen test för SSE-scopet, avsiktligt.** Kravet "bara de pågående radernas
+id:n i scopet" uppfylls av att `useJobScope`-raden *inte* ändras — det finns
+inget nytt beteende att verifiera. Och det vore inte observerbart här ändå:
+`Overview.test.tsx` renderar utan `StreamProvider`, så
+`JobScopeSetterContext`s setter är sin no-op-default. Ett test som heter
+"scopes the stream" men bara kontrollerar att rader renderas skulle ljuga om
+sin egen täckning. Skyddet är kommentaren i Step 5 plus att raden syns
+oförändrad i diffen.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
