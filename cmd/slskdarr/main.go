@@ -272,7 +272,11 @@ func main() {
 		page, err := st.ListDashboardJobs(ctx, store.DashboardJobsQuery{
 			Page: query.Page, Sort: query.Sort, Dir: query.Dir,
 			Filter: query.Filter, Source: query.Source, Query: query.Query,
-			PageSize: query.PageSize,
+			PageSize: query.PageSize, SkipFacets: query.SkipFacets,
+			// filter=finished anchors its window here rather than in SQL, so
+			// the store never reads the database clock (see
+			// store.DashboardFinishedWindow). Every other filter ignores it.
+			Now: time.Now(),
 		})
 		if err != nil {
 			return observ.PagedJobsResult{}, err

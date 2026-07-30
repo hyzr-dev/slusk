@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -240,6 +241,20 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 // and ListDashboardJobs).
 const DashboardJobsPageSize int64 = 12
 
+// DashboardFinishedWindow is how far back filter=finished looks: a job counts
+// as recently finished when its updated_at falls inside this window. It is a
+// constant rather than configuration deliberately — internal/config rejects
+// unknown keys and a merge to main deploys straight to production, so a new
+// required key could stop the container from starting, and this number is not
+// yet known to be wrong (see the design spec's "Beslut som avvägts").
+//
+// album_jobs.updated_at is a trustworthy completion stamp for DONE and FAILED:
+// MarkJobFailed is guarded against re-failing an already-terminal job, and the
+// metadata backfill in SyncWantedJobs deliberately leaves updated_at alone for
+// jobs past WANTED. WANTED jobs *do* get a fresh updated_at on every sync pass,
+// which is why this filter can never include them.
+const DashboardFinishedWindow = time.Hour
+
 // DashboardJobsQuery is the validated, persisted-only query used by the
 // dashboard's paged REST endpoint. Live transfer data must never be threaded
 // into this query because it would make page membership move between polls.
@@ -257,6 +272,21 @@ type DashboardJobsQuery struct {
 	// DashboardJobsPageSize, rather than failing validation on a bound
 	// nothing chose.
 	PageSize int64
+	// Now anchors filter=finished's window (see DashboardFinishedWindow) and is
+	// required only for that filter — validateDashboardJobsQuery rejects a zero
+	// value there and ignores it everywhere else. Threaded in rather than read
+	// from the database's now() so tests are independent of the wall clock,
+	// matching how every other time-dependent store method takes its `now`.
+	Now time.Time
+	// SkipFacets omits the status/source facet queries and the total count,
+	// leaving DashboardJobsPage.Total and .Facets at their zero values. The
+	// facet query evaluates dashboardJobStatusSQL over every non-cancelled row
+	// — measured at ~85ms warm against production (5183 album_jobs, 15716
+	// candidates, 74174 transfers, see issue #286) — and it runs regardless of
+	// which filter was asked for, since facets deliberately ignore the status
+	// filter. A caller that renders neither a total nor facet chips should not
+	// pay for them. Callers that do read them must leave this false.
+	SkipFacets bool
 }
 
 // DashboardStatusFacets contains counts for each dashboard status. All ignores
@@ -304,7 +334,7 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 		return fmt.Errorf("invalid dashboard jobs page %d", q.Page)
 	}
 	switch q.Sort {
-	case "st", "album", "peer", "try", "transfer":
+	case "st", "album", "peer", "try", "transfer", "recent":
 	default:
 		return fmt.Errorf("invalid dashboard jobs sort %q", q.Sort)
 	}
@@ -319,10 +349,20 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	if q.Sort == "transfer" && q.Dir == "desc" {
 		return fmt.Errorf("dir=desc is not supported for dashboard jobs sort %q", q.Sort)
 	}
+	// sort=recent is a newest-first ranking; ascending would be "oldest
+	// finished first", which no caller wants and which would silently turn
+	// Overview's recently-finished panel into its opposite. Rejected rather
+	// than reinterpreted, the same treatment sort=transfer gets above.
+	if q.Sort == "recent" && q.Dir == "asc" {
+		return fmt.Errorf("dir=asc is not supported for dashboard jobs sort %q", q.Sort)
+	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
+	}
+	if q.Filter == "finished" && q.Now.IsZero() {
+		return fmt.Errorf("dashboard jobs filter %q requires a non-zero Now", q.Filter)
 	}
 	switch q.Source {
 	case "all", "manual", "lidarr":
@@ -344,13 +384,26 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 		clauses = append(clauses, "(strpos(lower(j.artist_name), lower("+placeholder+")) > 0 OR strpos(lower(j.title), lower("+placeholder+")) > 0 OR strpos(lower(COALESCE(a.username, '')), lower("+placeholder+")) > 0)")
 	}
 	if includeStatus && q.Filter != "all" {
-		if q.Filter == "transferring" {
-			// The union of 'active' and 'stalled' (issue #268, Overview's
-			// TRANSFERS panel) — expressed against the same dashboardJobStatusSQL
-			// CASE every other status filter uses, rather than a second copy of
-			// the state predicates, so the two can never drift apart.
-			clauses = append(clauses, "("+dashboardJobStatusSQL+") IN ("+bind("active")+", "+bind("stalled")+")")
-		} else {
+		switch q.Filter {
+		case "inflight":
+			// Everything the pipeline currently holds a MaxActive slot for
+			// (issue #287, Overview's TRANSFERS panel). Deliberately keyed on
+			// j.state, not on dashboardJobStatusSQL: a DOWNLOADING job whose
+			// transfers all errored reports status 'failed' while still being
+			// in flight, so a status-keyed predicate would put it in this
+			// region AND in 'finished' at the same time. A job has exactly one
+			// state, which makes the two regions disjoint by construction.
+			clauses = append(clauses, "j.state IN ("+bind(string(core.StateDownloading))+", "+bind(string(core.StateImporting))+")")
+		case "finished":
+			// Terminal in the pipeline sense and recent (issue #287, Overview's
+			// recently-finished panel). PARKED is excluded on purpose: a job can
+			// sit parked for days, so its updated_at would read as fresh without
+			// anything having just happened. Keyed on j.state for the same
+			// disjointness reason as inflight above.
+			clauses = append(clauses,
+				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+")"+
+					" AND j.updated_at > "+bind(q.Now.Add(-DashboardFinishedWindow)))
+		default:
 			clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
 		}
 	}
@@ -396,8 +449,24 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 		// is the tiebreaker: without one, Postgres' order for equal
 		// (group, created_at) pairs is undefined, and the same job could
 		// appear on two pages while another never shows at all.
+		//
+		// Four groups since issue #287 widened the panel's filter from the
+		// active+stalled union to every in-flight job: a job waiting for more
+		// files ('queued') and a job past download ('importing') used to be
+		// unreachable here and both collapsed into the old ELSE, which made
+		// their relative order fall out of created_at alone. They now rank
+		// explicitly, in pipeline order — moving, stuck, waiting, importing.
 		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
-			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 ELSE 3 END ASC, j.created_at ASC, j.id ASC`
+			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 WHEN 'queued' THEN 3
+			WHEN 'importing' THEN 4 ELSE 5 END ASC, j.created_at ASC, j.id ASC`
+	case "recent":
+		// Newest finish first, for Overview's recently-finished panel (issue
+		// #287). Direction is hardcoded DESC, never `direction`: validation
+		// rejects dir=asc. j.id DESC is the tiebreaker — two jobs finishing in
+		// the same transaction share an updated_at, and without a tiebreaker
+		// Postgres' order between them is undefined, so the same job could
+		// appear on two pages while another never shows at all.
+		return " ORDER BY j.updated_at DESC, j.id DESC"
 	default:
 		panic("dashboardJobsOrder called without validation")
 	}
@@ -425,40 +494,44 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	}
 	defer tx.Rollback()
 
-	statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
-	statusSQL := `SELECT COUNT(*),
-		COUNT(*) FILTER (WHERE status = 'active'),
-		COUNT(*) FILTER (WHERE status = 'importing'),
-		COUNT(*) FILTER (WHERE status = 'queued'),
-		COUNT(*) FILTER (WHERE status = 'stalled'),
-		COUNT(*) FILTER (WHERE status = 'failed'),
-		COUNT(*) FILTER (WHERE status = 'parked'),
-		COUNT(*) FILTER (WHERE status = 'done')
-		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
 	var page DashboardJobsPage
-	if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
-		&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
-		&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
-		&page.Facets.Status.Parked, &page.Facets.Status.Done,
-	); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
-	}
+	if !q.SkipFacets {
+		statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
+		statusSQL := `SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE status = 'active'),
+			COUNT(*) FILTER (WHERE status = 'importing'),
+			COUNT(*) FILTER (WHERE status = 'queued'),
+			COUNT(*) FILTER (WHERE status = 'stalled'),
+			COUNT(*) FILTER (WHERE status = 'failed'),
+			COUNT(*) FILTER (WHERE status = 'parked'),
+			COUNT(*) FILTER (WHERE status = 'done')
+			FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
+		if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
+			&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
+			&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
+			&page.Facets.Status.Parked, &page.Facets.Status.Done,
+		); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
+		}
 
-	sourceWhere, sourceArgs := dashboardJobsWhere(q, true, false)
-	sourceSQL := `SELECT COUNT(*),
-		COUNT(*) FILTER (WHERE source = 'manual'),
-		COUNT(*) FILTER (WHERE source = 'lidarr')
-		FROM (SELECT j.source AS source` + jobViewFrom + sourceWhere + `) dashboard_jobs`
-	if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
-		&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
-	); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: source facets: %w", err)
+		sourceWhere, sourceArgs := dashboardJobsWhere(q, true, false)
+		sourceSQL := `SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE source = 'manual'),
+			COUNT(*) FILTER (WHERE source = 'lidarr')
+			FROM (SELECT j.source AS source` + jobViewFrom + sourceWhere + `) dashboard_jobs`
+		if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
+			&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
+		); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: source facets: %w", err)
+		}
 	}
 
 	where, args := dashboardJobsWhere(q, true, true)
-	countSQL := `SELECT COUNT(*)` + jobViewFrom + where
-	if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
+	if !q.SkipFacets {
+		countSQL := `SELECT COUNT(*)` + jobViewFrom + where
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
+		}
 	}
 
 	args = append(args, q.PageSize, q.Page*q.PageSize)

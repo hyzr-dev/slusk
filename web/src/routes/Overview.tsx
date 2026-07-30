@@ -10,21 +10,31 @@ import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice'
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
-import { formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
+import { formatAge, formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
 import styles from './Overview.module.css';
 
 // Rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:105) rather than the full jobs list.
-// Selection, ordering and this row count are all server-side now (issue
-// #268): filter=transferring (active+stalled union), sort=transfer
-// (status group first — active before stalled — then createdAt ascending
-// within the group, the same 'transferOrder' rule the client used to apply
-// itself in the now-deleted jobSort.ts), pageSize=8. The client renders
-// result.jobs exactly as returned — no filter, sort or slice here.
+// Selection, ordering and this row count are all server-side (issue #268):
+// filter=inflight is every job the pipeline holds a MaxActive slot for —
+// state DOWNLOADING or IMPORTING (issue #287 widened this from the old
+// active+stalled 'transferring' union, which dropped a job the moment it
+// stopped moving bytes). sort=transfer ranks active, then stalled, then
+// waiting, then importing, and orders by createdAt ascending inside a group.
+// The client renders result.jobs exactly as returned — no filter, sort or
+// slice here.
 const TRANSFER_PAGE_SIZE = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
+
+// Rows in the RECENTLY FINISHED panel. Selection is server-side: filter=finished
+// is state DONE or FAILED with an updated_at inside the backend's window
+// (store.DashboardFinishedWindow), sort=recent is newest finish first. The panel
+// reads neither total nor facets, so it opts out of them (skipFacets) — the facet
+// query is the expensive half of /api/jobs and runs whatever the filter is
+// (issue #286).
+const FINISHED_PAGE_SIZE = 5;
 
 /**
  * Tick colour for a TRANSFERS row: queued takes priority over stalled since a
@@ -37,20 +47,42 @@ function tickTone(job: Job): TickTone {
   return 'bar';
 }
 
+/**
+ * Age of a finished job, for the WHEN column. Reads updated_at, which is the
+ * completion stamp for DONE and FAILED — MarkJobFailed is guarded against
+ * re-failing an already-terminal job and the wanted-sync metadata backfill
+ * leaves updated_at alone past WANTED, so it never moves again once set.
+ * Returns an em dash for a missing or unparseable value rather than a
+ * misleading "0s".
+ */
+function finishedAge(updatedAt: string): string {
+  if (!updatedAt) return '—';
+  const ms = Date.now() - new Date(updatedAt).getTime();
+  if (Number.isNaN(ms)) return '—';
+  return formatAge(Math.max(0, Math.floor(ms / 1000)));
+}
+
 export default function Overview() {
   const navigate = useNavigate();
-  const jobsQuery = useJobs({ page: 0, filter: 'transferring', sort: 'transfer', dir: 'asc', source: 'all', q: '', pageSize: TRANSFER_PAGE_SIZE });
+  const jobsQuery = useJobs({ page: 0, filter: 'inflight', sort: 'transfer', dir: 'asc', source: 'all', q: '', pageSize: TRANSFER_PAGE_SIZE });
   const statusQuery = useStatus();
   const chartsQuery = useCharts();
+  const finishedQuery = useJobs({
+    page: 0, filter: 'finished', sort: 'recent', dir: 'desc',
+    source: 'all', q: '', pageSize: FINISHED_PAGE_SIZE, skipFacets: true,
+  });
   const result = jobsQuery.data;
   const transferRows = result?.jobs ?? [];
   const status = statusQuery.data;
   const charts = chartsQuery.data;
+  const finishedRows = finishedQuery.data?.jobs ?? [];
 
-  // Scopes the SSE connection to exactly these rows (issue #268), the same
-  // mechanism Jobs.tsx uses for its page — this is what lets the backend's
-  // job-delta bookkeeping stay bounded for the Overview surface too, not
-  // just the paged Jobs list (see #258's accumulator work).
+  // Only the in-flight rows: a finished job is terminal, so the stream never
+  // sends deltas for it and there is no reason to make the backend track it.
+  // This does NOT make the finished panel immune to live replacement: useJobs
+  // runs replaceLiveJobPage over every page it returns regardless of scope,
+  // so a job that just transitioned to DONE can still be rendered from its
+  // last in-flight live frame until framedAt ages past LIVE_JOB_FRESH_MS.
   useJobScope(transferRows.map((job) => job.id));
 
   // Three independent polls feeding three independent regions: a dead
@@ -60,6 +92,7 @@ export default function Overview() {
   const statusPhase = queryPhase(statusQuery);
   const jobsPhase = queryPhase(jobsQuery);
   const chartsPhase = queryPhase(chartsQuery);
+  const finishedPhase = queryPhase(finishedQuery);
 
   // IMPORTED 24H sums /api/charts' completedByHour, exactly 24 zero-filled
   // hourly buckets ending at the current hour (ChartsReport, api/types.ts).
@@ -145,9 +178,17 @@ export default function Overview() {
       <Panel>
         <SectionHeader
           label={t.overview.transfersHeading}
-          // "0 active" is a claim, not a placeholder — omit the meta until
-          // /status has answered. SectionHeader skips a falsy meta.
-          meta={hasData(statusPhase) ? t.overview.activeCountMeta(status?.active ?? 0) : undefined}
+          // A count is a claim, not a placeholder — omit the meta until
+          // /api/jobs has answered. SectionHeader skips a falsy meta.
+          // total comes from the same response as the rows, so it can reveal
+          // the rows this fixed-height panel could not fit.
+          meta={
+            hasData(jobsPhase)
+              ? (result?.total ?? 0) > transferRows.length
+                ? t.overview.inFlightTruncatedMeta(transferRows.length, result?.total ?? 0)
+                : t.overview.inFlightCountMeta(transferRows.length)
+              : undefined
+          }
         />
         <QueryNotice phase={jobsPhase} />
         {hasData(jobsPhase) &&
@@ -207,6 +248,42 @@ export default function Overview() {
                   </div>
                 );
               })}
+            </div>
+          ))}
+      </Panel>
+
+      <Panel>
+        <SectionHeader label={t.overview.finishedHeading} />
+        <QueryNotice phase={finishedPhase} />
+        {hasData(finishedPhase) &&
+          (finishedRows.length === 0 ? (
+            <EmptyState message={t.overview.noneFinished} />
+          ) : (
+            <div role="table">
+              <div role="row" className={`${styles.finishedGrid} ${styles.transferHead}`}>
+                <span role="columnheader">{t.overview.finishedGridHead.status}</span>
+                <span role="columnheader">{t.overview.finishedGridHead.album}</span>
+                <span role="columnheader" className={styles.peerCell}>{t.overview.finishedGridHead.peer}</span>
+                <span role="columnheader" className={styles.headRight}>{t.overview.finishedGridHead.when}</span>
+              </div>
+              {finishedRows.map((job) => (
+                <div
+                  key={job.id}
+                  role="row"
+                  className={`${styles.finishedGrid} ${styles.transferRow}`}
+                  onClick={() => navigate(`/jobs/${job.id}`)}
+                >
+                  <span role="cell">
+                    <Tag status={job.status} bare />
+                  </span>
+                  <span role="cell" className={styles.albumCell}>
+                    <span className={styles.transferTitle}>{job.title}</span>
+                    <span className={styles.transferArtist}>{job.artist}</span>
+                  </span>
+                  <span role="cell" className={styles.peerCell}>{job.peer || '—'}</span>
+                  <span role="cell" className={styles.finishedWhen}>{finishedAge(job.updatedAt)}</span>
+                </div>
+              ))}
             </div>
           ))}
       </Panel>

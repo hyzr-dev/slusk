@@ -13,12 +13,24 @@ afterEach(() => vi.unstubAllGlobals());
 // query key has to match for setQueryData to seed the cache useJobs reads.
 const TRANSFER_PARAMS: JobPageParams = {
   page: 0,
-  filter: 'transferring',
+  filter: 'inflight',
   sort: 'transfer',
   dir: 'asc',
   source: 'all',
   q: '',
   pageSize: 8,
+};
+
+// Mirrors the params Overview.tsx passes for the recently-finished panel.
+const FINISHED_PARAMS: JobPageParams = {
+  page: 0,
+  filter: 'finished',
+  sort: 'recent',
+  dir: 'desc',
+  source: 'all',
+  q: '',
+  pageSize: 5,
+  skipFacets: true,
 };
 
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
@@ -67,9 +79,11 @@ function makeFacets(jobs: Job[]): JobFacets {
 }
 
 // Builds the exact JobPage shape GET /api/jobs returns, which is what
-// useJobs's cache now holds instead of a raw Job[] (queryKeys.jobsAll).
-function makeJobPage(jobs: Job[]): JobPage {
-  return { jobs, total: jobs.length, facets: makeFacets(jobs) };
+// useJobs's cache now holds instead of a raw Job[] (queryKeys.jobsAll). total
+// defaults to jobs.length so every existing caller behaves unchanged; pass it
+// explicitly to exercise the truncation case, where total exceeds the rows.
+function makeJobPage(jobs: Job[], total: number = jobs.length): JobPage {
+  return { jobs, total, facets: makeFacets(jobs) };
 }
 
 const baseJob = makeJob(1, 'Kind of Blue', 'Miles Davis', 'active');
@@ -101,12 +115,23 @@ function renderOverview(
   jobsData: JobPage = jobPage,
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
+  // undefined (the default) seeds an empty, resolved finished page.
+  // null is a distinct sentinel meaning "don't seed this key at all" — the
+  // finished query then stays pending forever against the hung-fetch stub,
+  // which is what a test needs to prove the finished region's gate is its
+  // own and can't blank another region (see 'keeps the transfers panel
+  // alive...' below). A JS default parameter only fires for undefined, so
+  // this distinction would collapse if null reused undefined's meaning.
+  finishedData: JobPage | undefined | null = makeJobPage([]),
 ) {
   // A real refetch on mount would otherwise hit the unmocked global fetch;
   // keep it pending indefinitely so the seeded data is what's asserted on.
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
+  if (finishedData !== null) {
+    queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  }
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -175,9 +200,10 @@ describe('Overview', () => {
     expect(screen.getByText('TRANSFERS')).toBeInTheDocument();
     expect(screen.getByText('THROUGHPUT')).toBeInTheDocument();
     expect(screen.getByText('RECONCILE')).toBeInTheDocument();
-    // Proves status and chart data actually reach the new markup, not just
-    // that the section headers render.
-    expect(screen.getByText('1 active')).toBeInTheDocument();
+    // Proves jobs and chart data actually reach the new markup, not just
+    // that the section headers render. jobPage seeds two jobs with total
+    // defaulting to jobs.length, so the meta is untruncated.
+    expect(screen.getByText(t.overview.inFlightCountMeta(2))).toBeInTheDocument();
     expect(screen.getByText('1 matched')).toBeInTheDocument();
   });
 
@@ -223,13 +249,9 @@ describe('Overview', () => {
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
-  // Defensive client-side case, not a reachable server state: Overview fetches
-  // filter: 'transferring', the server-side active+stalled union (see
-  // Overview.tsx), which never includes 'importing'. If a job with that
-  // status ever did land in this list — e.g. a future filter change — it
-  // must still render its importing tag and verifying path rather than
-  // something misleading.
-  it('renders an IMPORTING job with its importing tag and verifying path, if one ever reached this list', () => {
+  // filter: 'inflight' (issue #287) includes IMPORTING jobs directly, so this
+  // is now a reachable server state, not just a defensive client-side case.
+  it('renders an IMPORTING job with its importing tag and verifying path', () => {
     renderOverview(makeJobPage([
       { ...baseJob, title: 'Importing Album', status: 'importing', state: 'IMPORTING' },
     ]));
@@ -253,6 +275,78 @@ describe('Overview', () => {
     const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;
     expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
     expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
+  it('renders an importing row and a waiting row that the old union never selected', () => {
+    renderOverview(makeJobPage([
+      { ...baseJob, id: 1, title: 'Importing Album', status: 'importing', state: 'IMPORTING', speed: 0 },
+      { ...baseJob, id: 2, title: 'Waiting Album', status: 'queued', state: 'DOWNLOADING', speed: 0, bytesDone: 0, bytesTotal: 100 },
+    ]));
+
+    expect(screen.getByText('Importing Album')).toBeInTheDocument();
+    expect(screen.getByText('Waiting Album')).toBeInTheDocument();
+    // IMPORTING replaces the byte counts with the verifying label.
+    expect(screen.getByText(t.jobs.verifying)).toBeInTheDocument();
+    // Neither row is moving bytes, so neither may flare.
+    expect(document.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
+  it('takes the transfers meta from total, not from the active counter', () => {
+    renderOverview(makeJobPage([{ ...baseJob, id: 1, title: 'Only Row', status: 'active' }], 1));
+    expect(screen.getByText(t.overview.inFlightCountMeta(1))).toBeInTheDocument();
+  });
+
+  it('reveals truncation when total exceeds the rendered rows', () => {
+    // pageSize is 8; a total of 12 means four in-flight jobs are not shown.
+    const rows = Array.from({ length: 8 }, (_, i) => ({ ...baseJob, id: i + 1, title: `Row ${i + 1}`, status: 'active' as JobStatus }));
+    renderOverview(makeJobPage(rows, 12));
+    expect(screen.getByText(t.overview.inFlightTruncatedMeta(8, 12))).toBeInTheDocument();
+  });
+
+  it('renders a done row and a failed row in the recently finished panel', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([
+      { ...baseJob, id: 90, title: 'Finished Album', artist: 'Artist A', status: 'done', state: 'DONE', peer: 'someuser', updatedAt: new Date(Date.now() - 12 * 60 * 1000).toISOString() },
+      { ...baseJob, id: 91, title: 'Dead Album', artist: 'Artist B', status: 'failed', state: 'FAILED', peer: '', updatedAt: new Date(Date.now() - 41 * 60 * 1000).toISOString() },
+    ]));
+
+    expect(screen.getByText(t.overview.finishedHeading)).toBeInTheDocument();
+    expect(screen.getByText('Finished Album')).toBeInTheDocument();
+    expect(screen.getByText('Dead Album')).toBeInTheDocument();
+    // formatAge on updatedAt — a one-hour window can only ever produce minutes.
+    expect(screen.getByText('12m')).toBeInTheDocument();
+    expect(screen.getByText('41m')).toBeInTheDocument();
+  });
+
+  it('shows a window-agnostic empty state when nothing finished recently', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([]));
+    expect(screen.getByText(`── ${t.overview.noneFinished} ──`)).toBeInTheDocument();
+    // The copy must not name the window: the length is a Go constant and no
+    // test in either suite could catch the two drifting apart.
+    expect(t.overview.noneFinished).not.toMatch(/hour|minute|\d/i);
+  });
+
+  it('keeps the transfers panel alive while the finished query is still pending', () => {
+    // null means "don't seed queryKeys.jobsPage(FINISHED_PARAMS) at all" — the
+    // finished query then has no cache entry and stays pending against the
+    // hung-fetch stub, which is what actually exercises a dead/slow poll for
+    // that region. (Passing undefined here would hit renderOverview's default
+    // parameter and seed a resolved empty page instead — that would prove
+    // nothing about gating.)
+    renderOverview(jobPage, charts, status, null);
+    // A dead poll for one region must never blank another (issue #201).
+    expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
+    expect(document.querySelectorAll('[class*="transferRow"]').length).toBeGreaterThan(0);
+  });
+
+  it('renders both panels from their own independent queries', () => {
+    renderOverview(
+      makeJobPage([{ ...baseJob, id: 1, title: 'In Flight', status: 'active' }]),
+      charts,
+      status,
+      makeJobPage([{ ...baseJob, id: 90, title: 'Finished Album', status: 'done', state: 'DONE' }]),
+    );
+    expect(screen.getByText('In Flight')).toBeInTheDocument();
+    expect(screen.getByText('Finished Album')).toBeInTheDocument();
   });
 });
 

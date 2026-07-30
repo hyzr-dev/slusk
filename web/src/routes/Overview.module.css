@@ -42,6 +42,25 @@
   align-items: center;
 }
 
+/* Four columns rather than the six TRANSFERS uses: a finished job has no
+   progress or speed left to report, and its byte counts are either complete
+   or meaningless. Same 28px status gutter and same album column shape, so
+   the two panels read as one stack. */
+.finishedGrid {
+  display: grid;
+  grid-template-columns: 28px minmax(150px, 2fr) minmax(76px, 1fr) 62px;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Same treatment as .reconcileDur: right-aligned and dimmed.
+   tabular-nums keeps the column from jittering as ages tick 9m -> 10m. */
+.finishedWhen {
+  text-align: right;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .transferHead {
   padding: 9px 17px;
   border-bottom: 1px solid var(--line);
@@ -171,4 +190,11 @@
 
 @media (max-width: 640px) {
   .statGrid { grid-template-columns: repeat(2, 1fr); }
+  /* The new panel's PEER column is what pushes it past the viewport at 375px,
+     and body has overflow-x: hidden, so the overflow is clipped rather than
+     scrollable (see issue #215) — the WHEN column, the one thing the panel
+     exists to show, was the part being cut. Album and age survive; peer is
+     the least essential field on a finished row. */
+  .finishedGrid { grid-template-columns: 28px minmax(90px, 2fr) 62px; }
+  .finishedGrid .peerCell { display: none; }
 }

@@ -288,7 +288,7 @@ export const t = {
     empty: 'No events.',
   },
   overview: {
-    empty: 'No active downloads.',
+    empty: 'Nothing in flight.',
     noChartData: 'No pass history yet',
     chartRangeStart: '−24 h',
     chartRangeEnd: 'now',
@@ -302,7 +302,16 @@ export const t = {
     // RECONCILE reuses t.chrome.reconcile rather than a third copy of the word.
     transfersHeading: 'TRANSFERS',
     throughputHeading: 'THROUGHPUT',
-    activeCountMeta: (n: number) => `${n} active`,
+    inFlightCountMeta: (n: number) => (n === 1 ? '1 album' : `${n} albums`),
+    // Shown instead of inFlightCountMeta when the panel cannot fit every
+    // in-flight job: max_active can exceed the panel's row count, and silently
+    // dropping the remainder would read as "this is all of it".
+    //
+    // Says "albums", not "in flight": the IN FLIGHT stat cell above counts
+    // active file transfers (/status's active field is len(ActiveTransfers)),
+    // not jobs, so two numbers labelled the same way would sit two rows apart
+    // meaning different things. The panel lists albums; it says so.
+    inFlightTruncatedMeta: (shown: number, total: number) => `${shown} of ${total} albums`,
     // The peer-queue special case: an "active" job with no bytes moving.
     queuePos: (n: number) => `queue pos ${n}`,
     // The dense TRANSFERS table's SIZE column for the same case (mock: 'pos
@@ -336,6 +345,20 @@ export const t = {
       when: 'WHEN',
       result: 'RESULT',
       dur: 'DUR',
+    },
+    // The RECENTLY FINISHED panel (#287): jobs that reached DONE or FAILED
+    // within the backend's window (store.DashboardFinishedWindow).
+    finishedHeading: 'RECENTLY FINISHED',
+    // Deliberately says nothing about how long "recently" is: the window is a
+    // Go constant (store.DashboardFinishedWindow) and this is a TypeScript
+    // string, so no test in either suite could catch them contradicting each
+    // other. An agnostic phrasing cannot go out of date.
+    noneFinished: 'Nothing finished recently',
+    finishedGridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      peer: 'PEER',
+      when: 'WHEN',
     },
     downloadThroughput: 'DOWNLOAD',
     uploadThroughput: 'UPLOAD',

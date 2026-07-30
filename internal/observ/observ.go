@@ -232,6 +232,11 @@ type PagedJobsQuery struct {
 	// dashboard's own page size and truncating client-side. Defaults to
 	// jobsPageSize when the request omits it; see parsePagedJobsQuery.
 	PageSize int64
+	// SkipFacets asks the store to omit the total and facet counts (see
+	// store.DashboardJobsQuery.SkipFacets — the facet query is the expensive
+	// part of the request and runs regardless of filter). Set by facets=0.
+	// A caller that renders a total or facet chips must leave this false.
+	SkipFacets bool
 }
 
 // JobStatusFacets contains counts for every dashboard status. All ignores the
@@ -779,7 +784,7 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if err != nil {
 		return PagedJobsQuery{}, errors.New("invalid query parameters")
 	}
-	allowed := map[string]struct{}{"page": {}, "sort": {}, "dir": {}, "filter": {}, "source": {}, "q": {}, "pageSize": {}}
+	allowed := map[string]struct{}{"page": {}, "sort": {}, "dir": {}, "filter": {}, "source": {}, "q": {}, "pageSize": {}, "facets": {}}
 	for key, value := range values {
 		if _, ok := allowed[key]; !ok {
 			return PagedJobsQuery{}, fmt.Errorf("unknown query parameter %q", key)
@@ -819,7 +824,20 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if raw, ok := values["q"]; ok {
 		query.Query = strings.TrimSpace(raw[0])
 	}
-	if !oneOf(query.Sort, "st", "album", "peer", "try", "transfer") {
+	// facets=0 opts out of the total and the facet counts; 1 is the default and
+	// the only other accepted value. Anything else is rejected rather than
+	// coerced, so a typo can't silently drop counts the caller meant to render.
+	if raw, ok := values["facets"]; ok {
+		switch raw[0] {
+		case "0":
+			query.SkipFacets = true
+		case "1":
+			query.SkipFacets = false
+		default:
+			return PagedJobsQuery{}, errors.New("invalid facets")
+		}
+	}
+	if !oneOf(query.Sort, "st", "album", "peer", "try", "transfer", "recent") {
 		return PagedJobsQuery{}, errors.New("invalid sort")
 	}
 	if !oneOf(query.Dir, "asc", "desc") {
@@ -832,7 +850,14 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if query.Sort == "transfer" && query.Dir == "desc" {
 		return PagedJobsQuery{}, errors.New("dir=desc is not supported for sort=transfer")
 	}
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring") {
+	// sort=recent is newest-first by definition (see store.dashboardJobsOrder);
+	// ascending would invert Overview's recently-finished panel. Note that Dir
+	// defaults to "asc", so a caller asking for sort=recent must pass dir=desc
+	// explicitly rather than relying on the default.
+	if query.Sort == "recent" && query.Dir == "asc" {
+		return PagedJobsQuery{}, errors.New("dir=asc is not supported for sort=recent")
+	}
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

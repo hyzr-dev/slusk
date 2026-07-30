@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1236,45 +1237,6 @@ func TestListDashboardJobsPersistedSortsAndIDTieBreak(t *testing.T) {
 	assertOrder("try", "desc", []int64{betaID, alphaAID, alphaZID, aliceID})
 }
 
-// TestListDashboardJobsFilterTransferringUnion is issue #268: filter=transferring
-// must select exactly the active+stalled union — nothing more, nothing less —
-// expressed against the same dashboardJobStatusSQL every other status filter
-// uses, not a second copy of the state predicates.
-func TestListDashboardJobsFilterTransferringUnion(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-
-	activeID := insertDashboardTestJob(t, s, 5001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "Artist", "peer_active", 0, now)
-	stalledID := insertDashboardTestJob(t, s, 5002, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "Artist", "peer_stalled", 0, now.Add(time.Second))
-	insertDashboardTestJob(t, s, 5003, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
-	insertDashboardTestJob(t, s, 5004, core.SourceLidarr, core.StateImporting, "", "Importing", "Artist", "", 0, now.Add(3*time.Second))
-	insertDashboardTestJob(t, s, 5005, core.SourceLidarr, core.StateFailed, "", "Failed", "Artist", "", 0, now.Add(4*time.Second))
-	insertDashboardTestJob(t, s, 5006, core.SourceLidarr, core.StateParked, "", "Parked", "Artist", "", 0, now.Add(5*time.Second))
-	insertDashboardTestJob(t, s, 5007, core.SourceLidarr, core.StateDone, "", "Done", "Artist", "", 0, now.Add(6*time.Second))
-
-	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "transferring", Source: "all"})
-	if err != nil {
-		t.Fatalf("ListDashboardJobs: %v", err)
-	}
-	gotIDs := make([]int64, len(page.Jobs))
-	for i, job := range page.Jobs {
-		gotIDs[i] = job.Job.ID
-	}
-	wantIDs := []int64{activeID, stalledID}
-	if page.Total != 2 || fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
-		t.Fatalf("filter=transferring ids = %v total %d, want %v total 2", gotIDs, page.Total, wantIDs)
-	}
-	// Status facets must ignore the selected status (same contract every
-	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
-	// and so report the FULL unfiltered counts, not just the transferring subset.
-	if page.Facets.Status.All != 7 || page.Facets.Status.Active != 1 || page.Facets.Status.Stalled != 1 ||
-		page.Facets.Status.Queued != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Failed != 1 ||
-		page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
-		t.Errorf("status facets did not ignore filter=transferring: %+v", page.Facets.Status)
-	}
-}
-
 // TestListDashboardJobsSortTransferGroupsActiveBeforeStalledThenAge is issue
 // #268: sort=transfer ranks active above stalled above everything else, then
 // created_at ascending within a group — the same rule
@@ -1419,7 +1381,7 @@ func TestListDashboardJobsPageSizeDefaultsWhenUnset(t *testing.T) {
 
 // TestListDashboardJobsExplicitPageSize covers an explicit, smaller PageSize
 // (Overview's TRANSFERS panel requests 8, issue #268): the LIMIT actually
-// applied must match, and it must still compose with filter=transferring and
+// applied must match, and it must still compose with filter=inflight and
 // sort=transfer.
 func TestListDashboardJobsExplicitPageSize(t *testing.T) {
 	s := newTestStore(t)
@@ -1429,7 +1391,7 @@ func TestListDashboardJobsExplicitPageSize(t *testing.T) {
 		insertDashboardTestJob(t, s, int64(8000+i), core.SourceLidarr, core.StateDownloading, core.TransferInProgress, fmt.Sprintf("Active %02d", i), "Artist", fmt.Sprintf("peer_%d", i), 0, now.Add(time.Duration(i)*time.Second))
 	}
 	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{
-		Sort: "transfer", Dir: "asc", Filter: "transferring", Source: "all", PageSize: 8,
+		Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 8,
 	})
 	if err != nil {
 		t.Fatalf("ListDashboardJobs: %v", err)
@@ -1834,5 +1796,265 @@ func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("job %d not returned by filter=active", job.ID)
+	}
+}
+
+func TestListDashboardJobsFilterInflightSelectsByStateNotStatus(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// DOWNLOADING with a file actually moving -> status 'active'.
+	moving := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Moving", "A", "peer1", 0, now)
+	// DOWNLOADING with everything still PENDING -> status 'queued', which the
+	// transferring union never selected. This is the whole point of inflight.
+	pending := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferPending, "Pending", "B", "peer2", 0, now.Add(time.Second))
+	// DOWNLOADING with a stalled file -> status 'stalled'.
+	stalled := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "C", "peer3", 0, now.Add(2*time.Second))
+	// IMPORTING -> status 'importing', also never in the transferring union.
+	importing := insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateImporting, "", "Importing", "D", "peer4", 0, now.Add(3*time.Second))
+	// Excluded: not yet started, and already finished.
+	insertDashboardTestJob(t, s, 5, core.SourceLidarr, core.StateWanted, "", "Wanted", "E", "", 0, now.Add(4*time.Second))
+	insertDashboardTestJob(t, s, 6, core.SourceLidarr, core.StateSelecting, "", "Selecting", "F", "", 0, now.Add(5*time.Second))
+	insertDashboardTestJob(t, s, 7, core.SourceLidarr, core.StateDone, "", "Done", "G", "", 0, now.Add(6*time.Second))
+	insertDashboardTestJob(t, s, 8, core.SourceLidarr, core.StateFailed, "", "Failed", "H", "", 0, now.Add(7*time.Second))
+	insertDashboardTestJob(t, s, 9, core.SourceLidarr, core.StateParked, "", "Parked", "I", "", 0, now.Add(8*time.Second))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "st", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, view := range page.Jobs {
+		got[view.Job.ID] = true
+	}
+	for _, want := range []int64{moving, pending, stalled, importing} {
+		if !got[want] {
+			t.Errorf("job %d missing from inflight page", want)
+		}
+	}
+	if len(page.Jobs) != 4 {
+		t.Fatalf("len(jobs) = %d, want 4; got ids %v", len(page.Jobs), got)
+	}
+	if page.Total != 4 {
+		t.Errorf("Total = %d, want 4", page.Total)
+	}
+	// Status facets must ignore the selected filter (same contract every
+	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
+	// and so report the FULL unfiltered counts, not just the inflight subset.
+	// moving=active, pending/wanted/selecting=queued, stalled=stalled,
+	// importing=importing, done=done, failed=failed, parked=parked.
+	if page.Facets.Status.All != 9 || page.Facets.Status.Active != 1 || page.Facets.Status.Queued != 3 ||
+		page.Facets.Status.Stalled != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Done != 1 ||
+		page.Facets.Status.Failed != 1 || page.Facets.Status.Parked != 1 {
+		t.Errorf("status facets did not ignore filter=inflight: %+v", page.Facets.Status)
+	}
+}
+
+func TestListDashboardJobsFilterInflightAndFinishedAreDisjoint(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// A DOWNLOADING job whose only transfer errored reports status 'failed'
+	// via the candidate aggregate (dashboard.go:142) while its state is still
+	// DOWNLOADING. Filtering on status would place it in BOTH regions; both
+	// filters go through j.state precisely so it cannot.
+	id := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDownloading, core.TransferErrored, "Errored", "A", "peer1", 0, now)
+
+	inflight, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "st", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("inflight: %v", err)
+	}
+	if len(inflight.Jobs) != 1 || inflight.Jobs[0].Job.ID != id {
+		t.Fatalf("inflight jobs = %+v, want exactly job %d", inflight.Jobs, id)
+	}
+	if inflight.Jobs[0].Status != "failed" {
+		t.Errorf("Status = %q, want %q (the aggregate-derived status is unchanged)", inflight.Jobs[0].Status, "failed")
+	}
+
+	// The other half of the disjointness claim: the same job must NOT show up
+	// under 'finished'. Use the same 'now' the job was inserted with, so it
+	// sits squarely inside DashboardFinishedWindow — if 'finished' were ever
+	// switched back to a status-keyed predicate (matching status 'failed'
+	// instead of state DONE/FAILED), this job would wrongly appear here, and
+	// the window itself couldn't be blamed for excluding it.
+	finished, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("finished: %v", err)
+	}
+	if len(finished.Jobs) != 0 {
+		t.Fatalf("finished jobs = %+v, want none (state is DOWNLOADING, not DONE/FAILED)", finished.Jobs)
+	}
+}
+
+func TestListDashboardJobsSortTransferRanksImportingAfterWaiting(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// Inserted in reverse rank order so a passing test cannot be an accident
+	// of insertion order: importing first, active last.
+	importing := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateImporting, "", "Importing", "A", "peer1", 0, now)
+	waiting := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferPending, "Waiting", "B", "peer2", 0, now.Add(time.Second))
+	stalled := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "C", "peer3", 0, now.Add(2*time.Second))
+	active := insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "D", "peer4", 0, now.Add(3*time.Second))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, 0, len(page.Jobs))
+	for _, view := range page.Jobs {
+		got = append(got, view.Job.ID)
+	}
+	want := []int64{active, stalled, waiting, importing}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v (active, stalled, waiting, importing)", got, want)
+	}
+}
+
+func TestListDashboardJobsSortTransferKeepsAgeOrderWithinGroup(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	older := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateImporting, "", "Older", "A", "peer1", 0, now)
+	newer := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateImporting, "", "Newer", "B", "peer2", 0, now.Add(time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 2 || page.Jobs[0].Job.ID != older || page.Jobs[1].Job.ID != newer {
+		t.Fatalf("order = %+v, want [%d %d] (created_at ascending within a group)", page.Jobs, older, newer)
+	}
+}
+
+func TestListDashboardJobsFilterFinishedHonoursTheWindow(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// insertDashboardTestJob writes its `at` argument to both created_at and
+	// updated_at, which is exactly what the window reads.
+	justDone := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Just done", "A", "peer1", 0, now.Add(-time.Minute))
+	justFailed := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateFailed, "", "Just failed", "B", "peer2", 0, now.Add(-30*time.Minute))
+	// One second inside the window survives; one second outside does not.
+	insideEdge := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDone, "", "Inside edge", "C", "peer3", 0, now.Add(-DashboardFinishedWindow).Add(time.Second))
+	insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateDone, "", "Outside edge", "D", "peer4", 0, now.Add(-DashboardFinishedWindow).Add(-time.Second))
+	// Excluded by state regardless of how fresh they are.
+	insertDashboardTestJob(t, s, 5, core.SourceLidarr, core.StateParked, "", "Parked", "E", "", 0, now)
+	insertDashboardTestJob(t, s, 6, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Downloading", "F", "peer6", 0, now)
+	insertDashboardTestJob(t, s, 7, core.SourceLidarr, core.StateWanted, "", "Wanted", "G", "", 0, now)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, 0, len(page.Jobs))
+	for _, view := range page.Jobs {
+		got = append(got, view.Job.ID)
+	}
+	// sort=recent is updated_at descending, so newest finish first.
+	want := []int64{justDone, justFailed, insideEdge}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ids = %v, want %v", got, want)
+	}
+}
+
+func TestListDashboardJobsSortRecentBreaksTiesById(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	finishedAt := now.Add(-time.Minute)
+
+	low := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Low id", "A", "peer1", 0, finishedAt)
+	high := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDone, "", "High id", "B", "peer2", 0, finishedAt)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	// Equal updated_at: without the id tiebreaker Postgres' order is
+	// undefined and the same job could appear on two pages.
+	if len(page.Jobs) != 2 || page.Jobs[0].Job.ID != high || page.Jobs[1].Job.ID != low {
+		t.Fatalf("order = %+v, want [%d %d] (id descending on an updated_at tie)", page.Jobs, high, low)
+	}
+}
+
+func TestValidateDashboardJobsQueryRejectsRecentAscendingAndMissingNow(t *testing.T) {
+	base := DashboardJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 5, Now: time.Now()}
+
+	ascending := base
+	ascending.Dir = "asc"
+	if err := validateDashboardJobsQuery(ascending); err == nil {
+		t.Error("dir=asc accepted for sort=recent, want rejected")
+	}
+
+	noNow := base
+	noNow.Now = time.Time{}
+	if err := validateDashboardJobsQuery(noNow); err == nil {
+		t.Error("filter=finished accepted with a zero Now, want rejected")
+	}
+
+	// A zero Now is fine for every other filter: nothing reads it.
+	otherFilter := base
+	otherFilter.Filter = "done"
+	otherFilter.Now = time.Time{}
+	if err := validateDashboardJobsQuery(otherFilter); err != nil {
+		t.Errorf("filter=done with zero Now: %v, want nil", err)
+	}
+}
+
+func TestListDashboardJobsSkipFacetsReturnsPageWithoutCounts(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	first := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "First", "A", "peer1", 0, now.Add(-time.Minute))
+	insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDone, "", "Second", "B", "peer2", 0, now.Add(-2*time.Minute))
+	insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateWanted, "", "Wanted", "C", "", 0, now)
+
+	query := DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 1, Now: now,
+		SkipFacets: true,
+	}
+	page, err := s.ListDashboardJobs(context.Background(), query)
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != first {
+		t.Fatalf("jobs = %+v, want exactly job %d", page.Jobs, first)
+	}
+	if page.Total != 0 {
+		t.Errorf("Total = %d, want 0 when facets are skipped", page.Total)
+	}
+	if page.Facets != (DashboardJobsFacets{}) {
+		t.Errorf("Facets = %+v, want the zero value when skipped", page.Facets)
+	}
+
+	// The same query without SkipFacets still reports both.
+	query.SkipFacets = false
+	withFacets, err := s.ListDashboardJobs(context.Background(), query)
+	if err != nil {
+		t.Fatalf("ListDashboardJobs without SkipFacets: %v", err)
+	}
+	if withFacets.Total != 2 {
+		t.Errorf("Total = %d, want 2", withFacets.Total)
+	}
+	if withFacets.Facets.Status.Done != 2 {
+		t.Errorf("Facets.Status.Done = %d, want 2", withFacets.Facets.Status.Done)
+	}
+	// Facets ignore the status filter, so the WANTED job still counts in All.
+	if withFacets.Facets.Status.All != 3 {
+		t.Errorf("Facets.Status.All = %d, want 3", withFacets.Facets.Status.All)
 	}
 }

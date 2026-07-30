@@ -21,12 +21,12 @@ import { t } from '../strings';
 import JobExpansion from './JobExpansion';
 import styles from './Jobs.module.css';
 
-// The approved status row keeps the mock's seven chips. IMPORTING remains a
-// supported server filter/facet and is represented under ALL by its IM tag.
-// TRANSFERRING (issue #268) exists only for Overview's own useJobs call —
-// it's not a chip a user picks here, so JobStatusFacets has no count for it
-// either.
-type ChipKey = Exclude<JobStatusFilter, 'importing' | 'transferring'>;
+// The approved status row keeps the mock's seven chips. IMPORTING, INFLIGHT
+// and FINISHED (issue #287) are all server-only filter values used by
+// Overview's own useJobs calls, not chips a user picks here — JobStatusFacets
+// has no count for any of them, and IMPORTING is otherwise represented under
+// ALL by its IM tag.
+type ChipKey = Exclude<JobStatusFilter, 'importing' | 'inflight' | 'finished'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The

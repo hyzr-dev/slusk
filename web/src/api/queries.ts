@@ -95,6 +95,7 @@ export const queryKeys = {
     params.source,
     params.q,
     params.pageSize,
+    params.skipFacets,
   ] as const,
   status: ['status'] as const,
   events: ['events'] as const,
@@ -281,6 +282,10 @@ export function jobsPageUrl(params: JobPageParams): string {
   // default already matches JOBS_PAGE_SIZE, and only a caller that actually
   // wants a different size (Overview, issue #268) needs to send it.
   if (params.pageSize !== undefined) query.set('pageSize', String(params.pageSize));
+  // Only sent when opting out: the server defaults to facets=1, so an absent
+  // parameter and facets=1 mean the same thing and omitting it keeps the URL
+  // (and therefore the cache key) unchanged for every existing caller.
+  if (params.skipFacets) query.set('facets', '0');
   return `/api/jobs?${query.toString()}`;
 }
 

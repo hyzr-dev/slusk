@@ -22,15 +22,15 @@ export type JobSource = 'lidarr' | 'manual';
 /**
  * GET /api/jobs query primitives. The backend defaults each page to
  * `jobsPageSize` (12) unless `pageSize` is given — see JobPageParams.
- * 'transfer' and 'transferring' exist for Overview's TRANSFERS panel (issue
- * #268): 'transfer' is `transferOrder` moved server-side (status group
- * first — active before stalled — then createdAt ascending within the
- * group, see the now-deleted client copy of this rule that used to live in
- * web/src/routes/jobSort.ts), and 'transferring' is the `active`+`stalled`
- * union as a single filter value, kept single-valued rather than turning
- * `filter` into a multi-value parameter.
+ * 'transfer' exists for Overview's TRANSFERS panel (issue #268):
+ * `transferOrder` moved server-side (status group first — active before
+ * stalled — then createdAt ascending within the group, see the now-deleted
+ * client copy of this rule that used to live in web/src/routes/jobSort.ts).
+ * 'inflight' and 'finished' are Overview's two region filters (issue #287):
+ * 'inflight' is every job the pipeline holds a MaxActive slot for, 'finished'
+ * is a job that reached a terminal state within the backend's recent window.
  */
-export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer';
+export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer' | 'recent';
 export type JobPageDirection = 'asc' | 'desc';
 export type JobStatusFilter =
   | 'all'
@@ -41,7 +41,8 @@ export type JobStatusFilter =
   | 'failed'
   | 'parked'
   | 'done'
-  | 'transferring';
+  | 'inflight'
+  | 'finished';
 export type JobSourceFilter = 'all' | JobSource;
 
 export interface JobPageParams {
@@ -57,6 +58,13 @@ export interface JobPageParams {
    * explicitly. Overview (issue #268) requests 8.
    */
   pageSize?: number;
+  /**
+   * Opt out of `total` and the facet counts (`facets=0`). The server's facet
+   * query is the expensive part of `/api/jobs` and runs whatever the filter is,
+   * so a panel that renders neither should not ask for them. Leave unset in any
+   * view that reads `total` or renders facet chips.
+   */
+  skipFacets?: boolean;
 }
 
 export interface JobStatusFacets {
