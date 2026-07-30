@@ -325,7 +325,11 @@ export const t = {
     statQueued: 'Queued',
     statImported: 'Imported 24h',
     statAttention: 'Needs attention',
-    subInFlight: (peers: number) => `downloading from ${peers} peers`,
+    // Not "downloading N peers": status.active is len(ActiveTransfers), which
+    // spans queued/in_progress/stalled transfers (not all "downloading"), and
+    // it's a transfer count, not a distinct-peer count.
+    subInFlight: (transfers: number) =>
+      transfers === 1 ? '1 active transfer' : `${transfers} active transfers`,
     subQueued: 'awaiting a free slot',
     subImported: (n: number) => `${n} verifying now`,
     subAttention: (stalled: number, parked: number) => `${stalled} stalled · ${parked} parked`,
