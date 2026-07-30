@@ -113,11 +113,11 @@ const baseline = await agent(
 
 if (!baseline) {
   log('baseline agent returned nothing -- treating as aborted, not as a verdict on the repository')
-  return { judgements: [], baseline, browser: [], aborted: 'baseline-agent-died' }
+  return { judgements: [], baseline, browser: [], unassessed: [], aborted: 'baseline-agent-died' }
 }
 if (baseline.unknownFailures?.length) {
   log(`main is red: ${baseline.unknownFailures.join(', ')}`)
-  return { judgements: [], baseline, browser: [], aborted: 'suite-red' }
+  return { judgements: [], baseline, browser: [], unassessed: [], aborted: 'suite-red' }
 }
 // The three greens are required fields in their own right: an agent can report
 // empty unknownFailures alongside a false green (e.g. it classified everything
@@ -126,15 +126,15 @@ if (baseline.unknownFailures?.length) {
 // ranking fiction, same as an outright unknownFailures hit.
 if (!baseline.goGreen) {
   log('main is red: go test ./... did not report green')
-  return { judgements: [], baseline, browser: [], aborted: 'go-red' }
+  return { judgements: [], baseline, browser: [], unassessed: [], aborted: 'go-red' }
 }
 if (!baseline.webGreen) {
   log('main is red: npm test (web/) did not report green')
-  return { judgements: [], baseline, browser: [], aborted: 'web-red' }
+  return { judgements: [], baseline, browser: [], unassessed: [], aborted: 'web-red' }
 }
 if (!baseline.triageGreen) {
   log('main is red: node --test scripts/triage did not report green')
-  return { judgements: [], baseline, browser: [], aborted: 'triage-red' }
+  return { judgements: [], baseline, browser: [], unassessed: [], aborted: 'triage-red' }
 }
 
 log(`baseline green (known noise seen: ${baseline.knownSeen?.join(', ') || 'none'})`)
@@ -259,4 +259,4 @@ for (const item of selected) {
     { label: `browser:#${item.number}`, phase: 'Browser', model: 'sonnet', schema: VERDICT }))
 }
 
-return { judgements, baseline, browser: browser.filter(Boolean) }
+return { judgements, baseline, browser: browser.filter(Boolean), unassessed }
