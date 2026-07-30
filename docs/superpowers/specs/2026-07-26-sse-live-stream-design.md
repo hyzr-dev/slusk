@@ -98,11 +98,22 @@ GET /api/stream?job=42   → samma, plus per fil för jobb 42
 `X-Accel-Buffering: no` (utan den buffrar en reverse proxy strömmen till
 oanvändbarhet). Handlern flushar efter varje meddelande via `http.Flusher`.
 
-Meddelandena är namngivna SSE-events — `event: live` — så att #129:s
-sökresultatström kan bli `event: search` på samma endpoint utan att röra
-något här. Det är #161:s krav på ett öppet händelseschema.
+Meddelandena är namngivna SSE-events på samma anslutning — `event: live` på
+varje anslutning, plus `event: throughput` (issue #265) för en prenumerant
+som ber om den via `?throughput=1` — så att #129:s sökresultatström kan bli
+`event: search` på samma endpoint utan att röra något här. Det är #161:s krav
+på ett öppet händelseschema.
 
 ### Nyttolast
+
+**UPPDATERAT (#265):** throughput-serierna (`throughput`/`uploadThroughput`)
+flyttades ut ur `event: live`-kroppen (`livePayload`) till en egen
+`throughputPayload` på `event: throughput`, fältnamn `download`/`upload`.
+Skälet: en prenumerant utan sparkline på skärmen (Jobs, JobDetail, Settings,
+...) ska aldrig behöva bygga eller ta emot serien alls. `down`/`up` (globala
+skalärer) ligger kvar på `event: live` oavsett scope. Se
+`internal/observ/stream.go`s paketkommentar för den aktuella kontraktet;
+nedanstående beskriver fortfarande formen som gällde före #265:
 
 Bara live-fält:
 
@@ -111,7 +122,8 @@ Bara live-fält:
 - **per fil** (endast med `?job=`): `filename`, `state`, `bytesDone`,
   `bytesTotal`, `speed`, `queuePosition`. "Vilken fil som processas just nu"
   faller ut som den med `state: in_progress` — inget eget fält behövs.
-- **throughput**: de sampel som är nyare än förra ticket
+- **throughput**: de sampel som är nyare än förra ticket (numera på
+  `event: throughput`, inte `event: live` — se ovan)
 - **down**: summan av hastigheterna, så headern slipper räkna ur hela
   jobblistan
 

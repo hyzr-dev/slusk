@@ -1,8 +1,16 @@
 // Package observ: stream.go serves GET /api/stream (issue #161), a
-// server-sent-events endpoint of live dashboard data: whole per-job objects
-// for changed jobs; recent directional throughput samples; aggregate current
-// download and upload speeds; and, when ?job=<id> is set, that job's whole
-// detail body.
+// server-sent-events endpoint of live dashboard data over two independently
+// fired named events on the SAME connection: `event: live` (whole per-job
+// objects for changed jobs, aggregate current download/upload speeds, and,
+// when ?job=<id> is set, that job's whole detail body) and `event: throughput`
+// (recent directional throughput samples, sent only to a subscriber that
+// opted in with ?throughput=1 — issue #265). Splitting them onto separate
+// events, rather than folding throughput's series into every `live` frame,
+// is what lets a subscriber with no sparkline on screen (Jobs, JobDetail,
+// Settings, ...) skip the cost of building and marshalling it entirely,
+// while a browser's 6-connections-per-origin limit isn't a reason to avoid a
+// second event on the same connection — an SSE connection holds its slot for
+// its whole lifetime regardless of how many named events it carries.
 //
 // Both the job-list half and the scoped detail half carry the FINISHED
 // object rather than a partial live-only view (issue #258): built by the
@@ -13,6 +21,14 @@
 // carries the whole truth; the stream carries only what changed since a
 // subscriber connected (or since ?jobs= last covered a given id — see
 // registerStream), and a dropped frame self-heals on the next GET.
+//
+// Throughput is the one exception to that self-healing story: it is a time
+// series the client accumulates into a window rather than a state snapshot,
+// so a dropped sample is gone forever rather than corrected by the next
+// frame (see sendLatestThroughput). Every subscriber's mailbox degrades by
+// discarding the superseded frame outright EXCEPT this one, which instead
+// accumulates across a displaced send — see that function's doc comment for
+// why both halves of that contract are required, not an optimization.
 //
 // The job list REQUIRES an explicit ?jobs=<id,id,...> array (issue #268): a
 // subscriber that omits ?jobs= gets no job frames at all — every job-list
@@ -119,19 +135,35 @@ const streamMaxJobScope = 100
 // the merge that produced four separate regressions in #161 (see issue
 // #258).
 //
-// Down/Up come from live data read fresh on every tick (deps.LiveTransfers,
+// Down/Up are global scalars independent of any subscriber's scope — every
+// connection gets them, since the header needs them regardless of whether
+// this subscriber asked for the throughput series behind them (issue #265)
+// — read fresh on every tick from live data (deps.LiveTransfers,
 // deps.Throughput); Jobs and Detail are built from a cache of persisted data
 // refreshed on its own slower timer (streamCorrelationInterval, or sooner —
 // see tick's event-driven refresh). The invariant is about *when*, not
 // *what*: the broadcaster's per-tick loop never issues a query, though what
 // it reads was last derived from one.
 type livePayload struct {
-	Jobs             []jobDTO              `json:"jobs,omitempty"`
-	Detail           *jobDetailDTO         `json:"detail,omitempty"`
-	Throughput       []throughputSampleDTO `json:"throughput,omitempty"`
-	UploadThroughput []throughputSampleDTO `json:"uploadThroughput,omitempty"`
-	Down             int64                 `json:"down"`
-	Up               int64                 `json:"up"`
+	Jobs   []jobDTO      `json:"jobs,omitempty"`
+	Detail *jobDetailDTO `json:"detail,omitempty"`
+	Down   int64         `json:"down"`
+	Up     int64         `json:"up"`
+}
+
+// throughputPayload is the JSON body of every `event: throughput` SSE frame
+// (issue #265), sent only to a subscriber that opened the connection with
+// ?throughput=1 (see streamSubscriber.wantThroughput) — every other
+// subscriber never receives this event at all, so it never pays for building
+// or marshalling it. Download/Upload carry only samples strictly newer than
+// this subscriber's previous throughput frame (see newThroughputSince), the
+// same "send only what's new" contract livePayload's Jobs field has, but
+// unlike every other field in this file a sample that doesn't make it into a
+// frame is lost forever rather than self-healing on the next one — see
+// sendLatestThroughput.
+type throughputPayload struct {
+	Download []throughputSampleDTO `json:"download,omitempty"`
+	Upload   []throughputSampleDTO `json:"upload,omitempty"`
 }
 
 // jobCorrelation is the minimal per-job data the stream hub needs to notice
@@ -370,20 +402,26 @@ func newThroughputSince(samples []core.ThroughputSample, since time.Time) []core
 	return nil
 }
 
-// changedSinceLast decides whether a subscriber needs a fresh live frame:
-// a nonzero per-job delta, either directional series gaining a new sample,
-// or the down/up/detail snapshot fields differing. newJobCount is a count
-// rather than a slice comparison, mirroring newDownloadCount/newUploadCount:
-// jobs is itself already a delta by the time this is called (see
-// buildJobsDelta), so a length check is the right unit of "changed", not a
-// snapshot equality check.
+// changedSinceLast decides whether a subscriber needs a fresh `event: live`
+// frame: a nonzero per-job delta, or the down/up/detail snapshot fields
+// differing. newJobCount is a count rather than a slice comparison: jobs is
+// itself already a delta by the time this is called (see buildJobsDelta), so
+// a length check is the right unit of "changed", not a snapshot equality
+// check.
+//
+// Throughput (issue #265) deliberately plays no part here: it is sent as its
+// own independent `event: throughput` frame (see tick), gated only on
+// whether a fresh sample exists for a subscriber that asked for it, never on
+// whether this function decided the live snapshot changed — a new sample at
+// an unchanged rate (Down/Up identical to the last frame) must NOT force a
+// live frame just because it exists.
 //
 // Detail needs reflect.DeepEqual: it is a pointer to a struct of nested
 // slices, so neither == nor an element-wise comparison reaches the
 // transfers that actually change. This runs once per scoped subscriber per
 // tick over one job's attempts, not over the job table.
-func changedSinceLast(prev, next livePayload, newJobCount, newDownloadCount, newUploadCount int) bool {
-	if newJobCount > 0 || newDownloadCount > 0 || newUploadCount > 0 {
+func changedSinceLast(prev, next livePayload, newJobCount int) bool {
+	if newJobCount > 0 {
 		return true
 	}
 	if prev.Down != next.Down || prev.Up != next.Up {
@@ -392,13 +430,26 @@ func changedSinceLast(prev, next livePayload, newJobCount, newDownloadCount, new
 	return !reflect.DeepEqual(prev.Detail, next.Detail)
 }
 
-// streamSubscriber is one open GET /api/stream connection's mailbox. ch has
-// capacity 1 and holds only the latest undelivered payload (see sendLatest),
-// so a slow client can never block the shared broadcaster or build up a
-// backlog of stale intermediate states — it just skips straight to whatever
-// is current once it catches up.
+// streamSubscriber is one open GET /api/stream connection's mailbox. ch and
+// tch each have capacity 1 and hold only the latest undelivered payload for
+// their own event (see sendLatest/sendLatestThroughput), so a slow client can
+// never block the shared broadcaster or build up a backlog of stale
+// intermediate states — it just skips straight to whatever is current once
+// it catches up. The two are deliberately independent channels rather than
+// one shared mailbox (issue #265): a single channel would force an ordinary
+// live-only change (Down ticking, no new sample) to carry along whatever
+// throughput delta was already queued, hand-carrying it forward exactly like
+// the trap this issue exists to fix, just one level up.
 type streamSubscriber struct {
-	ch chan livePayload
+	ch  chan livePayload
+	tch chan throughputPayload
+	// wantThroughput is whether this connection asked for the throughput
+	// event (?throughput=1). false for every subscriber that never mentions
+	// it — the common case — which is what lets fetchThroughput's result
+	// stay unconditional (down/up need it — see downSpeed) while the per-tick
+	// work of diffing, converting, and sending the series itself is skipped
+	// entirely for a subscriber that has no sparkline on screen.
+	wantThroughput bool
 	// jobID is the ?job=<id> detail scope (0 for none).
 	jobID int64
 	// jobIDs is the ?jobs=<id,id,...> job-list scope. nil/empty means no job
@@ -408,13 +459,19 @@ type streamSubscriber struct {
 	// buildJobsDelta can range over it directly without copying.
 	jobIDs map[int64]struct{}
 	// last remembers the down/up/detail fields this subscriber last had
-	// queued; directional deltas use independent per-subscriber watermarks,
-	// and per-job state uses lastJobs below rather than living here, since
-	// jobs is delta- not snapshot-encoded.
+	// queued; per-job state uses lastJobs below rather than living here,
+	// since jobs is delta- not snapshot-encoded.
 	last livePayload
 	// lastJobs remembers, per job id, the last whole jobDTO this subscriber
 	// was sent (or computed as pending-send) — see buildJobsDelta.
-	lastJobs                 map[int64]jobDTO
+	lastJobs map[int64]jobDTO
+	// lastDownloadThroughputAt/lastUploadThroughputAt are the independent
+	// per-direction watermarks newThroughputSince diffs against. Maintained
+	// for every subscriber regardless of wantThroughput (subscribe's initial
+	// set is unconditional — see subscribe's doc comment), even though only
+	// a wantThroughput subscriber's tick loop ever advances them past that
+	// initial value: a future mid-connection opt-in would otherwise dump the
+	// whole accumulated window as its first frame instead of just what's new.
 	lastDownloadThroughputAt time.Time
 	lastUploadThroughputAt   time.Time
 }
@@ -776,15 +833,21 @@ func (h *streamHub) atCapacity() bool {
 }
 
 // subscribe registers a new subscriber (jobID 0 for no ?job= detail scope,
-// jobIDs nil/empty for no ?jobs= list scope) and starts the shared ticker if
-// this is the first one. Returns the subscriber's id (for unsubscribe), its
-// channel, and an immediate snapshot computed synchronously against ctx, so
-// the connection's very first frame doesn't wait for the next tick —
+// jobIDs nil/empty for no ?jobs= list scope, wantThroughput for ?throughput=1
+// — issue #265) and starts the shared ticker if this is the first one.
+// Returns the subscriber's id (for unsubscribe), its two channels, and an
+// immediate snapshot of each event computed synchronously against ctx, so
+// the connection's very first frames don't wait for the next tick —
 // including a synchronous correlation refresh, so a subscriber connecting
 // right after process start (or a long idle period with no subscribers,
 // hence no correlation refresh — see run) doesn't have to wait up to
 // correlationInterval for its first useful frame.
-func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}) (id uint64, ch chan livePayload, initial livePayload) {
+//
+// fetchThroughput runs unconditionally, regardless of wantThroughput — see
+// this file's package comment on fetchThroughput's callers — but the initial
+// full-window conversion into initialThroughput is skipped for a subscriber
+// that never asked for it.
+func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool) (id uint64, ch chan livePayload, tch chan throughputPayload, initial livePayload, initialThroughput throughputPayload) {
 	// jobID/jobIDs are passed explicitly: this subscriber is not in h.subs
 	// yet, and without them a freshly opened detail or list view would wait a
 	// whole correlationInterval for its first Detail/Jobs.
@@ -804,18 +867,26 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 	now := time.Now()
 
 	sub := &streamSubscriber{
-		ch:     make(chan livePayload, 1),
-		jobID:  jobID,
-		jobIDs: jobIDs,
+		ch:             make(chan livePayload, 1),
+		tch:            make(chan throughputPayload, 1),
+		wantThroughput: wantThroughput,
+		jobID:          jobID,
+		jobIDs:         jobIDs,
 	}
 	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 
 	initial = buildLiveSnapshot(live, jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 	initial.Jobs = jobsDelta
-	initial.Throughput = toThroughputDTO(throughput.Download)
-	initial.UploadThroughput = toThroughputDTO(throughput.Upload)
+
+	if wantThroughput {
+		initialThroughput = throughputPayload{
+			Download: toThroughputDTO(throughput.Download),
+			Upload:   toThroughputDTO(throughput.Upload),
+		}
+	}
 
 	sub.last = livePayload{Detail: initial.Detail, Down: initial.Down, Up: initial.Up}
+	// Unconditional — see wantThroughput's doc comment on streamSubscriber.
 	if n := len(throughput.Download); n > 0 {
 		sub.lastDownloadThroughputAt = throughput.Download[n-1].At
 	}
@@ -833,7 +904,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		h.cancel = cancel
 		go h.run(tickCtx)
 	}
-	return id, sub.ch, initial
+	return id, sub.ch, sub.tch, initial, initialThroughput
 }
 
 // unsubscribe removes a subscriber and stops the shared ticker once none
@@ -946,28 +1017,44 @@ func (h *streamHub) tick(ctx context.Context) {
 		view, hasView := views[sub.jobID]
 		next := buildLiveSnapshot(live, sub.jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 		jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
-		freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
-		freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
-		if !changedSinceLast(sub.last, next, len(jobsDelta), len(freshDownload), len(freshUpload)) {
+		if changedSinceLast(sub.last, next, len(jobsDelta)) {
+			payload := next
+			payload.Jobs = jobsDelta
+			sub.last = next
+			sendLatest(sub.ch, payload)
+		}
+
+		// The `event: throughput` frame is entirely independent of the
+		// `live` frame above (issue #265): it fires whenever a fresh sample
+		// exists for this subscriber, whether or not anything in `live`
+		// changed, and conversely stays silent on a live-only change (Down
+		// ticking with no new sample behind it). Skipped outright for a
+		// subscriber that never asked for it — see wantThroughput's doc
+		// comment on streamSubscriber for why fetchThroughput itself stays
+		// unconditional regardless.
+		if !sub.wantThroughput {
 			continue
 		}
-		payload := next
-		payload.Jobs = jobsDelta
+		freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
+		freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
+		if len(freshDownload) == 0 && len(freshUpload) == 0 {
+			continue
+		}
+		var tp throughputPayload
 		if len(freshDownload) > 0 {
-			payload.Throughput = toThroughputDTO(freshDownload)
+			tp.Download = toThroughputDTO(freshDownload)
 		}
 		if len(freshUpload) > 0 {
-			payload.UploadThroughput = toThroughputDTO(freshUpload)
+			tp.Upload = toThroughputDTO(freshUpload)
 		}
-		sub.last = next
-		queued := sendLatest(sub.ch, payload)
-		if n := len(queued.Throughput); n > 0 {
-			if at, err := time.Parse(timeFormat, queued.Throughput[n-1].At); err == nil {
+		queued := sendLatestThroughput(sub.tch, tp)
+		if n := len(queued.Download); n > 0 {
+			if at, err := time.Parse(timeFormat, queued.Download[n-1].At); err == nil {
 				sub.lastDownloadThroughputAt = at
 			}
 		}
-		if n := len(queued.UploadThroughput); n > 0 {
-			if at, err := time.Parse(timeFormat, queued.UploadThroughput[n-1].At); err == nil {
+		if n := len(queued.Upload); n > 0 {
+			if at, err := time.Parse(timeFormat, queued.Upload[n-1].At); err == nil {
 				sub.lastUploadThroughputAt = at
 			}
 		}
@@ -1002,12 +1089,12 @@ func mergeJobsDelta(old, next []jobDTO) []jobDTO {
 
 // sendLatest delivers payload to ch without ever blocking. ch has capacity
 // 1; when it already holds an undelivered payload, the fresh snapshot fields
-// (Down/Up/Detail) supersede the old ones. Jobs and the two throughput
-// fields are delta-encoded, though: Jobs is unioned by id (mergeJobsDelta,
-// newer wins) and each old throughput delta is prepended to its matching
-// fresh delta, rather than either being discarded. The caller advances each
-// watermark from what this function actually leaves queued, so a slow reader
-// loses neither direction nor any per-job update.
+// (Down/Up/Detail) supersede the old ones. Jobs is delta-encoded, though:
+// unioned by id (mergeJobsDelta, newer wins) rather than discarded, so a job
+// that changed on the superseded tick but not the newer one isn't lost
+// outright. Throughput used to be accumulated here too; it now travels on
+// its own channel and its own function — see sendLatestThroughput — since
+// #265 split it into an independent `event: throughput`.
 func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 	for {
 		select {
@@ -1017,24 +1104,83 @@ func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 			select {
 			case old := <-ch:
 				payload.Jobs = mergeJobsDelta(old.Jobs, payload.Jobs)
-				payload.Throughput = append(old.Throughput, payload.Throughput...)
-				payload.UploadThroughput = append(old.UploadThroughput, payload.UploadThroughput...)
 			default:
 			}
 		}
 	}
 }
 
-// writeLiveEvent writes one `event: live` SSE frame and flushes it via rc
-// (see registerStream's write-deadline comment — the same
+// streamThroughputCap bounds how many samples sendLatestThroughput keeps per
+// direction when accumulating across a displaced frame. It mirrors internal/
+// soulseek's own throughputWindow (unexported there; internal/observ doesn't
+// import internal/soulseek — see CLAUDE.md's package boundary, same
+// rationale as streamInterval above) rather than sharing a constant with it.
+// Without this cap, a permanently-stalled reader (a backgrounded tab, a
+// sleeping laptop) would grow the queued slice by one sample every second
+// forever: there is no write deadline on an SSE connection (see
+// registerStream's SetWriteDeadline(time.Time{})) to ever close it out from
+// under a subscriber that isn't reading. The frontend independently discards
+// past its own THROUGHPUT_CAP (48, api/queries.ts) anyway, so retaining more
+// than streamThroughputCap here buys nothing.
+const streamThroughputCap = 48
+
+// capThroughputSamples keeps only the newest streamThroughputCap entries of
+// samples, oldest-first per ThroughputFunc's doc comment (so the newest are
+// the ones at the end).
+func capThroughputSamples(samples []throughputSampleDTO) []throughputSampleDTO {
+	if len(samples) <= streamThroughputCap {
+		return samples
+	}
+	return samples[len(samples)-streamThroughputCap:]
+}
+
+// sendLatestThroughput delivers payload to tch without ever blocking, the
+// same non-blocking drain-and-merge shape as sendLatest — but where sendLatest
+// discards a superseded frame's ordinary snapshot fields outright, this
+// function ACCUMULATES: an undelivered frame's samples are prepended to the
+// fresh ones rather than dropped, then capped at streamThroughputCap per
+// direction, keeping the newest. Throughput is the one field in this package
+// where a displaced sample is unrecoverable rather than self-healing (see
+// this file's package comment) — a dropped sample leaves a permanent hole in
+// the client's accumulated window, invisible to every test unless one is
+// written for exactly this.
+//
+// The caller MUST advance its watermark from what this function actually
+// leaves queued (the return value), never from what it merely tried to
+// send: whatever a slow reader hasn't drained yet is still unacknowledged,
+// and advancing from the send argument instead would silently skip
+// re-sending it once the reader catches up — reproducing the very loss this
+// function exists to prevent, just at the watermark instead of the channel.
+func sendLatestThroughput(tch chan throughputPayload, payload throughputPayload) throughputPayload {
+	for {
+		select {
+		case tch <- payload:
+			return payload
+		default:
+			select {
+			case old := <-tch:
+				payload.Download = capThroughputSamples(append(old.Download, payload.Download...))
+				payload.Upload = capThroughputSamples(append(old.Upload, payload.Upload...))
+			default:
+			}
+		}
+	}
+}
+
+// writeEvent writes one named SSE frame (`event: <name>`) and flushes it via
+// rc (see registerStream's write-deadline comment — the same
 // http.ResponseController clears both). Returns false on any write/flush
-// error, signaling the caller to give up on this connection.
-func writeLiveEvent(w http.ResponseWriter, rc *http.ResponseController, payload livePayload) bool {
-	body, err := json.Marshal(payload)
+// error, signaling the caller to give up on this connection. Generalised
+// from the single-purpose writeLiveEvent by issue #265, which introduced the
+// second named event (`throughput`) on this same connection — registerStream's
+// doc comment already promised the event name wasn't hardcoded, since #129's
+// `event: search` is expected to land here later too.
+func writeEvent(w http.ResponseWriter, rc *http.ResponseController, name string, v any) bool {
+	body, err := json.Marshal(v)
 	if err != nil {
 		return false
 	}
-	if _, err := fmt.Fprintf(w, "event: live\ndata: %s\n\n", body); err != nil {
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, body); err != nil {
 		return false
 	}
 	return rc.Flush() == nil
@@ -1074,11 +1220,13 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 	return out, nil
 }
 
-// registerStream wires GET /api/stream: named SSE events (`event: live`) of
-// live, in-memory-only data. The event name is deliberately not hardcoded
-// into a generic "message" frame — issue #129's search-result stream is
-// expected to land as `event: search` on this same endpoint later, and named
-// events let it do so without touching anything here.
+// registerStream wires GET /api/stream: named SSE events of live,
+// in-memory-only data — `event: live` on every connection, plus
+// `event: throughput` (issue #265) for a subscriber that asks for it via
+// ?throughput=1. Event names are deliberately not hardcoded into a generic
+// "message" frame — issue #129's search-result stream is expected to land
+// as `event: search` on this same endpoint later, and named events let it do
+// so without touching anything here.
 //
 // tickInterval/correlationInterval/heartbeatInterval are parameters rather
 // than reading the streamInterval/streamCorrelationInterval/
@@ -1102,6 +1250,19 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+
+		// ?throughput= parsing is strict (issue #265), matching
+		// parseStreamJobIDs' intolerance of malformed input: absent or empty
+		// means off, exactly "1" means on, anything else is a 400 rather
+		// than silently defaulting either way.
+		var wantThroughput bool
+		if raw := r.URL.Query().Get("throughput"); raw != "" {
+			if raw != "1" {
+				http.Error(w, "invalid throughput value", http.StatusBadRequest)
+				return
+			}
+			wantThroughput = true
 		}
 
 		if hub.atCapacity() {
@@ -1133,11 +1294,23 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 			return
 		}
 
-		id, ch, initial := hub.subscribe(r.Context(), jobID, jobIDs)
+		id, ch, tch, initial, initialThroughput := hub.subscribe(r.Context(), jobID, jobIDs, wantThroughput)
 		defer hub.unsubscribe(id)
 
-		if !writeLiveEvent(w, rc, initial) {
+		// event: live is written ALWAYS, even for a throughput-only
+		// subscriber (see the per-subscriber behaviour matrix in this
+		// file's package comment) — it proves the connection opened and a
+		// failed first write detects a dead connection early. The initial
+		// event: throughput follows only when wantThroughput AND there is
+		// at least one sample to send; an empty initial window isn't worth
+		// a frame.
+		if !writeEvent(w, rc, "live", initial) {
 			return
+		}
+		if wantThroughput && (len(initialThroughput.Download) > 0 || len(initialThroughput.Upload) > 0) {
+			if !writeEvent(w, rc, "throughput", initialThroughput) {
+				return
+			}
 		}
 
 		heartbeat := time.NewTicker(heartbeatInterval)
@@ -1149,7 +1322,11 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 			case <-deps.Shutdown:
 				return
 			case payload := <-ch:
-				if !writeLiveEvent(w, rc, payload) {
+				if !writeEvent(w, rc, "live", payload) {
+					return
+				}
+			case tp := <-tch:
+				if !writeEvent(w, rc, "throughput", tp) {
 					return
 				}
 			case <-heartbeat.C:

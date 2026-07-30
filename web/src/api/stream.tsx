@@ -7,7 +7,7 @@ import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
 import { mergeThroughputSamples, queryKeys } from './queries';
-import type { ChartsReport, LivePayload, ScopedLivePayload, WireJob } from './types';
+import type { ChartsReport, LivePayload, ScopedLivePayload, ThroughputPayload, WireJob } from './types';
 
 // Recognises a job detail route (/jobs/:id) from the current pathname.
 // StreamProvider is mounted above <Routes> (see App.tsx), not as a route
@@ -68,6 +68,31 @@ export function useJobScope(ids: number[] | undefined): void {
   }, [key]);
 }
 
+// Lets a route opt the shared SSE connection into ?throughput=1 (issue #265)
+// without owning the connection itself. Default no-op setter mirrors
+// JobScopeSetterContext, covering tests that mount a route in isolation.
+const ThroughputSetterContext = createContext<(delta: number) => void>(() => {});
+
+/**
+ * Opts the shared SSE connection into `?throughput=1` for as long as the
+ * calling component is mounted (issue #265). Call from the one route that
+ * renders a sparkline off the live stream — currently only Overview.
+ *
+ * Uses a counter (incremented on mount, decremented on unmount) rather than a
+ * boolean flag: two consumers could in principle be mounted at once (e.g. a
+ * future panel alongside Overview's own chart), and a boolean would let
+ * whichever one unmounts first clear the flag out from under the other —
+ * the same bug useJobScope's doc comment warns a naive scope flag would
+ * have. `wantThroughput` is `count > 0`.
+ */
+export function useThroughputStream(): void {
+  const setWant = useContext(ThroughputSetterContext);
+  useEffect(() => {
+    setWant(1);
+    return () => setWant(-1);
+  }, [setWant]);
+}
+
 /**
  * One EventSource for the whole app, opened at `/api/stream` or
  * `/api/stream?job=<id>` on a job detail route — one connection per view,
@@ -104,6 +129,14 @@ export function useJobScope(ids: number[] | undefined): void {
  * `?job=<id>` on /jobs/:id always wins when present, since a detail page's
  * own `detail` field needs the connection scoped to that one job regardless
  * of which jobs happen to be on the /jobs list underneath it.
+ *
+ * A third, fully independent axis is `?throughput=1` (issue #265), opted
+ * into via useThroughputStream by whichever route renders a sparkline off
+ * this connection (currently only Overview). `event: throughput` frames are
+ * folded into queryKeys.charts, not queryKeys.live — see the separate
+ * `throughput` listener below — since the directional series was split off
+ * livePayload entirely so a subscriber with no chart on screen never pays
+ * for building or receiving it.
  */
 export function StreamProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -114,6 +147,13 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   // `jobsScope` itself, so a same-content page of ids published again
   // doesn't reopen the connection.
   const jobsScopeKey = jobsScope?.join(',');
+
+  // Counter, not a boolean: see useThroughputStream's doc comment for why —
+  // two mounted consumers must not let one unmounting clear the other's
+  // opt-in.
+  const [throughputCount, setThroughputCount] = useState(0);
+  const wantThroughput = throughputCount > 0;
+  const setThroughputWant = (delta: number) => setThroughputCount((n) => n + delta);
 
   // Known cost, tracked as #267, not fixed here: mounting a scope-publishing
   // route (/jobs) opens two connections in quick succession — an unscoped
@@ -129,11 +169,28 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   // at mount, not on every poll.
 
   useEffect(() => {
-    const url = jobId !== undefined
-      ? `/api/stream?job=${jobId}`
-      : jobsScope !== undefined
-        ? `/api/stream?jobs=${jobsScope.join(',')}`
-        : '/api/stream';
+    // Built with URLSearchParams rather than a hand-rolled ternary so a
+    // third independent axis (?throughput=, issue #265) doesn't turn this
+    // into a combinatorial mess of string branches. ?job= still wins over
+    // ?jobs= when both would apply (a detail page's own scope always takes
+    // priority — see this function's doc comment), and an empty param set
+    // must produce a bare `/api/stream`, not `/api/stream?` — existing tests
+    // assert the exact string.
+    const params = new URLSearchParams();
+    if (jobId !== undefined) {
+      params.set('job', String(jobId));
+    } else if (jobsScope !== undefined) {
+      params.set('jobs', jobsScope.join(','));
+    }
+    if (wantThroughput) {
+      params.set('throughput', '1');
+    }
+    // URLSearchParams percent-encodes the comma in a ?jobs= list (%2C); the
+    // server's parseStreamJobIDs splits on a literal comma either way, so
+    // this only matters for readability (and for the exact strings existing
+    // tests assert on).
+    const query = params.toString().replace(/%2C/g, ',');
+    const url = query ? `/api/stream?${query}` : '/api/stream';
     const source = new EventSource(url);
 
     // Accumulates each frame's changed jobs by id — see the doc comment
@@ -182,24 +239,34 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       }
       const scoped: ScopedLivePayload = { ...payload, jobs: Array.from(jobsById.values()), scopeJobId: jobId };
       queryClient.setQueryData(queryKeys.live, scoped);
-      if (payload.throughput?.length || payload.uploadThroughput?.length) {
-        // Only folds in once a REST snapshot already exists — if none has
-        // landed yet there's nothing to append to, and the imminent REST
-        // fetch will carry these samples anyway. Each direction merges into
-        // its own 48-sample window, even when a frame updates both at once.
-        queryClient.setQueryData<ChartsReport>(queryKeys.charts, (prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            throughput: payload.throughput?.length
-              ? mergeThroughputSamples(prev.throughput, payload.throughput)
-              : prev.throughput,
-            uploadThroughput: payload.uploadThroughput?.length
-              ? mergeThroughputSamples(prev.uploadThroughput, payload.uploadThroughput)
-              : prev.uploadThroughput,
-          };
-        });
-      }
+    });
+
+    // Independent of the `live` listener above (issue #265): the server
+    // fires this event on its own schedule, whether or not anything in
+    // `live` changed on the same tick, and never fires it at all for a
+    // connection that didn't ask for it — see ThroughputPayload's doc
+    // comment. Registered unconditionally regardless of wantThroughput: the
+    // server simply never emits it when unasked, so there's nothing to gate
+    // client-side either.
+    source.addEventListener('throughput', (event) => {
+      const payload = JSON.parse((event as MessageEvent<string>).data) as ThroughputPayload;
+      if (!payload.download?.length && !payload.upload?.length) return;
+      // Only folds in once a REST snapshot already exists — if none has
+      // landed yet there's nothing to append to, and the imminent REST
+      // fetch will carry these samples anyway. Each direction merges into
+      // its own 48-sample window, even when a frame updates both at once.
+      queryClient.setQueryData<ChartsReport>(queryKeys.charts, (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          throughput: payload.download?.length
+            ? mergeThroughputSamples(prev.throughput, payload.download)
+            : prev.throughput,
+          uploadThroughput: payload.upload?.length
+            ? mergeThroughputSamples(prev.uploadThroughput, payload.upload)
+            : prev.uploadThroughput,
+        };
+      });
     });
 
     // EventSource's error event fires both for a genuine failure and for
@@ -232,7 +299,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       source.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- jobsScopeKey stands in for jobsScope, see above
-  }, [queryClient, jobId, jobsScopeKey]);
+  }, [queryClient, jobId, jobsScopeKey, wantThroughput]);
 
   // Clears the live cache only when StreamProvider itself unmounts — as
   // opposed to the effect above, which reruns (closing and reopening the
@@ -251,7 +318,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
 
   return (
     <JobScopeSetterContext.Provider value={setJobsScope}>
-      {children}
+      <ThroughputSetterContext.Provider value={setThroughputWant}>
+        {children}
+      </ThroughputSetterContext.Provider>
     </JobScopeSetterContext.Provider>
   );
 }
