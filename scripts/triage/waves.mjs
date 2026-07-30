@@ -27,6 +27,13 @@ export function filesConflict(a, b) {
  * waves and says so out loud, where the failure it guards against is silent --
  * and a reader who sees `Makefile` in the excluded list can fix the judgement in
  * one line.
+ *
+ * What it misses, symmetrically: a directory whose last segment contains a dot
+ * (`docs/v1.2`, a bare `.claude`) reads as a file and slips through. Not worth
+ * chasing -- a path-shaped string cannot be classified perfectly without
+ * touching the filesystem, and this module is deliberately pure -- but the guard
+ * is a heuristic, not a decision procedure, and a caller should not read it as
+ * complete.
  */
 export function namesDirectory(path) {
   const trimmed = path.trim()

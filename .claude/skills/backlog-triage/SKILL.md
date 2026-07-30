@@ -34,6 +34,14 @@ table is small today, another as `dataloss` because nothing bounds it. The secon
 correct. If an issue's severity depends on unmerged work, judge it as it stands and say so
 in `impactEvidence`.
 
+**"Outcome" means what the system does, not what a human might do in response to what it
+displays.** A defect that only misinforms a reader is `cosmetic` however badly it misinforms
+them — an operator acting on a wrong number is not the system behaving worse — and it becomes
+`degraded` only when something in the system itself behaves worse as a result. Without that
+bound, every misleading-UI defect can be argued up to `degraded` via a hypothetical operator,
+which is exactly the seam between `cosmetic`'s "every behaviour is correct" and a maximal
+reading of the worst-outcome rule.
+
 **The first run's distribution is not a baseline.** The run recorded in
 `docs/triage/2026-07-30-backlog.md` predates this rubric: 42 judges each invented the
 boundaries privately and came out 38 of 42 at `cosmetic` or `none`, 4 at `degraded`, and
@@ -202,8 +210,10 @@ boolean — and each means something different:
 format assumes a baseline result, so on these two paths it must instead state that the run
 never got as far as checking the tree: there is no baseline to report, red or green, and
 writing "baseline unknown" without saying why would read like `'baseline-agent-died'`, which
-is a different and much more alarming thing. The other five abort paths all carry a real
-`baseline` object.
+is a different and much more alarming thing. `'baseline-agent-died'` is the third path with no
+`baseline` object — the agent returned nothing, so there is nothing to report there either,
+and what the header says on it is that the check never ran, which is still not a red baseline.
+The other four abort paths all carry a real `baseline` object.
 
 (The baseline agent runs the suite as three separate legs — `go test ./...`, `node --test
 scripts/triage/*.test.mjs`, `cd web && npm test` — because the bare-directory form `node
