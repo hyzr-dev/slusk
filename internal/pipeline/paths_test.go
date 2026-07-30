@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -288,5 +289,54 @@ func TestQuarantineFolderSuffixesOnCollision(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join(occupied, "old.flac"))
 	if err != nil || string(body) != "old" {
 		t.Errorf("pre-existing quarantined file = %q (%v), want %q", body, err, "old")
+	}
+}
+
+// TestCleanupFolderRefusesQuarantineDir pins the destructive half of the
+// ".failed" guard: a peer sharing a folder literally named like the quarantine
+// directory must not make cleanupFolder hand that name to DeleteDownloadFolder,
+// which is recursive on both backends and would destroy every album quarantined
+// so far.
+func TestCleanupFolderRefusesQuarantineDir(t *testing.T) {
+	files := []string{
+		`music\Sia\` + quarantineDirName + `\01 - Chandelier.flac`,
+		`music\Sia\` + quarantineDirName + `\02 - Big Girls Cry.flac`,
+	}
+	// Guard the premise: without the guard this is exactly the name that reaches
+	// DeleteDownloadFolder.
+	if got := commonLeaf(files); got != quarantineDirName {
+		t.Fatalf("commonLeaf = %q, want %q (premise of this test)", got, quarantineDirName)
+	}
+
+	var buf bytes.Buffer
+	peers := &fakeSearcher{}
+	cleanupFolder(context.Background(), peers, newTestLogger(&buf), 7, files)
+
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("DeleteDownloadFolder called with %v, want no call at all", peers.deletedFolders)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line, got %q", logged)
+	}
+	if !strings.Contains(logged, "skipping cleanup") {
+		t.Errorf("expected an INFO line saying the cleanup was skipped, got %q", logged)
+	}
+}
+
+// TestCleanupFolderDeletesOrdinaryLeaf is the counterpart: an ordinary album
+// folder must still be deleted, so the guard above cannot pass by disabling
+// cleanup outright.
+func TestCleanupFolderDeletesOrdinaryLeaf(t *testing.T) {
+	files := []string{
+		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
+		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
+	}
+	var buf bytes.Buffer
+	peers := &fakeSearcher{}
+	cleanupFolder(context.Background(), peers, newTestLogger(&buf), 7, files)
+
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "1000 Forms of Fear (2014)" {
+		t.Errorf("deletedFolders = %v, want [%q]", peers.deletedFolders, "1000 Forms of Fear (2014)")
 	}
 }

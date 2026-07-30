@@ -540,6 +540,61 @@ func TestSelectingNonTerminalExhaustionLeavesFilesAlone(t *testing.T) {
 	}
 }
 
+// TestSelectingNonTerminalExhaustionKeepsCandidateFoldersWhenResetBounces is
+// what actually pins selectJob's `if failed` guard.
+//
+// TestSelectingNonTerminalExhaustionLeavesFilesAlone above cannot: on the
+// ordinary non-terminal path ResetJobToWanted has already deleted the job's
+// candidates and transfers by the time quarantineLeftovers would run, so it
+// finds no folder to move and dropping the guard changes nothing observable.
+//
+// The state where the guard does real work is the one ResetJobToWanted's
+// from-guard exists for: WantedSync cancels the job between Tick reading its
+// SELECTING batch and selectJob acting on that snapshot. The UPDATE then
+// matches no row, the candidates and transfers survive, and an unguarded
+// quarantineLeftovers would move a merely-cancelled job's files into .failed.
+// Tick offers no interleaving point, so the test drives selectJob with the
+// stale snapshot Tick would have been holding.
+func TestSelectingNonTerminalExhaustionKeepsCandidateFoldersWhenResetBounces(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.MaxRetries = 3 // job.Retries(0)+1 < 3 -> back off, not terminal
+	p.CompleteDir = t.TempDir()
+
+	job, folder := seedExhaustedJobWithLeftovers(t, ctx, st, p, 42, now)
+
+	// WantedSync's own cancellation path, run against a wanted set the album is
+	// no longer in - exactly what races Tick in production.
+	if n, err := st.CancelJobsNotWanted(ctx, []int64{9999}, now); err != nil || n != 1 {
+		t.Fatalf("CancelJobsNotWanted: n=%d err=%v, want n=1", n, err)
+	}
+
+	// job is the SELECTING snapshot Tick read before the cancellation.
+	if _, err := NewSelecting(p).selectJob(ctx, job, now); err != nil {
+		t.Fatalf("selectJob: %v", err)
+	}
+
+	// The premise: ResetJobToWanted bounced, so the candidate and its transfers
+	// are still there and quarantineLeftovers would find a folder to move.
+	cands, err := st.CandidatesForJob(ctx, job.ID)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("CandidatesForJob = %d candidates (%v), want 1 surviving the bounced reset", len(cands), err)
+	}
+	transfers, err := st.TransfersForCandidate(ctx, cands[0].ID)
+	if err != nil || len(transfers) == 0 {
+		t.Fatalf("TransfersForCandidate = %d (%v), want the candidate's transfers to survive", len(transfers), err)
+	}
+
+	if _, err := os.Stat(folder); err != nil {
+		t.Errorf("expected leftovers left in place for a non-terminal failure, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.CompleteDir, quarantineDirName)); !os.IsNotExist(err) {
+		t.Errorf("expected no quarantine dir on a non-terminal failure, stat err = %v", err)
+	}
+}
+
 func TestSelectingExpiresStaleCache(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)

@@ -32,10 +32,14 @@ type FolderCleaner interface {
 // delete entirely when filenames don't share one common remote directory
 // (commonLeaf == ""): that's ambiguous, and slskd's API only accepts one
 // relative subdirectory name, so guessing wrong risks deleting more than this
-// candidate wrote. A delete failure is logged and otherwise ignored — it must
-// not block the job from moving on to its next candidate. A 404 means the
-// candidate never wrote any bytes (e.g. it failed before any transfer started),
-// which is routine, so it's logged quietly rather than as an ERROR.
+// candidate wrote. It also refuses to act on the quarantine directory itself
+// (see quarantineDirName), which a peer's remote folder can legitimately be
+// named: DeleteDownloadFolder is recursive on both backends, so one such peer
+// would otherwise wipe every album quarantined so far. A delete failure is
+// logged and otherwise ignored — it must not block the job from moving on to
+// its next candidate. A 404 means the candidate never wrote any bytes (e.g. it
+// failed before any transfer started), which is routine, so it's logged quietly
+// rather than as an ERROR.
 //
 // Ported from the legacy engine's Discoverer.cleanupAttempt
 // (engine/discovery.go:812-825) as a shared free function so both Downloading
@@ -43,6 +47,14 @@ type FolderCleaner interface {
 func cleanupFolder(ctx context.Context, peers FolderCleaner, log *slog.Logger, jobID int64, filenames []string) {
 	leaf := commonLeaf(filenames)
 	if leaf == "" {
+		return
+	}
+	// A peer's remote folder can legitimately be named ".failed"; deleting it
+	// would take every already-quarantined album with it, since both backends'
+	// DeleteDownloadFolder is recursive. Same guard, same reason, as
+	// quarantineFolder's.
+	if leaf == quarantineDirName {
+		log.Info("skipping cleanup of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
 		return
 	}
 	err := peers.DeleteDownloadFolder(ctx, leaf)
