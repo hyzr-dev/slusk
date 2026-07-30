@@ -12,6 +12,7 @@ dev:
 
 test:
 	go test ./...
+	node --test scripts/triage/*.test.mjs
 	cd web && npm test
 
 clean:

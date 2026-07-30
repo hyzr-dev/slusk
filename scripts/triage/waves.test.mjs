@@ -212,3 +212,34 @@ test('a missing state file makes every open issue stale', () => {
   })
   assert.deepEqual(out, { fresh: [], stale: [10, 11] })
 })
+
+import { execFileSync } from 'node:child_process'
+
+test('the CLI computes waves from stdin JSON', () => {
+  const input = JSON.stringify({
+    issues: [
+      { number: 1, prodImpact: 'outage', effort: 'S', touches: ['a.go'] },
+      { number: 2, prodImpact: 'cosmetic', effort: 'S', touches: ['a.go'] },
+    ],
+    contracts: [],
+  })
+  const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
+  assert.deepEqual(JSON.parse(out), { waves: [[1], [2]], unassessable: [] })
+})
+
+test('the CLI reports unassessable issues alongside the waves', () => {
+  const input = JSON.stringify({
+    issues: [
+      { number: 1, prodImpact: 'outage', effort: 'S', touches: ['a.go'] },
+      { number: 2, prodImpact: 'urgent', effort: 'S', touches: ['b.go'] },
+    ],
+    contracts: [],
+  })
+  const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [2] })
+})
+
+test('the CLI rejects an unknown mode with a non-zero exit', () => {
+  assert.throws(() =>
+    execFileSync('node', ['scripts/triage/waves.mjs', 'nonsense'], { input: '{}', stdio: 'pipe' }))
+})

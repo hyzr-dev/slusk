@@ -150,3 +150,25 @@ export function invalidate({ state, openIssues, changedPaths }) {
 
   return { fresh, stale }
 }
+
+// CLI entry point. The skill shells out to this rather than reimplementing the
+// rules, so the tested code and the running code are the same code.
+if (process.argv[1] && process.argv[1].endsWith('waves.mjs')) {
+  const mode = process.argv[2]
+  const chunks = []
+  for await (const chunk of process.stdin) chunks.push(chunk)
+  const input = JSON.parse(chunks.join('') || '{}')
+
+  if (mode === 'waves') {
+    process.stdout.write(JSON.stringify(computeWaves(input.issues ?? [], input.contracts ?? [])))
+  } else if (mode === 'invalidate') {
+    process.stdout.write(JSON.stringify(invalidate({
+      state: input.state ?? null,
+      openIssues: input.openIssues ?? [],
+      changedPaths: input.changedPaths ?? [],
+    })))
+  } else {
+    process.stderr.write(`unknown mode: ${mode}\n`)
+    process.exit(2)
+  }
+}
