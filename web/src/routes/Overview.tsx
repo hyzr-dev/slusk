@@ -263,7 +263,7 @@ export default function Overview() {
               <div role="row" className={`${styles.finishedGrid} ${styles.transferHead}`}>
                 <span role="columnheader">{t.overview.finishedGridHead.status}</span>
                 <span role="columnheader">{t.overview.finishedGridHead.album}</span>
-                <span role="columnheader">{t.overview.finishedGridHead.peer}</span>
+                <span role="columnheader" className={styles.peerCell}>{t.overview.finishedGridHead.peer}</span>
                 <span role="columnheader" className={styles.headRight}>{t.overview.finishedGridHead.when}</span>
               </div>
               {finishedRows.map((job) => (
