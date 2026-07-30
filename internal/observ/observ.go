@@ -106,11 +106,15 @@ type jobDTO struct {
 	// UpdatedAt reorders the panel on every progress tick.
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
-	// FramedAt is when this DTO instance was computed — not the DB row's
-	// UpdatedAt, and not copied from any cache. On the stream path every job
-	// sent in the same tick's frame shares one value (see tick()); on REST
-	// every job in one response shares one value (see enrichJobDTOs). The
-	// frontend uses it, not UpdatedAt, to decide whether a job's streamed
+	// FramedAt is when this DTO instance's live data was last genuinely
+	// current — not the DB row's UpdatedAt, and not copied from any cache.
+	// On REST every job in one response shares one value (see
+	// enrichJobDTOs). On the stream path it's per-job: a live-matched job
+	// gets the current tick's timestamp (see buildJobsDelta), while a job
+	// that isn't live-matched this tick keeps whatever FramedAt it last had,
+	// so it correctly ages once it stops changing instead of being
+	// perpetually refreshed. The frontend uses it, not UpdatedAt, to decide
+	// whether a job's streamed
 	// values are still worth trusting over REST's — see replaceLiveJobs in
 	// web/src/api/queries.ts and issue #285 for why UpdatedAt could not do
 	// this job: REST's and the stream's UpdatedAt values are read from two
