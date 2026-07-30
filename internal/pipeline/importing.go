@@ -265,8 +265,28 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		}
 	}
 	if len(importable) == 0 {
-		// Nothing matched at all — rejected like a failed download: other
-		// candidates usually remain, so the next SELECTING tick tries one
+		// Nothing matched at all. This usually means the candidate's files are
+		// bad, but Lidarr also rejects every file with no TrackIDs when the
+		// release is already fully present in the library (e.g. imported by a
+		// previous candidate, or by an out-of-band Lidarr action) — there is
+		// nothing left for it to match against. Failing the candidate in that
+		// case just burns through every remaining candidate for an album that
+		// was never actually missing (issue #280), so check AlbumStatus before
+		// giving up.
+		complete, err := m.albumAlreadyComplete(ctx, job)
+		if err != nil {
+			m.log().Warn("album status check before import-rejected failure failed", "album_job", job.ID, "err", err)
+		} else if complete {
+			alreadyDetail := fmt.Sprintf("import rejected but album already complete in Lidarr (folder %s): %s", folder, strings.Join(rejections, "; "))
+			m.log().Info(alreadyDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
+			m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, alreadyDetail, now)
+			if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
+				return err
+			}
+			cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
+			return nil
+		}
+		// Other candidates usually remain, so the next SELECTING tick tries one
 		// immediately — no cooldown.
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
@@ -354,6 +374,19 @@ func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand
 	m.log().Info(stuckDetail, "album_job", job.ID, "reason", reason)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, stuckDetail, now)
 	return m.failCandidate(ctx, job, cand, filenames, reason, now)
+}
+
+// albumAlreadyComplete reports whether Lidarr's library already holds every
+// track of job's album, independent of what the current candidate
+// contributed. total==0 (AlbumStatus couldn't determine a canonical total,
+// e.g. a stale or unknown album) never counts as complete — only a positive
+// total that present has met or exceeded does.
+func (m *Importing) albumAlreadyComplete(ctx context.Context, job core.AlbumJob) (bool, error) {
+	present, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+	if err != nil {
+		return false, err
+	}
+	return total > 0 && present >= total, nil
 }
 
 // coverage counts the distinct Lidarr track IDs covered by importable, used to
