@@ -288,7 +288,7 @@ export const t = {
     empty: 'No events.',
   },
   overview: {
-    empty: 'No active downloads.',
+    empty: 'Nothing in flight.',
     noChartData: 'No pass history yet',
     chartRangeStart: '−24 h',
     chartRangeEnd: 'now',

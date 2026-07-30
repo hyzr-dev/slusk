@@ -77,9 +77,12 @@ export default function Overview() {
   const charts = chartsQuery.data;
   const finishedRows = finishedQuery.data?.jobs ?? [];
 
-  // Only the in-flight rows: a finished job is terminal and the stream never
-  // sends deltas for it, so widening the scope would cost the backend
-  // bookkeeping for updates that can never arrive.
+  // Only the in-flight rows: a finished job is terminal, so the stream never
+  // sends deltas for it and there is no reason to make the backend track it.
+  // This does NOT make the finished panel immune to live replacement: useJobs
+  // runs replaceLiveJobPage over every page it returns regardless of scope,
+  // so a job that just transitioned to DONE can still be rendered from its
+  // last in-flight live frame until framedAt ages past LIVE_JOB_FRESH_MS.
   useJobScope(transferRows.map((job) => job.id));
 
   // Three independent polls feeding three independent regions: a dead

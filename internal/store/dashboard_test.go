@@ -1874,6 +1874,22 @@ func TestListDashboardJobsFilterInflightAndFinishedAreDisjoint(t *testing.T) {
 	if inflight.Jobs[0].Status != "failed" {
 		t.Errorf("Status = %q, want %q (the aggregate-derived status is unchanged)", inflight.Jobs[0].Status, "failed")
 	}
+
+	// The other half of the disjointness claim: the same job must NOT show up
+	// under 'finished'. Use the same 'now' the job was inserted with, so it
+	// sits squarely inside DashboardFinishedWindow — if 'finished' were ever
+	// switched back to a status-keyed predicate (matching status 'failed'
+	// instead of state DONE/FAILED), this job would wrongly appear here, and
+	// the window itself couldn't be blamed for excluding it.
+	finished, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("finished: %v", err)
+	}
+	if len(finished.Jobs) != 0 {
+		t.Fatalf("finished jobs = %+v, want none (state is DOWNLOADING, not DONE/FAILED)", finished.Jobs)
+	}
 }
 
 func TestListDashboardJobsSortTransferRanksImportingAfterWaiting(t *testing.T) {
