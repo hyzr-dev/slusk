@@ -19,6 +19,10 @@ import (
 const testFailedRetryAfter = time.Hour
 const testMaxCandidates = 5
 
+// testNow is a fixed instant used wherever a test needs to pass toJobDTO's
+// (and friends') now parameter, so FramedAt assertions are deterministic.
+var testNow = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
 // noopJobDetail, noopJobEvents, noopRecentEvents, and noopPeers are no-op
 // implementations of the newer dashboard funcs, for tests that only care
 // about routes unrelated to job detail/events/peers.
@@ -598,7 +602,7 @@ func TestToJobDTOOverlaysLiveBytesRegardlessOfState(t *testing.T) {
 	})
 	persisted := map[int64]map[string]int64{1: {"01.flac": 300}}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted)
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted, testNow)
 	if dto.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (live overlay wins even though the match is terminal)", dto.BytesDone)
 	}
@@ -623,7 +627,7 @@ func TestToJobDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
 		AlbumBytesTotal: 1000,
 	}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{}, nil)
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{}, nil, testNow)
 	if dto.BytesDone != 300 {
 		t.Errorf("BytesDone = %d, want 300 (persisted fallback, no live match)", dto.BytesDone)
 	}
@@ -654,9 +658,23 @@ func TestToJobDTOSumsPersistedForUnmatchedFilesInLiveMatchedCandidate(t *testing
 	})
 	persisted := map[int64]map[string]int64{1: {"01.flac": 500, "02.flac": 1000}}
 
-	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted)
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, live, persisted, testNow)
 	if dto.BytesDone != 750+1000 {
 		t.Errorf("BytesDone = %d, want %d (750 live + 1000 persisted)", dto.BytesDone, 750+1000)
+	}
+}
+
+// TestToJobDTOSetsFramedAtFromCallerSuppliedNow covers issue #285: FramedAt
+// must be exactly the caller-supplied now, formatted the same way as
+// UpdatedAt/CreatedAt — not derived internally from time.Now() and not left
+// as the DB row's UpdatedAt.
+func TestToJobDTOSetsFramedAtFromCallerSuppliedNow(t *testing.T) {
+	view := core.JobView{
+		Job: core.AlbumJob{ID: 1, State: core.StateDownloading, Source: core.SourceLidarr},
+	}
+	dto := toJobDTO(view, testFailedRetryAfter, testMaxCandidates, liveTransferIndex{}, nil, testNow)
+	if want := testNow.Format(timeFormat); dto.FramedAt != want {
+		t.Errorf("FramedAt = %q, want %q", dto.FramedAt, want)
 	}
 }
 

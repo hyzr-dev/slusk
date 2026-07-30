@@ -39,13 +39,13 @@ func TestBuildJobsDeltaOnlyChangedJobsSent(t *testing.T) {
 	withLive := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50, BytesDone: 300},
 	})
-	first := buildJobsDelta(sub, views, withLive, nil, testFailedRetryAfter, testMaxCandidates)
+	first := buildJobsDelta(sub, views, withLive, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if len(first) != 1 || first[0].ID != 7 || first[0].Speed != 50 {
 		t.Fatalf("first tick: expected job 7 at speed 50, got %+v", first)
 	}
 
 	// Unchanged: no live data change, nothing rebuilt differently -> empty delta.
-	second := buildJobsDelta(sub, views, withLive, nil, testFailedRetryAfter, testMaxCandidates)
+	second := buildJobsDelta(sub, views, withLive, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if len(second) != 0 {
 		t.Fatalf("unchanged tick must produce an empty delta, got %+v", second)
 	}
@@ -56,9 +56,94 @@ func TestBuildJobsDeltaOnlyChangedJobsSent(t *testing.T) {
 	changed := newLiveTransferIndex([]core.RemoteTransfer{
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 75, BytesDone: 300},
 	})
-	third := buildJobsDelta(sub, views, changed, nil, testFailedRetryAfter, testMaxCandidates)
+	third := buildJobsDelta(sub, views, changed, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if len(third) != 1 || third[0].ID != 7 || third[0].Speed != 75 {
 		t.Fatalf("changed tick: expected job 7 at speed 75, got %+v", third)
+	}
+}
+
+// TestBuildJobsDeltaSameNowUnchangedJobStaysOmitted proves that FramedAt
+// being part of jobDTO doesn't defeat buildJobsDelta's reflect.DeepEqual
+// change-detection: passing the exact same now on two consecutive ticks for
+// an otherwise-unchanged job must not resend it (issue #285).
+func TestBuildJobsDeltaSameNowUnchangedJobStaysOmitted(t *testing.T) {
+	views := map[int64]core.JobView{
+		7: {Job: core.AlbumJob{ID: 7, Title: "Rounds"}},
+	}
+	sub := &streamSubscriber{jobIDs: map[int64]struct{}{7: {}}}
+
+	first := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
+	if len(first) != 1 || first[0].ID != 7 {
+		t.Fatalf("first tick: expected job 7, got %+v", first)
+	}
+
+	second := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
+	if len(second) != 0 {
+		t.Fatalf("same now, unchanged job: expected an empty delta, got %+v", second)
+	}
+}
+
+// TestBuildJobsDeltaDifferentNowResendsUnchangedLiveMatchedJob is the
+// converse of same-now: for a job that is LIVE-MATCHED (anyLiveMatch true on
+// its candidate), two different now values on an otherwise-identical job
+// must resend it — a FramedAt-only refresh is exactly what should
+// re-freshen the client's freshness signal (issue #285), which matters for
+// the stalled-but-live case: identical byte/speed values tick to tick must
+// still get a fresh FramedAt or the client incorrectly falls back to REST
+// despite the job still being live. FramedAt must only ever be bumped to
+// `now` for a live-matched job — see the code-review regression this test
+// guards against in TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable.
+func TestBuildJobsDeltaDifferentNowResendsUnchangedLiveMatchedJob(t *testing.T) {
+	view := core.JobView{
+		Job:     core.AlbumJob{ID: 7, Title: "Rounds"},
+		Attempt: &core.Candidate{ID: 1, Username: "alice", Files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}},
+	}
+	views := map[int64]core.JobView{7: view}
+	sub := &streamSubscriber{jobIDs: map[int64]struct{}{7: {}}}
+
+	// Stalled: same speed/bytes on both ticks, but the file still has a live
+	// counterpart (State: TransferQueued), so the job stays live-matched.
+	idx := newLiveTransferIndex([]core.RemoteTransfer{
+		{Username: "alice", Filename: "a.flac", State: core.TransferQueued, Speed: 0},
+	})
+
+	first := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
+	if len(first) != 1 || first[0].ID != 7 || first[0].FramedAt != testNow.Format(timeFormat) {
+		t.Fatalf("first tick: expected job 7 framed at testNow, got %+v", first)
+	}
+
+	later := testNow.Add(time.Second)
+	second := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates, later)
+	if len(second) != 1 || second[0].ID != 7 || second[0].FramedAt != later.Format(timeFormat) {
+		t.Fatalf("different now, still live-matched: expected job 7 resent with the new FramedAt, got %+v", second)
+	}
+}
+
+// TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable is the regression
+// test for what code review found in #285: tick() used to compute ONE
+// shared `now` per tick and thread it into every scoped job's FramedAt
+// unconditionally, so a job that is NOT live-matched (no candidate, or a
+// candidate with no current live counterpart) got a different FramedAt every
+// tick even though nothing about it actually changed — resending every
+// scoped job, including fully terminal ones, on every single tick forever,
+// defeating delta encoding. A non-live-matched job must keep whatever
+// FramedAt it was last assigned across ticks with different `now`, so once
+// its other fields stop changing, it is correctly omitted from the delta.
+func TestBuildJobsDeltaNonLiveMatchedJobKeepsFramedAtStable(t *testing.T) {
+	views := map[int64]core.JobView{
+		7: {Job: core.AlbumJob{ID: 7, Title: "Rounds"}},
+	}
+	sub := &streamSubscriber{jobIDs: map[int64]struct{}{7: {}}}
+
+	first := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
+	if len(first) != 1 || first[0].ID != 7 || first[0].FramedAt != testNow.Format(timeFormat) {
+		t.Fatalf("first tick: expected job 7 framed at testNow, got %+v", first)
+	}
+
+	later := testNow.Add(time.Second)
+	second := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, later)
+	if len(second) != 0 {
+		t.Fatalf("different now, not live-matched, nothing else changed: expected an empty delta (FramedAt must not have been bumped), got %+v", second)
 	}
 }
 
@@ -70,7 +155,7 @@ func TestBuildJobsDeltaScopedIncludesNonLiveMatchedRequestedIDs(t *testing.T) {
 		1: {Job: core.AlbumJob{ID: 1, Title: "Queued job"}},
 	}
 	sub := &streamSubscriber{jobIDs: map[int64]struct{}{1: {}}}
-	got := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates)
+	got := buildJobsDelta(sub, views, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if len(got) != 1 || got[0].ID != 1 {
 		t.Fatalf("expected the requested job even with no candidate/live match, got %+v", got)
 	}
@@ -91,7 +176,7 @@ func TestBuildJobsDeltaEmptyForUnscopedSubscriber(t *testing.T) {
 		{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, Speed: 50},
 	})
 	sub := &streamSubscriber{} // no jobIDs
-	got := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	got := buildJobsDelta(sub, views, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if len(got) != 0 {
 		t.Fatalf("expected no job frames for an unscoped subscriber, got %+v", got)
 	}
@@ -140,11 +225,11 @@ func TestBuildStreamDetailMatchesRESTHandlerOutput(t *testing.T) {
 		{Username: "alice", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 400, Speed: 100},
 	})
 
-	got := buildStreamDetail(view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	got := buildStreamDetail(view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if got == nil {
 		t.Fatal("expected a detail for a cached job")
 	}
-	want := toJobDetailDTO(view, detail, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	want := toJobDetailDTO(view, detail, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if !reflect.DeepEqual(*got, want) {
 		t.Errorf("stream detail diverged from the REST handler's:\n got %+v\nwant %+v", *got, want)
 	}
@@ -161,13 +246,13 @@ func TestBuildStreamDetailMatchesRESTHandlerOutput(t *testing.T) {
 func TestBuildStreamDetailUncachedIsNil(t *testing.T) {
 	view := core.JobView{Job: core.AlbumJob{ID: 7}}
 	detail := core.JobDetail{Job: core.AlbumJob{ID: 7}}
-	if got := buildStreamDetail(view, false, detail, true, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates); got != nil {
+	if got := buildStreamDetail(view, false, detail, true, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow); got != nil {
 		t.Errorf("expected nil when the view isn't cached, got %+v", got)
 	}
-	if got := buildStreamDetail(view, true, detail, false, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates); got != nil {
+	if got := buildStreamDetail(view, true, detail, false, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow); got != nil {
 		t.Errorf("expected nil when the detail isn't cached, got %+v", got)
 	}
-	if got := buildStreamDetail(core.JobView{}, false, core.JobDetail{}, false, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates); got != nil {
+	if got := buildStreamDetail(core.JobView{}, false, core.JobDetail{}, false, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow); got != nil {
 		t.Errorf("expected nil when neither is cached, got %+v", got)
 	}
 }
@@ -217,12 +302,12 @@ func TestBuildLiveSnapshotDetailScopingByJobID(t *testing.T) {
 		Upload:   []core.ThroughputSample{{BytesPerSecond: 300}, {BytesPerSecond: 400}},
 	}
 
-	unscoped := buildLiveSnapshot(live, 0, series, view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	unscoped := buildLiveSnapshot(live, 0, series, view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if unscoped.Detail != nil {
 		t.Errorf("expected nil Detail without ?job=, got %+v", unscoped.Detail)
 	}
 
-	scoped := buildLiveSnapshot(live, 7, series, view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	scoped := buildLiveSnapshot(live, 7, series, view, true, detail, true, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if scoped.Detail == nil || len(scoped.Detail.Attempts) != 1 {
 		t.Fatalf("expected a detail for ?job=7, got %+v", scoped.Detail)
 	}
@@ -236,7 +321,7 @@ func TestBuildLiveSnapshotDetailScopingByJobID(t *testing.T) {
 	// Scoped, but the hub has no cached detail (or view) for that id yet —
 	// the field is omitted rather than sent empty, and the frontend keeps
 	// its REST copy.
-	missing := buildLiveSnapshot(live, 999, series, core.JobView{}, false, core.JobDetail{}, false, idx, nil, testFailedRetryAfter, testMaxCandidates)
+	missing := buildLiveSnapshot(live, 999, series, core.JobView{}, false, core.JobDetail{}, false, idx, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	if missing.Detail != nil {
 		t.Errorf("expected nil Detail for an uncached job id, got %+v", missing.Detail)
 	}
@@ -1283,7 +1368,7 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 // only asserts about the payload's own top-level keys, not jobDTO's shape.
 func TestLivePayloadHasNoDBOnlyFieldsAtTopLevel(t *testing.T) {
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
-	payload := buildLiveSnapshot(live, 1, core.ThroughputSeries{}, core.JobView{}, false, core.JobDetail{}, false, newLiveTransferIndex(live), nil, testFailedRetryAfter, testMaxCandidates)
+	payload := buildLiveSnapshot(live, 1, core.ThroughputSeries{}, core.JobView{}, false, core.JobDetail{}, false, newLiveTransferIndex(live), nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	payload.Jobs = []jobDTO{}
 	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
