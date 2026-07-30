@@ -230,21 +230,38 @@ first:
    container on the next deploy; found here it is a line read in ten seconds.
 3. **Waves** — bare issue numbers, e.g. `` `#272 #212 #286` ``. Readable by a human and
    pasteable into an implementation run — by a human, or by a separate implementation
-   capability. This skill only computes and prints the waves; it never runs one itself.
-4. **Dependencies** — a mermaid graph of the conflict and blocker edges.
-5. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches.
-6. **Unassessed** — the `unassessed` issue numbers from step 2's result: the judge agent for
+   capability. This skill only computes and prints the waves; it never runs one itself. Name,
+   right here, any issue whose `touches` came back empty: by design an issue with no known
+   file set conflicts with everything, so it alone can push work into later waves. A thin
+   wave one with no obvious cause is usually explained by exactly one such issue — say which
+   one, because fixing its `touches` (or re-judging it) may collapse several waves into one.
+4. **Blocking dependencies** — a mermaid graph of the `statedBlockers` edges only: "this
+   issue said it requires that one first." A real backlog has few of these, so the graph
+   stays small and readable. Do not add conflict edges to this graph, here or anywhere else —
+   see the next section for why.
+5. **Conflict density** — file-overlap and shared-contract conflicts are reported as
+   numbers, never a graph: the total conflict-edge count, and the handful of issues driving
+   the most of them (e.g. the top three to five by edge count). A conflict and a dependency
+   are different relations with different shapes — "do not work these two at once" is not
+   "do this one first" — and a graph mixing both leaves a reader unable to tell which an edge
+   means; a real backlog's conflict count is also large enough (hundreds of edges across a
+   few dozen issues is normal) that drawing it is both unreadable and beside the point a
+   count and a short offender list already make. Keep this section separate from Blocking
+   dependencies for that reason, and do not "simplify" the report by merging them back into
+   one graph later.
+6. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches.
+7. **Unassessed** — the `unassessed` issue numbers from step 2's result: the judge agent for
    that issue returned nothing, so it was never assessed at all. This is an infrastructure
    failure worth retrying, not a judgement call — say that plainly.
-7. **Unassessable** — the `unassessable` issue numbers from step 3: a judgement came back,
+8. **Unassessable** — the `unassessable` issue numbers from step 3: a judgement came back,
    but its `prodImpact` or `effort` was not a recognised value, so the wave computation
    excluded it. This is a bad judgement worth reading, a different failure from Unassessed —
    keep the two sections separate so a reader can tell which happened.
-8. **Candidates to close** — what was observed. Not a conclusion: "I could not reproduce
+9. **Candidates to close** — what was observed. Not a conclusion: "I could not reproduce
    it" and "it is fixed" are different claims, and the second is the maintainer's.
-9. **Not verified (BLOCKED)** — the reason and the command that would unblock it. Printing
-   that command is the whole job here; running it yourself is not — that is exactly the PR
-   lab / browser-verification territory this capability stays out of.
+10. **Not verified (BLOCKED)** — the reason and the command that would unblock it. Printing
+    that command is the whole job here; running it yourself is not — that is exactly the PR
+    lab / browser-verification territory this capability stays out of.
 
 Then write `docs/triage/state.json`. Every value below shown without quotes is a real JSON
 object, array or number — not a string; only `computedAt` and the map keys under `issues`
@@ -329,6 +346,8 @@ and heredocs, which fish does not support at all.
 | Concatenated `cached` onto `result.judgements` before computing waves | `result.judgements` already includes the cached ones; concatenating duplicates them, and a duplicate conflicts with itself, faking a dependency |
 | Wrote `state.json`'s template values as quoted strings | Only `computedAt` and the map keys are strings; judgements, numbers and arrays are not — a literal string copy breaks every future cache hit |
 | A subagent hand-rolled an Agent-call pipeline when the Workflow tool wasn't available | Stop and hand step 2 back to the main session; a substitute pipeline tests itself, not `.claude/workflows/backlog-triage.js` |
+| Drew conflict edges into the dependency graph, or refused to draw anything because the graph was unreadable | They're different relations — graph only `statedBlockers`; report conflict density as a count and top offenders instead |
+| Left a thin wave one unexplained | Check for an issue with empty `touches` — it conflicts with everything by design and can push work into later waves on its own; name it in the Waves section |
 | Judged an issue from its text | Read the code it points at; a summary is not a judgement |
 | An agent decided the waves | The waves come from `waves.mjs`; agents supply `touches`, not scheduling |
 | Ranked issues against a red baseline | The script aborts for a reason — report which `aborted` value fired and stop |
