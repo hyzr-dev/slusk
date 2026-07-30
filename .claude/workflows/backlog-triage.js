@@ -208,7 +208,16 @@ const judged = await pipeline(
      summary, not a judgement, and a summary is worthless here.
 
      prodImpact is about the running production instance, not about how annoying
-     the issue is. impactEvidence is a required field on every issue, not just the
+     the issue is. The five levels are DEFINED in
+     .claude/skills/backlog-triage/SKILL.md under "Production-impact rubric" --
+     read that section before you choose one, and apply its tie-breaking
+     principle (judge the worst outcome the defect can produce as the code stands
+     today, not the most likely one and not the one after some other issue
+     lands). The definitions are deliberately not repeated here: a second copy
+     drifts from the first, and then two judges in the same run are ranking
+     against different scales without either of them knowing.
+
+     impactEvidence is a required field on every issue, not just the
      severe ones. When prodImpact is above 'cosmetic', impactEvidence must be a
      path:line reference a reader can open -- not a description, not a
      restatement of the issue title. When it's 'none' or 'cosmetic', say briefly

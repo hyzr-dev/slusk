@@ -12,6 +12,48 @@ issues can be worked in parallel, and write a dated report. The report is the de
 writes, no closing issues. Merging to `main` deploys within minutes, so the thing that
 ranks work must not also ship it. It also never starts the PR lab.
 
+## Production-impact rubric
+
+`prodImpact` is the ranking axis — `rank = impact * 10 - effort`, so effort is only a
+tiebreak within one impact level. Every judge agent must use these five definitions and no
+others. This section is the single copy; nothing else in this capability restates it.
+
+| `prodImpact` | The running instance |
+|---|---|
+| `outage` | Stops doing its job: it will not start, the pipeline stalls entirely, or a component wedges permanently with no recovery. |
+| `dataloss` | Data is destroyed, corrupted, or permanently stranded. Includes files left behind that nothing will ever clean up, jobs that can never leave a state, and unbounded growth that will eventually take the instance down. |
+| `degraded` | Works, but measurably worse: wasted work, repeated retries, slow queries under real load, or missing observability that hides a genuine failure. |
+| `cosmetic` | Every behaviour is correct; something the UI or the logs *says* is wrong, misleading or ugly. |
+| `none` | No runtime effect at all: documentation, tests, or a refactor with no behavioural change. |
+
+**The tie-breaking principle: judge the worst outcome the defect can produce in production
+as the code stands today.** Not the most likely outcome, and not the outcome after some
+other issue lands. This is the sentence to read twice, because it is exactly where privately
+invented rubrics diverge — one judge reads "unbounded row growth" as `degraded` because the
+table is small today, another as `dataloss` because nothing bounds it. The second is
+correct. If an issue's severity depends on unmerged work, judge it as it stands and say so
+in `impactEvidence`.
+
+**The first run's distribution is not a baseline.** The run recorded in
+`docs/triage/2026-07-30-backlog.md` predates this rubric: 42 judges each invented the
+boundaries privately and came out 38 of 42 at `cosmetic` or `none`, 4 at `degraded`, and
+zero at `dataloss` or `outage`. An axis that flat collapses the ranking into the effort
+tiebreak, which is the one thing this capability exists not to do. Do not calibrate against
+those numbers, and do not treat a later run that ranks more issues above `degraded` as
+inflation on that evidence alone.
+
+Two judgements from that run are worth reading as examples of a boundary that is genuinely
+hard, not as corrections to apply now:
+
+- **#186** — any Soulseek peer can write unbounded rows to Postgres, with pruning ruled out
+  in a migration comment. Unbounded growth with no bound anywhere is the `dataloss` row's
+  own wording.
+- **#266** — a broadcaster goroutine that can wedge forever on an untimed context. "Wedges
+  permanently with no recovery" is the `outage` row's own wording.
+
+Both were judged lower. Whether that was wrong is a judgement call; that it was made without
+a written rubric to be wrong against is not.
+
 ## Procedure
 
 ### 1. Scout inline
