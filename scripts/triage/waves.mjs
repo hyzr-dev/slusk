@@ -23,7 +23,12 @@ export function contractsTouched(issue, contracts) {
   const touches = issue.touches ?? []
   return contracts
     .filter(c => c.sides.some(side =>
-      side.some(prefix => touches.some(path => path.startsWith(prefix)))))
+      side.some(prefix => touches.some(path => {
+        // Remove trailing slash from prefix for consistent matching
+        const normalized = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix
+        // Match exactly (file) or with slash following (directory)
+        return path === normalized || path.startsWith(normalized + '/')
+      }))))
     .map(c => c.name)
 }
 

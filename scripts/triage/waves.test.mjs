@@ -48,3 +48,11 @@ test('issues sharing no file and no contract do not conflict', () => {
   const b = { number: 2, touches: ['internal/matcher/rank.go'] }
   assert.equal(conflicts(a, b, CONTRACTS), false)
 })
+
+test('a directory side without a trailing slash does not match a longer sibling directory', () => {
+  const contracts = [{ name: 'config', sides: [['internal/config'], ['config.example.toml']] }]
+  const unrelated = { number: 1, touches: ['internal/configuration/x.go'] }
+  const real = { number: 2, touches: ['internal/config/config.go'] }
+  assert.deepEqual(contractsTouched(unrelated, contracts), [])
+  assert.deepEqual(contractsTouched(real, contracts), ['config'])
+})
