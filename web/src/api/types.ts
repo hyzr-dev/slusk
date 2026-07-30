@@ -631,11 +631,11 @@ export interface ChartsReport {
 
 /**
  * GET /api/stream's `event: live` JSON body — internal/observ/stream.go
- * livePayload. `throughput` and `uploadThroughput` carry only samples newer
- * than the previous frame — see api/queries.ts's mergeThroughputSamples for
- * how the client folds each direction independently into the cached series.
- * `down` and `up` are always present (the global live rates for their
- * directions, 0 when idle).
+ * livePayload. `down` and `up` are always present (the global live rates for
+ * their directions, 0 when idle). The directional throughput series used to
+ * live on this type too; issue #265 split it onto its own independent
+ * `event: throughput` (see ThroughputPayload below) so a subscriber with no
+ * sparkline on screen never pays for building or receiving it.
  *
  * `detail` is the whole `GET /api/jobs/{id}/detail` body, present only when
  * the connection was opened with `?job=<id>`, and built server-side by the
@@ -668,10 +668,27 @@ export interface ChartsReport {
 export interface LivePayload {
   jobs?: WireJob[];
   detail?: JobDetail;
-  throughput?: ThroughputSample[];
-  uploadThroughput?: ThroughputSample[];
   down: number;
   up: number;
+}
+
+/**
+ * GET /api/stream's `event: throughput` JSON body — internal/observ/
+ * stream.go throughputPayload (issue #265). Sent only to a connection opened
+ * with `?throughput=1` (see useThroughputStream in api/stream.tsx); every
+ * other subscriber never receives this event at all. `download`/`upload`
+ * carry only samples strictly newer than this subscriber's previous
+ * throughput frame — the same "send only what's new" contract LivePayload's
+ * `jobs` has — but unlike every other field in this app, a sample that
+ * doesn't make it into a frame is lost forever rather than self-healing on
+ * the next one: see api/queries.ts's mergeThroughputSamples for how the
+ * client folds each direction independently into its own cached window
+ * anyway (a dropped frame just means a gap in that window, not a wrong
+ * value).
+ */
+export interface ThroughputPayload {
+  download?: ThroughputSample[];
+  upload?: ThroughputSample[];
 }
 
 /**

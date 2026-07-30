@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from './queries';
-import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope } from './stream';
+import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope, useThroughputStream } from './stream';
 
 // EventSource does not exist in jsdom — this mock captures every instance
 // ever constructed (StreamProvider.tsx creates a new one per route change)
@@ -427,6 +427,8 @@ describe('StreamProvider', () => {
     expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
   });
 
+  // Issue #265: throughput arrives on its own `event: throughput`, decoupled
+  // from `event: live` entirely.
   it('merges and dedupes download and upload samples independently', () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(queryKeys.charts, {
@@ -444,15 +446,12 @@ describe('StreamProvider', () => {
     );
 
     act(() =>
-      MockEventSource.instances[0].emit('live', {
-        jobs: [],
-        down: 2000,
-        up: 750,
-        throughput: [
+      MockEventSource.instances[0].emit('throughput', {
+        download: [
           { at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 },
           { at: '2026-07-26T12:00:01Z', bytesPerSecond: 2000, activeTransfers: 2 },
         ],
-        uploadThroughput: [
+        upload: [
           { at: '2026-07-26T12:00:01Z', bytesPerSecond: 750, activeTransfers: 1 },
           { at: '2026-07-26T12:00:02Z', bytesPerSecond: 0, activeTransfers: 0 },
         ],
@@ -495,11 +494,8 @@ describe('StreamProvider', () => {
       </QueryClientProvider>,
     );
 
-    act(() => MockEventSource.instances[0].emit('live', {
-      jobs: [],
-      down: 0,
-      up: 999,
-      uploadThroughput: [
+    act(() => MockEventSource.instances[0].emit('throughput', {
+      upload: [
         { at: '2026-07-26T12:01:00Z', bytesPerSecond: 999, activeTransfers: 1 },
       ],
     }));
@@ -513,5 +509,181 @@ describe('StreamProvider', () => {
     expect(charts.uploadThroughput).toHaveLength(48);
     expect(charts.uploadThroughput[0].at).toBe('2026-07-26T12:00:01Z');
     expect(charts.uploadThroughput.at(-1)?.at).toBe('2026-07-26T12:01:00Z');
+  });
+
+  // Proves the two events are genuinely decoupled: a `throughput` frame
+  // merges into the charts cache even with no preceding `live` frame at all
+  // on this connection.
+  it('merges a throughput event into the charts cache with no preceding live frame', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(queryKeys.charts, {
+      passes: [],
+      completedByHour: [],
+      throughput: [],
+      uploadThroughput: [],
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[0].emit('throughput', {
+      download: [{ at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 }],
+    }));
+
+    const charts = queryClient.getQueryData(queryKeys.charts) as { throughput: { at: string }[] };
+    expect(charts.throughput).toEqual([
+      { at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 },
+    ]);
+  });
+
+  // Mirrors ScopePublisher above, but for the throughput opt-in.
+  function ThroughputPublisher() {
+    useThroughputStream();
+    return null;
+  }
+
+  it('adds ?throughput=1 to the URL while a child calls useThroughputStream', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>
+            <ThroughputPublisher />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?throughput=1');
+  });
+
+  it('omits ?throughput= when nothing calls useThroughputStream', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(MockEventSource.instances[0].url).toBe('/api/stream');
+  });
+
+  it('combines ?jobs= and ?throughput=1', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <ScopePublisher ids={[1, 2]} />
+            <ThroughputPublisher />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.closed).toBe(false);
+    expect(last.url).toBe('/api/stream?jobs=1,2&throughput=1');
+  });
+
+  it('carries no throughput param on a ?job= detail route with no throughput consumer', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs/5']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(MockEventSource.instances[0].url).toBe('/api/stream?job=5');
+  });
+
+  // ScopePublisher above (used by every other test in this file) takes its
+  // ids as a static prop, already resolved at mount. Overview's real ids
+  // come from useJobs (React Query), which starts undefined — so
+  // transferRows.map(...) falls back to [] — and only resolves to the real
+  // array on a later microtask. AsyncScopePublisher reproduces that timing:
+  // an id set that starts empty and becomes real one tick after mount, the
+  // same shape a mocked-but-still-async query has.
+  function AsyncScopePublisher({ ids }: { ids: number[] }) {
+    const [resolvedIds, setResolvedIds] = useState<number[]>([]);
+    useEffect(() => {
+      void Promise.resolve().then(() => setResolvedIds(ids));
+    }, [ids]);
+    useJobScope(resolvedIds);
+    return null;
+  }
+
+  // Pins the actual cost of Overview's timing (issue #265 review): a static
+  // ids prop (every other job-scope test in this file) opens 2 connections
+  // (unscoped, then the real `?jobs=...`, per #267) — but an id set that
+  // resolves asynchronously, like Overview's, opens a THIRD: unscoped, then
+  // an intermediate `?jobs=` (empty, published the instant the scope
+  // publisher's own mount effect runs, before its query has resolved), then
+  // finally the real `?jobs=1,2,3`. This is a job-scope cost, not a
+  // throughput one — see the next test.
+  it('costs three connections for an async-resolving job scope, not the two a static prop shows', async () => {
+    const queryClient = new QueryClient();
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/jobs']}>
+            <StreamProvider>
+              <AsyncScopePublisher ids={[1, 2, 3]} />
+            </StreamProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      // Lets the simulated query-resolution microtask (and the effect it
+      // schedules) flush.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockEventSource.instances).toHaveLength(3);
+    expect(MockEventSource.instances[0].url).toBe('/api/stream');
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?jobs=');
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.url).toBe('/api/stream?jobs=1,2,3');
+    expect(last.closed).toBe(false);
+  });
+
+  // The counterpart to the test above: mounting useThroughputStream
+  // alongside the same async-resolving scope must NOT add a fourth
+  // connection. Both effects fire in the same commit on every render (they
+  // are direct siblings, same as on Overview), so wantThroughput's counter
+  // update rides along with whichever jobsScope state is current when it
+  // fires — the third connection above already exists without it. This is
+  // the empirical check behind the #267 comment in stream.tsx: the total
+  // cost is bounded by the job-scope's own two extra hops, not by
+  // throughput adding a THIRD one on top.
+  it('adding useThroughputStream to the same async-resolving scope costs no additional connection', async () => {
+    const queryClient = new QueryClient();
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/jobs']}>
+            <StreamProvider>
+              <AsyncScopePublisher ids={[1, 2, 3]} />
+              <ThroughputPublisher />
+            </StreamProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockEventSource.instances).toHaveLength(3);
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.url).toBe('/api/stream?jobs=1,2,3&throughput=1');
+    expect(last.closed).toBe(false);
   });
 });

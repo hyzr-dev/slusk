@@ -3,6 +3,7 @@ package observ
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -262,23 +263,29 @@ func TestChangedSinceLastTableCases(t *testing.T) {
 	detailB := &jobDetailDTO{Job: jobDTO{ID: 1}, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 20}}}}}
 
 	cases := []struct {
-		name                                          string
-		prev, next                                    livePayload
-		newJobCount, newDownloadCount, newUploadCount int
-		want                                          bool
+		name        string
+		prev, next  livePayload
+		newJobCount int
+		want        bool
 	}{
-		{"nothing changed", livePayload{Detail: detailA, Down: 5, Up: 6}, livePayload{Detail: detailA, Down: 5, Up: 6}, 0, 0, 0, false},
-		{"jobs changed", livePayload{}, livePayload{}, 1, 0, 0, true},
-		{"down changed", livePayload{Down: 5}, livePayload{Down: 6}, 0, 0, 0, true},
-		{"up changed", livePayload{Up: 5}, livePayload{Up: 6}, 0, 0, 0, true},
-		{"detail nested transfer bytes changed", livePayload{Detail: detailA}, livePayload{Detail: detailB}, 0, 0, 0, true},
-		{"detail appeared", livePayload{}, livePayload{Detail: detailA}, 0, 0, 0, true},
-		{"only new download throughput", livePayload{Detail: detailA, Down: 5}, livePayload{Detail: detailA, Down: 5}, 0, 1, 0, true},
-		{"only new upload throughput", livePayload{Detail: detailA, Up: 5}, livePayload{Detail: detailA, Up: 5}, 0, 0, 1, true},
+		{"nothing changed", livePayload{Detail: detailA, Down: 5, Up: 6}, livePayload{Detail: detailA, Down: 5, Up: 6}, 0, false},
+		{"jobs changed", livePayload{}, livePayload{}, 1, true},
+		{"down changed", livePayload{Down: 5}, livePayload{Down: 6}, 0, true},
+		{"up changed", livePayload{Up: 5}, livePayload{Up: 6}, 0, true},
+		{"detail nested transfer bytes changed", livePayload{Detail: detailA}, livePayload{Detail: detailB}, 0, true},
+		{"detail appeared", livePayload{}, livePayload{Detail: detailA}, 0, true},
+		// A fresh throughput sample no longer forces a live frame on its own
+		// (issue #265): throughput now travels on its own independent
+		// `event: throughput` channel, gated purely on whether a fresh
+		// sample exists, never on changedSinceLast. Down/Up unchanged here
+		// stands in for "a new sample arrived at the same rate as before" —
+		// changedSinceLast no longer even receives throughput data to
+		// distinguish that case from "nothing changed" at all.
+		{"same rate, unaffected by any throughput sample arriving on the side", livePayload{Detail: detailA, Down: 5, Up: 6}, livePayload{Detail: detailA, Down: 5, Up: 6}, 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := changedSinceLast(tc.prev, tc.next, tc.newJobCount, tc.newDownloadCount, tc.newUploadCount)
+			got := changedSinceLast(tc.prev, tc.next, tc.newJobCount)
 			if got != tc.want {
 				t.Errorf("changedSinceLast(...) = %v, want %v", got, tc.want)
 			}
@@ -333,23 +340,58 @@ func TestBuildLiveSnapshotDetailScopingByJobID(t *testing.T) {
 func TestLivePayloadExactBidirectionalJSON(t *testing.T) {
 	// Jobs is deliberately left unset: it's delta-encoded (see buildJobsDelta)
 	// and omitempty, so a frame with nothing job-related to report omits the
-	// key entirely rather than emitting an empty array.
+	// key entirely rather than emitting an empty array. Throughput/
+	// UploadThroughput no longer exist on livePayload at all (issue #265) —
+	// see TestThroughputPayloadExactBidirectionalJSON for their new home.
 	payload := livePayload{
-		Throughput:       []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 200, ActiveTransfers: 2}},
-		UploadThroughput: []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 400, ActiveTransfers: 4}},
-		Down:             200,
-		Up:               400,
+		Down: 200,
+		Up:   400,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"throughput":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":200,"activeTransfers":2}],"uploadThroughput":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":400,"activeTransfers":4}],"down":200,"up":400}`
+	want := `{"down":200,"up":400}`
 	if string(body) != want {
 		t.Errorf("live JSON = %s\nwant      = %s", body, want)
 	}
 }
 
+// TestThroughputPayloadExactBidirectionalJSON pins the wire shape of
+// `event: throughput` (issue #265): field names are `download`/`upload`,
+// deliberately different from livePayload's `down`/`up` scalars, and both
+// are omitempty since a frame with a fresh sample in only one direction
+// must not emit an empty array for the other.
+func TestThroughputPayloadExactBidirectionalJSON(t *testing.T) {
+	payload := throughputPayload{
+		Download: []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 200, ActiveTransfers: 2}},
+		Upload:   []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 400, ActiveTransfers: 4}},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"download":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":200,"activeTransfers":2}],"upload":[{"at":"2026-01-01T00:00:00Z","bytesPerSecond":400,"activeTransfers":4}]}`
+	if string(body) != want {
+		t.Errorf("throughput JSON = %s\nwant      = %s", body, want)
+	}
+
+	empty := throughputPayload{}
+	emptyBody, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if string(emptyBody) != `{}` {
+		t.Errorf("empty throughput JSON = %s, want {}", emptyBody)
+	}
+}
+
+// TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries covers the "down/
+// up stay global" criterion (issue #265): two subscribers scoped to
+// DIFFERENT ?jobs= sets, both opted into ?throughput=1, still see identical
+// Down/Up scalars and byte-identical initial throughput frames — the
+// directional series is a global quantity, entirely independent of a
+// subscriber's job scope.
 func TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries(t *testing.T) {
 	at := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
@@ -359,44 +401,41 @@ func TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries(t *testing.T) {
 		}, nil
 	}
 	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	unscopedID, _, unscoped := hub.subscribe(context.Background(), 0, nil)
+	unscopedID, _, _, unscoped, unscopedThroughput := hub.subscribe(context.Background(), 0, map[int64]struct{}{1: {}}, true)
 	defer hub.unsubscribe(unscopedID)
-	scopedID, _, scoped := hub.subscribe(context.Background(), 7, nil)
+	scopedID, _, _, scoped, scopedThroughput := hub.subscribe(context.Background(), 7, map[int64]struct{}{2: {}}, true)
 	defer hub.unsubscribe(scopedID)
 
 	if scoped.Down != unscoped.Down || scoped.Up != unscoped.Up {
 		t.Errorf("scoped rates = %d/%d, global = %d/%d", scoped.Down, scoped.Up, unscoped.Down, unscoped.Up)
 	}
-	if !reflect.DeepEqual(scoped.Throughput, unscoped.Throughput) || !reflect.DeepEqual(scoped.UploadThroughput, unscoped.UploadThroughput) {
-		t.Errorf("scoped series differ from global: scoped=%+v/%+v global=%+v/%+v", scoped.Throughput, scoped.UploadThroughput, unscoped.Throughput, unscoped.UploadThroughput)
+	if !reflect.DeepEqual(scopedThroughput, unscopedThroughput) {
+		t.Errorf("scoped throughput frame differs from global: scoped=%+v global=%+v", scopedThroughput, unscopedThroughput)
 	}
 }
 
-// TestSendLatestReplacesRatesUnionsJobsAccumulatesThroughput asserts mailbox
-// replacement: Down/Up (ordinary snapshot fields) are superseded outright,
-// while Jobs (delta-encoded, unioned by id) and the two throughput series
-// (delta-encoded, concatenated) both preserve what the superseded frame
-// carried.
-func TestSendLatestReplacesRatesUnionsJobsAccumulatesThroughput(t *testing.T) {
+// TestSendLatestReplacesRatesUnionsJobs asserts mailbox replacement: Down/Up
+// (ordinary snapshot fields) are superseded outright, while Jobs
+// (delta-encoded, unioned by id) preserves what the superseded frame
+// carried. Throughput's own accumulation contract moved to
+// sendLatestThroughput (issue #265) — see
+// TestSendLatestThroughputAccumulatesAcrossDisplacedFrame below.
+func TestSendLatestReplacesRatesUnionsJobs(t *testing.T) {
 	ch := make(chan livePayload, 1)
 
 	first := livePayload{
-		Jobs:             []jobDTO{{ID: 1, BytesDone: 100}, {ID: 2, BytesDone: 200}},
-		Down:             10,
-		Up:               11,
-		Throughput:       []throughputSampleDTO{{At: "d1"}},
-		UploadThroughput: []throughputSampleDTO{{At: "u1"}},
+		Jobs: []jobDTO{{ID: 1, BytesDone: 100}, {ID: 2, BytesDone: 200}},
+		Down: 10,
+		Up:   11,
 	}
-	if got := sendLatest(ch, first); len(got.Throughput) != 1 || len(got.UploadThroughput) != 1 {
+	if got := sendLatest(ch, first); got.Down != 10 || got.Up != 11 {
 		t.Fatalf("first send: got %+v", got)
 	}
 
 	second := livePayload{
-		Jobs:             []jobDTO{{ID: 2, BytesDone: 250}, {ID: 3, BytesDone: 300}},
-		Down:             20,
-		Up:               21,
-		Throughput:       []throughputSampleDTO{{At: "d2"}},
-		UploadThroughput: []throughputSampleDTO{{At: "u2"}},
+		Jobs: []jobDTO{{ID: 2, BytesDone: 250}, {ID: 3, BytesDone: 300}},
+		Down: 20,
+		Up:   21,
 	}
 	merged := sendLatest(ch, second)
 	if merged.Down != 20 || merged.Up != 21 {
@@ -411,16 +450,93 @@ func TestSendLatestReplacesRatesUnionsJobsAccumulatesThroughput(t *testing.T) {
 			t.Errorf("job %d BytesDone = %d, want %d", dto.ID, dto.BytesDone, wantJobs[dto.ID])
 		}
 	}
-	if len(merged.Throughput) != 2 || merged.Throughput[0].At != "d1" || merged.Throughput[1].At != "d2" {
-		t.Errorf("merged.Throughput = %+v, want [d1, d2]", merged.Throughput)
-	}
-	if len(merged.UploadThroughput) != 2 || merged.UploadThroughput[0].At != "u1" || merged.UploadThroughput[1].At != "u2" {
-		t.Errorf("merged.UploadThroughput = %+v, want [u1, u2]", merged.UploadThroughput)
-	}
 
 	queued := <-ch
-	if len(queued.Jobs) != 3 || len(queued.Throughput) != 2 || len(queued.UploadThroughput) != 2 {
-		t.Errorf("queued = %+v, want 3 jobs and 2/2 directional samples", queued)
+	if len(queued.Jobs) != 3 {
+		t.Errorf("queued = %+v, want 3 jobs", queued)
+	}
+}
+
+// TestSendLatestThroughputAccumulatesAcrossDisplacedFrame is the test issue
+// #265 demands (written first, TDD): sendLatestThroughput must ADD an
+// undelivered frame's samples to the next one rather than discard them —
+// checked both on the return value and on what ends up queued in the
+// channel, since either one alone could hide a bug in the other (a merge
+// that mutated its argument in place, say, could pass a return-value-only
+// check while leaving the channel with something different). Throughput is
+// the one field where a displaced sample is unrecoverable rather than
+// self-healing (see this file's package comment), so accumulation, not mere
+// non-blocking delivery, is the property that matters here (see
+// TestStreamHubTickThroughputSurvivesUndrainedMailbox for the
+// interaction-level version of the same requirement).
+func TestSendLatestThroughputAccumulatesAcrossDisplacedFrame(t *testing.T) {
+	tch := make(chan throughputPayload, 1)
+
+	d1 := throughputSampleDTO{At: "d1"}
+	u1 := throughputSampleDTO{At: "u1"}
+	first := throughputPayload{Download: []throughputSampleDTO{d1}, Upload: []throughputSampleDTO{u1}}
+	if got := sendLatestThroughput(tch, first); len(got.Download) != 1 || len(got.Upload) != 1 {
+		t.Fatalf("first send: got %+v", got)
+	}
+
+	// Sent WITHOUT reading the channel first — first is still queued.
+	d2 := throughputSampleDTO{At: "d2"}
+	u2 := throughputSampleDTO{At: "u2"}
+	second := throughputPayload{Download: []throughputSampleDTO{d2}, Upload: []throughputSampleDTO{u2}}
+	merged := sendLatestThroughput(tch, second)
+
+	if len(merged.Download) != 2 || merged.Download[0] != d1 || merged.Download[1] != d2 {
+		t.Errorf("returned Download = %+v, want [d1, d2] (the caller advances its watermark from this)", merged.Download)
+	}
+	if len(merged.Upload) != 2 || merged.Upload[0] != u1 || merged.Upload[1] != u2 {
+		t.Errorf("returned Upload = %+v, want [u1, u2]", merged.Upload)
+	}
+
+	queued := <-tch
+	if len(queued.Download) != 2 || queued.Download[0] != d1 || queued.Download[1] != d2 {
+		t.Errorf("queued Download = %+v, want [d1, d2]", queued.Download)
+	}
+	if len(queued.Upload) != 2 || queued.Upload[0] != u1 || queued.Upload[1] != u2 {
+		t.Errorf("queued Upload = %+v, want [u1, u2]", queued.Upload)
+	}
+}
+
+// TestSendLatestThroughputCapsAtFortyEightAcrossDisplacedFrames covers the
+// cap half of the same contract: accumulating across repeated displaced
+// frames must never let either direction's slice grow past
+// streamThroughputCap, and the entries kept must be the newest ones.
+func TestSendLatestThroughputCapsAtFortyEightAcrossDisplacedFrames(t *testing.T) {
+	tch := make(chan throughputPayload, 1)
+
+	first := throughputPayload{Download: make([]throughputSampleDTO, streamThroughputCap)}
+	for i := range first.Download {
+		first.Download[i] = throughputSampleDTO{At: fmt.Sprintf("d%d", i)}
+	}
+	if got := sendLatestThroughput(tch, first); len(got.Download) != streamThroughputCap {
+		t.Fatalf("first send: got %d samples, want %d", len(got.Download), streamThroughputCap)
+	}
+
+	// Sent without draining: displaces the full 48-sample frame above with
+	// 5 more, which must push the total to 53 before capping back to 48,
+	// dropping the OLDEST 5 (d0..d4) and keeping the newest.
+	second := throughputPayload{Download: make([]throughputSampleDTO, 5)}
+	for i := range second.Download {
+		second.Download[i] = throughputSampleDTO{At: fmt.Sprintf("e%d", i)}
+	}
+	merged := sendLatestThroughput(tch, second)
+	if len(merged.Download) != streamThroughputCap {
+		t.Fatalf("merged Download = %d samples, want capped at %d", len(merged.Download), streamThroughputCap)
+	}
+	if merged.Download[0].At != "d5" {
+		t.Errorf("merged.Download[0] = %+v, want d5 (the oldest 5 samples dropped by the cap)", merged.Download[0])
+	}
+	if last := merged.Download[len(merged.Download)-1]; last.At != "e4" {
+		t.Errorf("merged.Download[last] = %+v, want e4 (the newest sample kept)", last)
+	}
+
+	queued := <-tch
+	if len(queued.Download) != streamThroughputCap {
+		t.Errorf("queued Download = %d samples, want capped at %d", len(queued.Download), streamThroughputCap)
 	}
 }
 
@@ -497,12 +613,12 @@ func TestParseStreamJobIDsRejectsOverMax(t *testing.T) {
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
 	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
 
-	id1, _, _ := hub.subscribe(context.Background(), 0, nil)
+	id1, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	if !hubRunning(hub) {
 		t.Fatal("expected ticker running after first subscribe")
 	}
 
-	id2, _, _ := hub.subscribe(context.Background(), 0, nil)
+	id2, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	if n := hubSubCount(hub); n != 2 {
 		t.Fatalf("expected 2 subs, got %d", n)
 	}
@@ -549,7 +665,7 @@ func hubSubCount(h *streamHub) int {
 // touch subscriber state.
 func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
 	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	_, ch, initial := hub.subscribe(context.Background(), 0, nil)
+	_, ch, _, initial, _ := hub.subscribe(context.Background(), 0, nil, false)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -624,7 +740,7 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick. Scoped to job 7
 	// (issue #268: unscoped subscribers get no job frames at all).
-	id, ch, initial := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}})
+	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 100 {
 		t.Fatalf("initial payload = %+v, want job 7 at speed 100", initial)
@@ -651,6 +767,12 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 	}
 }
 
+// TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark ports the
+// pre-#265 test of the same name to the now-independent throughput channel:
+// the two directions' watermarks stay independent of one another, an
+// upload-only sample must produce an `event: throughput` frame carrying only
+// that direction, and a subscriber that connected after the sample already
+// exists must not receive it again on its own next tick.
 func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T) {
 	t1 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)
@@ -666,33 +788,36 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 		return series, nil
 	}
 	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, initial := hub.subscribe(context.Background(), 0, nil)
+	id, _, tch, initial, initialThroughput := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id)
 	if initial.Down != 100 || initial.Up != 300 {
 		t.Fatalf("initial down/up = %d/%d, want 100/300", initial.Down, initial.Up)
 	}
+	if len(initialThroughput.Upload) != 1 {
+		t.Fatalf("first subscriber initial upload series = %+v, want just t1", initialThroughput.Upload)
+	}
 
 	uploadAdvanced.Store(true)
-	id2, ch2, secondInitial := hub.subscribe(context.Background(), 0, nil)
+	id2, _, tch2, _, secondInitialThroughput := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id2)
-	if len(secondInitial.UploadThroughput) != 2 {
-		t.Fatalf("second subscriber initial upload series = %+v, want t1 and t2", secondInitial.UploadThroughput)
+	if len(secondInitialThroughput.Upload) != 2 {
+		t.Fatalf("second subscriber initial upload series = %+v, want t1 and t2", secondInitialThroughput.Upload)
 	}
 
 	hub.tick(context.Background())
 	select {
-	case got := <-ch:
-		if len(got.Throughput) != 0 {
-			t.Errorf("download delta = %+v, want none", got.Throughput)
+	case got := <-tch:
+		if len(got.Download) != 0 {
+			t.Errorf("download delta = %+v, want none", got.Download)
 		}
-		if len(got.UploadThroughput) != 1 || got.UploadThroughput[0].At != t2.Format(timeFormat) {
-			t.Errorf("upload delta = %+v, want only t2", got.UploadThroughput)
+		if len(got.Upload) != 1 || got.Upload[0].At != t2.Format(timeFormat) {
+			t.Errorf("upload delta = %+v, want only t2", got.Upload)
 		}
 	default:
-		t.Fatal("upload-only sample must trigger a frame")
+		t.Fatal("upload-only sample must trigger a throughput frame")
 	}
 	select {
-	case got := <-ch2:
+	case got := <-tch2:
 		t.Fatalf("newer subscriber must not receive already-seen upload sample, got %+v", got)
 	default:
 	}
@@ -704,6 +829,148 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 	hub.mu.Unlock()
 	if !downloadAt1.Equal(t1) || !uploadAt1.Equal(t2) || !downloadAt2.Equal(t1) || !uploadAt2.Equal(t2) {
 		t.Errorf("subscriber watermarks = first %s/%s second %s/%s, want %s/%s for both", downloadAt1, uploadAt1, downloadAt2, uploadAt2, t1, t2)
+	}
+}
+
+// TestStreamHubTickThroughputSurvivesUndrainedMailbox is the interaction-
+// level test issue #265 demands: sendLatestThroughput's accumulate-rather-
+// than-discard contract must actually hold across real tick() calls, not
+// just in its own unit test in isolation. A subscriber's tch is deliberately
+// never drained across two ticks with distinct samples; the third tick
+// drains everything at once, and every sample from all three ticks must be
+// present exactly once, none skipped.
+func TestStreamHubTickThroughputSurvivesUndrainedMailbox(t *testing.T) {
+	t0 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	samples := []core.ThroughputSample{{At: t0, BytesPerSecond: 100}}
+	var mu sync.Mutex
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]core.ThroughputSample, len(samples))
+		copy(out, samples)
+		return core.ThroughputSeries{Download: out}, nil
+	}
+	addSample := func(at time.Time, bps int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		samples = append(samples, core.ThroughputSample{At: at, BytesPerSecond: bps})
+	}
+
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	id, _, tch, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	defer hub.unsubscribe(id)
+
+	addSample(t0.Add(1*time.Second), 200)
+	hub.tick(context.Background()) // queues t0+1s, undrained
+	addSample(t0.Add(2*time.Second), 300)
+	hub.tick(context.Background()) // must accumulate onto the undrained frame, not discard it
+	addSample(t0.Add(3*time.Second), 400)
+	hub.tick(context.Background())
+
+	got := <-tch
+	wantAts := []string{
+		t0.Add(1 * time.Second).Format(timeFormat),
+		t0.Add(2 * time.Second).Format(timeFormat),
+		t0.Add(3 * time.Second).Format(timeFormat),
+	}
+	if len(got.Download) != len(wantAts) {
+		t.Fatalf("Download = %+v, want %d samples across all three ticks", got.Download, len(wantAts))
+	}
+	for i, want := range wantAts {
+		if got.Download[i].At != want {
+			t.Errorf("Download[%d].At = %q, want %q", i, got.Download[i].At, want)
+		}
+	}
+}
+
+// TestStreamHubTickBuildsNoThroughputFrameWithoutSubscriber covers the two
+// halves of issue #265's most subtle invariant: a subscriber that never
+// asked for ?throughput=1 must never receive an `event: throughput` frame at
+// all, but must still see a fresh `down`/`up` on its `live` frame from the
+// very newest sample — proving fetchThroughput itself was never gated,
+// only the per-subscriber send.
+func TestStreamHubTickBuildsNoThroughputFrameWithoutSubscriber(t *testing.T) {
+	var bps atomic.Int64
+	bps.Store(100)
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{
+			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: bps.Load()}},
+		}, nil
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	id, ch, tch, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	bps.Store(250)
+	hub.tick(context.Background())
+
+	select {
+	case got := <-tch:
+		t.Fatalf("subscriber without ?throughput=1 must never receive a throughput frame, got %+v", got)
+	default:
+	}
+	select {
+	case got := <-ch:
+		if got.Down != 250 {
+			t.Errorf("live frame Down = %d, want 250 (fetchThroughput must not be gated by wantThroughput)", got.Down)
+		}
+	default:
+		t.Fatal("expected a live frame reflecting the new Down rate")
+	}
+}
+
+// TestStreamHubTickWatermarkSurvivesSubSecondPrecision is issue #265's
+// review finding: tick used to advance the throughput watermark by
+// round-tripping the sample's time.Time through timeFormat (no fractional
+// seconds) via time.Parse, which truncates a real sample's sub-second
+// component and moves the watermark BACKWARDS by up to 999ms relative to the
+// sample just sent. newThroughputSince would then re-select that same
+// already-sent sample on every subsequent tick forever, so a subscriber got
+// a duplicate `event: throughput` frame every second even when the meter
+// produced nothing new. Every other test in this file builds its timestamps
+// with whole-second time.Date(...), which cannot see this: a whole-second
+// value survives the truncating round trip unchanged. This one uses a
+// sub-second offset (237ms) so the bug is observable: a tick with a fresh
+// sample must send exactly one frame, and a second tick with no further
+// sample must send none.
+func TestStreamHubTickWatermarkSurvivesSubSecondPrecision(t *testing.T) {
+	t0 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(237 * time.Millisecond)
+	var mu sync.Mutex
+	samples := []core.ThroughputSample{{At: t0, BytesPerSecond: 100}}
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]core.ThroughputSample, len(samples))
+		copy(out, samples)
+		return core.ThroughputSeries{Download: out}, nil
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	id, _, tch, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	defer hub.unsubscribe(id)
+
+	mu.Lock()
+	samples = append(samples, core.ThroughputSample{At: t1, BytesPerSecond: 150})
+	mu.Unlock()
+
+	hub.tick(context.Background())
+	select {
+	case got := <-tch:
+		if len(got.Download) != 1 || got.Download[0].At != t1.Format(timeFormat) {
+			t.Fatalf("first tick with a fresh sub-second sample: got %+v, want just t1", got)
+		}
+	default:
+		t.Fatal("expected a throughput frame carrying the fresh sub-second sample")
+	}
+
+	// No new sample added: a second tick must NOT resend t1. Before the fix,
+	// the watermark truncated t1's milliseconds on the way in, so
+	// newThroughputSince re-selected the same sample here.
+	hub.tick(context.Background())
+	select {
+	case got := <-tch:
+		t.Fatalf("second tick with no new sample must send nothing, got %+v", got)
+	default:
 	}
 }
 
@@ -735,7 +1002,7 @@ func TestStreamHubScopedJobPicksUpLiveMatchWithinOneTick(t *testing.T) {
 		}}, nil
 	}
 	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, initial := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}})
+	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 0 {
 		t.Fatalf("initial payload = %+v, want job 9 present with no live match yet", initial)
@@ -806,7 +1073,7 @@ func TestStreamHubFileLevelRefreshKeepsMultiFileAlbumTotalMonotonic(t *testing.T
 		return map[int64]map[string]int64{101: {"a.flac": 9_000_000, "b.flac": 3_000_000}}, nil
 	}
 	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, initial := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}})
+	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 {
 		t.Fatalf("initial payload = %+v, want job 11 present", initial)
@@ -888,7 +1155,7 @@ func TestStreamHubPreservesBytesCacheWhenTransferBytesFailsDuringEventDrivenRefr
 		return nil, context.DeadlineExceeded
 	}
 	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, initial := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}})
+	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].BytesDone != 12_000_000 {
 		t.Fatalf("initial payload = %+v, want job 41 at 12_000_000 bytes", initial)
@@ -961,7 +1228,7 @@ func TestStreamHubScopedJobViewRefreshesPromptlyOnLiveMatchChange(t *testing.T) 
 		}}, nil
 	}
 	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, initial := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}})
+	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 999 {
 		t.Fatalf("initial payload = %+v, want job 30 at speed 999", initial)
@@ -1261,6 +1528,86 @@ func TestStreamEndpointInvalidJobsParamReturns400(t *testing.T) {
 	}
 }
 
+// TestStreamEndpointInvalidThroughputParamReturns400 covers ?throughput=
+// parsing (issue #265): strict like ?jobs=, so anything other than exactly
+// "1" is a 400 rather than silently defaulting to off.
+func TestStreamEndpointInvalidThroughputParamReturns400(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+
+	for _, raw := range []string{"0", "true", "yes", "2", "-1"} {
+		t.Run(raw, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/stream?throughput="+raw, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+// TestStreamEndpointThroughputOptInSendsEvent covers ?throughput=1 end to
+// end at the wire level: an `event: throughput` line must appear in the raw
+// SSE body.
+func TestStreamEndpointThroughputOptInSendsEvent(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.Throughput = func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{
+			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: 123}},
+		}, nil
+	}
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/stream?throughput=1", nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, "event: throughput")
+	cancel()
+	<-done
+
+	if !strings.Contains(rec.String(), `"download":[`) {
+		t.Errorf("expected the download series in the throughput frame, got %q", rec.String())
+	}
+}
+
+// TestStreamEndpointNoThroughputParamNeverSendsEvent is the negative half:
+// without ?throughput=1, no `event: throughput` line ever appears, even
+// though samples exist and would otherwise be sent.
+func TestStreamEndpointNoThroughputParamNeverSendsEvent(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.Throughput = func(ctx context.Context) (core.ThroughputSeries, error) {
+		return core.ThroughputSeries{
+			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: 123}},
+		}, nil
+	}
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, "event: live")
+	time.Sleep(20 * time.Millisecond) // let the handler finish writing whatever it's going to write
+	cancel()
+	<-done
+
+	if strings.Contains(rec.String(), "event: throughput") {
+		t.Errorf("no ?throughput=1: expected no throughput event, got %q", rec.String())
+	}
+}
+
 // TestStreamEndpointJobsScopeRestrictsToRequestedIDs covers the ?jobs=
 // scoping contract itself end to end: a subscriber that names an id set only
 // ever gets jobs from that set, even when other jobs exist and are
@@ -1396,11 +1743,12 @@ func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 // Since #258 a job entry legitimately carries the whole jobDTO, DB-owned
 // fields included — that's the point of streaming whole objects — so this
 // only asserts about the payload's own top-level keys, not jobDTO's shape.
+// Covers throughputPayload too (issue #265's new independent event) — the
+// same requirement applies regardless of which event a field rides on.
 func TestLivePayloadHasNoDBOnlyFieldsAtTopLevel(t *testing.T) {
 	live := []core.RemoteTransfer{{Username: "alice", Filename: "a.flac", State: core.TransferInProgress, BytesDone: 10, Speed: 5, QueuePosition: 2}}
 	payload := buildLiveSnapshot(live, 1, core.ThroughputSeries{}, core.JobView{}, false, core.JobDetail{}, false, newLiveTransferIndex(live), nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	payload.Jobs = []jobDTO{}
-	payload.Throughput = []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1412,7 +1760,22 @@ func TestLivePayloadHasNoDBOnlyFieldsAtTopLevel(t *testing.T) {
 	}
 	for _, forbidden := range []string{"status", "state", "events", "peers"} {
 		if _, ok := raw[forbidden]; ok {
-			t.Errorf("payload top level must not contain %q (DB-only field)", forbidden)
+			t.Errorf("live payload top level must not contain %q (DB-only field)", forbidden)
+		}
+	}
+
+	tp := throughputPayload{Download: []throughputSampleDTO{{At: "2026-01-01T00:00:00Z", BytesPerSecond: 100, ActiveTransfers: 1}}}
+	tpBody, err := json.Marshal(tp)
+	if err != nil {
+		t.Fatalf("marshal throughput: %v", err)
+	}
+	var tpRaw map[string]json.RawMessage
+	if err := json.Unmarshal(tpBody, &tpRaw); err != nil {
+		t.Fatalf("unmarshal throughput: %v", err)
+	}
+	for _, forbidden := range []string{"status", "state", "events", "peers"} {
+		if _, ok := tpRaw[forbidden]; ok {
+			t.Errorf("throughput payload top level must not contain %q (DB-only field)", forbidden)
 		}
 	}
 }

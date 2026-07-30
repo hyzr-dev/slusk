@@ -1,7 +1,7 @@
 import type { KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCharts, useJobs, useStatus } from '../api/queries';
-import { useJobScope } from '../api/stream';
+import { useJobScope, useThroughputStream } from '../api/stream';
 import type { Job } from '../api/types';
 import ThroughputAreaChart from '../components/charts/ThroughputAreaChart';
 import EmptyState from '../components/tui/EmptyState';
@@ -104,6 +104,10 @@ export default function Overview() {
   // so a job that just transitioned to DONE can still be rendered from its
   // last in-flight live frame until framedAt ages past LIVE_JOB_FRESH_MS.
   useJobScope(transferRows.map((job) => job.id));
+  // Overview is the only sparkline consumer of the live stream (issue
+  // #265), so it's the only route that needs the connection opted into
+  // ?throughput=1 — every other route relies on the charts REST poll alone.
+  useThroughputStream();
 
   // Three independent polls feeding three independent regions: a dead
   // /api/charts must not blank the transfer list, and a dead /api/jobs must
