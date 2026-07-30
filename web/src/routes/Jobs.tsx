@@ -27,7 +27,7 @@ import styles from './Jobs.module.css';
 // it's not a chip a user picks here, so JobStatusFacets has no count for it
 // either. INFLIGHT and FINISHED (issue #287) are likewise server-only filter
 // values with no facet count and no chip here.
-type ChipKey = Exclude<JobStatusFilter, 'importing' | 'transferring' | 'inflight' | 'finished'>;
+type ChipKey = Exclude<JobStatusFilter, 'importing' | 'inflight' | 'finished'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The

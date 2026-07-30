@@ -1237,45 +1237,6 @@ func TestListDashboardJobsPersistedSortsAndIDTieBreak(t *testing.T) {
 	assertOrder("try", "desc", []int64{betaID, alphaAID, alphaZID, aliceID})
 }
 
-// TestListDashboardJobsFilterTransferringUnion is issue #268: filter=transferring
-// must select exactly the active+stalled union — nothing more, nothing less —
-// expressed against the same dashboardJobStatusSQL every other status filter
-// uses, not a second copy of the state predicates.
-func TestListDashboardJobsFilterTransferringUnion(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
-
-	activeID := insertDashboardTestJob(t, s, 5001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "Artist", "peer_active", 0, now)
-	stalledID := insertDashboardTestJob(t, s, 5002, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "Artist", "peer_stalled", 0, now.Add(time.Second))
-	insertDashboardTestJob(t, s, 5003, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
-	insertDashboardTestJob(t, s, 5004, core.SourceLidarr, core.StateImporting, "", "Importing", "Artist", "", 0, now.Add(3*time.Second))
-	insertDashboardTestJob(t, s, 5005, core.SourceLidarr, core.StateFailed, "", "Failed", "Artist", "", 0, now.Add(4*time.Second))
-	insertDashboardTestJob(t, s, 5006, core.SourceLidarr, core.StateParked, "", "Parked", "Artist", "", 0, now.Add(5*time.Second))
-	insertDashboardTestJob(t, s, 5007, core.SourceLidarr, core.StateDone, "", "Done", "Artist", "", 0, now.Add(6*time.Second))
-
-	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "transferring", Source: "all"})
-	if err != nil {
-		t.Fatalf("ListDashboardJobs: %v", err)
-	}
-	gotIDs := make([]int64, len(page.Jobs))
-	for i, job := range page.Jobs {
-		gotIDs[i] = job.Job.ID
-	}
-	wantIDs := []int64{activeID, stalledID}
-	if page.Total != 2 || fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
-		t.Fatalf("filter=transferring ids = %v total %d, want %v total 2", gotIDs, page.Total, wantIDs)
-	}
-	// Status facets must ignore the selected status (same contract every
-	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
-	// and so report the FULL unfiltered counts, not just the transferring subset.
-	if page.Facets.Status.All != 7 || page.Facets.Status.Active != 1 || page.Facets.Status.Stalled != 1 ||
-		page.Facets.Status.Queued != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Failed != 1 ||
-		page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
-		t.Errorf("status facets did not ignore filter=transferring: %+v", page.Facets.Status)
-	}
-}
-
 // TestListDashboardJobsSortTransferGroupsActiveBeforeStalledThenAge is issue
 // #268: sort=transfer ranks active above stalled above everything else, then
 // created_at ascending within a group — the same rule
@@ -1420,7 +1381,7 @@ func TestListDashboardJobsPageSizeDefaultsWhenUnset(t *testing.T) {
 
 // TestListDashboardJobsExplicitPageSize covers an explicit, smaller PageSize
 // (Overview's TRANSFERS panel requests 8, issue #268): the LIMIT actually
-// applied must match, and it must still compose with filter=transferring and
+// applied must match, and it must still compose with filter=inflight and
 // sort=transfer.
 func TestListDashboardJobsExplicitPageSize(t *testing.T) {
 	s := newTestStore(t)
@@ -1430,7 +1391,7 @@ func TestListDashboardJobsExplicitPageSize(t *testing.T) {
 		insertDashboardTestJob(t, s, int64(8000+i), core.SourceLidarr, core.StateDownloading, core.TransferInProgress, fmt.Sprintf("Active %02d", i), "Artist", fmt.Sprintf("peer_%d", i), 0, now.Add(time.Duration(i)*time.Second))
 	}
 	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{
-		Sort: "transfer", Dir: "asc", Filter: "transferring", Source: "all", PageSize: 8,
+		Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 8,
 	})
 	if err != nil {
 		t.Fatalf("ListDashboardJobs: %v", err)
@@ -1878,6 +1839,16 @@ func TestListDashboardJobsFilterInflightSelectsByStateNotStatus(t *testing.T) {
 	}
 	if page.Total != 4 {
 		t.Errorf("Total = %d, want 4", page.Total)
+	}
+	// Status facets must ignore the selected filter (same contract every
+	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
+	// and so report the FULL unfiltered counts, not just the inflight subset.
+	// moving=active, pending/wanted/selecting=queued, stalled=stalled,
+	// importing=importing, done=done, failed=failed, parked=parked.
+	if page.Facets.Status.All != 9 || page.Facets.Status.Active != 1 || page.Facets.Status.Queued != 3 ||
+		page.Facets.Status.Stalled != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Done != 1 ||
+		page.Facets.Status.Failed != 1 || page.Facets.Status.Parked != 1 {
+		t.Errorf("status facets did not ignore filter=inflight: %+v", page.Facets.Status)
 	}
 }
 

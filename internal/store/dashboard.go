@@ -357,7 +357,7 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 		return fmt.Errorf("dir=asc is not supported for dashboard jobs sort %q", q.Sort)
 	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring", "inflight", "finished":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -385,12 +385,6 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 	}
 	if includeStatus && q.Filter != "all" {
 		switch q.Filter {
-		case "transferring":
-			// The union of 'active' and 'stalled' (issue #268, Overview's
-			// TRANSFERS panel) — expressed against the same dashboardJobStatusSQL
-			// CASE every other status filter uses, rather than a second copy of
-			// the state predicates, so the two can never drift apart.
-			clauses = append(clauses, "("+dashboardJobStatusSQL+") IN ("+bind("active")+", "+bind("stalled")+")")
 		case "inflight":
 			// Everything the pipeline currently holds a MaxActive slot for
 			// (issue #287, Overview's TRANSFERS panel). Deliberately keyed on

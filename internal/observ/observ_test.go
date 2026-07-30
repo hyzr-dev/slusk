@@ -410,6 +410,8 @@ func TestPagedJobsEndpointRejectsInvalidQueries(t *testing.T) {
 		"?pageSize=not-a-number",
 		"?pageSize=1&pageSize=2",
 		"?sort=transfer&dir=desc",
+		// Issue #287: transferring is gone now that inflight/finished replace it.
+		"?filter=transferring",
 	}
 	for _, suffix := range invalid {
 		t.Run(suffix, func(t *testing.T) {
@@ -508,39 +510,6 @@ func TestPagedJobsEndpointReturns500OnStoreError(t *testing.T) {
 	NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
-	}
-}
-
-// TestPagedJobsEndpointParsesTransferringFilterSortAndPageSize is issue
-// #268: filter=transferring, sort=transfer and ?pageSize= must all reach
-// PagedJobsFunc as parsed, and pageSize must default to jobsPageSize when
-// the request omits it entirely.
-func TestPagedJobsEndpointParsesTransferringFilterSortAndPageSize(t *testing.T) {
-	var gotQuery PagedJobsQuery
-	deps := testServerDeps(prometheus.NewRegistry())
-	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
-		gotQuery = query
-		return PagedJobsResult{}, nil
-	}
-	h := NewServer(deps)
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs?filter=transferring&sort=transfer&dir=asc&pageSize=8", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	want := PagedJobsQuery{Sort: "transfer", Dir: "asc", Filter: "transferring", Source: "all", PageSize: 8}
-	if !reflect.DeepEqual(gotQuery, want) {
-		t.Fatalf("query = %+v, want %+v", gotQuery, want)
-	}
-
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	if gotQuery.PageSize != jobsPageSize {
-		t.Errorf("PageSize with no ?pageSize= = %d, want the default %d", gotQuery.PageSize, jobsPageSize)
 	}
 }
 

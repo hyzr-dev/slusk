@@ -857,7 +857,7 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if query.Sort == "recent" && query.Dir == "asc" {
 		return PagedJobsQuery{}, errors.New("dir=asc is not supported for sort=recent")
 	}
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring", "inflight", "finished") {
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {
