@@ -184,23 +184,33 @@ Invoke the Workflow tool with `{scriptPath: ".claude/workflows/backlog-triage.js
 {issues: <stale numbers>, cached: <fresh judgement objects, per step 1>}}`.
 
 The script runs the baseline first and aborts if `main` is red on anything that is not
-known noise. Its return value carries `aborted` as one of five distinct strings — never a
+known noise. Its return value carries `aborted` as one of seven distinct strings — never a
 boolean — and each means something different:
 
 | `aborted` value | What actually happened | What to say in the report |
 |---|---|---|
+| `'bad-args'` | The script's own `args` did not resolve to a JSON object — a string that isn't JSON, or a non-object. Nothing was spent: this fires before the baseline agent. | The invocation was malformed, so nothing was triaged. Quote the `log()` line, which echoes what actually arrived. This is a caller bug in step 2, not a finding about the backlog. |
+| `'no-issues'` | `args.issues` was empty or missing **and** `args.cached` was empty — nothing to judge and nothing cached to report on. Also fires before the baseline. | Say plainly that the run had no input. This exists so an empty backlog cannot pass for a clean one: a report with zero findings and no abort would look identical to a backlog that was read and found healthy. Check step 1 — most often `fresh` numbers were passed where `cached` judgement objects belong, so both arrays came out empty. |
 | `'baseline-agent-died'` | The baseline agent itself returned nothing | The repo's state is **unknown** — the check that would have told you never ran. Do not call this a red baseline. |
 | `'suite-red'` | `unknownFailures` was non-empty — a failure not on CLAUDE.md's known-noise list | `main` is red; name the failures |
 | `'go-red'` | `go test ./...` did not report green | `go test ./...` is red |
 | `'web-red'` | `cd web && npm test` did not report green | the web suite is red |
 | `'triage-red'` | `node --test scripts/triage/*.test.mjs` did not report green | the triage suite's own tests are red |
 
+**On the two pre-baseline paths — `'bad-args'` and `'no-issues'` — `baseline` comes back
+`null`,** because the abort happens before any baseline agent is spawned. The report's header
+format assumes a baseline result, so on these two paths it must instead state that the run
+never got as far as checking the tree: there is no baseline to report, red or green, and
+writing "baseline unknown" without saying why would read like `'baseline-agent-died'`, which
+is a different and much more alarming thing. The other five abort paths all carry a real
+`baseline` object.
+
 (The baseline agent runs the suite as three separate legs — `go test ./...`, `node --test
 scripts/triage/*.test.mjs`, `cd web && npm test` — because the bare-directory form `node
 --test scripts/triage/` fails on this machine's Node; the workflow script already gets this
 right, this is only relevant if you are explaining an abort to a human.)
 
-If `aborted` is set at all: report which of the five happened, in those terms, and stop.
+If `aborted` is set at all: report which of the seven happened, in those terms, and stop.
 Do not compute waves, do not write the dated report body past the header, do not write
 `state.json` — there is nothing new to cache. Ranking issues against a baseline that either
 failed or was never checked is ranking fiction either way.
@@ -276,8 +286,10 @@ stop being diffable, which is the entire reason they are dated files on disk ins
 one-off reply. Each section below says which order it uses; do not add a new list of issues
 anywhere in the report without stating one too.
 
-1. **Header** — baseline result (or which of the five `aborted` values fired), commit,
-   judged vs cached counts, browser coverage.
+1. **Header** — baseline result (or which of the seven `aborted` values fired), commit,
+   judged vs cached counts, browser coverage. On `'bad-args'` and `'no-issues'` there is no
+   baseline result at all — `baseline` is `null` — so the header says the run never got as
+   far as checking the tree, rather than reporting a baseline it does not have.
 2. **Requires your decision** — every issue with a `needsDecision` flag, listed by issue
    number, descending. First, because it is the only part that blocks. A new required
    config key found after a merge stops the container on the next deploy; found here it is a
@@ -427,6 +439,7 @@ and heredocs, which fish does not support at all.
 | An agent decided the waves | The waves come from `waves.mjs`; agents supply `touches`, not scheduling |
 | Ranked issues against a red baseline | The script aborts for a reason — report which `aborted` value fired and stop |
 | Treated `aborted: 'baseline-agent-died'` as "the repo is broken" | It means the check never ran, not that it failed — say that, don't conflate the two |
+| Reported `'bad-args'` or `'no-issues'` as a baseline problem | Both fire before any baseline agent exists and leave `baseline` `null` — they are caller bugs in step 2 and step 1; say the run never reached the tree |
 | Passed `fresh` issue numbers as `args.cached` | The workflow needs judgement *objects*; look each `fresh` number up in `state.json` first |
 | Went looking for `unassessed` in the log output | It's a field on the return value (`result.unassessed`), always an array; read it directly |
 | Skipped the code-change axis when `computedAt` didn't resolve | Treat everything as stale instead — an unresolvable diff is not evidence nothing changed |
