@@ -302,7 +302,11 @@ export const t = {
     // RECONCILE reuses t.chrome.reconcile rather than a third copy of the word.
     transfersHeading: 'TRANSFERS',
     throughputHeading: 'THROUGHPUT',
-    activeCountMeta: (n: number) => `${n} active`,
+    inFlightCountMeta: (n: number) => `${n} in flight`,
+    // Shown instead of inFlightCountMeta when the panel cannot fit every
+    // in-flight job: max_active can exceed the panel's row count, and silently
+    // dropping the remainder would read as "this is all of it".
+    inFlightTruncatedMeta: (shown: number, total: number) => `${shown} of ${total} in flight`,
     // The peer-queue special case: an "active" job with no bytes moving.
     queuePos: (n: number) => `queue pos ${n}`,
     // The dense TRANSFERS table's SIZE column for the same case (mock: 'pos

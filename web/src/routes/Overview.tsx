@@ -16,12 +16,14 @@ import styles from './Overview.module.css';
 
 // Rows in the TRANSFERS panel — matches the mock
 // (docs/design/slskdarr-tui.dc.html:105) rather than the full jobs list.
-// Selection, ordering and this row count are all server-side now (issue
-// #268): filter=transferring (active+stalled union), sort=transfer
-// (status group first — active before stalled — then createdAt ascending
-// within the group, the same 'transferOrder' rule the client used to apply
-// itself in the now-deleted jobSort.ts), pageSize=8. The client renders
-// result.jobs exactly as returned — no filter, sort or slice here.
+// Selection, ordering and this row count are all server-side (issue #268):
+// filter=inflight is every job the pipeline holds a MaxActive slot for —
+// state DOWNLOADING or IMPORTING (issue #287 widened this from the old
+// active+stalled 'transferring' union, which dropped a job the moment it
+// stopped moving bytes). sort=transfer ranks active, then stalled, then
+// waiting, then importing, and orders by createdAt ascending inside a group.
+// The client renders result.jobs exactly as returned — no filter, sort or
+// slice here.
 const TRANSFER_PAGE_SIZE = 8;
 // At most this many rows in the RECONCILE list.
 const MAX_RECONCILE_ROWS = 7;
@@ -39,7 +41,7 @@ function tickTone(job: Job): TickTone {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const jobsQuery = useJobs({ page: 0, filter: 'transferring', sort: 'transfer', dir: 'asc', source: 'all', q: '', pageSize: TRANSFER_PAGE_SIZE });
+  const jobsQuery = useJobs({ page: 0, filter: 'inflight', sort: 'transfer', dir: 'asc', source: 'all', q: '', pageSize: TRANSFER_PAGE_SIZE });
   const statusQuery = useStatus();
   const chartsQuery = useCharts();
   const result = jobsQuery.data;
@@ -145,9 +147,17 @@ export default function Overview() {
       <Panel>
         <SectionHeader
           label={t.overview.transfersHeading}
-          // "0 active" is a claim, not a placeholder — omit the meta until
-          // /status has answered. SectionHeader skips a falsy meta.
-          meta={hasData(statusPhase) ? t.overview.activeCountMeta(status?.active ?? 0) : undefined}
+          // A count is a claim, not a placeholder — omit the meta until
+          // /api/jobs has answered. SectionHeader skips a falsy meta.
+          // total comes from the same response as the rows, so it can reveal
+          // the rows this fixed-height panel could not fit.
+          meta={
+            hasData(jobsPhase)
+              ? (result?.total ?? 0) > transferRows.length
+                ? t.overview.inFlightTruncatedMeta(transferRows.length, result?.total ?? 0)
+                : t.overview.inFlightCountMeta(transferRows.length)
+              : undefined
+          }
         />
         <QueryNotice phase={jobsPhase} />
         {hasData(jobsPhase) &&

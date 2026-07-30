@@ -13,7 +13,7 @@ afterEach(() => vi.unstubAllGlobals());
 // query key has to match for setQueryData to seed the cache useJobs reads.
 const TRANSFER_PARAMS: JobPageParams = {
   page: 0,
-  filter: 'transferring',
+  filter: 'inflight',
   sort: 'transfer',
   dir: 'asc',
   source: 'all',
@@ -67,9 +67,11 @@ function makeFacets(jobs: Job[]): JobFacets {
 }
 
 // Builds the exact JobPage shape GET /api/jobs returns, which is what
-// useJobs's cache now holds instead of a raw Job[] (queryKeys.jobsAll).
-function makeJobPage(jobs: Job[]): JobPage {
-  return { jobs, total: jobs.length, facets: makeFacets(jobs) };
+// useJobs's cache now holds instead of a raw Job[] (queryKeys.jobsAll). total
+// defaults to jobs.length so every existing caller behaves unchanged; pass it
+// explicitly to exercise the truncation case, where total exceeds the rows.
+function makeJobPage(jobs: Job[], total: number = jobs.length): JobPage {
+  return { jobs, total, facets: makeFacets(jobs) };
 }
 
 const baseJob = makeJob(1, 'Kind of Blue', 'Miles Davis', 'active');
@@ -175,9 +177,10 @@ describe('Overview', () => {
     expect(screen.getByText('TRANSFERS')).toBeInTheDocument();
     expect(screen.getByText('THROUGHPUT')).toBeInTheDocument();
     expect(screen.getByText('RECONCILE')).toBeInTheDocument();
-    // Proves status and chart data actually reach the new markup, not just
-    // that the section headers render.
-    expect(screen.getByText('1 active')).toBeInTheDocument();
+    // Proves jobs and chart data actually reach the new markup, not just
+    // that the section headers render. jobPage seeds two jobs with total
+    // defaulting to jobs.length, so the meta is untruncated.
+    expect(screen.getByText(t.overview.inFlightCountMeta(2))).toBeInTheDocument();
     expect(screen.getByText('1 matched')).toBeInTheDocument();
   });
 
@@ -223,13 +226,9 @@ describe('Overview', () => {
     expect(screen.queryByText('DL')).not.toBeInTheDocument();
   });
 
-  // Defensive client-side case, not a reachable server state: Overview fetches
-  // filter: 'transferring', the server-side active+stalled union (see
-  // Overview.tsx), which never includes 'importing'. If a job with that
-  // status ever did land in this list — e.g. a future filter change — it
-  // must still render its importing tag and verifying path rather than
-  // something misleading.
-  it('renders an IMPORTING job with its importing tag and verifying path, if one ever reached this list', () => {
+  // filter: 'inflight' (issue #287) includes IMPORTING jobs directly, so this
+  // is now a reachable server state, not just a defensive client-side case.
+  it('renders an IMPORTING job with its importing tag and verifying path', () => {
     renderOverview(makeJobPage([
       { ...baseJob, title: 'Importing Album', status: 'importing', state: 'IMPORTING' },
     ]));
@@ -253,6 +252,32 @@ describe('Overview', () => {
     const queuedRow = screen.getByText('Queued Album').closest('[class*="transferRow"]') as HTMLElement;
     expect(transferringRow.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
     expect(queuedRow.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
+  it('renders an importing row and a waiting row that the old union never selected', () => {
+    renderOverview(makeJobPage([
+      { ...baseJob, id: 1, title: 'Importing Album', status: 'importing', state: 'IMPORTING', speed: 0 },
+      { ...baseJob, id: 2, title: 'Waiting Album', status: 'queued', state: 'DOWNLOADING', speed: 0, bytesDone: 0, bytesTotal: 100 },
+    ]));
+
+    expect(screen.getByText('Importing Album')).toBeInTheDocument();
+    expect(screen.getByText('Waiting Album')).toBeInTheDocument();
+    // IMPORTING replaces the byte counts with the verifying label.
+    expect(screen.getByText(t.jobs.verifying)).toBeInTheDocument();
+    // Neither row is moving bytes, so neither may flare.
+    expect(document.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
+  });
+
+  it('takes the transfers meta from total, not from the active counter', () => {
+    renderOverview(makeJobPage([{ ...baseJob, id: 1, title: 'Only Row', status: 'active' }], 1));
+    expect(screen.getByText(t.overview.inFlightCountMeta(1))).toBeInTheDocument();
+  });
+
+  it('reveals truncation when total exceeds the rendered rows', () => {
+    // pageSize is 8; a total of 12 means four in-flight jobs are not shown.
+    const rows = Array.from({ length: 8 }, (_, i) => ({ ...baseJob, id: i + 1, title: `Row ${i + 1}`, status: 'active' as JobStatus }));
+    renderOverview(makeJobPage(rows, 12));
+    expect(screen.getByText(t.overview.inFlightTruncatedMeta(8, 12))).toBeInTheDocument();
   });
 });
 
