@@ -569,6 +569,36 @@ func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
 	}
 }
 
+// TestStreamHubCorrelationTickBoundedByFetchTimeout is issue #266: run's
+// corrTicker branch used to pass its own untimed ctx straight into
+// h.fetchLive/h.refreshCorrelation, so a hung deps call wedged the whole
+// single-goroutine select loop forever — including tick's 1Hz broadcast —
+// while per-connection heartbeats kept flowing and masked the outage. It
+// passes context.Background() directly (never cancelled by any caller,
+// unlike TestStreamHubTickNoOpAfterContextCancelled above) with a
+// liveTransfers dependency that blocks until its context is done, and
+// asserts correlationTick still returns — bounded by its own
+// streamFetchTimeout budget — instead of hanging.
+func TestStreamHubCorrelationTickBoundedByFetchTimeout(t *testing.T) {
+	blockingLive := func(ctx context.Context) ([]core.RemoteTransfer, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	hub := newStreamHub(noopJobs, blockingLive, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+
+	done := make(chan struct{})
+	go func() {
+		hub.correlationTick(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * streamFetchTimeout):
+		t.Fatal("correlationTick did not return within 2x streamFetchTimeout; hung deps call is not bounded (#266)")
+	}
+}
+
 // TestStreamHubTickSendsChangedDataAndSuppressesUnchanged drives the
 // broadcaster's tick() directly across multiple calls with changing and
 // unchanged live data, and asserts on what a subscriber actually receives —

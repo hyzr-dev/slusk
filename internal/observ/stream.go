@@ -864,16 +864,26 @@ func (h *streamHub) run(ctx context.Context) {
 		case <-ticker.C:
 			h.tick(ctx)
 		case <-corrTicker.C:
-			// ctx here is untimed (unlike tick's fetchCtx below), so a hung
-			// h.jobs/h.transferBytes/h.jobDetail call stalls this whole
-			// goroutine — including tick's 1Hz broadcast — while heartbeats
-			// on already-open connections keep flowing regardless. Tracked
-			// as #266; not fixed here.
-			live := h.fetchLive(ctx)
-			detailIDs, jobArrayIDs := h.scopedJobIDs(0, nil)
-			h.refreshCorrelation(ctx, live, detailIDs, jobArrayIDs)
+			h.correlationTick(ctx)
 		}
 	}
+}
+
+// correlationTick refreshes the hub's job<->candidate correlation cache on
+// correlationInterval, independent of tick's per-second broadcast. It bounds
+// its deps calls with the same streamFetchTimeout budget as tick (see that
+// constant's doc comment) — extracted into its own function, rather than
+// inlined in run's select, specifically so `defer cancel()` is scoped to a
+// single tick's fetchCtx instead of to run's entire lifetime: a `defer`
+// inside a `for`/`select` case only runs when the enclosing function
+// returns, so inlining it here would leak one uncancelled timer per
+// correlation tick for as long as the goroutine lives (issue #266).
+func (h *streamHub) correlationTick(ctx context.Context) {
+	fetchCtx, cancel := context.WithTimeout(ctx, streamFetchTimeout)
+	defer cancel()
+	live := h.fetchLive(fetchCtx)
+	detailIDs, jobArrayIDs := h.scopedJobIDs(0, nil)
+	h.refreshCorrelation(fetchCtx, live, detailIDs, jobArrayIDs)
 }
 
 // tick fetches the current live state exactly once (never a DB query — see
