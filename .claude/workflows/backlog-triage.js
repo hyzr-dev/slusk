@@ -3,16 +3,16 @@ export const meta = {
   name: 'backlog-triage',
   description: 'Read every open issue, judge it against production stability, verify what still reproduces',
   phases: [
+    { title: 'Baseline', detail: 'run the suites once and classify failures' },
     { title: 'Collect',  detail: 'distil each issue from tea JSON (haiku)' },
     { title: 'Judge',    detail: 'read the code each issue points at (sonnet)' },
-    { title: 'Baseline', detail: 'run the suites once and classify failures' },
     { title: 'Browser',  detail: 'serial browser reproduction of visual claims' },
   ],
 }
 
 const JUDGEMENT = {
   type: 'object',
-  required: ['number', 'kind', 'prodImpact', 'touches', 'effort'],
+  required: ['number', 'kind', 'prodImpact', 'impactEvidence', 'touches', 'frontend', 'effort', 'reproCheck', 'statedBlockers'],
   properties: {
     number: { type: 'number' },
     kind: { enum: ['bug', 'feature', 'techdebt', 'test'] },
@@ -48,14 +48,22 @@ const COLLECTED = {
 
 const BASELINE = {
   type: 'object',
-  required: ['goGreen', 'webGreen', 'unknownFailures'],
+  required: ['goGreen', 'webGreen', 'triageGreen', 'unknownFailures', 'treeStatus'],
   properties: {
     goGreen: { type: 'boolean' },
     webGreen: { type: 'boolean' },
+    triageGreen: { type: 'boolean' },
     unknownFailures: { type: 'array', items: { type: 'string' } },
     knownSeen: { type: 'array', items: { type: 'number' } },
+    treeStatus: { type: 'string' },
   },
 }
+
+// Mirrors the rank() ordering in scripts/triage/waves.mjs -- a Workflow script
+// cannot import that module, so these tables are duplicated here and must be
+// kept in step with it by hand.
+const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 }
+const EFFORT_COST = { S: 0, M: 1, L: 2 }
 
 const VERDICT = {
   type: 'object',
@@ -75,9 +83,14 @@ const cached = args?.cached ?? []
 phase('Baseline')
 const baseline = await agent(
   `Run the test suites once against the current working tree and classify the result.
+   This is a read-only check: do not edit, stash, or commit anything, even if a
+   failure looks trivial to fix -- roughly thirty other agents are about to read
+   this same tree and every one of them needs to see what you saw, not a tree
+   you patched.
 
    Run each as a single command, naming the interpreter where a construct needs one:
      go test ./...
+     node --test scripts/triage/*.test.mjs
      cd web && npm test
 
    Read CLAUDE.md's "Known noise" section first. It lists the failures that are
@@ -86,12 +99,19 @@ const baseline = await agent(
 
    Report unknownFailures as the failures that are NOT on that list. Report
    knownSeen as the issue numbers from the list whose failure you actually saw.
-   Do not run -race; it is too slow to pay for itself here.`,
+   Do not run -race; it is too slow to pay for itself here.
+
+   Finally run \`git status --short\` and report its raw output as treeStatus --
+   this is the evidence that you left the tree exactly as you found it.`,
   { label: 'baseline', phase: 'Baseline', model: 'sonnet', schema: BASELINE })
 
-if (!baseline || baseline.unknownFailures?.length) {
-  log(`main is red: ${baseline?.unknownFailures?.join(', ') ?? 'baseline agent returned nothing'}`)
-  return { judgements: [], baseline, browser: [], aborted: true }
+if (!baseline) {
+  log('baseline agent returned nothing -- treating as aborted, not as a verdict on the repository')
+  return { judgements: [], baseline, browser: [], aborted: 'baseline-agent-died' }
+}
+if (baseline.unknownFailures?.length) {
+  log(`main is red: ${baseline.unknownFailures.join(', ')}`)
+  return { judgements: [], baseline, browser: [], aborted: 'suite-red' }
 }
 
 log(`baseline green (known noise seen: ${baseline.knownSeen?.join(', ') || 'none'})`)
@@ -102,11 +122,15 @@ log(`baseline green (known noise seen: ${baseline.knownSeen?.join(', ') || 'none
 const judged = await pipeline(
   issues,
   n => agent(
-    `Use the issue-tracker-cli skill for the tea invocation, then read Gitea issue #${n}.
+    `Use the issue-tracker-cli skill for the tea invocation, then read Gitea issue #${n}
+     with --comments -- without that flag the comments never come back at all.
 
      Extract: a short factual summary of what the issue claims, and every repo
      path the issue text or its comments name. Do not judge severity and do not
      read the code -- that is the next stage's job.
+
+     If the issue no longer exists or is already closed, still return all four
+     required fields: say so plainly in summary, and use an empty paths array.
 
      Set thin: true when the comment thread was long and technical enough that
      your summary may have dropped something load-bearing.`,
@@ -115,15 +139,19 @@ const judged = await pipeline(
   (collected, n) => agent(
     `Judge Gitea issue #${n} for a backlog triage. Read CLAUDE.md first.
 
-     A previous agent distilled the issue: ${JSON.stringify(collected)}
+     ${collected
+       ? `A previous agent distilled the issue: ${JSON.stringify(collected)}`
+       : 'The previous agent that was supposed to distil this issue returned nothing -- fetch the raw issue JSON yourself.'}
      ${collected?.thin ? 'It flagged the thread as thin -- fetch the raw issue JSON yourself.' : ''}
 
      READ THE CODE the issue points at. Reading only the issue text produces a
      summary, not a judgement, and a summary is worthless here.
 
      prodImpact is about the running production instance, not about how annoying
-     the issue is. Anything above 'cosmetic' needs impactEvidence naming a real
-     file:line where it manifests.
+     the issue is. impactEvidence is a required field on every issue, not just the
+     severe ones: when prodImpact is 'none' or 'cosmetic', say so plainly there
+     instead of leaving it empty; anything above 'cosmetic' needs impactEvidence
+     naming a real file:line where it manifests.
 
      touches must list the repo-relative paths an implementation would change.
      Be accurate: these paths decide which issues are scheduled in parallel, and
@@ -132,12 +160,21 @@ const judged = await pipeline(
      exact equality, so a directory never collides with the file paths another
      issue reports and a real conflict would go undetected.
 
+     frontend: true only when the issue is about the React SPA in web/ or its
+     rendered behaviour -- this gates whether the issue is even considered for
+     browser verification, so leaving it unset is read as false, not unknown.
+
+     concurrency: true when the issue involves goroutines, channels, locking, or
+     race conditions -- this flags issues that need -race attention beyond what
+     the baseline run covers.
+
      reproCheck: a concrete falsifiable check that would decide whether the
      defect still holds -- a route to open, an interaction to drive, a command to
      run. null when there is nothing to reproduce, which is always true of a
      feature request.
 
-     statedBlockers only when the issue text itself says it depends on another.`,
+     statedBlockers only when the issue text itself says it depends on another;
+     report an empty array, not an omitted field, when there are none.`,
     { label: `judge:#${n}`, phase: 'Judge', model: 'sonnet', schema: JUDGEMENT }))
 
 // A dead agent must not vanish. Dropping the issue silently would make the
@@ -152,8 +189,9 @@ log(`${judged.filter(Boolean).length} judged, ${cached.length} reused from cache
 // the session, and two verifiers at once return verdicts about each other's tab.
 phase('Browser')
 const candidates = judgements
-  .filter(j => j.frontend && j.reproCheck && j.kind !== 'feature')
-  .sort((a, b) => (b.prodImpact === 'outage') - (a.prodImpact === 'outage'))
+  .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature')
+  .sort((a, b) => (IMPACT_RANK[b.prodImpact] - IMPACT_RANK[a.prodImpact])
+    || (EFFORT_COST[a.effort] - EFFORT_COST[b.effort]))
 
 const BROWSER_CAP = 4
 const selected = candidates.slice(0, BROWSER_CAP)
@@ -167,7 +205,16 @@ for (const item of selected) {
     `Invoke the verifying-ui-in-browser skill and follow it exactly, for Gitea issue #${item.number}.
 
      Nothing has been implemented -- you are checking whether the defect the
-     issue describes still reproduces on the current code. The check to drive:
+     issue describes still reproduces on the current code. That inverts what the
+     skill's own verdict names normally mean, since the skill was written to
+     verify a fix, not to reproduce a defect. Use this mapping instead:
+       - The defect does NOT reproduce (behaviour looks correct)  -> PASS
+       - The defect DOES reproduce (you saw the reported problem) -> ISSUES_FOUND
+       - You could not render or reach the app at all              -> BLOCKED
+     Seeing the exact broken behaviour the issue describes is ISSUES_FOUND, not
+     PASS -- PASS here means the bug is gone, not that you successfully observed it.
+
+     The check to drive:
      ${item.reproCheck}
 
      The lab backend may already be running on http://localhost:9090. Probe it
