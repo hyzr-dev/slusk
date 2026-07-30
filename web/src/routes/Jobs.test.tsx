@@ -208,7 +208,7 @@ describe('queue position rendering', () => {
     expect(screen.getByText('25%')).toBeInTheDocument();
   });
 
-  // Issue #269: currentCandidateSubquery can leave a SELECTING (status
+  // Issue #269: currentCandidateOrder can leave a SELECTING (status
   // 'queued') job pointed at a candidate that already failed, so
   // AlbumBytesDone/Total can be non-zero even though nothing is happening.
   // The '—' label already says so; the tick bar must agree rather than

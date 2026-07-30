@@ -14,10 +14,10 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-// currentCandidateSubquery picks the one candidate of album_jobs j that
-// represents the job everywhere the dashboard reads a "current" candidate:
-// its state and progress, its peer, and (via jobViewFrom's agg lateral) the
-// job's dashboard status.
+// currentCandidateOrder is the ORDER BY that picks the one candidate of
+// album_jobs j that represents the job everywhere the dashboard reads a
+// "current" candidate: its state and progress, its peer, and (via
+// jobViewFrom's agg lateral) the job's dashboard status.
 //
 // The naive "most recently created" ordering (created_at DESC, id DESC) looks
 // correct but is not: InsertCandidates writes every candidate of one search
@@ -43,10 +43,7 @@ import (
 // than the blank the deleted transfer join produced. The bytes are not — a
 // dead attempt's progress must not render as the job's own, so the jobs view
 // zeroes it for queued rows (see noProgress in web/src/routes/Jobs.tsx).
-const currentCandidateSubquery = `
-		SELECT id FROM candidates WHERE album_job_id = j.id
-		ORDER BY (state = 'ACTIVE') DESC, (state = 'NEW') ASC, updated_at DESC, id DESC
-		LIMIT 1`
+const currentCandidateOrder = `ORDER BY (state = 'ACTIVE') DESC, (state = 'NEW') ASC, updated_at DESC, id DESC`
 
 // jobViewFrom is the FROM clause shared by every dashboard read of
 // album_jobs: the row projection (jobViewSelect) and the count/facet/filter/
@@ -54,15 +51,23 @@ const currentCandidateSubquery = `
 // disagree about which candidate or which transfer aggregate a job's status
 // is computed from.
 //
-//   - a is the job's current candidate (currentCandidateSubquery). Earlier
-//     versions of this view additionally joined the candidate's single most
-//     recently updated transfer (aliased t) to answer "is this job stalled/
-//     active/failed" and to supply JobView.Peer — but a transfer belongs to
-//     one file, and "most recently updated" has no relationship to whether
-//     that file, or the album as a whole, is actually progressing (issue
-//     #269). That join is gone: agg below aggregates every transfer of the
-//     candidate instead, and Peer is a.username — the candidate's own peer,
-//     unambiguous without picking a single file.
+//   - a is the job's current candidate, a LEFT JOIN LATERAL that returns the
+//     candidate row directly rather than joining on a scalar subquery's id:
+//     the earlier `a.id = (SELECT id FROM candidates WHERE ... ORDER BY ...
+//     LIMIT 1)` form made Postgres hash-build all of candidates and evaluate
+//     the correlated subplan roughly twice per outer row (once for the hash
+//     probe key, once to recheck the predicate after a hash match) — issue
+//     #286. The LATERAL is a single nested loop instead: one index-scan-plus-
+//     limit per outer row. currentCandidateOrder is the tiebreak this
+//     LATERAL orders by; see its own doc comment. Earlier versions of this
+//     view additionally joined the candidate's single most recently updated
+//     transfer (aliased t) to answer "is this job stalled/active/failed" and
+//     to supply JobView.Peer — but a transfer belongs to one file, and "most
+//     recently updated" has no relationship to whether that file, or the
+//     album as a whole, is actually progressing (issue #269). That join is
+//     gone: agg below aggregates every transfer of the candidate instead, and
+//     Peer is a.username — the candidate's own peer, unambiguous without
+//     picking a single file.
 //   - agg aggregates every transfer of the candidate: summed bytes (issue
 //     #174; ActivateCandidateWithTransfers and CreateManualJob insert a
 //     transfers row for every file of the album upfront, state PENDING with
@@ -76,8 +81,12 @@ const currentCandidateSubquery = `
 // agg's COALESCE-guarded zeros. Callers append their own WHERE clause.
 const jobViewFrom = `
 	FROM album_jobs j
-	LEFT JOIN candidates a ON a.id = (` + currentCandidateSubquery + `
-	)
+	LEFT JOIN LATERAL (
+		SELECT id, album_job_id, username, score, state, fail_reason, created_at, updated_at, files
+		FROM candidates WHERE album_job_id = j.id
+		` + currentCandidateOrder + `
+		LIMIT 1
+	) a ON true
 	LEFT JOIN LATERAL (
 		SELECT
 			COALESCE(SUM(bytes_done), 0)  AS bytes_done,

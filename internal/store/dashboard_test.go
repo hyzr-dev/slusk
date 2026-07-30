@@ -74,7 +74,7 @@ func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
 // TestListJobsWithTransferJoinsLatestTransfer covers two candidates from two
 // separate search passes (distinct created_at, unlike the same-batch
 // scenario TestListJobsWithTransferPrefersActiveOverNewerNeverTried
-// reproduces): both stay NEW here, so currentCandidateSubquery's tiebreak
+// reproduces): both stay NEW here, so currentCandidateOrder's tiebreak
 // (updated_at DESC, id DESC) picks the more recently touched one — peer_two's
 // candidate, whose own transfer aggregate must be what AlbumBytesDone/Total
 // and Peer reflect.

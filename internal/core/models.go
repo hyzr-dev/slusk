@@ -125,7 +125,7 @@ type JobView struct {
 	Job AlbumJob
 	// Peer is the current candidate's username (store.jobViewFrom's a.username)
 	// — the album's peer, unambiguous since a job has exactly one current
-	// candidate (see store.currentCandidateSubquery). "" if Attempt is nil.
+	// candidate (see store.currentCandidateOrder). "" if Attempt is nil.
 	Peer string
 	// Status is the dashboard's coarse display status (queued/active/
 	// stalled/importing/failed/parked/done), computed once by the store's
