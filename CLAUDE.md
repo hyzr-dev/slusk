@@ -220,8 +220,9 @@ test. A failure that is *not* on this list means the branch broke something.
 | `internal/soulseek` `TestConnectPeerIndirectSuccess` | Fails only in container (Gitea act_runner). Invisible locally — a green local run is not evidence about it | #250 |
 
 Both entries state where the failure is *visible*, because a green run under the wrong
-conditions is not evidence. Verified 2026-07-30 on `main`: full `go test ./...` exits 0,
-`npm test` is 362/362, and #171 still reproduces under `-count=5`.
+conditions is not evidence. Verified 2026-07-30: full `go test ./...` exits 0, `npm test` is
+364/364, and #171 still reproduces under `-count=5`. Do not treat a stated test count as
+current — it was 362 earlier the same day, before the #285 web tests landed. Run the suite.
 
 Keep the list keyed on issue numbers: when one is closed, the entry stops being an excuse
 and starts being a stale claim that hides a real failure. #242 (`Settings.test.tsx`
