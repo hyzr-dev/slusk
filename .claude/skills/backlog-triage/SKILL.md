@@ -83,11 +83,12 @@ Do not compute waves, do not write the dated report body past the header, do not
 `state.json` — there is nothing new to cache. Ranking issues against a baseline that either
 failed or was never checked is ranking fiction either way.
 
-**The workflow's return value has no `unassessed` field.** `judgements`, `baseline` and
-`browser` are the only fields it returns; the list of issues whose judge agent returned
-nothing is only ever emitted through `log()`, as a line shaped like `unassessed (agent
-returned nothing): #123 #456`. Watch the workflow's run output for that line and parse the
-issue numbers out of it — do not assume `result.unassessed` exists, it does not.
+The return value's `unassessed` field is the list of issue numbers whose judge agent
+returned nothing at all — the issue was never assessed. Read it directly off the result
+(`result.unassessed`), alongside `judgements`, `baseline` and `browser`. It is always an
+array, including on every abort path, so there is nothing to test for before reading it.
+Do not go looking for it in the workflow's log output — a value the script already computed
+belongs in the return value, not in something meant for a human watching the run.
 
 **Before caching a judgement, stitch on the issue's `updated` timestamp.** The workflow's
 judgement schema has no `updated` field — it never sees the tea issue JSON, only the
@@ -132,15 +133,16 @@ Keep this list; it goes in the report and in `state.json` (step 4).
    pasteable into an implementation run.
 4. **Dependencies** — a mermaid graph of the conflict and blocker edges.
 5. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches.
-6. **Not ranked** — the `unassessable` issues from step 3 and the `unassessed` issues from
-   step 2, each with which of the two happened and why: `unassessable` means the judgement
-   came back but with a `prodImpact` or `effort` value the wave computation didn't
-   recognise; `unassessed` means no judgement came back at all because the agent judging
-   that issue died. Both are issues that went unranked — state that plainly, don't let them
-   silently vanish from the count.
-7. **Candidates to close** — what was observed. Not a conclusion: "I could not reproduce
+6. **Unassessed** — the `unassessed` issue numbers from step 2's result: the judge agent for
+   that issue returned nothing, so it was never assessed at all. This is an infrastructure
+   failure worth retrying, not a judgement call — say that plainly.
+7. **Unassessable** — the `unassessable` issue numbers from step 3: a judgement came back,
+   but its `prodImpact` or `effort` was not a recognised value, so the wave computation
+   excluded it. This is a bad judgement worth reading, a different failure from Unassessed —
+   keep the two sections separate so a reader can tell which happened.
+8. **Candidates to close** — what was observed. Not a conclusion: "I could not reproduce
    it" and "it is fixed" are different claims, and the second is the maintainer's.
-8. **Not verified (BLOCKED)** — with the reason and the command that would unblock it.
+9. **Not verified (BLOCKED)** — with the reason and the command that would unblock it.
 
 Then write `docs/triage/state.json` as:
 
@@ -156,10 +158,10 @@ Then write `docs/triage/state.json` as:
 
 `issues` holds every judgement this run knows about — reused and newly judged — keyed by
 issue number as a string, so next run's `invalidate` step can find them. `waves` is what
-makes the report checkable after the fact. `unassessable` (from step 3) and `unassessed`
-(from step 2's log line) are kept apart deliberately: one is a judgement with a value the
-scheduler didn't recognise, the other is no judgement at all. Collapsing them would hide
-which failure mode actually happened.
+makes the report checkable after the fact. `unassessable` (from step 3's result) and
+`unassessed` (from step 2's result) are kept apart deliberately: one is a judgement with a
+value the scheduler didn't recognise, the other is no judgement at all. Collapsing them
+would hide which failure mode actually happened.
 
 ### 5. Reap what the run left behind
 
@@ -193,7 +195,7 @@ and heredocs, which fish does not support at all.
 | Ranked issues against a red baseline | The script aborts for a reason — report which `aborted` value fired and stop |
 | Treated `aborted: 'baseline-agent-died'` as "the repo is broken" | It means the check never ran, not that it failed — say that, don't conflate the two |
 | Passed `fresh` issue numbers as `args.cached` | The workflow needs judgement *objects*; look each `fresh` number up in `state.json` first |
-| Assumed `result.unassessed` exists | It doesn't — the workflow only logs it; parse the `unassessed (agent returned nothing): ...` line |
+| Went looking for `unassessed` in the log output | It's a field on the return value (`result.unassessed`), always an array; read it directly |
 | Wrote judgements to `state.json` without an `updated` timestamp | Next run's `invalidate` needs it on every cached entry, or cache freshness breaks |
 | Merged `unassessable` and `unassessed` into one bucket | They are different failure modes; keep them apart in the report and in `state.json` |
 | Called a browser check PASS without rendering | That is BLOCKED; `verifying-ui-in-browser` owns the contract |
