@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
@@ -27,6 +28,11 @@ type SelectingStore interface {
 	// DeferSelectingJob moves a candidate-specific skip behind FIFO peers so a
 	// full batch of live-owner conflicts cannot starve later unrelated jobs.
 	DeferSelectingJob(ctx context.Context, jobID int64, now time.Time) error
+	// CandidatesForJob is only used once a job has terminally FAILED, to work
+	// out which download folders its attempts left behind (see
+	// quarantineLeftovers). Every candidate matters, not just the last one: a
+	// job's attempts span several peers whose remote folder names differ.
+	CandidatesForJob(ctx context.Context, jobID int64) ([]core.Candidate, error)
 
 	// The remaining methods are topUpDeps's store half (see topUpCandidate):
 	// declared again here, rather than embedding topUpDeps directly, so this
@@ -62,6 +68,11 @@ type SelectingParams struct {
 	TransferDeadline   time.Duration
 
 	Interval time.Duration
+
+	// CompleteDir is the download root (paths.slskd_complete_dir). Selecting
+	// only needs it when a job fails terminally, to move whatever the job left
+	// behind into the quarantine subdirectory. Empty disables quarantining.
+	CompleteDir string
 
 	Logger *slog.Logger
 }
@@ -182,10 +193,14 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		// stuck in SELECTING with nothing left to try.
 		detail := "candidates exhausted, re-searching"
 		s.log().Info(detail, "album_job", job.ID)
-		if err := failOrBackoff(ctx, s.p.Store, s.log(), job, s.p.MaxRetries, s.p.BackoffBase, s.p.BackoffCap, true, now); err != nil {
+		failed, err := failOrBackoff(ctx, s.p.Store, s.log(), job, s.p.MaxRetries, s.p.BackoffBase, s.p.BackoffCap, true, now)
+		if err != nil {
 			return false, err
 		}
 		s.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
+		if failed {
+			s.quarantineLeftovers(ctx, job, now)
+		}
 		return true, nil
 	}
 
@@ -236,6 +251,59 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		"files", len(cand.Files), "sent", sent, "deferred", len(cand.Files)-sent)
 	s.recordEvent(ctx, job.ID, core.EventCandidateSelected, selectedDetail, now)
 	return true, nil
+}
+
+// quarantineLeftovers moves whatever a terminally FAILED job left in the
+// download root into the quarantine subdirectory, so a job nothing will ever
+// pick up again does not strand its partial download where Lidarr and the
+// next job both scan. Usually there is nothing left - cleanupFolder already
+// removed each candidate's folder as it failed - so this is a no-op far more
+// often than not.
+//
+// The folder is derived per candidate rather than per job: a job's attempts
+// span several peers whose remote folder names differ, so commonLeaf over all
+// of a job's filenames would almost always be ambiguous and the move would
+// silently never happen. Identical leaves across candidates are moved once.
+//
+// It returns nothing and swallows every error: the FAILED transition has
+// already committed, and no filesystem or store problem here may be allowed to
+// turn that into a pipeline error. The N+1 transfer queries are bounded by
+// max_candidates_per_album and run once in a job's lifetime.
+func (s *Selecting) quarantineLeftovers(ctx context.Context, job core.AlbumJob, now time.Time) {
+	if s.p.CompleteDir == "" {
+		return
+	}
+	cands, err := s.p.Store.CandidatesForJob(ctx, job.ID)
+	if err != nil {
+		s.log().Error("list candidates for quarantine failed", "album_job", job.ID, "err", err)
+		return
+	}
+	seen := make(map[string]bool, len(cands))
+	var moved []string
+	for _, cand := range cands {
+		transfers, err := s.p.Store.TransfersForCandidate(ctx, cand.ID)
+		if err != nil {
+			s.log().Error("list transfers for quarantine failed", "album_job", job.ID, "candidate", cand.ID, "err", err)
+			continue
+		}
+		names := make([]string, 0, len(transfers))
+		for _, tr := range transfers {
+			names = append(names, tr.Filename)
+		}
+		leaf := commonLeaf(names)
+		if leaf == "" || seen[leaf] {
+			continue
+		}
+		seen[leaf] = true
+		if dst, ok := quarantineFolder(s.log(), job.ID, s.p.CompleteDir, leaf); ok {
+			moved = append(moved, dst)
+		}
+	}
+	if len(moved) == 0 {
+		return
+	}
+	s.recordEvent(ctx, job.ID, core.EventQuarantined,
+		fmt.Sprintf("moved leftover files to %s", strings.Join(moved, ", ")), now)
 }
 
 // topUpDeps is the store+peer behavior topUpCandidate needs: exactly enough

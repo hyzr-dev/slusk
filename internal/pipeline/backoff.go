@@ -39,15 +39,22 @@ type BackoffStore interface {
 // (Discovery empty search - already WANTED). The AddJobEvent write is
 // best-effort: a failure is logged at warn level and swallowed rather than
 // propagated, since the audit trail must never block the pipeline.
-func failOrBackoff(ctx context.Context, st BackoffStore, log *slog.Logger, job core.AlbumJob, maxRetries int, base, maxBackoff time.Duration, resetToWanted bool, now time.Time) error {
+//
+// failed reports that this was the terminal transition (MarkJobFailed), so a
+// caller that owns post-mortem work - Selecting quarantining the job's
+// leftover files - can run it without re-deriving the retry arithmetic. It is
+// false for both backoff branches. Note that MarkJobFailed's own from-guard
+// makes it a no-op (returning nil) if WantedSync cancelled the job underneath
+// this tick, so failed==true does not strictly prove the row flipped.
+func failOrBackoff(ctx context.Context, st BackoffStore, log *slog.Logger, job core.AlbumJob, maxRetries int, base, maxBackoff time.Duration, resetToWanted bool, now time.Time) (bool, error) {
 	retries := job.Retries + 1
 
 	if retries >= maxRetries {
 		if err := st.MarkJobFailed(ctx, job.ID, now); err != nil {
-			return err
+			return false, err
 		}
 		recordBackoffEvent(ctx, st, log, job.ID, core.EventJobFailed, now)
-		return nil
+		return true, nil
 	}
 
 	notBefore := now.Add(nextBackoff(retries, base, maxBackoff))
@@ -55,9 +62,9 @@ func failOrBackoff(ctx context.Context, st BackoffStore, log *slog.Logger, job c
 		// resetToWanted is only ever set by Selecting (candidate cache exhausted),
 		// so the job is in SELECTING; ResetJobToWanted's from-guard bounces if
 		// WantedSync cancelled it underneath us.
-		return st.ResetJobToWanted(ctx, job.ID, core.StateSelecting, retries, &notBefore, now)
+		return false, st.ResetJobToWanted(ctx, job.ID, core.StateSelecting, retries, &notBefore, now)
 	}
-	return st.SetJobBackoff(ctx, job.ID, retries, notBefore, now)
+	return false, st.SetJobBackoff(ctx, job.ID, retries, notBefore, now)
 }
 
 // recordBackoffEvent best-effort appends one row to a job's audit trail (see

@@ -220,6 +220,7 @@ func main() {
 		MaxTransferRetries: cfg.Pipeline.MaxTransferRetries,
 		TransferDeadline:   cfg.Pipeline.TransferDeadline.Duration,
 		Interval:           cfg.Pipeline.SelectingInterval.Duration,
+		CompleteDir:        cfg.Paths.SlskdCompleteDir,
 		Logger:             logger,
 	})
 	downloading := pipeline.NewDownloading(pipeline.DownloadingParams{

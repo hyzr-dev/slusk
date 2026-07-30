@@ -279,7 +279,11 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// The EventSearch event recorded above already carries this cycle's
 		// empty outcome (results/candidates counts); nothing further to record.
 		d.log().Info("no viable candidates, backing off", "album_job", job.ID)
-		return true, false, failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, now)
+		// The terminal-failure signal is discarded on purpose: a Discovery-
+		// terminal job is in WANTED with its candidates and transfers already
+		// gone, so there is nothing to derive a leftover download folder from.
+		_, err := failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, now)
+		return true, false, err
 	}
 
 	if err := d.p.Store.InsertCandidates(ctx, job.ID, survivors, now); err != nil {

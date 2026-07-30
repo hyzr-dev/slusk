@@ -168,6 +168,7 @@ export const t = {
     import_ok: 'Import completed',
     import_rejected: 'Import rejected',
     job_failed: 'Job failed',
+    quarantined: 'Files quarantined',
   },
   // The generic column-label object that predates this reskin. Each reskinned
   // view now owns its own `gridHead` map matching the mock's column names;
