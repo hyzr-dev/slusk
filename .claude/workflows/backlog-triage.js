@@ -17,7 +17,11 @@ const JUDGEMENT = {
     number: { type: 'number' },
     kind: { enum: ['bug', 'feature', 'techdebt', 'test'] },
     prodImpact: { enum: ['none', 'cosmetic', 'degraded', 'dataloss', 'outage'] },
-    impactEvidence: { type: 'string' },
+    // minLength rules out an empty or single-char placeholder that would
+    // otherwise satisfy `required` while saying nothing -- long enough that a
+    // real "none" / "cosmetic" sentence or a file:line reference clears it
+    // comfortably, short enough not to reject a terse but genuine answer.
+    impactEvidence: { type: 'string', minLength: 8 },
     touches: { type: 'array', items: { type: 'string' } },
     frontend: { type: 'boolean' },
     effort: { enum: ['S', 'M', 'L'] },
@@ -113,6 +117,23 @@ if (baseline.unknownFailures?.length) {
   log(`main is red: ${baseline.unknownFailures.join(', ')}`)
   return { judgements: [], baseline, browser: [], aborted: 'suite-red' }
 }
+// The three greens are required fields in their own right: an agent can report
+// empty unknownFailures alongside a false green (e.g. it classified everything
+// as known noise, or filled the boolean and not the list), which would
+// otherwise slip through as a clean baseline. Ranking issues against that is
+// ranking fiction, same as an outright unknownFailures hit.
+if (!baseline.goGreen) {
+  log('main is red: go test ./... did not report green')
+  return { judgements: [], baseline, browser: [], aborted: 'go-red' }
+}
+if (!baseline.webGreen) {
+  log('main is red: npm test (web/) did not report green')
+  return { judgements: [], baseline, browser: [], aborted: 'web-red' }
+}
+if (!baseline.triageGreen) {
+  log('main is red: node --test scripts/triage did not report green')
+  return { judgements: [], baseline, browser: [], aborted: 'triage-red' }
+}
 
 log(`baseline green (known noise seen: ${baseline.knownSeen?.join(', ') || 'none'})`)
 
@@ -191,7 +212,8 @@ phase('Browser')
 const candidates = judgements
   .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature')
   .sort((a, b) => (IMPACT_RANK[b.prodImpact] - IMPACT_RANK[a.prodImpact])
-    || (EFFORT_COST[a.effort] - EFFORT_COST[b.effort]))
+    || (EFFORT_COST[a.effort] - EFFORT_COST[b.effort])
+    || (a.number - b.number))
 
 const BROWSER_CAP = 4
 const selected = candidates.slice(0, BROWSER_CAP)
