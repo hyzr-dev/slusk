@@ -53,7 +53,7 @@
   align-items: center;
 }
 
-/* Same treatment as .reconcileDur (line 151): right-aligned and dimmed.
+/* Same treatment as .reconcileDur: right-aligned and dimmed.
    tabular-nums keeps the column from jittering as ages tick 9m -> 10m. */
 .finishedWhen {
   text-align: right;

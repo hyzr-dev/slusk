@@ -115,14 +115,23 @@ function renderOverview(
   jobsData: JobPage = jobPage,
   chartsData: ChartsReport | undefined = charts,
   statusData: StatusReport | undefined = status,
-  finishedData: JobPage | undefined = makeJobPage([]),
+  // undefined (the default) seeds an empty, resolved finished page.
+  // null is a distinct sentinel meaning "don't seed this key at all" — the
+  // finished query then stays pending forever against the hung-fetch stub,
+  // which is what a test needs to prove the finished region's gate is its
+  // own and can't blank another region (see 'keeps the transfers panel
+  // alive...' below). A JS default parameter only fires for undefined, so
+  // this distinction would collapse if null reused undefined's meaning.
+  finishedData: JobPage | undefined | null = makeJobPage([]),
 ) {
   // A real refetch on mount would otherwise hit the unmocked global fetch;
   // keep it pending indefinitely so the seeded data is what's asserted on.
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
-  queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  if (finishedData !== null) {
+    queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  }
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
   return render(
@@ -316,8 +325,14 @@ describe('Overview', () => {
     expect(t.overview.noneFinished).not.toMatch(/hour|minute|\d/i);
   });
 
-  it('keeps the transfers panel alive when the finished query has no data', () => {
-    renderOverview(jobPage, charts, status, undefined);
+  it('keeps the transfers panel alive while the finished query is still pending', () => {
+    // null means "don't seed queryKeys.jobsPage(FINISHED_PARAMS) at all" — the
+    // finished query then has no cache entry and stays pending against the
+    // hung-fetch stub, which is what actually exercises a dead/slow poll for
+    // that region. (Passing undefined here would hit renderOverview's default
+    // parameter and seed a resolved empty page instead — that would prove
+    // nothing about gating.)
+    renderOverview(jobPage, charts, status, null);
     // A dead poll for one region must never blank another (issue #201).
     expect(screen.getByText(t.overview.transfersHeading)).toBeInTheDocument();
     expect(document.querySelectorAll('[class*="transferRow"]').length).toBeGreaterThan(0);
