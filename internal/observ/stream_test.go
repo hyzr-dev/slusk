@@ -459,16 +459,16 @@ func TestSendLatestReplacesRatesUnionsJobs(t *testing.T) {
 
 // TestSendLatestThroughputAccumulatesAcrossDisplacedFrame is the test issue
 // #265 demands (written first, TDD): sendLatestThroughput must ADD an
-// undelivered frame's samples to the next one rather than discard them, and
-// the caller must advance its watermark from what this function actually
-// leaves QUEUED, not from what it was asked to send — both halves of
-// sendLatest's original contract, reproduced here for the now-independent
-// throughput channel. Throughput is the one field where a displaced sample
-// is unrecoverable (see this file's package comment), so both must survive:
-// a test that only checked the return value, or only checked the channel,
-// would miss either the accumulation itself or the watermark bug this test
-// exists to catch (see TestStreamHubTickThroughputSurvivesUndrainedMailbox
-// for the interaction-level version of the same requirement).
+// undelivered frame's samples to the next one rather than discard them —
+// checked both on the return value and on what ends up queued in the
+// channel, since either one alone could hide a bug in the other (a merge
+// that mutated its argument in place, say, could pass a return-value-only
+// check while leaving the channel with something different). Throughput is
+// the one field where a displaced sample is unrecoverable rather than
+// self-healing (see this file's package comment), so accumulation, not mere
+// non-blocking delivery, is the property that matters here (see
+// TestStreamHubTickThroughputSurvivesUndrainedMailbox for the
+// interaction-level version of the same requirement).
 func TestSendLatestThroughputAccumulatesAcrossDisplacedFrame(t *testing.T) {
 	tch := make(chan throughputPayload, 1)
 
@@ -833,12 +833,12 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 }
 
 // TestStreamHubTickThroughputSurvivesUndrainedMailbox is the interaction-
-// level test issue #265 demands: sendLatestThroughput's return-what's-queued
-// contract must actually drive tick's watermark advance, not just its own
-// unit test in isolation. A subscriber's tch is deliberately never drained
-// across two ticks with distinct samples; the third tick drains everything
-// at once, and every sample from all three ticks must be present exactly
-// once, none skipped.
+// level test issue #265 demands: sendLatestThroughput's accumulate-rather-
+// than-discard contract must actually hold across real tick() calls, not
+// just in its own unit test in isolation. A subscriber's tch is deliberately
+// never drained across two ticks with distinct samples; the third tick
+// drains everything at once, and every sample from all three ticks must be
+// present exactly once, none skipped.
 func TestStreamHubTickThroughputSurvivesUndrainedMailbox(t *testing.T) {
 	t0 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
 	samples := []core.ThroughputSample{{At: t0, BytesPerSecond: 100}}
@@ -916,6 +916,61 @@ func TestStreamHubTickBuildsNoThroughputFrameWithoutSubscriber(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected a live frame reflecting the new Down rate")
+	}
+}
+
+// TestStreamHubTickWatermarkSurvivesSubSecondPrecision is issue #265's
+// review finding: tick used to advance the throughput watermark by
+// round-tripping the sample's time.Time through timeFormat (no fractional
+// seconds) via time.Parse, which truncates a real sample's sub-second
+// component and moves the watermark BACKWARDS by up to 999ms relative to the
+// sample just sent. newThroughputSince would then re-select that same
+// already-sent sample on every subsequent tick forever, so a subscriber got
+// a duplicate `event: throughput` frame every second even when the meter
+// produced nothing new. Every other test in this file builds its timestamps
+// with whole-second time.Date(...), which cannot see this: a whole-second
+// value survives the truncating round trip unchanged. This one uses a
+// sub-second offset (237ms) so the bug is observable: a tick with a fresh
+// sample must send exactly one frame, and a second tick with no further
+// sample must send none.
+func TestStreamHubTickWatermarkSurvivesSubSecondPrecision(t *testing.T) {
+	t0 := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(237 * time.Millisecond)
+	var mu sync.Mutex
+	samples := []core.ThroughputSample{{At: t0, BytesPerSecond: 100}}
+	throughputFn := func(ctx context.Context) (core.ThroughputSeries, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]core.ThroughputSample, len(samples))
+		copy(out, samples)
+		return core.ThroughputSeries{Download: out}, nil
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	id, _, tch, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	defer hub.unsubscribe(id)
+
+	mu.Lock()
+	samples = append(samples, core.ThroughputSample{At: t1, BytesPerSecond: 150})
+	mu.Unlock()
+
+	hub.tick(context.Background())
+	select {
+	case got := <-tch:
+		if len(got.Download) != 1 || got.Download[0].At != t1.Format(timeFormat) {
+			t.Fatalf("first tick with a fresh sub-second sample: got %+v, want just t1", got)
+		}
+	default:
+		t.Fatal("expected a throughput frame carrying the fresh sub-second sample")
+	}
+
+	// No new sample added: a second tick must NOT resend t1. Before the fix,
+	// the watermark truncated t1's milliseconds on the way in, so
+	// newThroughputSince re-selected the same sample here.
+	hub.tick(context.Background())
+	select {
+	case got := <-tch:
+		t.Fatalf("second tick with no new sample must send nothing, got %+v", got)
+	default:
 	}
 }
 

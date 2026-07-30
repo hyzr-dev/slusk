@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
@@ -592,7 +592,7 @@ describe('StreamProvider', () => {
     expect(last.url).toBe('/api/stream?jobs=1,2&throughput=1');
   });
 
-  it('carries no throughput param on a ?job= detail route', () => {
+  it('carries no throughput param on a ?job= detail route with no throughput consumer', () => {
     const queryClient = new QueryClient();
     render(
       <QueryClientProvider client={queryClient}>
@@ -605,38 +605,85 @@ describe('StreamProvider', () => {
     expect(MockEventSource.instances[0].url).toBe('/api/stream?job=5');
   });
 
-  // Guards the React-batching assumption behind combining useJobScope and
-  // useThroughputStream on the same connection (issue #265): mounting both
-  // in the same commit must open exactly as many EventSource instances as
-  // useJobScope alone, or #267's known double-open would become a
-  // triple-open. If this fails, StreamProvider needs to derive the
-  // throughput want from `pathname === '/'` instead (like jobIdFromPathname)
-  // rather than a child-published counter.
-  it('opens the same number of connections combining useJobScope and useThroughputStream as useJobScope alone', () => {
-    const soloClient = new QueryClient();
-    render(
-      <QueryClientProvider client={soloClient}>
-        <MemoryRouter initialEntries={['/jobs']}>
-          <StreamProvider>
-            <ScopePublisher ids={[1, 2, 3]} />
-          </StreamProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-    const soloCount = MockEventSource.instances.length;
+  // ScopePublisher above (used by every other test in this file) takes its
+  // ids as a static prop, already resolved at mount. Overview's real ids
+  // come from useJobs (React Query), which starts undefined — so
+  // transferRows.map(...) falls back to [] — and only resolves to the real
+  // array on a later microtask. AsyncScopePublisher reproduces that timing:
+  // an id set that starts empty and becomes real one tick after mount, the
+  // same shape a mocked-but-still-async query has.
+  function AsyncScopePublisher({ ids }: { ids: number[] }) {
+    const [resolvedIds, setResolvedIds] = useState<number[]>([]);
+    useEffect(() => {
+      void Promise.resolve().then(() => setResolvedIds(ids));
+    }, [ids]);
+    useJobScope(resolvedIds);
+    return null;
+  }
 
-    MockEventSource.instances = [];
-    const comboClient = new QueryClient();
-    render(
-      <QueryClientProvider client={comboClient}>
-        <MemoryRouter initialEntries={['/jobs']}>
-          <StreamProvider>
-            <ScopePublisher ids={[1, 2, 3]} />
-            <ThroughputPublisher />
-          </StreamProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-    expect(MockEventSource.instances).toHaveLength(soloCount);
+  // Pins the actual cost of Overview's timing (issue #265 review): a static
+  // ids prop (every other job-scope test in this file) opens 2 connections
+  // (unscoped, then the real `?jobs=...`, per #267) — but an id set that
+  // resolves asynchronously, like Overview's, opens a THIRD: unscoped, then
+  // an intermediate `?jobs=` (empty, published the instant the scope
+  // publisher's own mount effect runs, before its query has resolved), then
+  // finally the real `?jobs=1,2,3`. This is a job-scope cost, not a
+  // throughput one — see the next test.
+  it('costs three connections for an async-resolving job scope, not the two a static prop shows', async () => {
+    const queryClient = new QueryClient();
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/jobs']}>
+            <StreamProvider>
+              <AsyncScopePublisher ids={[1, 2, 3]} />
+            </StreamProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      // Lets the simulated query-resolution microtask (and the effect it
+      // schedules) flush.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockEventSource.instances).toHaveLength(3);
+    expect(MockEventSource.instances[0].url).toBe('/api/stream');
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?jobs=');
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.url).toBe('/api/stream?jobs=1,2,3');
+    expect(last.closed).toBe(false);
+  });
+
+  // The counterpart to the test above: mounting useThroughputStream
+  // alongside the same async-resolving scope must NOT add a fourth
+  // connection. Both effects fire in the same commit on every render (they
+  // are direct siblings, same as on Overview), so wantThroughput's counter
+  // update rides along with whichever jobsScope state is current when it
+  // fires — the third connection above already exists without it. This is
+  // the empirical check behind the #267 comment in stream.tsx: the total
+  // cost is bounded by the job-scope's own two extra hops, not by
+  // throughput adding a THIRD one on top.
+  it('adding useThroughputStream to the same async-resolving scope costs no additional connection', async () => {
+    const queryClient = new QueryClient();
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={['/jobs']}>
+            <StreamProvider>
+              <AsyncScopePublisher ids={[1, 2, 3]} />
+              <ThroughputPublisher />
+            </StreamProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(MockEventSource.instances).toHaveLength(3);
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.url).toBe('/api/stream?jobs=1,2,3&throughput=1');
+    expect(last.closed).toBe(false);
   });
 });

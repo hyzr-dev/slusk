@@ -441,8 +441,8 @@ func changedSinceLast(prev, next livePayload, newJobCount int) bool {
 // throughput delta was already queued, hand-carrying it forward exactly like
 // the trap this issue exists to fix, just one level up.
 type streamSubscriber struct {
-	ch  chan livePayload
-	tch chan throughputPayload
+	ch           chan livePayload
+	throughputCh chan throughputPayload
 	// wantThroughput is whether this connection asked for the throughput
 	// event (?throughput=1). false for every subscriber that never mentions
 	// it — the common case — which is what lets fetchThroughput's result
@@ -470,8 +470,9 @@ type streamSubscriber struct {
 	// for every subscriber regardless of wantThroughput (subscribe's initial
 	// set is unconditional — see subscribe's doc comment), even though only
 	// a wantThroughput subscriber's tick loop ever advances them past that
-	// initial value: a future mid-connection opt-in would otherwise dump the
-	// whole accumulated window as its first frame instead of just what's new.
+	// initial value: two unconditional assignments are cheaper than a branch
+	// to skip them, and harmless to compute for a subscriber that never reads
+	// them.
 	lastDownloadThroughputAt time.Time
 	lastUploadThroughputAt   time.Time
 }
@@ -844,7 +845,7 @@ func (h *streamHub) atCapacity() bool {
 // correlationInterval for its first useful frame.
 //
 // fetchThroughput runs unconditionally, regardless of wantThroughput — see
-// this file's package comment on fetchThroughput's callers — but the initial
+// wantThroughput's doc comment on streamSubscriber — but the initial
 // full-window conversion into initialThroughput is skipped for a subscriber
 // that never asked for it.
 func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool) (id uint64, ch chan livePayload, tch chan throughputPayload, initial livePayload, initialThroughput throughputPayload) {
@@ -868,7 +869,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 
 	sub := &streamSubscriber{
 		ch:             make(chan livePayload, 1),
-		tch:            make(chan throughputPayload, 1),
+		throughputCh:   make(chan throughputPayload, 1),
 		wantThroughput: wantThroughput,
 		jobID:          jobID,
 		jobIDs:         jobIDs,
@@ -904,7 +905,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		h.cancel = cancel
 		go h.run(tickCtx)
 	}
-	return id, sub.ch, sub.tch, initial, initialThroughput
+	return id, sub.ch, sub.throughputCh, initial, initialThroughput
 }
 
 // unsubscribe removes a subscriber and stops the shared ticker once none
@@ -1047,16 +1048,20 @@ func (h *streamHub) tick(ctx context.Context) {
 		if len(freshUpload) > 0 {
 			tp.Upload = toThroughputDTO(freshUpload)
 		}
-		queued := sendLatestThroughput(sub.tch, tp)
-		if n := len(queued.Download); n > 0 {
-			if at, err := time.Parse(timeFormat, queued.Download[n-1].At); err == nil {
-				sub.lastDownloadThroughputAt = at
-			}
+		sendLatestThroughput(sub.throughputCh, tp)
+		// Advanced from the core.ThroughputSample time.Time values already in
+		// hand (freshDownload/freshUpload), not by round-tripping through the
+		// formatted DTO: timeFormat has no fractional-second component, while
+		// real samples off a time.Ticker always carry one, so parsing the
+		// formatted string back would truncate the watermark and move it
+		// BACKWARDS relative to the sample just sent — newThroughputSince
+		// would then re-select that same sample forever, sending a duplicate
+		// frame every tick even when nothing new exists (issue #265 review).
+		if n := len(freshDownload); n > 0 {
+			sub.lastDownloadThroughputAt = freshDownload[n-1].At
 		}
-		if n := len(queued.Upload); n > 0 {
-			if at, err := time.Parse(timeFormat, queued.Upload[n-1].At); err == nil {
-				sub.lastUploadThroughputAt = at
-			}
+		if n := len(freshUpload); n > 0 {
+			sub.lastUploadThroughputAt = freshUpload[n-1].At
 		}
 	}
 }
@@ -1122,6 +1127,13 @@ func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 // under a subscriber that isn't reading. The frontend independently discards
 // past its own THROUGHPUT_CAP (48, api/queries.ts) anyway, so retaining more
 // than streamThroughputCap here buys nothing.
+//
+// This isn't only #265 housekeeping: origin/main's pre-#265 sendLatest also
+// accumulated throughput onto a displaced frame with no bound at all, so a
+// stalled reader already grew unboundedly before this issue existed. This
+// cap closes that pre-existing growth, not just a new one introduced by
+// splitting throughput onto its own channel — worth keeping in mind before
+// a future "simplification" removes it as dead weight.
 const streamThroughputCap = 48
 
 // capThroughputSamples keeps only the newest streamThroughputCap entries of
@@ -1145,12 +1157,17 @@ func capThroughputSamples(samples []throughputSampleDTO) []throughputSampleDTO {
 // the client's accumulated window, invisible to every test unless one is
 // written for exactly this.
 //
-// The caller MUST advance its watermark from what this function actually
-// leaves queued (the return value), never from what it merely tried to
-// send: whatever a slow reader hasn't drained yet is still unacknowledged,
-// and advancing from the send argument instead would silently skip
-// re-sending it once the reader catches up — reproducing the very loss this
-// function exists to prevent, just at the watermark instead of the channel.
+// The accumulation itself — not the return value's identity with any
+// particular caller's watermark bookkeeping — is what this function
+// guarantees: an undelivered frame's samples are always unioned into the
+// next send, never replaced by it, so nothing queued here is ever lost to a
+// slow reader. (An earlier version of this comment additionally claimed the
+// caller MUST derive its watermark from this function's return value rather
+// than from the samples it was asked to send; that claim was never actually
+// enforced — tick derives its watermark straight from the fresh samples it
+// already has in hand, see tick's own comment — and was vacuous in this
+// call shape besides, since a fresh, non-empty payload's last element is
+// always byte-identical to the returned value's last element.)
 func sendLatestThroughput(tch chan throughputPayload, payload throughputPayload) throughputPayload {
 	for {
 		select {
@@ -1298,9 +1315,8 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 		defer hub.unsubscribe(id)
 
 		// event: live is written ALWAYS, even for a throughput-only
-		// subscriber (see the per-subscriber behaviour matrix in this
-		// file's package comment) — it proves the connection opened and a
-		// failed first write detects a dead connection early. The initial
+		// subscriber — it proves the connection opened and a failed first
+		// write detects a dead connection early. The initial
 		// event: throughput follows only when wantThroughput AND there is
 		// at least one sample to send; an empty initial window isn't worth
 		// a frame.

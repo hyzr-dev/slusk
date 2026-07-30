@@ -3,7 +3,7 @@
 // queries.ts's replaceLiveJobs/pickJobDetail/mergeThroughputSamples for how
 // the frame this writes is folded into what components read.
 import { createContext, useContext, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
 import { mergeThroughputSamples, queryKeys } from './queries';
@@ -71,7 +71,7 @@ export function useJobScope(ids: number[] | undefined): void {
 // Lets a route opt the shared SSE connection into ?throughput=1 (issue #265)
 // without owning the connection itself. Default no-op setter mirrors
 // JobScopeSetterContext, covering tests that mount a route in isolation.
-const ThroughputSetterContext = createContext<(delta: number) => void>(() => {});
+const ThroughputSetterContext = createContext<Dispatch<SetStateAction<number>>>(() => {});
 
 /**
  * Opts the shared SSE connection into `?throughput=1` for as long as the
@@ -79,18 +79,24 @@ const ThroughputSetterContext = createContext<(delta: number) => void>(() => {})
  * renders a sparkline off the live stream — currently only Overview.
  *
  * Uses a counter (incremented on mount, decremented on unmount) rather than a
- * boolean flag: two consumers could in principle be mounted at once (e.g. a
- * future panel alongside Overview's own chart), and a boolean would let
- * whichever one unmounts first clear the flag out from under the other —
- * the same bug useJobScope's doc comment warns a naive scope flag would
- * have. `wantThroughput` is `count > 0`.
+ * boolean flag: two consumers could in principle be mounted at once, and a
+ * boolean would let whichever one unmounts first clear the flag out from
+ * under the other. This rationale stands on its own regardless of whether a
+ * second consumer ever actually exists — it costs nothing to get right the
+ * first time, and getting it wrong would be a silent bug only exercised once
+ * a second consumer showed up.
  */
 export function useThroughputStream(): void {
-  const setWant = useContext(ThroughputSetterContext);
+  const setCount = useContext(ThroughputSetterContext);
   useEffect(() => {
-    setWant(1);
-    return () => setWant(-1);
-  }, [setWant]);
+    setCount((n) => n + 1);
+    return () => setCount((n) => n - 1);
+    // setCount is the raw useState setter passed down by StreamProvider
+    // (stable for the component's lifetime, like JobScopeSetterContext's
+    // setJobsScope) — not a delta-wrapping closure rebuilt on every render,
+    // which would otherwise make this effect tear down and re-run (net
+    // -1/+1) on every StreamProvider render.
+  }, [setCount]);
 }
 
 /**
@@ -153,44 +159,48 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   // opt-in.
   const [throughputCount, setThroughputCount] = useState(0);
   const wantThroughput = throughputCount > 0;
-  const setThroughputWant = (delta: number) => setThroughputCount((n) => n + delta);
 
   // Known cost, tracked as #267, not fixed here: mounting a scope-publishing
-  // route (/jobs) opens two connections in quick succession — an unscoped
-  // one on this component's first commit (jobsScope is still its initial
-  // `undefined`), then the real `?jobs=...` one once useJobScope's effect
-  // has run in the child and published into jobsScope, changing
-  // jobsScopeKey and reopening below. Each open runs onopen's invalidation
-  // and the server's refreshCorrelation. Avoiding the first open would need
-  // the scope to be known synchronously during this component's first
-  // render (e.g. a ref-driven subscription written during render rather
-  // than an effect), which is a real restructuring of how useJobScope
-  // publishes — left alone for now since it only costs one extra connection
-  // at mount, not on every poll.
+  // route (/jobs, or Overview) can open THREE connections in quick
+  // succession, not two — measured directly against Overview's own timing
+  // (see the pinning test in stream.test.tsx). The first is unscoped (this
+  // component's first commit, jobsScope still its initial `undefined`); the
+  // second and third both come from useJobScope's effect running in the
+  // child, because a route whose ids come from an async-resolving query
+  // (Overview's useJobs, still loading on first commit) publishes an EMPTY
+  // scope first (`?jobs=`) and only republishes with the real ids once the
+  // query resolves a tick later — two distinct jobsScopeKey values, each
+  // its own reopen. wantThroughput rides along with whichever of these
+  // opens happens to be current when its own mount effect fires (batched
+  // into the same commit as useJobScope's on Overview, since both are
+  // direct children mounted together), so it adds no INDEPENDENT open of
+  // its own — the third connection exists whether or not anything asks for
+  // ?throughput=1. Avoiding the extra opens would need the scope to be
+  // known synchronously during this component's first render (e.g. a
+  // ref-driven subscription written during render rather than an effect),
+  // which is a real restructuring of how useJobScope publishes — left alone
+  // for now since it only costs extra connections at mount, not on every
+  // poll.
 
   useEffect(() => {
-    // Built with URLSearchParams rather than a hand-rolled ternary so a
-    // third independent axis (?throughput=, issue #265) doesn't turn this
-    // into a combinatorial mess of string branches. ?job= still wins over
-    // ?jobs= when both would apply (a detail page's own scope always takes
-    // priority — see this function's doc comment), and an empty param set
-    // must produce a bare `/api/stream`, not `/api/stream?` — existing tests
-    // assert the exact string.
-    const params = new URLSearchParams();
+    // Built as a plain parts array rather than URLSearchParams: every value
+    // here is a number or one of a small set of known literals, so
+    // URLSearchParams' percent-encoding (and the %2C-undoing replace it
+    // would need for a readable ?jobs= list) buys nothing. ?job= still wins
+    // over ?jobs= when both would apply (a detail page's own scope always
+    // takes priority — see this function's doc comment), and an empty part
+    // list must produce a bare `/api/stream`, not `/api/stream?` — existing
+    // tests assert the exact string.
+    const parts: string[] = [];
     if (jobId !== undefined) {
-      params.set('job', String(jobId));
+      parts.push(`job=${jobId}`);
     } else if (jobsScope !== undefined) {
-      params.set('jobs', jobsScope.join(','));
+      parts.push(`jobs=${jobsScope.join(',')}`);
     }
     if (wantThroughput) {
-      params.set('throughput', '1');
+      parts.push('throughput=1');
     }
-    // URLSearchParams percent-encodes the comma in a ?jobs= list (%2C); the
-    // server's parseStreamJobIDs splits on a literal comma either way, so
-    // this only matters for readability (and for the exact strings existing
-    // tests assert on).
-    const query = params.toString().replace(/%2C/g, ',');
-    const url = query ? `/api/stream?${query}` : '/api/stream';
+    const url = parts.length ? `/api/stream?${parts.join('&')}` : '/api/stream';
     const source = new EventSource(url);
 
     // Accumulates each frame's changed jobs by id — see the doc comment
@@ -318,7 +328,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
 
   return (
     <JobScopeSetterContext.Provider value={setJobsScope}>
-      <ThroughputSetterContext.Provider value={setThroughputWant}>
+      <ThroughputSetterContext.Provider value={setThroughputCount}>
         {children}
       </ThroughputSetterContext.Provider>
     </JobScopeSetterContext.Provider>

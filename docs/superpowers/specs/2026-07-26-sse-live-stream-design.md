@@ -112,7 +112,7 @@ flyttades ut ur `event: live`-kroppen (`livePayload`) till en egen
 Skälet: en prenumerant utan sparkline på skärmen (Jobs, JobDetail, Settings,
 ...) ska aldrig behöva bygga eller ta emot serien alls. `down`/`up` (globala
 skalärer) ligger kvar på `event: live` oavsett scope. Se
-`internal/observ/stream.go`s paketkommentar för den aktuella kontraktet;
+`internal/observ/stream.go`s paketkommentar för det aktuella kontraktet;
 nedanstående beskriver fortfarande formen som gällde före #265:
 
 Bara live-fält:
