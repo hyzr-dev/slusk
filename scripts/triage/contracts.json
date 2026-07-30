@@ -1,0 +1,19 @@
+{
+  "contracts": [
+    {
+      "name": "sse-events",
+      "why": "GET /api/stream carries a named live frame; producer and consumer must agree on its shape",
+      "sides": [["internal/observ/stream.go"], ["web/src/api/stream.tsx"]]
+    },
+    {
+      "name": "album-jobs",
+      "why": "the pipeline stages contact each other only through this table",
+      "sides": [["internal/store/migrations/"], ["internal/pipeline/"]]
+    },
+    {
+      "name": "config",
+      "why": "config loading is strict; a new required key must exist in production before merge",
+      "sides": [["internal/config/"], ["config.example.toml"]]
+    }
+  ]
+}

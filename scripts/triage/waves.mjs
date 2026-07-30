@@ -14,3 +14,28 @@ export function filesConflict(a, b) {
   const other = new Set(b.touches)
   return a.touches.some(path => other.has(path))
 }
+
+/**
+ * Names of the shared contracts an issue touches. A side is a list of path
+ * prefixes, so both a file and a directory can name a side.
+ */
+export function contractsTouched(issue, contracts) {
+  const touches = issue.touches ?? []
+  return contracts
+    .filter(c => c.sides.some(side =>
+      side.some(prefix => touches.some(path => path.startsWith(prefix)))))
+    .map(c => c.name)
+}
+
+/**
+ * True when two issues must not share a wave. File overlap is the obvious
+ * case; the second is not. Two issues can change opposite ends of one protocol
+ * while touching entirely disjoint files -- #275 changes the SSE producer,
+ * #267 the consumer -- and scheduling those together lets two agents skew a
+ * contract silently, because each side is tested against its own mock.
+ */
+export function conflicts(a, b, contracts) {
+  if (filesConflict(a, b)) return true
+  const mine = new Set(contractsTouched(a, contracts))
+  return contractsTouched(b, contracts).some(name => mine.has(name))
+}
