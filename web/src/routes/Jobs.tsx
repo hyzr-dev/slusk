@@ -25,8 +25,9 @@ import styles from './Jobs.module.css';
 // supported server filter/facet and is represented under ALL by its IM tag.
 // TRANSFERRING (issue #268) exists only for Overview's own useJobs call —
 // it's not a chip a user picks here, so JobStatusFacets has no count for it
-// either.
-type ChipKey = Exclude<JobStatusFilter, 'importing' | 'transferring'>;
+// either. INFLIGHT and FINISHED (issue #287) are likewise server-only filter
+// values with no facet count and no chip here.
+type ChipKey = Exclude<JobStatusFilter, 'importing' | 'transferring' | 'inflight' | 'finished'>;
 const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The

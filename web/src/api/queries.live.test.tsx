@@ -170,7 +170,7 @@ describe('paged jobs transport', () => {
     const params = { ...DEFAULT_JOB_PAGE_PARAMS, page: 2, sort: 'peer' as const, dir: 'desc' as const, filter: 'failed' as const, source: 'manual' as const, q: 'Miles & Blue' };
     const key = queryKeys.jobsPage(params);
 
-    expect(key).toEqual(['jobs', 'page', 2, 'peer', 'desc', 'failed', 'manual', 'Miles & Blue', undefined]);
+    expect(key).toEqual(['jobs', 'page', 2, 'peer', 'desc', 'failed', 'manual', 'Miles & Blue', undefined, undefined]);
     expect(queryKeys.jobsPage({ ...params, source: 'lidarr' })).not.toEqual(key);
     expect(jobsPageUrl(params)).toBe('/api/jobs?page=2&sort=peer&dir=desc&filter=failed&source=manual&q=Miles+%26+Blue');
   });
@@ -179,7 +179,7 @@ describe('paged jobs transport', () => {
   // so pageSize has to isolate its own cache entry and reach the URL.
   it('sends pageSize only when given, and isolates it in the query key', () => {
     const withSize = { ...DEFAULT_JOB_PAGE_PARAMS, pageSize: 8 };
-    expect(queryKeys.jobsPage(withSize)).toEqual(['jobs', 'page', 0, 'st', 'asc', 'all', 'all', '', 8]);
+    expect(queryKeys.jobsPage(withSize)).toEqual(['jobs', 'page', 0, 'st', 'asc', 'all', 'all', '', 8, undefined]);
     expect(queryKeys.jobsPage(withSize)).not.toEqual(queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS));
     expect(jobsPageUrl(withSize)).toBe('/api/jobs?page=0&sort=st&dir=asc&filter=all&source=all&q=&pageSize=8');
     expect(jobsPageUrl(DEFAULT_JOB_PAGE_PARAMS)).not.toContain('pageSize');

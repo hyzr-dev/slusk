@@ -30,7 +30,7 @@ export type JobSource = 'lidarr' | 'manual';
  * union as a single filter value, kept single-valued rather than turning
  * `filter` into a multi-value parameter.
  */
-export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer';
+export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer' | 'recent';
 export type JobPageDirection = 'asc' | 'desc';
 export type JobStatusFilter =
   | 'all'
@@ -41,7 +41,9 @@ export type JobStatusFilter =
   | 'failed'
   | 'parked'
   | 'done'
-  | 'transferring';
+  | 'transferring'
+  | 'inflight'
+  | 'finished';
 export type JobSourceFilter = 'all' | JobSource;
 
 export interface JobPageParams {
@@ -57,6 +59,13 @@ export interface JobPageParams {
    * explicitly. Overview (issue #268) requests 8.
    */
   pageSize?: number;
+  /**
+   * Opt out of `total` and the facet counts (`facets=0`). The server's facet
+   * query is the expensive part of `/api/jobs` and runs whatever the filter is,
+   * so a panel that renders neither should not ask for them. Leave unset in any
+   * view that reads `total` or renders facet chips.
+   */
+  skipFacets?: boolean;
 }
 
 export interface JobStatusFacets {
