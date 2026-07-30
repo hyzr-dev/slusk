@@ -84,11 +84,28 @@ const VERDICT = {
 // Validate args before spending anything on a baseline agent: a malformed
 // invocation should cost nothing, not burn an agent before the emptiness is
 // discovered.
-if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-  log(`args must be passed as an actual JSON object, not ${typeof args} -- a JSON string is the
-     specific mistake to avoid. Expected shape: { issues: number[], cached: object[] }. Received: ${JSON.stringify(args)}`)
+//
+// The Workflow tool's own docs say to pass args as an actual JSON value, not a
+// stringified payload -- and yet a stringified payload is what arrives here in
+// practice. So this accepts either shape rather than being correct-but-unusable:
+// a future reader who deletes this branch as "redundant, the docs already say
+// not to do this" will break every real invocation, and the failure will look
+// exactly like an empty backlog rather than a rejected input.
+let normalizedArgs = args
+if (typeof args === 'string') {
+  try {
+    normalizedArgs = JSON.parse(args)
+  } catch {
+    log(`args arrived as a string that isn't valid JSON -- cannot recover a payload from it. Received: ${args}`)
+    return { judgements: [], baseline: null, browser: [], unassessed: [], aborted: 'bad-args' }
+  }
+}
+if (typeof normalizedArgs !== 'object' || normalizedArgs === null || Array.isArray(normalizedArgs)) {
+  log(`args must resolve to a JSON object (either passed as one, or as a JSON string of one), not
+     ${typeof normalizedArgs}. Expected shape: { issues: number[], cached: object[] }. Received: ${JSON.stringify(args)}`)
   return { judgements: [], baseline: null, browser: [], unassessed: [], aborted: 'bad-args' }
 }
+args = normalizedArgs
 
 const cached = args?.cached ?? []
 
