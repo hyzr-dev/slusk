@@ -129,7 +129,11 @@ export function computeWaves(issues, contracts) {
  * Two independent axes, because `touches` is an asserted relation between an
  * issue and the code: the issue can move, and the code under it can move. An
  * issue may sit untouched for months while the file it concerns is refactored
- * away, so checking only the issue's timestamp is not enough.
+ * away, so checking only the issue's content would miss the refactoring.
+ *
+ * The digest is a content hash computed by the caller and is expected to cover
+ * the issue's title, body, labels, and comments — enough to detect real content
+ * change and ignore touches that changed nothing.
  */
 export function invalidate({ state, openIssues, changedPaths }) {
   const fresh = []
@@ -138,7 +142,7 @@ export function invalidate({ state, openIssues, changedPaths }) {
 
   for (const open of openIssues) {
     const cached = state?.issues?.[String(open.number)]
-    const movedIssue = !cached || cached.updated !== open.updated
+    const movedIssue = !cached || cached.digest !== open.digest
     const movedCode = cached
       ? (cached.touches ?? []).some(path =>
           [...changed].some(c => c === path || c.startsWith(path) || path.startsWith(c)))

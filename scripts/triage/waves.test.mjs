@@ -163,33 +163,33 @@ import { invalidate } from './waves.mjs'
 const state = {
   computedAt: 'f5e1f5b',
   issues: {
-    '10': { number: 10, updated: '2026-07-01T00:00:00Z', touches: ['internal/store/jobview.go'] },
-    '11': { number: 11, updated: '2026-07-01T00:00:00Z', touches: ['web/src/App.tsx'] },
+    '10': { number: 10, digest: 'abc123def456', touches: ['internal/store/jobview.go'] },
+    '11': { number: 11, digest: 'xyz789uvw012', touches: ['web/src/App.tsx'] },
   },
 }
 
 test('an unchanged issue over unchanged code is fresh', () => {
   const out = invalidate({
     state,
-    openIssues: [{ number: 10, updated: '2026-07-01T00:00:00Z' }],
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
     changedPaths: [],
   })
   assert.deepEqual(out, { fresh: [10], stale: [] })
 })
 
-test('an issue updated since the cache is stale', () => {
+test('an issue with a different digest is stale', () => {
   const out = invalidate({
     state,
-    openIssues: [{ number: 10, updated: '2026-07-29T00:00:00Z' }],
+    openIssues: [{ number: 10, digest: 'changed1234567' }],
     changedPaths: [],
   })
   assert.deepEqual(out, { fresh: [], stale: [10] })
 })
 
-test('an issue whose touched code moved is stale even if the issue did not', () => {
+test('an issue whose touched code moved is stale even if the digest did not', () => {
   const out = invalidate({
     state,
-    openIssues: [{ number: 10, updated: '2026-07-01T00:00:00Z' }],
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
     changedPaths: ['internal/store/jobview.go'],
   })
   assert.deepEqual(out, { fresh: [], stale: [10] })
@@ -198,7 +198,7 @@ test('an issue whose touched code moved is stale even if the issue did not', () 
 test('an issue absent from the cache is stale', () => {
   const out = invalidate({
     state,
-    openIssues: [{ number: 99, updated: '2026-07-29T00:00:00Z' }],
+    openIssues: [{ number: 99, digest: 'newdigest1234' }],
     changedPaths: [],
   })
   assert.deepEqual(out, { fresh: [], stale: [99] })
@@ -207,10 +207,19 @@ test('an issue absent from the cache is stale', () => {
 test('a missing state file makes every open issue stale', () => {
   const out = invalidate({
     state: null,
-    openIssues: [{ number: 10, updated: 'x' }, { number: 11, updated: 'y' }],
+    openIssues: [{ number: 10, digest: 'abc123def456' }, { number: 11, digest: 'xyz789uvw012' }],
     changedPaths: [],
   })
   assert.deepEqual(out, { fresh: [], stale: [10, 11] })
+})
+
+test('the two invalidation axes are independent: same digest, code changed', () => {
+  const out = invalidate({
+    state,
+    openIssues: [{ number: 11, digest: 'xyz789uvw012' }],
+    changedPaths: ['web/src/App.tsx'],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [11] })
 })
 
 import { execFileSync } from 'node:child_process'
