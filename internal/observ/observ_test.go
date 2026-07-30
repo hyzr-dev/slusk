@@ -431,6 +431,74 @@ func TestPagedJobsEndpointRejectsInvalidQueries(t *testing.T) {
 	}
 }
 
+// TestPagedJobsEndpointParsesInflightFinishedAndFacets covers filter=inflight,
+// filter=finished, sort=recent and the facets=0 opt-out reaching PagedJobsFunc
+// as parsed.
+func TestPagedJobsEndpointParsesInflightFinishedAndFacets(t *testing.T) {
+	cases := []struct {
+		suffix string
+		want   PagedJobsQuery
+	}{
+		{
+			suffix: "?filter=inflight&sort=transfer&dir=asc&pageSize=8",
+			want:   PagedJobsQuery{Page: 0, Sort: "transfer", Dir: "asc", Filter: "inflight", Source: "all", PageSize: 8},
+		},
+		{
+			suffix: "?filter=finished&sort=recent&dir=desc&pageSize=5&facets=0",
+			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 5, SkipFacets: true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.suffix, func(t *testing.T) {
+			deps := testServerDeps(prometheus.NewRegistry())
+			var got PagedJobsQuery
+			deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+				got = query
+				return PagedJobsResult{}, nil
+			}
+			rec := httptest.NewRecorder()
+			NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs"+tc.suffix, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+			}
+			if got != tc.want {
+				t.Fatalf("query = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPagedJobsEndpointRejectsRecentAscendingAndBadFacets covers the
+// dir=asc/sort=recent conflict and every rejected shape of facets=.
+func TestPagedJobsEndpointRejectsRecentAscendingAndBadFacets(t *testing.T) {
+	invalid := []string{
+		"?sort=recent&dir=asc",
+		"?sort=recent", // dir defaults to asc, which sort=recent rejects
+		"?facets=2",
+		"?facets=yes",
+		"?facets=",
+		"?facets=0&facets=1",
+	}
+	for _, suffix := range invalid {
+		t.Run(suffix, func(t *testing.T) {
+			deps := testServerDeps(prometheus.NewRegistry())
+			called := false
+			deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
+				called = true
+				return PagedJobsResult{}, nil
+			}
+			rec := httptest.NewRecorder()
+			NewServer(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs"+suffix, nil))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+			if called {
+				t.Fatal("PagedJobs called for invalid query")
+			}
+		})
+	}
+}
+
 func TestPagedJobsEndpointReturns500OnStoreError(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.PagedJobs = func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
