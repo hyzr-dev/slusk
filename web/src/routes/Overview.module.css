@@ -82,6 +82,16 @@
   background: var(--panel-hover);
 }
 
+/* Negative offset is deliberate: rows sit edge-to-edge separated only by a
+   1px border (see .transferRow's border-bottom above), so a positive offset
+   would visually collide with the neighbouring row. Settings.module.css
+   insets for the same reason. Shared by both the TRANSFERS and RECENTLY
+   FINISHED panels, since both use .transferRow (issue #292). */
+.transferRow:focus-visible {
+  outline: 1px solid var(--fg);
+  outline-offset: -2px;
+}
+
 .albumCell {
   display: flex;
   align-items: baseline;
