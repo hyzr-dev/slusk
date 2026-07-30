@@ -44,3 +44,56 @@ export function conflicts(a, b, contracts) {
   const mine = new Set(contractsTouched(a, contracts))
   return contractsTouched(b, contracts).some(name => mine.has(name))
 }
+
+const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 }
+const EFFORT_COST = { S: 0, M: 1, L: 2 }
+
+/**
+ * Priority score. Production impact dominates; cheaper work wins ties, so a
+ * wave fills with the most urgent issues that can actually be finished.
+ */
+export function rank(issue) {
+  const impact = IMPACT_RANK[issue.prodImpact] ?? 0
+  const effort = EFFORT_COST[issue.effort] ?? 1
+  return impact * 10 - effort
+}
+
+/**
+ * Greedy colouring into waves. Wave one is the largest pairwise-compatible set
+ * of the highest-ranked issues; each later wave repeats over what is left.
+ *
+ * Sorting by (rank desc, number asc) before colouring makes the result
+ * independent of input order -- two runs over an unchanged backlog must produce
+ * an identical report, or diffing successive reports means nothing.
+ */
+export function computeWaves(issues, contracts) {
+  const issueNumbers = new Set(issues.map(i => i.number))
+  const ordered = [...issues].sort((a, b) => {
+    const aHasBlockers = (a.statedBlockers ?? []).some(n => issueNumbers.has(n))
+    const bHasBlockers = (b.statedBlockers ?? []).some(n => issueNumbers.has(n))
+    if (aHasBlockers !== bHasBlockers) return aHasBlockers - bHasBlockers
+    return rank(b) - rank(a) || a.number - b.number
+  })
+  const placed = new Map()   // issue number -> wave index
+  const waves = []
+
+  for (const issue of ordered) {
+    let index = 0
+    for (;;) {
+      const wave = waves[index] ?? []
+      const blocked = (issue.statedBlockers ?? []).some(n => {
+        if (!issueNumbers.has(n)) return false
+        const at = placed.get(n)
+        return at !== undefined && at >= index
+      })
+      const clashes = wave.some(other => conflicts(issue, other, contracts))
+      if (!blocked && !clashes) break
+      index++
+    }
+    if (!waves[index]) waves[index] = []
+    waves[index].push(issue)
+    placed.set(issue.number, index)
+  }
+
+  return waves.map(wave => wave.map(issue => issue.number))
+}

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { filesConflict, contractsTouched, conflicts } from './waves.mjs'
+import { filesConflict, contractsTouched, conflicts, rank, computeWaves } from './waves.mjs'
 
 test('issues touching the same file conflict', () => {
   const a = { number: 1, touches: ['internal/pipeline/importing.go'] }
@@ -55,4 +55,47 @@ test('a directory side without a trailing slash does not match a longer sibling 
   const real = { number: 2, touches: ['internal/config/config.go'] }
   assert.deepEqual(contractsTouched(unrelated, contracts), [])
   assert.deepEqual(contractsTouched(real, contracts), ['config'])
+})
+
+test('rank orders by prod impact, then by ascending effort', () => {
+  const dataloss = { number: 1, prodImpact: 'dataloss', effort: 'L', touches: ['a'] }
+  const degraded = { number: 2, prodImpact: 'degraded', effort: 'S', touches: ['b'] }
+  assert.ok(rank(dataloss) > rank(degraded))
+
+  const cheap = { number: 3, prodImpact: 'degraded', effort: 'S', touches: ['c'] }
+  const dear = { number: 4, prodImpact: 'degraded', effort: 'L', touches: ['d'] }
+  assert.ok(rank(cheap) > rank(dear))
+})
+
+test('disjoint issues share wave one, ordered by rank', () => {
+  const issues = [
+    { number: 10, prodImpact: 'cosmetic', effort: 'S', touches: ['a.go'] },
+    { number: 11, prodImpact: 'outage', effort: 'M', touches: ['b.go'] },
+  ]
+  assert.deepEqual(computeWaves(issues, []), [[11, 10]])
+})
+
+test('conflicting issues are split across waves, the urgent one first', () => {
+  const issues = [
+    { number: 20, prodImpact: 'cosmetic', effort: 'S', touches: ['same.go'] },
+    { number: 21, prodImpact: 'outage', effort: 'S', touches: ['same.go'] },
+  ]
+  assert.deepEqual(computeWaves(issues, []), [[21], [20]])
+})
+
+test('statedBlockers force ordering even without a file conflict', () => {
+  const issues = [
+    { number: 30, prodImpact: 'outage', effort: 'S', touches: ['a.go'], statedBlockers: [31] },
+    { number: 31, prodImpact: 'cosmetic', effort: 'S', touches: ['b.go'] },
+  ]
+  assert.deepEqual(computeWaves(issues, []), [[31], [30]])
+})
+
+test('computeWaves is deterministic for the same input', () => {
+  const issues = [
+    { number: 40, prodImpact: 'degraded', effort: 'M', touches: ['a.go'] },
+    { number: 41, prodImpact: 'degraded', effort: 'M', touches: ['b.go'] },
+    { number: 42, prodImpact: 'degraded', effort: 'M', touches: ['a.go'] },
+  ]
+  assert.deepEqual(computeWaves(issues, []), computeWaves([...issues].reverse(), []))
 })
