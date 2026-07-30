@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_JOB_PAGE_PARAMS,
   jobsPageUrl,
@@ -28,6 +28,12 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     bytesTotal: 100,
     createdAt: '2026-07-01T10:00:00Z',
     updatedAt: '2026-07-01T10:00:00Z',
+    // Computed at call time (not a fixed literal) so it reads as "just
+    // framed" under Date.now() whenever the test actually runs, and every
+    // existing call site that doesn't care about live-data freshness keeps
+    // passing untouched. Tests that specifically exercise freshness (see
+    // the 'replaceLiveJobs' describe block) override this explicitly.
+    framedAt: new Date().toISOString(),
     state: 'DOWNLOADING',
     candidatesTried: 1,
     maxCandidates: 3,
@@ -68,6 +74,18 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
 }
 
 describe('replaceLiveJobs', () => {
+  // Fixed clock for the freshness-boundary tests below — see LIVE_JOB_FRESH_MS
+  // in queries.ts (not exported; mirrored here as FRESH_MS so a drift between
+  // the two is visible rather than silently tolerated).
+  const NOW = new Date('2026-07-27T10:00:00Z');
+  const FRESH_MS = 10_000; // must match queries.ts's LIVE_JOB_FRESH_MS
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
   // Issue #258: the stream now carries full Job objects, and the client
   // adopts one wholesale rather than overlaying individual fields — a
   // streamed job replaces the REST row entirely, including fields the old
@@ -101,29 +119,49 @@ describe('replaceLiveJobs', () => {
   // stops streaming a job once it leaves the live-matched set, including
   // post-terminal DB transitions that settle after the last live frame) — so
   // presence in `live` can't be the tie-breaker, or a REST poll could never
-  // correct a job pinned at stale live values. `updatedAt` is: REST strictly
-  // newer means the DB genuinely moved since the pinned live object was
-  // built, so REST wins and the pin is released.
-  it('lets a newer REST row override a pinned live object once the DB has moved on', () => {
-    const pinned = makeJob({ id: 1, state: 'DOWNLOADING', status: 'active', speed: 0, updatedAt: '2026-07-27T10:00:00Z' });
-    const restAfterReconcile = makeJob({ id: 1, state: 'DONE', status: 'done', updatedAt: '2026-07-27T10:00:15Z' });
+  // correct a job pinned at stale live values. `framedAt` is: once the
+  // streamed row's framedAt ages past LIVE_JOB_FRESH_MS, REST wins and the
+  // pin is released — regardless of what either side's updatedAt says,
+  // since the two are read from independently-cached DB copies and can't be
+  // compared meaningfully (issue #285).
+  it('lets REST win once the pinned streamed row goes stale', () => {
+    const stale = new Date(NOW.getTime() - FRESH_MS - 1).toISOString();
+    const pinned = makeJob({ id: 1, state: 'DOWNLOADING', status: 'active', speed: 0, framedAt: stale });
+    const restAfterReconcile = makeJob({ id: 1, state: 'DONE', status: 'done', framedAt: NOW.toISOString() });
 
     const replaced = replaceLiveJobs([restAfterReconcile], [pinned]);
     expect(replaced?.[0]).toEqual(restAfterReconcile);
 
-    // A later poll with the same (already-correct) row must keep winning —
-    // the pin was released, not just skipped once.
+    // A later read with the same stale pinned row must keep losing — the
+    // pin was released, not just skipped once.
     const replacedAgain = replaceLiveJobs([restAfterReconcile], [pinned]);
     expect(replacedAgain?.[0]).toEqual(restAfterReconcile);
   });
 
-  // The mirror image: DB unchanged (equal updatedAt) means only live fields
-  // moved, so the live object still wins — this is the ordinary, expected
-  // case the accumulator exists for.
-  it('still prefers the live object when the REST row has not moved on (equal updatedAt)', () => {
-    const jobs = [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100, updatedAt: '2026-07-27T10:00:00Z' })];
-    const streamed = makeJob({ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000, updatedAt: '2026-07-27T10:00:00Z' });
+  // The mirror image: a recently framed streamed row wins over REST even
+  // when the two disagree on state — this is the ordinary, expected case
+  // the accumulator exists for.
+  it('prefers the live object while its framedAt is still fresh', () => {
+    const jobs = [makeJob({ id: 1, state: 'DOWNLOADING', bytesDone: 50, bytesTotal: 100 })];
+    const streamed = makeJob({ id: 1, state: 'DOWNLOADING', bytesDone: 80, bytesTotal: 100, speed: 4000, framedAt: NOW.toISOString() });
     expect(replaceLiveJobs(jobs, [streamed])?.[0]).toEqual(streamed);
+  });
+
+  // Boundary: exactly FRESH_MS old is still fresh (the check is a strict
+  // `>`, so equality does not count as stale).
+  it('still trusts a streamed row exactly LIVE_JOB_FRESH_MS old', () => {
+    const jobs = [makeJob({ id: 1 })];
+    const boundary = new Date(NOW.getTime() - FRESH_MS).toISOString();
+    const streamed = makeJob({ id: 1, speed: 4000, framedAt: boundary });
+    expect(replaceLiveJobs(jobs, [streamed])?.[0]).toEqual(streamed);
+  });
+
+  // One tick past the boundary flips to stale.
+  it('stops trusting a streamed row one millisecond past LIVE_JOB_FRESH_MS', () => {
+    const jobs = [makeJob({ id: 1 })];
+    const pastBoundary = new Date(NOW.getTime() - FRESH_MS - 1).toISOString();
+    const streamed = makeJob({ id: 1, speed: 4000, framedAt: pastBoundary });
+    expect(replaceLiveJobs(jobs, [streamed])?.[0]).toEqual(jobs[0]);
   });
 });
 

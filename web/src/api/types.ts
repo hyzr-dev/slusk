@@ -98,6 +98,10 @@ export interface Job {
   // by start order (#233) without rows reordering on every progress tick.
   createdAt: string;
   updatedAt: string;
+  /** When this DTO instance was computed server-side — see internal/observ's
+   * jobDTO.FramedAt. Used (only for stream-sourced jobs) to decide whether
+   * live data is still fresh enough to trust over REST — see replaceLiveJobs. */
+  framedAt: string;
   state: JobState;
   candidatesTried: number;
   maxCandidates: number;

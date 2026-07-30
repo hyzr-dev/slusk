@@ -173,7 +173,7 @@ func TestToJobDetailDTOOverlaysBytesDoneForLiveMatch(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 750},
 	})
 
-	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates)
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 750 {
 		t.Errorf("BytesDone = %d, want 750 (live overlay)", tr.BytesDone)
@@ -197,7 +197,7 @@ func TestToJobDetailDTOFallsBackToPersistedWithoutLiveMatch(t *testing.T) {
 		}},
 	}
 
-	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates)
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, liveTransferIndex{}, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (persisted, no live match)", tr.BytesDone)
@@ -227,7 +227,7 @@ func TestToJobDetailDTOTerminalLiveMatchOverwritesPersisted(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000},
 	})
 
-	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates)
+	dto := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates, testNow)
 	tr := dto.Attempts[0].Transfers[0]
 	if tr.BytesDone != 1000 {
 		t.Errorf("BytesDone = %d, want 1000 (terminal live match still supplies bytes)", tr.BytesDone)
@@ -257,7 +257,7 @@ func TestToJobDetailDTOPersistedTerminalWinsOverLingeringLiveEntry(t *testing.T)
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
 	})
 
-	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates, testNow).Attempts[0].Transfers[0]
 	if tr.State != string(core.TransferCompleted) {
 		t.Errorf("State = %q, want %q (persisted terminal wins over a lingering live entry)", tr.State, core.TransferCompleted)
 	}
@@ -293,7 +293,7 @@ func TestToJobDetailDTOTerminalLiveMatchDropsSpeedAndQueue(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferCompleted, BytesDone: 1000, Speed: 1300000, QueuePosition: 182},
 	})
 
-	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates, testNow).Attempts[0].Transfers[0]
 	if tr.State != string(core.TransferCompleted) {
 		t.Errorf("State = %q, want %q (live alone is terminal, so it wins)", tr.State, core.TransferCompleted)
 	}
@@ -321,7 +321,7 @@ func TestToJobDetailDTOStalledKeepsLiveSpeedAndQueue(t *testing.T) {
 		{ID: "g1", Username: "peer_one", Filename: "01.flac", State: core.TransferInProgress, BytesDone: 600, Speed: 1500, QueuePosition: 3},
 	})
 
-	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates).Attempts[0].Transfers[0]
+	tr := toJobDetailDTO(core.JobView{Job: detail.Job}, detail, live, nil, testFailedRetryAfter, testMaxCandidates, testNow).Attempts[0].Transfers[0]
 	if tr.Speed != 1500 || tr.QueuePosition != 3 {
 		t.Errorf("Speed/QueuePosition = %d/%d, want 1500/3 (STALLED is not terminal)", tr.Speed, tr.QueuePosition)
 	}

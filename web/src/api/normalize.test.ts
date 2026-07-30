@@ -13,6 +13,7 @@ function wireJob(overrides: Partial<WireJob> = {}): WireJob {
     bytesTotal: 0,
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
+    framedAt: '2026-01-01T00:00:00Z',
     state: 'DOWNLOADING',
     candidatesTried: 0,
     maxCandidates: 3,
