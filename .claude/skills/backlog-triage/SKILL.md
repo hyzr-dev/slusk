@@ -294,7 +294,20 @@ anywhere in the report without stating one too.
    number, descending. First, because it is the only part that blocks. A new required
    config key found after a merge stops the container on the next deploy; found here it is a
    line read in ten seconds.
-3. **Waves** — bare issue numbers, e.g. `` `#272 #212 #286` ``, kept in the order
+3. **Confirmed still reproducing** — every browser verdict that came back `ISSUES_FOUND`,
+   listed by issue number, descending: the defect the issue describes was driven in a real
+   browser and the reported behaviour was seen. Give each one the `evidence` string the
+   verifier returned. This sits above Waves because it is the only section in the report
+   built from *observed* behaviour — everything below it, Waves included, is inferred from
+   reading code, and a defect confirmed live outranks any judgement about one. It is also
+   the most valuable thing the browser phase can produce, and it is the natural place a
+   reader checks a `prodImpact` that now looks too low. Note if the section is empty and
+   why: no `ISSUES_FOUND` verdict because every candidate passed is a different fact from no
+   `ISSUES_FOUND` verdict because every candidate was `BLOCKED`, and the second says nothing
+   about the backlog at all. (The first run hit exactly that case — all four verdicts
+   `BLOCKED` — which is why this section was missing from the report layout for as long as
+   it was.)
+4. **Waves** — bare issue numbers, e.g. `` `#272 #212 #286` ``, kept in the order
    `computeWaves` returned them: highest-ranked issue first within each wave. That order is
    deliberate and carries meaning — do not re-sort it by issue number. Readable by a human
    and pasteable into an implementation run — by a human, or by a separate implementation
@@ -303,12 +316,12 @@ anywhere in the report without stating one too.
    file set conflicts with everything, so it alone can push work into later waves. A thin
    wave one with no obvious cause is usually explained by exactly one such issue — say which
    one, because fixing its `touches` (or re-judging it) may collapse several waves into one.
-4. **Blocking dependencies** — a mermaid graph of the `statedBlockers` edges only: "this
+5. **Blocking dependencies** — a mermaid graph of the `statedBlockers` edges only: "this
    issue said it requires that one first," edges listed by the blocked issue's number,
    descending. A real backlog has few of these, so the graph stays small and readable. Do
    not add conflict edges to this graph, here or anywhere else — see the next section for
    why.
-5. **Conflict density** — file-overlap and shared-contract conflicts are reported as
+6. **Conflict density** — file-overlap and shared-contract conflicts are reported as
    numbers, never a graph: the total conflict-edge count, and the handful of issues driving
    the most of them (e.g. the top three to five by edge count, that list itself ordered by
    descending edge count). A conflict and a dependency are different relations with
@@ -318,23 +331,33 @@ anywhere in the report without stating one too.
    normal) that drawing it is both unreadable and beside the point a count and a short
    offender list already make. Keep this section separate from Blocking dependencies for
    that reason, and do not "simplify" the report by merging them back into one graph later.
-6. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches;
-   rows listed by issue number, descending. This table is a lookup reference, not a
+7. **Full judgement** — a table: issue, kind, impact, evidence, effort, **repro check**,
+   touches; rows listed by issue number, descending. This table is a lookup reference, not a
    priority ranking — rank order already lives in Waves, so re-sorting this table by rank
    would just duplicate it under a different name.
-7. **Unassessed** — the `unassessed` issue numbers from step 2's result, listed by issue
+
+   The sixth column holds the judgement's `reproCheck` string verbatim, and its heading is
+   **"Repro check"** — not "repro status". The two words mean different things and only one
+   of them is in the data: `reproCheck` is the *proposed* falsifiable check ("open this
+   route and look at that element"), written before anything was driven, and it is present
+   on issues the browser phase never touched. Whether the defect still holds — the
+   status — is nowhere in this table. It lives only in the three sections built from browser
+   verdicts: Confirmed still reproducing (`ISSUES_FOUND`), Candidates to close (`PASS`), and
+   Not verified (`BLOCKED`). Calling this column a status invites a reader to take a
+   populated cell as an outcome when it is a plan, so do not rename it back.
+8. **Unassessed** — the `unassessed` issue numbers from step 2's result, listed by issue
    number, descending: the judge agent for that issue returned nothing, so it was never
    assessed at all. This is an infrastructure failure worth retrying, not a judgement call —
    say that plainly.
-8. **Unassessable** — the `unassessable` issue numbers from step 3, listed by issue number,
+9. **Unassessable** — the `unassessable` issue numbers from step 3, listed by issue number,
    descending: a judgement came back, but its `prodImpact` or `effort` was not a recognised
    value, so the wave computation excluded it. This is a bad judgement worth reading, a
    different failure from Unassessed — keep the two sections separate so a reader can tell
    which happened.
-9. **Candidates to close** — what was observed, listed by issue number, descending. Not a
-   conclusion: "I could not reproduce it" and "it is fixed" are different claims, and the
-   second is the maintainer's.
-10. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
+10. **Candidates to close** — the browser verdicts that came back `PASS`: what was observed,
+    listed by issue number, descending. Not a conclusion: "I could not reproduce it" and "it
+    is fixed" are different claims, and the second is the maintainer's.
+11. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
     command that would unblock it. Printing
     that command is the whole job here; running it yourself is not — that is exactly the PR
     lab / browser-verification territory this capability stays out of.
@@ -446,6 +469,8 @@ and heredocs, which fish does not support at all.
 | Merged `unassessable` and `unassessed` into one bucket | They are different failure modes; keep them apart in the report and in `state.json` |
 | Committed the report or `state.json` | Leave both unstaged; this capability never commits anything, including its own output |
 | Called a browser check PASS without rendering | That is BLOCKED; `verifying-ui-in-browser` owns the contract |
+| Left an `ISSUES_FOUND` verdict out of the report | It has its own section, above Waves — a defect confirmed live in a browser is the strongest evidence in the report, and `PASS`/`BLOCKED` sections have no room for it |
+| Titled the judgement table's sixth column "repro status" | It holds `reproCheck`, a proposed check written before anything was driven — the status lives in the three browser-verdict sections only |
 | Two browser verifiers at once | Playwright MCP owns one browser — the loop is serial on purpose |
 | Started the lab to unblock a check | Never; report BLOCKED and print `./testenv/lab.sh up` |
 | Ran the command printed for a BLOCKED check | Printing it is the job; running it belongs to a separate capability |
