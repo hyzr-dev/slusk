@@ -229,6 +229,17 @@ const judged = await pipeline(
      them but only actually contains one, since a range that opens to real code
      but omits part of what it claims reads as verified when it is not.
 
+     That cuts both ways, and the second direction is the one nobody catches.
+     Choosing a lower prodImpact so that you do not have to produce a resolvable
+     reference is the same failure as fabricating one: a fabricated reference has
+     a reviewer who opens it, a deflated prodImpact produces no reference to open
+     and so cannot be checked at all -- on the field that is the entire ranking
+     axis. If the impact is real but you cannot locate it precisely, keep the
+     level you believe and say in impactEvidence that you could not pin it down.
+     An honest "degraded, could not narrow past internal/pipeline/downloading.go"
+     is useful; a 'cosmetic' chosen to avoid the work is a wrong ranking dressed
+     as a modest one.
+
      touches must list the repo-relative paths an implementation would change.
      Be accurate: these paths decide which issues are scheduled in parallel, and
      a wrong path puts two agents in the same file. Each entry must name an
