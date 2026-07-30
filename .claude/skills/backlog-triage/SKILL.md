@@ -315,7 +315,17 @@ would hide which failure mode actually happened.
 **Leave both files unstaged and uncommitted.** Writing a file and committing it is the
 reflex in this repo, but this capability never commits anything — that is the prohibition
 at the top of this document, and it applies to its own output just as much as to any
-implementation work.
+implementation work. Committing them is the maintainer's decision, taken outside this
+capability, not a follow-up step of it. The split is deliberate: an agent that commits its
+own output has decided, on the human's behalf, that this run's judgement is worth keeping —
+and a triage that ran on a bad premise or against a red tree should be discardable without a
+revert. This means `git log docs/triage/` is a history of the runs the maintainer chose to
+keep, not of every run this capability ever produced — the two are not the same claim, and
+this file does not promise the second one.
+
+The first report actually in this repository's history, commit `2933e30`, was committed
+deliberately as verification evidence for the plan that built this capability. Finding it in
+`git log` is not evidence that committing is this capability's normal behaviour.
 
 ### 5. Reap what the run left behind
 
