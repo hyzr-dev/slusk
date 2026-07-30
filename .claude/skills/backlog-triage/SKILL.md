@@ -223,43 +223,65 @@ date +%F
 Write `docs/triage/<that date>-backlog.md`, sections in this order — what demands a human
 first:
 
+**Every list of issues below is emitted in an explicitly stated order — never whatever order
+the source data happened to have.** A fresh run's `result.judgements` follows the workflow's
+fetch order; a regeneration read from `state.json`'s `issues` map instead, and that map's
+keys are stringified issue numbers, which JavaScript always enumerates in ascending numeric
+order regardless of insertion order, per the language spec. Two different sources, two
+different orders, same underlying data — a section that just iterates whichever one it was
+handed produces a different file depending on where the run's data came from, and the reports
+stop being diffable, which is the entire reason they are dated files on disk instead of a
+one-off reply. Each section below says which order it uses; do not add a new list of issues
+anywhere in the report without stating one too.
+
 1. **Header** — baseline result (or which of the five `aborted` values fired), commit,
    judged vs cached counts, browser coverage.
-2. **Requires your decision** — every issue with a `needsDecision` flag. First, because it
-   is the only part that blocks. A new required config key found after a merge stops the
-   container on the next deploy; found here it is a line read in ten seconds.
-3. **Waves** — bare issue numbers, e.g. `` `#272 #212 #286` ``. Readable by a human and
-   pasteable into an implementation run — by a human, or by a separate implementation
+2. **Requires your decision** — every issue with a `needsDecision` flag, listed by issue
+   number, descending. First, because it is the only part that blocks. A new required
+   config key found after a merge stops the container on the next deploy; found here it is a
+   line read in ten seconds.
+3. **Waves** — bare issue numbers, e.g. `` `#272 #212 #286` ``, kept in the order
+   `computeWaves` returned them: highest-ranked issue first within each wave. That order is
+   deliberate and carries meaning — do not re-sort it by issue number. Readable by a human
+   and pasteable into an implementation run — by a human, or by a separate implementation
    capability. This skill only computes and prints the waves; it never runs one itself. Name,
    right here, any issue whose `touches` came back empty: by design an issue with no known
    file set conflicts with everything, so it alone can push work into later waves. A thin
    wave one with no obvious cause is usually explained by exactly one such issue — say which
    one, because fixing its `touches` (or re-judging it) may collapse several waves into one.
 4. **Blocking dependencies** — a mermaid graph of the `statedBlockers` edges only: "this
-   issue said it requires that one first." A real backlog has few of these, so the graph
-   stays small and readable. Do not add conflict edges to this graph, here or anywhere else —
-   see the next section for why.
+   issue said it requires that one first," edges listed by the blocked issue's number,
+   descending. A real backlog has few of these, so the graph stays small and readable. Do
+   not add conflict edges to this graph, here or anywhere else — see the next section for
+   why.
 5. **Conflict density** — file-overlap and shared-contract conflicts are reported as
    numbers, never a graph: the total conflict-edge count, and the handful of issues driving
-   the most of them (e.g. the top three to five by edge count). A conflict and a dependency
-   are different relations with different shapes — "do not work these two at once" is not
-   "do this one first" — and a graph mixing both leaves a reader unable to tell which an edge
-   means; a real backlog's conflict count is also large enough (hundreds of edges across a
-   few dozen issues is normal) that drawing it is both unreadable and beside the point a
-   count and a short offender list already make. Keep this section separate from Blocking
-   dependencies for that reason, and do not "simplify" the report by merging them back into
-   one graph later.
-6. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches.
-7. **Unassessed** — the `unassessed` issue numbers from step 2's result: the judge agent for
-   that issue returned nothing, so it was never assessed at all. This is an infrastructure
-   failure worth retrying, not a judgement call — say that plainly.
-8. **Unassessable** — the `unassessable` issue numbers from step 3: a judgement came back,
-   but its `prodImpact` or `effort` was not a recognised value, so the wave computation
-   excluded it. This is a bad judgement worth reading, a different failure from Unassessed —
-   keep the two sections separate so a reader can tell which happened.
-9. **Candidates to close** — what was observed. Not a conclusion: "I could not reproduce
-   it" and "it is fixed" are different claims, and the second is the maintainer's.
-10. **Not verified (BLOCKED)** — the reason and the command that would unblock it. Printing
+   the most of them (e.g. the top three to five by edge count, that list itself ordered by
+   descending edge count). A conflict and a dependency are different relations with
+   different shapes — "do not work these two at once" is not "do this one first" — and a
+   graph mixing both leaves a reader unable to tell which an edge means; a real backlog's
+   conflict count is also large enough (hundreds of edges across a few dozen issues is
+   normal) that drawing it is both unreadable and beside the point a count and a short
+   offender list already make. Keep this section separate from Blocking dependencies for
+   that reason, and do not "simplify" the report by merging them back into one graph later.
+6. **Full judgement** — a table: issue, impact, evidence, effort, repro status, touches;
+   rows listed by issue number, descending. This table is a lookup reference, not a
+   priority ranking — rank order already lives in Waves, so re-sorting this table by rank
+   would just duplicate it under a different name.
+7. **Unassessed** — the `unassessed` issue numbers from step 2's result, listed by issue
+   number, descending: the judge agent for that issue returned nothing, so it was never
+   assessed at all. This is an infrastructure failure worth retrying, not a judgement call —
+   say that plainly.
+8. **Unassessable** — the `unassessable` issue numbers from step 3, listed by issue number,
+   descending: a judgement came back, but its `prodImpact` or `effort` was not a recognised
+   value, so the wave computation excluded it. This is a bad judgement worth reading, a
+   different failure from Unassessed — keep the two sections separate so a reader can tell
+   which happened.
+9. **Candidates to close** — what was observed, listed by issue number, descending. Not a
+   conclusion: "I could not reproduce it" and "it is fixed" are different claims, and the
+   second is the maintainer's.
+10. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
+    command that would unblock it. Printing
     that command is the whole job here; running it yourself is not — that is exactly the PR
     lab / browser-verification territory this capability stays out of.
 
@@ -348,6 +370,7 @@ and heredocs, which fish does not support at all.
 | A subagent hand-rolled an Agent-call pipeline when the Workflow tool wasn't available | Stop and hand step 2 back to the main session; a substitute pipeline tests itself, not `.claude/workflows/backlog-triage.js` |
 | Drew conflict edges into the dependency graph, or refused to draw anything because the graph was unreadable | They're different relations — graph only `statedBlockers`; report conflict density as a count and top offenders instead |
 | Left a thin wave one unexplained | Check for an issue with empty `touches` — it conflicts with everything by design and can push work into later waves on its own; name it in the Waves section |
+| Added a new report section that iterates judgements without stating its order | State one — otherwise the section's order silently depends on whether the data came from `result.judgements` or `state.json`, and reading the report won't catch it; only regenerating and diffing will |
 | Judged an issue from its text | Read the code it points at; a summary is not a judgement |
 | An agent decided the waves | The waves come from `waves.mjs`; agents supply `touches`, not scheduling |
 | Ranked issues against a red baseline | The script aborts for a reason — report which `aborted` value fired and stop |
