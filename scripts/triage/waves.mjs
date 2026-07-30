@@ -49,8 +49,18 @@ const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 
 const EFFORT_COST = { S: 0, M: 1, L: 2 }
 
 /**
+ * True when an issue can be ranked. Returns false if prodImpact or effort are
+ * not recognized — a typo'd `"outage"` would rank as `none` silently, which is
+ * the opposite of what a production-impact ranking exists for.
+ */
+export function isAssessable(issue) {
+  return issue.prodImpact in IMPACT_RANK && issue.effort in EFFORT_COST
+}
+
+/**
  * Priority score. Production impact dominates; cheaper work wins ties, so a
  * wave fills with the most urgent issues that can actually be finished.
+ * Defaults to `none` and `M` respectively so ranking stays total.
  */
 export function rank(issue) {
   const impact = IMPACT_RANK[issue.prodImpact] ?? 0
@@ -65,10 +75,21 @@ export function rank(issue) {
  * Sorting by (rank desc, number asc) before colouring makes the result
  * independent of input order -- two runs over an unchanged backlog must produce
  * an identical report, or diffing successive reports means nothing.
+ *
+ * Issues with stated blockers that are in the backlog are sorted after
+ * unblocked issues — a real departure from the maximal wave-one goal, but
+ * necessary: processing blockers first is what makes the placement loop
+ * terminate when blockers have lower rank than blocked issues.
+ *
+ * Cyclic blockers (A blocks B, B blocks A) do not hang; one is silently placed
+ * before its own blocker. Cyclic input is malformed and resolved arbitrarily.
  */
 export function computeWaves(issues, contracts) {
   const issueNumbers = new Set(issues.map(i => i.number))
-  const ordered = [...issues].sort((a, b) => {
+  const assessable = issues.filter(isAssessable)
+  const unassessable = issues.filter(i => !isAssessable(i)).map(i => i.number)
+
+  const ordered = [...assessable].sort((a, b) => {
     const aHasBlockers = (a.statedBlockers ?? []).some(n => issueNumbers.has(n))
     const bHasBlockers = (b.statedBlockers ?? []).some(n => issueNumbers.has(n))
     if (aHasBlockers !== bHasBlockers) return aHasBlockers - bHasBlockers
@@ -95,5 +116,8 @@ export function computeWaves(issues, contracts) {
     placed.set(issue.number, index)
   }
 
-  return waves.map(wave => wave.map(issue => issue.number))
+  return {
+    waves: waves.map(wave => wave.map(issue => issue.number)),
+    unassessable
+  }
 }
