@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
@@ -240,6 +241,20 @@ func (s *Store) ListJobsWithTransfer(ctx context.Context) ([]core.JobView, error
 // and ListDashboardJobs).
 const DashboardJobsPageSize int64 = 12
 
+// DashboardFinishedWindow is how far back filter=finished looks: a job counts
+// as recently finished when its updated_at falls inside this window. It is a
+// constant rather than configuration deliberately — internal/config rejects
+// unknown keys and a merge to main deploys straight to production, so a new
+// required key could stop the container from starting, and this number is not
+// yet known to be wrong (see the design spec's "Beslut som avvägts").
+//
+// album_jobs.updated_at is a trustworthy completion stamp for DONE and FAILED:
+// MarkJobFailed is guarded against re-failing an already-terminal job, and the
+// metadata backfill in SyncWantedJobs deliberately leaves updated_at alone for
+// jobs past WANTED. WANTED jobs *do* get a fresh updated_at on every sync pass,
+// which is why this filter can never include them.
+const DashboardFinishedWindow = time.Hour
+
 // DashboardJobsQuery is the validated, persisted-only query used by the
 // dashboard's paged REST endpoint. Live transfer data must never be threaded
 // into this query because it would make page membership move between polls.
@@ -257,6 +272,12 @@ type DashboardJobsQuery struct {
 	// DashboardJobsPageSize, rather than failing validation on a bound
 	// nothing chose.
 	PageSize int64
+	// Now anchors filter=finished's window (see DashboardFinishedWindow) and is
+	// required only for that filter — validateDashboardJobsQuery rejects a zero
+	// value there and ignores it everywhere else. Threaded in rather than read
+	// from the database's now() so tests are independent of the wall clock,
+	// matching how every other time-dependent store method takes its `now`.
+	Now time.Time
 }
 
 // DashboardStatusFacets contains counts for each dashboard status. All ignores
@@ -304,7 +325,7 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 		return fmt.Errorf("invalid dashboard jobs page %d", q.Page)
 	}
 	switch q.Sort {
-	case "st", "album", "peer", "try", "transfer":
+	case "st", "album", "peer", "try", "transfer", "recent":
 	default:
 		return fmt.Errorf("invalid dashboard jobs sort %q", q.Sort)
 	}
@@ -319,10 +340,20 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	if q.Sort == "transfer" && q.Dir == "desc" {
 		return fmt.Errorf("dir=desc is not supported for dashboard jobs sort %q", q.Sort)
 	}
+	// sort=recent is a newest-first ranking; ascending would be "oldest
+	// finished first", which no caller wants and which would silently turn
+	// Overview's recently-finished panel into its opposite. Rejected rather
+	// than reinterpreted, the same treatment sort=transfer gets above.
+	if q.Sort == "recent" && q.Dir == "asc" {
+		return fmt.Errorf("dir=asc is not supported for dashboard jobs sort %q", q.Sort)
+	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring", "inflight":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "transferring", "inflight", "finished":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
+	}
+	if q.Filter == "finished" && q.Now.IsZero() {
+		return fmt.Errorf("dashboard jobs filter %q requires a non-zero Now", q.Filter)
 	}
 	switch q.Source {
 	case "all", "manual", "lidarr":
@@ -360,6 +391,15 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 			// region AND in 'finished' at the same time. A job has exactly one
 			// state, which makes the two regions disjoint by construction.
 			clauses = append(clauses, "j.state IN ("+bind(string(core.StateDownloading))+", "+bind(string(core.StateImporting))+")")
+		case "finished":
+			// Terminal in the pipeline sense and recent (issue #287, Overview's
+			// recently-finished panel). PARKED is excluded on purpose: a job can
+			// sit parked for days, so its updated_at would read as fresh without
+			// anything having just happened. Keyed on j.state for the same
+			// disjointness reason as inflight above.
+			clauses = append(clauses,
+				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+")"+
+					" AND j.updated_at > "+bind(q.Now.Add(-DashboardFinishedWindow)))
 		default:
 			clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
 		}
@@ -416,6 +456,14 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
 			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 WHEN 'queued' THEN 3
 			WHEN 'importing' THEN 4 ELSE 5 END ASC, j.created_at ASC, j.id ASC`
+	case "recent":
+		// Newest finish first, for Overview's recently-finished panel (issue
+		// #287). Direction is hardcoded DESC, never `direction`: validation
+		// rejects dir=asc. j.id DESC is the tiebreaker — two jobs finishing in
+		// the same transaction share an updated_at, and without a tiebreaker
+		// Postgres' order between them is undefined, so the same job could
+		// appear on two pages while another never shows at all.
+		return " ORDER BY j.updated_at DESC, j.id DESC"
 	default:
 		panic("dashboardJobsOrder called without validation")
 	}

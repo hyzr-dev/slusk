@@ -1949,3 +1949,81 @@ func TestListDashboardJobsSortTransferKeepsAgeOrderWithinGroup(t *testing.T) {
 		t.Fatalf("order = %+v, want [%d %d] (created_at ascending within a group)", page.Jobs, older, newer)
 	}
 }
+
+func TestListDashboardJobsFilterFinishedHonoursTheWindow(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// insertDashboardTestJob writes its `at` argument to both created_at and
+	// updated_at, which is exactly what the window reads.
+	justDone := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Just done", "A", "peer1", 0, now.Add(-time.Minute))
+	justFailed := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateFailed, "", "Just failed", "B", "peer2", 0, now.Add(-30*time.Minute))
+	// One second inside the window survives; one second outside does not.
+	insideEdge := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDone, "", "Inside edge", "C", "peer3", 0, now.Add(-DashboardFinishedWindow).Add(time.Second))
+	insertDashboardTestJob(t, s, 4, core.SourceLidarr, core.StateDone, "", "Outside edge", "D", "peer4", 0, now.Add(-DashboardFinishedWindow).Add(-time.Second))
+	// Excluded by state regardless of how fresh they are.
+	insertDashboardTestJob(t, s, 5, core.SourceLidarr, core.StateParked, "", "Parked", "E", "", 0, now)
+	insertDashboardTestJob(t, s, 6, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Downloading", "F", "peer6", 0, now)
+	insertDashboardTestJob(t, s, 7, core.SourceLidarr, core.StateWanted, "", "Wanted", "G", "", 0, now)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := make([]int64, 0, len(page.Jobs))
+	for _, view := range page.Jobs {
+		got = append(got, view.Job.ID)
+	}
+	// sort=recent is updated_at descending, so newest finish first.
+	want := []int64{justDone, justFailed, insideEdge}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ids = %v, want %v", got, want)
+	}
+}
+
+func TestListDashboardJobsSortRecentBreaksTiesById(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	finishedAt := now.Add(-time.Minute)
+
+	low := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Low id", "A", "peer1", 0, finishedAt)
+	high := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDone, "", "High id", "B", "peer2", 0, finishedAt)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	// Equal updated_at: without the id tiebreaker Postgres' order is
+	// undefined and the same job could appear on two pages.
+	if len(page.Jobs) != 2 || page.Jobs[0].Job.ID != high || page.Jobs[1].Job.ID != low {
+		t.Fatalf("order = %+v, want [%d %d] (id descending on an updated_at tie)", page.Jobs, high, low)
+	}
+}
+
+func TestValidateDashboardJobsQueryRejectsRecentAscendingAndMissingNow(t *testing.T) {
+	base := DashboardJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 5, Now: time.Now()}
+
+	ascending := base
+	ascending.Dir = "asc"
+	if err := validateDashboardJobsQuery(ascending); err == nil {
+		t.Error("dir=asc accepted for sort=recent, want rejected")
+	}
+
+	noNow := base
+	noNow.Now = time.Time{}
+	if err := validateDashboardJobsQuery(noNow); err == nil {
+		t.Error("filter=finished accepted with a zero Now, want rejected")
+	}
+
+	// A zero Now is fine for every other filter: nothing reads it.
+	otherFilter := base
+	otherFilter.Filter = "done"
+	otherFilter.Now = time.Time{}
+	if err := validateDashboardJobsQuery(otherFilter); err != nil {
+		t.Errorf("filter=done with zero Now: %v, want nil", err)
+	}
+}
