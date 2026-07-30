@@ -364,11 +364,12 @@ export const t = {
       peer: 'PEER',
       when: 'WHEN',
     },
-    // The FAILED IMPORTS panel (#310): jobs whose current status is 'failed',
-    // time-unbounded — unlike RECENTLY FINISHED above, there is no window,
-    // since a failure a caller hasn't dealt with yet is still worth surfacing
-    // whenever it happened.
-    failedHeading: 'FAILED IMPORTS',
+    // The FAILED panel (#310): jobs whose STATE is FAILED, time-unbounded —
+    // unlike RECENTLY FINISHED above, there is no window, since a failure a
+    // caller hasn't dealt with yet is still worth surfacing whenever it
+    // happened. "FAILED JOBS", not "FAILED IMPORTS": a row here can equally
+    // be a search or download failure, not only an import rejection.
+    failedHeading: 'FAILED JOBS',
     noneFailed: 'Nothing failed',
     failedGridHead: {
       status: 'ST',

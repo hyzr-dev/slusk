@@ -34,10 +34,11 @@ const FINISHED_PARAMS: JobPageParams = {
   skipFacets: true,
 };
 
-// Mirrors the params Overview.tsx passes for the failed-imports panel (#310).
+// Mirrors the params Overview.tsx passes for the FAILED panel (#310, review
+// follow-up: filter is 'failures', the state-keyed predicate, not 'failed').
 const FAILED_PARAMS: JobPageParams = {
   page: 0,
-  filter: 'failed',
+  filter: 'failures',
   sort: 'recent',
   dir: 'desc',
   source: 'all',
@@ -493,9 +494,9 @@ describe('Overview', () => {
     expect(screen.getByText('Finished Album')).toBeInTheDocument();
   });
 
-  // #310: the FAILED IMPORTS panel, a third independent panel/query alongside
+  // #310: the FAILED panel, a third independent panel/query alongside
   // TRANSFERS and RECENTLY FINISHED.
-  it('renders the failed-imports panel with a reason, preferring failDetail over failReason', () => {
+  it('renders the failed panel with a reason, preferring failDetail over failReason', () => {
     renderOverview(jobPage, charts, status, makeJobPage([]), makeJobPage([
       {
         ...baseJob, id: 92, title: 'Bad Import', artist: 'Artist C', status: 'failed', state: 'FAILED',

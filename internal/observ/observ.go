@@ -133,8 +133,7 @@ type jobDTO struct {
 	// engine-assigned category), while FailDetail is whatever detail string
 	// the pipeline actually wrote to the audit trail for the failure — often
 	// far more specific. It is populated only on the REST list path (see
-	// enrichJobDTOs) and is therefore absent from stream frames — see
-	// enrichJobDTOs' assignment comment for why.
+	// enrichJobDTOs) and is therefore absent from stream frames.
 	FailDetail    string  `json:"failDetail,omitempty"`
 	NextAttemptAt string  `json:"nextAttemptAt"`
 	Retries       int     `json:"retries"`
@@ -368,8 +367,8 @@ type ServerDeps struct {
 	// PagedJobs backs GET /api/jobs.
 	PagedJobs PagedJobsFunc
 	// FailureDetails enriches GET /api/jobs' failed rows with jobDTO.FailDetail
-	// (issue #310, Overview's Failed Imports panel). nil is nil-tolerant — see
-	// enrichJobDTOs — and every existing test's ServerDeps leaves it unset.
+	// (issue #310, Overview's Failed panel). A nil func is tolerated — see
+	// enrichJobDTOs.
 	FailureDetails FailureDetailsFunc
 	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
 	// /api/jobs/{id}.

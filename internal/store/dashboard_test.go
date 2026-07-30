@@ -1892,6 +1892,69 @@ func TestListDashboardJobsFilterInflightAndFinishedAreDisjoint(t *testing.T) {
 	}
 }
 
+// TestListDashboardJobsFilterFailuresSelectsByStateNotStatus is the fix for
+// Overview's FAILED panel (issue #310 review follow-up): filter=failed falls
+// through to dashboardJobsWhere's default case, which matches
+// dashboardJobStatusSQL's status-derived 'failed' — and that status also
+// covers a job still in DOWNLOADING whose current candidate's transfers all
+// errored (agg.live = 0 AND agg.failed > 0), which the pipeline will retry
+// with the next candidate. filter=failures must be keyed on j.state instead,
+// so it selects only a terminal StateFailed job and excludes that
+// mid-retry DOWNLOADING one. Both filters are asserted against the same
+// fixture so the difference between them is the thing under test — if
+// "failures" were ever routed to the default case (dashboardJobStatusSQL),
+// this test would catch it because the DOWNLOADING/errored job would then
+// wrongly appear in its results too.
+func TestListDashboardJobsFilterFailuresSelectsByStateNotStatus(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// Terminal failure: state FAILED. Must appear under both "failed" and
+	// "failures".
+	terminal := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateFailed, "", "Terminal", "A", "", 0, now)
+	// Mid-retry: state DOWNLOADING, but its only transfer errored, so its
+	// dashboard status is 'failed' too. Must appear under "failed" but NOT
+	// under "failures".
+	midRetry := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferErrored, "MidRetry", "B", "peer2", 0, now.Add(time.Second))
+
+	failuresPage, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "failures", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("filter=failures: %v", err)
+	}
+	gotFailures := map[int64]bool{}
+	for _, view := range failuresPage.Jobs {
+		gotFailures[view.Job.ID] = true
+	}
+	if !gotFailures[terminal] {
+		t.Errorf("filter=failures missing terminal job %d", terminal)
+	}
+	if gotFailures[midRetry] {
+		t.Errorf("filter=failures wrongly includes mid-retry DOWNLOADING job %d", midRetry)
+	}
+	if len(failuresPage.Jobs) != 1 {
+		t.Fatalf("filter=failures jobs = %+v, want exactly [%d]", failuresPage.Jobs, terminal)
+	}
+
+	failedPage, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "st", Dir: "asc", Filter: "failed", Source: "all", PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("filter=failed: %v", err)
+	}
+	gotFailed := map[int64]bool{}
+	for _, view := range failedPage.Jobs {
+		gotFailed[view.Job.ID] = true
+	}
+	// filter=failed is the status-derived predicate: it DOES include the
+	// mid-retry job, unlike filter=failures above — that's the whole point
+	// of the distinction this test exists to lock in.
+	if !gotFailed[terminal] || !gotFailed[midRetry] {
+		t.Errorf("filter=failed jobs = %+v, want both %d and %d", failedPage.Jobs, terminal, midRetry)
+	}
+}
+
 func TestListDashboardJobsSortTransferRanksImportingAfterWaiting(t *testing.T) {
 	s := newTestStore(t)
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)

@@ -37,13 +37,23 @@ const MAX_RECONCILE_ROWS = 7;
 // (issue #286).
 const FINISHED_PAGE_SIZE = 5;
 
-// Rows in the FAILED IMPORTS panel (#310). Selection is server-side:
-// filter=failed is every job whose current status is 'failed', time-unbounded
-// — unlike filter=finished above, which is windowed to
-// store.DashboardFinishedWindow, a failure a caller hasn't dealt with yet is
-// still worth surfacing regardless of when it happened. sort=recent is
-// newest-failure-first. The panel opts out of facets (skipFacets) for the
-// same reason as the finished panel: it reads neither total nor chips.
+// Rows in the FAILED panel (#310, review follow-up). Selection is
+// server-side: filter=failures is every job whose STATE (not
+// dashboardJobStatusSQL's derived status) is FAILED — deliberately
+// state-keyed, like filter=inflight/finished, so a job still DOWNLOADING
+// whose current candidate merely errored and will be retried does not also
+// show up here. Time-unbounded — unlike filter=finished above, which is
+// windowed to store.DashboardFinishedWindow — since a failure a caller
+// hasn't dealt with yet is still worth surfacing regardless of when it
+// happened. sort=recent is newest-failure-first. The panel opts out of
+// facets (skipFacets) for the same reason as the finished panel: it reads
+// neither total nor chips.
+//
+// This panel's set can overlap with RECENTLY FINISHED above for the length
+// of DashboardFinishedWindow: a job that just failed is both "recently
+// finished" and "still failed". That overlap is deliberate, not a bug — the
+// two panels answer different questions ("what just happened" vs "what
+// still needs attention, however old").
 const FAILED_PAGE_SIZE = 8;
 
 /**
@@ -101,7 +111,7 @@ export default function Overview() {
     source: 'all', q: '', pageSize: FINISHED_PAGE_SIZE, skipFacets: true,
   });
   const failedQuery = useJobs({
-    page: 0, filter: 'failed', sort: 'recent', dir: 'desc',
+    page: 0, filter: 'failures', sort: 'recent', dir: 'desc',
     source: 'all', q: '', pageSize: FAILED_PAGE_SIZE, skipFacets: true,
   });
   const result = jobsQuery.data;
@@ -336,7 +346,7 @@ export default function Overview() {
           ) : (
             <div role="table">
               <div role="row" className={`${styles.failedGrid} ${styles.transferHead}`}>
-                <span role="columnheader">{t.overview.failedGridHead.status}</span>
+                <span role="columnheader" className={styles.statusCell}>{t.overview.failedGridHead.status}</span>
                 <span role="columnheader">{t.overview.failedGridHead.album}</span>
                 <span role="columnheader">{t.overview.failedGridHead.reason}</span>
                 <span role="columnheader" className={styles.headRight}>{t.overview.failedGridHead.when}</span>
@@ -352,7 +362,7 @@ export default function Overview() {
                     onClick={() => navigate(`/jobs/${job.id}`)}
                     onKeyDown={(event) => handleRowKeyDown(event, () => navigate(`/jobs/${job.id}`))}
                   >
-                    <span role="cell">
+                    <span role="cell" className={styles.statusCell}>
                       <Tag status={job.status} bare />
                     </span>
                     <span role="cell" className={styles.albumCell}>
