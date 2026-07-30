@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
@@ -153,6 +153,27 @@ describe('Overview', () => {
     // Unlike the old dashboard, failed jobs have no stat cell here — the
     // mock and spec only cover active/queued/imported/attention.
     expect(screen.queryByText('Failed')).not.toBeInTheDocument();
+  });
+
+  // #295: the IN FLIGHT subtitle used to say "downloading from N peers", but
+  // status.active (main.go's len(ActiveTransfers)) is a transfer count, not a
+  // distinct-peer count, and ActiveTransfers spans queued/in_progress/stalled
+  // — most of which aren't "downloading". The fix is wording-only: the stat's
+  // number must stay exactly status.active.
+  it('labels the IN FLIGHT subtitle by what it counts, not by peers (#295)', () => {
+    renderOverview(jobPage, charts, { ...status, active: 21 });
+    const inFlightCell = screen.getByText(t.overview.statInFlight).parentElement as HTMLElement;
+    expect(within(inFlightCell).getByText('21')).toBeInTheDocument();
+    expect(within(inFlightCell).getByText('21 active transfers')).toBeInTheDocument();
+    expect(within(inFlightCell).queryByText(/peers/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the IN FLIGHT subtitle singular for exactly one active transfer (#295)', () => {
+    renderOverview(jobPage, charts, { ...status, active: 1 });
+    const inFlightCell = screen.getByText(t.overview.statInFlight).parentElement as HTMLElement;
+    expect(within(inFlightCell).getByText('1')).toBeInTheDocument();
+    expect(within(inFlightCell).getByText('1 active transfer')).toBeInTheDocument();
+    expect(within(inFlightCell).queryByText('1 active transfers')).not.toBeInTheDocument();
   });
 
   // The governing principle of #268: the frontend shows exactly what the
