@@ -17,11 +17,13 @@ const JUDGEMENT = {
     number: { type: 'number' },
     kind: { enum: ['bug', 'feature', 'techdebt', 'test'] },
     prodImpact: { enum: ['none', 'cosmetic', 'degraded', 'dataloss', 'outage'] },
-    // minLength rules out an empty or single-char placeholder that would
-    // otherwise satisfy `required` while saying nothing -- long enough that a
-    // real "none" / "cosmetic" sentence or a file:line reference clears it
-    // comfortably, short enough not to reject a terse but genuine answer.
-    impactEvidence: { type: 'string', minLength: 8 },
+    // minLength only rules out the empty string -- the original hole. It
+    // deliberately does not try to express the real rule ("a path:line
+    // reference is required when prodImpact is above cosmetic"), because a
+    // length floor can't state a conditional-on-content rule; that lives in
+    // the judge prompt below instead, where a reviewer reading the report can
+    // actually check it against the field's content.
+    impactEvidence: { type: 'string', minLength: 1 },
     touches: { type: 'array', items: { type: 'string' } },
     frontend: { type: 'boolean' },
     effort: { enum: ['S', 'M', 'L'] },
@@ -170,9 +172,13 @@ const judged = await pipeline(
 
      prodImpact is about the running production instance, not about how annoying
      the issue is. impactEvidence is a required field on every issue, not just the
-     severe ones: when prodImpact is 'none' or 'cosmetic', say so plainly there
-     instead of leaving it empty; anything above 'cosmetic' needs impactEvidence
-     naming a real file:line where it manifests.
+     severe ones. When prodImpact is above 'cosmetic', impactEvidence must be a
+     path:line reference a reader can open -- not a description, not a
+     restatement of the issue title. When it's 'none' or 'cosmetic', say briefly
+     why there is no production impact instead of leaving it empty. A reviewer
+     will open the reference you give against the actual file: one that doesn't
+     resolve, or doesn't say what you claimed, is worse than an honest lower
+     prodImpact.
 
      touches must list the repo-relative paths an implementation would change.
      Be accurate: these paths decide which issues are scheduled in parallel, and
