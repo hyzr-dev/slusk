@@ -1,6 +1,9 @@
 # Backlog triage — a project-manager capability
 
-Design, 2026-07-30. Status: approved, not yet implemented.
+Design, 2026-07-30. Status: implemented. See the amendments at the foot of this document —
+the implementation diverged from this design in six places, and the shipped code is the
+authority wherever they disagree. Amendments are recorded rather than edited in silently, so
+that the reason a decision changed survives alongside the decision.
 
 ## Purpose
 
@@ -25,6 +28,10 @@ most are not the ones most recently filed.
   takes minutes, and only one lab can run at a time.
 
 ## Two files
+
+> **Amended — see [A3](#a3-four-parts-not-two-files).** There are four parts, not two: wave
+> computation moved out of the workflow script into `scripts/triage/waves.mjs`, with its data
+> in `scripts/triage/contracts.json`.
 
 | File | Owns |
 |---|---|
@@ -74,6 +81,11 @@ than a boolean: it is what compensates for the missing predicate.
 
 Workflow scripts have no filesystem access, so everything file-shaped is read inline and
 handed in as `args`:
+
+> **Amended — see [A1](#a1-invalidation-is-a-content-digest-not-a-timestamp) and
+> [A2](#a2-tea-issues-truncates-silently-at-30).** There is no `updated` field in `tea`'s
+> output, so the first axis is a content digest; and the `tea` invocation below needs an
+> explicit `--limit` or it silently returns only the first 30 of 42 issues.
 
 1. `tea issues --state open --output json` — numbers and `updated` timestamps.
 2. `docs/triage/state.json` — the previous run's structured judgements.
@@ -183,6 +195,13 @@ So the design carries a short, explicit list of shared contracts with both their
 | `album-jobs` | `internal/store` schema | `internal/pipeline` |
 | `config` | `internal/config` | `config.example.toml` and production's `config.toml` |
 
+> **Deviation, deliberately not fixed — see
+> [A6](#a6-contractsjsons-album-jobs-side-b-is-a-directory-and-stays-one).** The shipped
+> `scripts/triage/contracts.json` gives `album-jobs` side B as `internal/pipeline/`, a
+> package-level side that reinstates exactly the coarse directory rule this section says was
+> replaced. This design is right and the data is over-conservative; it was left alone because
+> it costs extra waves, not correctness.
+
 An issue touches a contract when its `touches` intersects either side. **Two issues
 touching the same contract conflict regardless of file overlap.**
 
@@ -261,6 +280,10 @@ independent" applies to this skill's commands, not to the whole chain.
 
 `docs/triage/YYYY-MM-DD-backlog.md`, sections ordered by what they demand of the reader:
 
+> **Amended — see [A4](#a4-the-report-has-twelve-sections-not-seven).** The shipped layout has
+> twelve sections. `SKILL.md` is the authority on the report layout; this list is the original
+> sketch.
+
 1. **Header** — baseline result, commit, issues read vs. cached, browser coverage.
 2. **Requires your decision** — the `needsDecision` flags. First, because it is the only
    part that blocks. A new required config key discovered after a merge stops the
@@ -277,6 +300,10 @@ Dated filename: two runs the same day overwrite each other, while `git log docs/
 becomes a history of how the backlog moved. Together with `state.json` — also committed,
 so a diff shows when the triage changed its mind about an issue — it answers "when did
 this become urgent, and why".
+
+> **Amended — see [A5](#a5-the-capability-commits-nothing-including-its-own-output).** The
+> capability never commits anything, its own output included. Both files are left unstaged;
+> committing them is the maintainer's decision, taken outside the capability.
 
 ## Error handling
 
@@ -308,3 +335,134 @@ cannot be diffed, and being diffable is most of the value.
 
 After any run that started a Vite server or ran vitest, the orchestrator reaps orphaned
 worker pools with `ps`. The script cannot: it has no shell.
+
+> **Amended.** "There is nothing here to unit-test" did not survive implementation. Wave
+> computation moved into `scripts/triage/waves.mjs` precisely so it could be tested, and it
+> has 35 tests. The four dry-run checks above still stand as the end-to-end verification.
+
+## Amendments
+
+Recorded 2026-07-30, after implementation and a whole-branch review. Each entry says what
+this design asserts, what the code actually does, and which is authoritative. **The code is
+authoritative in A1–A5** — those are places the design was written before something was
+known, and it was not edited in place because the reasoning that produced the original text
+is worth keeping next to the correction. **A6 is the one entry where this design is right and
+the shipped data is not**, and it says why the data was left alone anyway.
+
+### A1. Invalidation is a content digest, not a timestamp
+
+Phase 0 describes invalidating a cached judgement when the issue's `updated` timestamp is
+newer than the cached entry. **There is no `updated` field anywhere in `tea`'s output.** The
+issue list gives author, index, labels, milestone, owner, repo, state and title; a single
+issue adds `created` and `closedAt`. Nothing records when an issue last changed, so there is
+nothing to compare.
+
+The implementation hashes the issue's **title, body, labels and comments** into a sha256
+content digest and compares digests instead. Comments are in the digest deliberately: a
+comment can add a `touches` path or change the severity picture as much as an edit to the
+body, so hashing only the body would miss real change. The digest must contain nothing
+time-based — a fetch timestamp or a salt makes every entry permanently stale and the cache
+never hits.
+
+The two-axis structure the design argues for is unchanged and still correct; only the first
+axis's mechanism differs. `invalidate()` in `scripts/triage/waves.mjs` is the implementation;
+`SKILL.md` step 1 is the procedure.
+
+### A2. `tea issues` truncates silently at 30
+
+Phase 0 shows `tea issues --state open --output json` with no `--limit`. That returns the
+first page — 30 items by default — with no warning anywhere in its output. The real backlog
+was 42 at the time of the first run, so this design's own command would have read 30 of them
+and produced a report that looked complete.
+
+The implementation passes `--limit 200` and treats a returned count landing exactly on a page
+size as suspicious rather than as a coincidence. A capability whose premise is "every open
+issue" and which silently covers page one only is worse than useless: it looks finished.
+
+### A3. Four parts, not "Two files"
+
+The design's file table has two entries and gives wave computation to the workflow script.
+The implementation has four parts, because a Workflow script cannot be unit-tested and wave
+computation is the one part of this capability where a wrong answer costs a merge conflict
+inside a running agent's worktree:
+
+| Part | Owns | Tested |
+|---|---|---|
+| `.claude/skills/backlog-triage/SKILL.md` | The method, the prod-impact rubric, the evidence contract, the report layout. Entry point `/backlog-triage`. | Prose; no |
+| `.claude/workflows/backlog-triage.js` | The engine: arg validation, the baseline barrier, agent fan-out, the judgement schema, the serial browser loop. | No — a Workflow script cannot be imported |
+| `scripts/triage/waves.mjs` | Pure computation: conflicts, contracts, rank, waves, cache invalidation. | Yes — 35 tests |
+| `scripts/triage/contracts.json` | The shared-contract data the wave computation reads. | Data |
+
+The split is the whole reason the scheduling rules are testable at all, so it is a departure
+worth keeping rather than one to reconcile back.
+
+### A4. The report has twelve sections, not seven
+
+The Output section lists seven. `SKILL.md` — which is the authority on the report layout —
+now specifies twelve. The five additions, in the order they appear:
+
+- **Confirmed still reproducing** — the `ISSUES_FOUND` browser verdicts. The design's layout
+  had `PASS` feeding Candidates to close and `BLOCKED` feeding Not verified, and no home for
+  the third verdict, which is the most valuable thing the browser phase can produce.
+- **Conflict density**, split out from what this design called simply "Dependencies". A
+  conflict ("do not work these two at once") and a dependency ("do this one first") are
+  different relations with different shapes; one graph carrying both leaves a reader unable to
+  tell which an edge means, and a real backlog's conflict count — hundreds of edges across a
+  few dozen issues — is unreadable as a graph anyway. Dependencies stay a mermaid graph of
+  `statedBlockers` only; conflicts are a count plus the few issues driving most of them.
+- **Unassessed** — the judge agent returned nothing.
+- **Unassessable** — a judgement came back with an unrecognised `prodImpact` or `effort`.
+- **Unschedulable** — a judgement whose `touches` named a directory (see
+  [A6](#a6-contractsjsons-album-jobs-side-b-is-a-directory-and-stays-one) for the related
+  data question). Three distinct exclusion modes needing three distinct repairs; this design's
+  error-handling table had only "an agent returns null".
+
+`SKILL.md` also adds a rule this design does not state: every list of issues in the report
+declares its own sort order. A fresh run's judgements arrive in fetch order while a
+regeneration reads `state.json`'s `issues` map, whose stringified-number keys JavaScript
+always enumerates in ascending numeric order — two sources, two orders, same data, and a
+section that iterates whichever it was handed makes successive reports undiffable.
+
+### A5. The capability commits nothing, including its own output
+
+The Output section says `state.json` is "also committed, so a diff shows when the triage
+changed its mind about an issue". `SKILL.md` now forbids the capability committing anything
+at all, its own two output files included, and that supersedes this.
+
+The reasoning: an agent that commits its own output has decided, on the maintainer's behalf,
+that this run's judgement is worth keeping — and a triage that ran on a bad premise or against
+a red tree should be discardable without a revert. The consequence is that
+`git log docs/triage/` is a history of the runs the maintainer chose to keep, not of every run
+the capability produced. The design's "when did this become urgent, and why" still works over
+the runs that were kept; it is just a weaker claim than the original text implies.
+
+The one report currently in this repository's history was committed by hand, as verification
+evidence for the plan that built the capability. Finding it in `git log` is not evidence that
+committing is normal behaviour.
+
+### A6. `contracts.json`'s `album-jobs` side B is a directory, and stays one
+
+This is the one entry where the design is right and the data is not.
+
+The Synthesize section argues at length that treating all of `internal/pipeline/` as one unit
+was a poor approximation of "shared contract", and that with contracts modelled explicitly,
+file-level granularity is enough everywhere. The shipped `scripts/triage/contracts.json`
+nonetheless gives `album-jobs` two sides of `internal/store/migrations/` and
+`internal/pipeline/` — both directories. The second reinstates precisely the coarse rule this
+design replaced: every pair of issues touching any file under `internal/pipeline/` now
+conflicts through the contract even when their files are disjoint.
+
+**It was left unchanged deliberately.** The consequence is extra waves, not a wrong answer:
+an over-conservative edge serialises work that could have run in parallel, which costs
+throughput. The failure it would introduce if removed carelessly is the silent one — two
+agents skewing opposite ends of the job-state contract, each green against its own mock.
+Tightening it needs the file-level analysis of who actually writes `album_jobs` transitions,
+which is real work with no test to catch a mistake in it, and it is not part of a fix wave.
+
+The `migrations/` side, by contrast, earns its keep as a directory and should not be narrowed:
+**two issues each proposing a new `0009_*.sql` under different filenames have no file overlap
+at all.** The directory side is the only thing that stops two competing migration 0009s
+sharing a wave — and since a merged migration is immutable in this repo, that collision is
+expensive to unwind. So "directory sides are always over-conservative" is not the right
+generalisation either; a side needs to be as coarse as the thing that actually collides, and
+for migrations the thing that collides is the sequence number, not the filename.
