@@ -211,14 +211,19 @@ own transport types and `main.go` adapts between them.
 
 ## Known noise
 
-Three known failures. None is a regression, and none may be "fixed" by weakening the test.
-A failure that is *not* on this list means the branch broke something.
+Two known failures. Neither is a regression, and neither may be "fixed" by weakening the
+test. A failure that is *not* on this list means the branch broke something.
 
 | Failure | Profile | Tracked as |
 |---|---|---|
-| `internal/store` `TestOpenRecyclesIdleConnections` | Intermittent under load (full suite or `-count=5`), passes in isolation | #171 |
-| `web/` `Settings.test.tsx` | Times out under the full suite, green in isolation — the same profile as #171 on the Go side | #242 |
-| `internal/soulseek` `TestConnectPeerIndirectSuccess` | Fails in container (Gitea act_runner) only, passes locally | #250 |
+| `internal/store` `TestOpenRecyclesIdleConnections` | Fails under load. `go test ./internal/store/ -count=5` reproduces it; a single `go test ./...` usually does not, which is why agent runs report green | #171 |
+| `internal/soulseek` `TestConnectPeerIndirectSuccess` | Fails only in container (Gitea act_runner). Invisible locally — a green local run is not evidence about it | #250 |
 
-Keep this list keyed on issue numbers: when one of them is closed, the entry stops being
-an excuse and starts being a stale claim that hides a real failure.
+Both entries state where the failure is *visible*, because a green run under the wrong
+conditions is not evidence. Verified 2026-07-30 on `main`: full `go test ./...` exits 0,
+`npm test` is 362/362, and #171 still reproduces under `-count=5`.
+
+Keep the list keyed on issue numbers: when one is closed, the entry stops being an excuse
+and starts being a stale claim that hides a real failure. #242 (`Settings.test.tsx`
+timing out under the full suite) was on this list until 2026-07-30 and is no longer —
+it did not reproduce, and the issue is a candidate to close.
