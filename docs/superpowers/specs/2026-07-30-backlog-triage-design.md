@@ -36,6 +36,38 @@ matters mechanically: `Workflow` may be invoked when a skill's instructions say 
 skill is what makes `/backlog-triage` a legitimate entry point to orchestration instead of
 something the user must opt into by hand every time.
 
+## Relationship to the existing skills
+
+The rule for every agent in this design: **delegate to a skill when a skill owns the
+contract; write the prompt inline when the stage is bespoke.** A skill exists to carry a
+contract across several call sites; a stage with one call site does not need one.
+
+| Skill | Used how |
+|---|---|
+| `verifying-ui-in-browser` | Required sub-skill for phase 2's browser leg. It owns the three-verdict contract and the one-browser rule. Restating it here would create a second truth. |
+| `issue-tracker-cli` | Required sub-skill wherever `tea` is called — phase 0 and 1a. Extracted from the four skills that had each grown their own copy. |
+| `resolve-issue` | **Not used.** See below. |
+| phases 1a, 1b, 3 | Inline prompts. No skill owns "distil issue JSON" or the prod-impact rubric, and the rubric lives in this design's own `SKILL.md`. |
+
+`resolve-issue` cannot run as a subagent. It has two hard human gates — "wait for user
+approval before implementing" in step 3, and "wait for the user to confirm the fix works"
+before the PR in step 7. A subagent invoking it blocks on a user who is not there. It is
+an orchestrator script for a session with a human present, not an agent prompt.
+
+It is still worth reading before implementing this. Its model table (haiku to explore,
+sonnet to implement and fix, the default model to plan and review) is close to the one
+below, so the budget rule here follows established practice rather than inventing it. Its
+pre- and post-flight branch checks exist because an agent's commit once landed on the
+user's branch — irrelevant to a capability that never commits, but the reason to keep
+that skill as the model for anything that does.
+
+One asymmetry is worth stating because it justifies a field in the schema. `resolve-issue`
+decides whether browser verification is needed by running a predicate on the diff, and
+says explicitly not to judge from the issue title. This design has no diff — nothing has
+been implemented — so its selection rests on `frontend` as judged in 1b, and is
+principally weaker. That is why `reproCheck` must be a concrete falsifiable claim rather
+than a boolean: it is what compensates for the missing predicate.
+
 ## Phases
 
 ### 0. Inline scouting (orchestrator, not the script)

@@ -211,6 +211,14 @@ own transport types and `main.go` adapts between them.
 
 ## Known noise
 
-`internal/store` `TestOpenRecyclesIdleConnections` fails intermittently under load (full
-suite or `-count=5`) and passes in isolation. Tracked as #171. It is not a regression —
-do not "fix" it by weakening the test.
+Three known failures. None is a regression, and none may be "fixed" by weakening the test.
+A failure that is *not* on this list means the branch broke something.
+
+| Failure | Profile | Tracked as |
+|---|---|---|
+| `internal/store` `TestOpenRecyclesIdleConnections` | Intermittent under load (full suite or `-count=5`), passes in isolation | #171 |
+| `web/` `Settings.test.tsx` | Times out under the full suite, green in isolation — the same profile as #171 on the Go side | #242 |
+| `internal/soulseek` `TestConnectPeerIndirectSuccess` | Fails in container (Gitea act_runner) only, passes locally | #250 |
+
+Keep this list keyed on issue numbers: when one of them is closed, the entry stops being
+an excuse and starts being a stale claim that hides a real failure.
