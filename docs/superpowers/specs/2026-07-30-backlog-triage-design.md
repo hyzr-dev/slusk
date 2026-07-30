@@ -162,14 +162,43 @@ is `log()`ed — a silent cap reads as full coverage.
 
 Waves are computed in plain JavaScript. **No agent decides what can run in parallel.**
 
-- An edge joins two issues when their `touches` overlap at directory or file level.
-- Overlap is deliberately coarse at directory level: `internal/pipeline/` is the only
-  contact surface between modules, so two issues there are treated as conflicting even in
-  different files. A false conflict costs one extra wave; a missed one costs a merge
-  conflict inside a running agent's worktree.
-- Greedy colouring yields wave 1 as the largest pairwise-disjoint set, ordered by
-  `prodImpact` rank with `effort` ascending as tiebreak.
-- `statedBlockers` are added as hard ordering edges on top.
+Two kinds of edge, both computed, neither judged:
+
+**File overlap.** An edge joins two issues whose `touches` intersect at file level.
+
+**Shared contract.** File overlap is blind to coupling across a wire: two issues can change
+opposite ends of the same protocol while touching entirely disjoint files. #275 (the stream
+must carry page invalidation) changes the producer in `internal/observ/stream.go`; #267 (two
+EventSource connections on mount) changes the consumer in `web/src/api/stream.tsx`. Zero
+overlap, so the algorithm would schedule them together — and two agents would change
+opposite ends of one protocol at the same time. That is worse than a merge conflict: a
+merge conflict is loud, a protocol skew is silent and green, because each side is tested
+against its own mock.
+
+So the design carries a short, explicit list of shared contracts with both their sides:
+
+| Contract | Side A | Side B |
+|---|---|---|
+| `sse-events` | `internal/observ/stream.go` | `web/src/api/stream.tsx` |
+| `album-jobs` | `internal/store` schema | `internal/pipeline` |
+| `config` | `internal/config` | `config.example.toml` and production's `config.toml` |
+
+An issue touches a contract when its `touches` intersects either side. **Two issues
+touching the same contract conflict regardless of file overlap.**
+
+This replaces an earlier rule that treated all of `internal/pipeline/` as one unit on the
+grounds that it was the only contact surface between modules. That premise came from
+CLAUDE.md and is no longer true — the SSE layer is a second one — and the coarse directory
+rule turned out to be a poor approximation of "shared contract" anyway. With contracts
+modelled explicitly, file-level granularity is enough everywhere, which is both less
+conservative and more correct.
+
+The list must be maintained by hand, like the known-noise list, and it is worth stating
+plainly that a contract nobody records is a contract the waves cannot see.
+
+Then: greedy colouring yields wave 1 as the largest pairwise-disjoint set, ordered by
+`prodImpact` rank with `effort` ascending as tiebreak. `statedBlockers` are added as hard
+ordering edges on top.
 
 Only then does one agent write the prose. It explains the computed structure; it does not
 decide it.
