@@ -229,6 +229,50 @@ func TestImportingVerifyAllUnmatchedStillFailsCandidate(t *testing.T) {
 	}
 }
 
+// TestImportingVerifyAlreadyCompleteInLidarrSucceeds: Lidarr's manual import
+// preview can reject every file with no TrackIDs at all because the release
+// is already fully present in the library (e.g. imported by a previous
+// candidate, or by an out-of-band Lidarr action) rather than because this
+// candidate's files are bad. Failing the candidate in that case just burns
+// through every remaining candidate for an album that was never actually
+// missing (issue #280). AlbumStatus reporting present>=total must short-
+// circuit straight to the same already-imported success path as the
+// empty-folder case.
+func TestImportingVerifyAlreadyCompleteInLidarrSucceeds(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Album already downloaded"}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Album already downloaded"}},
+		},
+		albumPresent: 2,
+		albumTotal:   2,
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `A\01.mp3`, Size: 10}, {Filename: `A\02.mp3`, Size: 10},
+	}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateDone {
+		t.Errorf("album already complete in Lidarr should advance job to DONE, got %v", got)
+	}
+	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventAttemptSucceeded {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventAttemptSucceeded)
+	}
+	if len(music.executedItems) != 0 {
+		t.Errorf("ExecuteManualImport must not run when the album is already complete, got %+v", music.executedItems)
+	}
+	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
+		t.Errorf("expected the now-redundant download folder cleaned up, got %+v", peers.deletedFolders)
+	}
+}
+
 // TestImportingCoverageUsesMinTrackCountBand: a candidate covering the
 // smallest valid edition (2 tracks) passes even though the canonical
 // AlbumStatus total is 3.
