@@ -2027,3 +2027,47 @@ func TestValidateDashboardJobsQueryRejectsRecentAscendingAndMissingNow(t *testin
 		t.Errorf("filter=done with zero Now: %v, want nil", err)
 	}
 }
+
+func TestListDashboardJobsSkipFacetsReturnsPageWithoutCounts(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	first := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "First", "A", "peer1", 0, now.Add(-time.Minute))
+	insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDone, "", "Second", "B", "peer2", 0, now.Add(-2*time.Minute))
+	insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateWanted, "", "Wanted", "C", "", 0, now)
+
+	query := DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 1, Now: now,
+		SkipFacets: true,
+	}
+	page, err := s.ListDashboardJobs(context.Background(), query)
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != first {
+		t.Fatalf("jobs = %+v, want exactly job %d", page.Jobs, first)
+	}
+	if page.Total != 0 {
+		t.Errorf("Total = %d, want 0 when facets are skipped", page.Total)
+	}
+	if page.Facets != (DashboardJobsFacets{}) {
+		t.Errorf("Facets = %+v, want the zero value when skipped", page.Facets)
+	}
+
+	// The same query without SkipFacets still reports both.
+	query.SkipFacets = false
+	withFacets, err := s.ListDashboardJobs(context.Background(), query)
+	if err != nil {
+		t.Fatalf("ListDashboardJobs without SkipFacets: %v", err)
+	}
+	if withFacets.Total != 2 {
+		t.Errorf("Total = %d, want 2", withFacets.Total)
+	}
+	if withFacets.Facets.Status.Done != 2 {
+		t.Errorf("Facets.Status.Done = %d, want 2", withFacets.Facets.Status.Done)
+	}
+	// Facets ignore the status filter, so the WANTED job still counts in All.
+	if withFacets.Facets.Status.All != 3 {
+		t.Errorf("Facets.Status.All = %d, want 3", withFacets.Facets.Status.All)
+	}
+}

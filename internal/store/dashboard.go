@@ -278,6 +278,15 @@ type DashboardJobsQuery struct {
 	// from the database's now() so tests are independent of the wall clock,
 	// matching how every other time-dependent store method takes its `now`.
 	Now time.Time
+	// SkipFacets omits the status/source facet queries and the total count,
+	// leaving DashboardJobsPage.Total and .Facets at their zero values. The
+	// facet query evaluates dashboardJobStatusSQL over every non-cancelled row
+	// — measured at ~85ms warm against production (5183 album_jobs, 15716
+	// candidates, 74174 transfers, see issue #286) — and it runs regardless of
+	// which filter was asked for, since facets deliberately ignore the status
+	// filter. A caller that renders neither a total nor facet chips should not
+	// pay for them. Callers that do read them must leave this false.
+	SkipFacets bool
 }
 
 // DashboardStatusFacets contains counts for each dashboard status. All ignores
@@ -491,40 +500,44 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	}
 	defer tx.Rollback()
 
-	statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
-	statusSQL := `SELECT COUNT(*),
-		COUNT(*) FILTER (WHERE status = 'active'),
-		COUNT(*) FILTER (WHERE status = 'importing'),
-		COUNT(*) FILTER (WHERE status = 'queued'),
-		COUNT(*) FILTER (WHERE status = 'stalled'),
-		COUNT(*) FILTER (WHERE status = 'failed'),
-		COUNT(*) FILTER (WHERE status = 'parked'),
-		COUNT(*) FILTER (WHERE status = 'done')
-		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
 	var page DashboardJobsPage
-	if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
-		&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
-		&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
-		&page.Facets.Status.Parked, &page.Facets.Status.Done,
-	); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
-	}
+	if !q.SkipFacets {
+		statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
+		statusSQL := `SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE status = 'active'),
+			COUNT(*) FILTER (WHERE status = 'importing'),
+			COUNT(*) FILTER (WHERE status = 'queued'),
+			COUNT(*) FILTER (WHERE status = 'stalled'),
+			COUNT(*) FILTER (WHERE status = 'failed'),
+			COUNT(*) FILTER (WHERE status = 'parked'),
+			COUNT(*) FILTER (WHERE status = 'done')
+			FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
+		if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
+			&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
+			&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
+			&page.Facets.Status.Parked, &page.Facets.Status.Done,
+		); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
+		}
 
-	sourceWhere, sourceArgs := dashboardJobsWhere(q, true, false)
-	sourceSQL := `SELECT COUNT(*),
-		COUNT(*) FILTER (WHERE source = 'manual'),
-		COUNT(*) FILTER (WHERE source = 'lidarr')
-		FROM (SELECT j.source AS source` + jobViewFrom + sourceWhere + `) dashboard_jobs`
-	if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
-		&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
-	); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: source facets: %w", err)
+		sourceWhere, sourceArgs := dashboardJobsWhere(q, true, false)
+		sourceSQL := `SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE source = 'manual'),
+			COUNT(*) FILTER (WHERE source = 'lidarr')
+			FROM (SELECT j.source AS source` + jobViewFrom + sourceWhere + `) dashboard_jobs`
+		if err := tx.QueryRowContext(ctx, sourceSQL, sourceArgs...).Scan(
+			&page.Facets.Source.All, &page.Facets.Source.Manual, &page.Facets.Source.Lidarr,
+		); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: source facets: %w", err)
+		}
 	}
 
 	where, args := dashboardJobsWhere(q, true, true)
-	countSQL := `SELECT COUNT(*)` + jobViewFrom + where
-	if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
-		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
+	if !q.SkipFacets {
+		countSQL := `SELECT COUNT(*)` + jobViewFrom + where
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&page.Total); err != nil {
+			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: total: %w", err)
+		}
 	}
 
 	args = append(args, q.PageSize, q.Page*q.PageSize)
