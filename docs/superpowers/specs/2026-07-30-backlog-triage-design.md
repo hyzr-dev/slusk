@@ -188,8 +188,9 @@ touching the same contract conflict regardless of file overlap.**
 
 This replaces an earlier rule that treated all of `internal/pipeline/` as one unit on the
 grounds that it was the only contact surface between modules. That premise came from
-CLAUDE.md and is no longer true — the SSE layer is a second one — and the coarse directory
-rule turned out to be a poor approximation of "shared contract" anyway. With contracts
+CLAUDE.md and is no longer true — the SSE layer is a second one, tracked as #290 along with
+three other places the file has drifted from the code — and the coarse directory rule
+turned out to be a poor approximation of "shared contract" anyway. With contracts
 modelled explicitly, file-level granularity is enough everywhere, which is both less
 conservative and more correct.
 
