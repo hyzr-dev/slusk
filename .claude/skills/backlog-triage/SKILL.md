@@ -117,6 +117,16 @@ open issue number as `args.issues` and `args.cached: []`.
 
 ### 2. Run the workflow
 
+**Before invoking the Workflow tool**, record the PIDs of any matching processes already
+running — step 5 needs this to know which ones it started:
+
+```bash
+ps -eo pid,command | grep -Ei 'vitest|jest|node .*vite' | grep -v grep | awk '{print $1}' > /tmp/triage-pids-before.txt
+```
+
+An empty file here is a normal result — it just means nothing matching was already
+running — not a sign of a problem to chase down.
+
 Invoke the Workflow tool with `{scriptPath: ".claude/workflows/backlog-triage.js", args:
 {issues: <stale numbers>, cached: <fresh judgement objects, per step 1>}}`.
 
@@ -259,16 +269,27 @@ implementation work.
 
 ### 5. Reap what the run left behind
 
-The script cannot do this — it has no shell. Note the wall-clock time before invoking the
-Workflow tool in step 2 (`date`), so you have a reference point for "older than this run".
-After any run that started a Vite server or a test runner:
+The script cannot do this — it has no shell. After any run that started a Vite server or a
+test runner, list matching processes again and compare against the before-list from step 2 —
+by PID set, not by elapsed time, so there is no arithmetic and no `ps` time-format (`etime`
+is `[[DD-]HH:]MM:SS`) to convert:
 
 ```bash
-ps -eo pid,ppid,rss,etime,command | grep -Ei 'vitest|jest|node .*vite' | grep -v grep
+ps -eo pid,command | grep -Ei 'vitest|jest|node .*vite' | grep -v grep | awk '{print $1}' > /tmp/triage-pids-after.txt
+sort /tmp/triage-pids-before.txt -o /tmp/triage-pids-before.txt
+sort /tmp/triage-pids-after.txt -o /tmp/triage-pids-after.txt
+comm -13 /tmp/triage-pids-before.txt /tmp/triage-pids-after.txt
 ```
 
-For every row with `ppid` `1` and an `etime` longer than the time since the mark above, kill
-it by PID:
+`comm -13` prints only the PIDs unique to the after-list — the ones that did not exist before
+this run started. A PID that was already running before the triage started is somebody
+else's process, not this run's leftover, and killing it would be worse than leaving an
+orphan: the set difference is what keeps this step from touching it. (You can still eyeball
+`ps -eo pid,ppid,rss,etime,command` for the same PIDs first — a survivor is recognisable by
+having been reparented to `ppid` `1` — but the kill list itself comes from the set
+difference, not from reading `ppid` or `etime`.)
+
+Kill every PID `comm` printed:
 
 ```bash
 kill -9 <pid> <pid> ...
