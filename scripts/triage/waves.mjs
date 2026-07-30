@@ -121,3 +121,32 @@ export function computeWaves(issues, contracts) {
     unassessable
   }
 }
+
+/**
+ * Split the open issues into those whose cached judgement still holds and
+ * those that must be re-judged.
+ *
+ * Two independent axes, because `touches` is an asserted relation between an
+ * issue and the code: the issue can move, and the code under it can move. An
+ * issue may sit untouched for months while the file it concerns is refactored
+ * away, so checking only the issue's timestamp is not enough.
+ */
+export function invalidate({ state, openIssues, changedPaths }) {
+  const fresh = []
+  const stale = []
+  const changed = new Set(changedPaths ?? [])
+
+  for (const open of openIssues) {
+    const cached = state?.issues?.[String(open.number)]
+    const movedIssue = !cached || cached.updated !== open.updated
+    const movedCode = cached
+      ? (cached.touches ?? []).some(path =>
+          [...changed].some(c => c === path || c.startsWith(path) || path.startsWith(c)))
+      : false
+
+    if (movedIssue || movedCode) stale.push(open.number)
+    else fresh.push(open.number)
+  }
+
+  return { fresh, stale }
+}

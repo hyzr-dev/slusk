@@ -157,3 +157,58 @@ test('circular blockers resolve arbitrarily', () => {
   assert.deepEqual(result.waves, [[90], [91]])
   assert.deepEqual(result.unassessable, [])
 })
+
+import { invalidate } from './waves.mjs'
+
+const state = {
+  computedAt: 'f5e1f5b',
+  issues: {
+    '10': { number: 10, updated: '2026-07-01T00:00:00Z', touches: ['internal/store/jobview.go'] },
+    '11': { number: 11, updated: '2026-07-01T00:00:00Z', touches: ['web/src/App.tsx'] },
+  },
+}
+
+test('an unchanged issue over unchanged code is fresh', () => {
+  const out = invalidate({
+    state,
+    openIssues: [{ number: 10, updated: '2026-07-01T00:00:00Z' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10], stale: [] })
+})
+
+test('an issue updated since the cache is stale', () => {
+  const out = invalidate({
+    state,
+    openIssues: [{ number: 10, updated: '2026-07-29T00:00:00Z' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [10] })
+})
+
+test('an issue whose touched code moved is stale even if the issue did not', () => {
+  const out = invalidate({
+    state,
+    openIssues: [{ number: 10, updated: '2026-07-01T00:00:00Z' }],
+    changedPaths: ['internal/store/jobview.go'],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [10] })
+})
+
+test('an issue absent from the cache is stale', () => {
+  const out = invalidate({
+    state,
+    openIssues: [{ number: 99, updated: '2026-07-29T00:00:00Z' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [99] })
+})
+
+test('a missing state file makes every open issue stale', () => {
+  const out = invalidate({
+    state: null,
+    openIssues: [{ number: 10, updated: 'x' }, { number: 11, updated: 'y' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [10, 11] })
+})
