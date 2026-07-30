@@ -114,6 +114,12 @@ export interface Job {
   candidatesTried: number;
   maxCandidates: number;
   failReason: string;
+  // The pipeline's own last recorded failure explanation from job_events (see
+  // internal/observ jobDTO.FailDetail), typically Lidarr's verbatim rejection
+  // text. Unlike failReason (the current candidate's generic category), this
+  // is populated only by GET /api/jobs, never by the live stream — so it's
+  // optional and absent on stream-sourced jobs.
+  failDetail?: string;
   nextAttemptAt: string;
   retries: number;
   notBefore: string;

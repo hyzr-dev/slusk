@@ -800,6 +800,84 @@ func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 	}
 }
 
+// TestJobsEndpointReturnsFailDetailForFailedJob is issue #310: a failed job's
+// jobDTO should carry the pipeline's own recorded failure explanation, not
+// just the candidate's generic FailReason.
+func TestJobsEndpointReturnsFailDetailForFailedJob(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:    core.AlbumJob{ID: 9, Title: "Doomed Again", ArtistName: "Nobody"},
+				Status: "failed",
+			},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		if len(jobIDs) != 1 || jobIDs[0] != 9 {
+			t.Fatalf("FailureDetails called with %v, want [9]", jobIDs)
+		}
+		return map[int64]string{9: "Lidarr rejected: track count mismatch"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].FailDetail != "Lidarr rejected: track count mismatch" {
+		t.Errorf("FailDetail = %q, want %q", got[0].FailDetail, "Lidarr rejected: track count mismatch")
+	}
+}
+
+// TestJobsEndpointToleratesNilAndErroringFailureDetails is issue #310: a nil
+// FailureDetails dep (every pre-existing ServerDeps) and one that errors must
+// both still produce a 200 with the rest of the payload intact — the
+// enrichment is best-effort, exactly like LiveTransfers.
+func TestJobsEndpointToleratesNilAndErroringFailureDetails(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 9, Title: "Doomed Again", ArtistName: "Nobody"}, Status: "failed"},
+		}, nil
+	}
+
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = nil
+	h := NewServer(deps)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil FailureDetails: status = %d, want 200", rec.Code)
+	}
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].FailDetail != "" || got[0].Title != "Doomed Again" {
+		t.Errorf("nil FailureDetails: got %+v", got[0])
+	}
+
+	deps2 := testServerDeps(reg)
+	deps2.PagedJobs = pagedJobsFromFunc(jobs)
+	deps2.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return nil, errors.New("boom")
+	}
+	h2 := NewServer(deps2)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("erroring FailureDetails: status = %d, want 200", rec2.Code)
+	}
+	got2 := decodeJobsList(t, rec2.Body.Bytes())
+	if got2[0].FailDetail != "" || got2[0].Title != "Doomed Again" {
+		t.Errorf("erroring FailureDetails: got %+v", got2[0])
+	}
+}
+
 // CreatedAt must reflect core.AlbumJob.CreatedAt distinctly from UpdatedAt —
 // the frontend sorts the TRANSFERS panel by createdAt specifically because it
 // does NOT change on progress/state updates (#233), so this guards against

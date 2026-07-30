@@ -364,6 +364,18 @@ export const t = {
       peer: 'PEER',
       when: 'WHEN',
     },
+    // The FAILED IMPORTS panel (#310): jobs whose current status is 'failed',
+    // time-unbounded — unlike RECENTLY FINISHED above, there is no window,
+    // since a failure a caller hasn't dealt with yet is still worth surfacing
+    // whenever it happened.
+    failedHeading: 'FAILED IMPORTS',
+    noneFailed: 'Nothing failed',
+    failedGridHead: {
+      status: 'ST',
+      album: 'ALBUM',
+      reason: 'REASON',
+      when: 'WHEN',
+    },
     downloadThroughput: 'DOWNLOAD',
     uploadThroughput: 'UPLOAD',
     peak: 'PEAK',

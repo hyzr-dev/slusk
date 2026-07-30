@@ -2058,3 +2058,138 @@ func TestListDashboardJobsSkipFacetsReturnsPageWithoutCounts(t *testing.T) {
 		t.Errorf("Facets.Status.All = %d, want 3", withFacets.Facets.Status.All)
 	}
 }
+
+// TestLatestFailureDetails covers issue #310's LatestFailureDetails: which
+// job_events rows qualify as a failure explanation, and which of several
+// candidates for one job wins.
+func TestLatestFailureDetails(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("empty input", func(t *testing.T) {
+		got, err := s.LatestFailureDetails(ctx, nil)
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got == nil || len(got) != 0 {
+			t.Errorf("got %#v, want empty non-nil map", got)
+		}
+	})
+
+	t.Run("newest event wins", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 100, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventAttemptFailed, "older reason", now); err != nil {
+			t.Fatalf("AddJobEvent older: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventImportRejected, "newer reason", now.Add(time.Minute)); err != nil {
+			t.Fatalf("AddJobEvent newer: %v", err)
+		}
+		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got[job.ID] != "newer reason" {
+			t.Errorf("detail = %q, want %q", got[job.ID], "newer reason")
+		}
+	})
+
+	t.Run("created_at tie broken by id", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 101, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		// Both rows share created_at, mirroring a single pipeline pass that
+		// threads one `now` into every recordEvent call — see
+		// LatestFailureDetails' id DESC comment. Insertion order (and so id
+		// order) is "first" then "second"; "second" must win.
+		if err := s.AddJobEvent(ctx, job.ID, core.EventAttemptFailed, "first", now); err != nil {
+			t.Fatalf("AddJobEvent first: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventAttemptFailed, "second", now); err != nil {
+			t.Fatalf("AddJobEvent second: %v", err)
+		}
+		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got[job.ID] != "second" {
+			t.Errorf("detail = %q, want %q (the higher id)", got[job.ID], "second")
+		}
+	})
+
+	t.Run("empty detail is skipped in favor of an older non-empty one", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 102, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventAttemptFailed, "has a reason", now); err != nil {
+			t.Fatalf("AddJobEvent non-empty: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobFailed, "", now.Add(time.Minute)); err != nil {
+			t.Fatalf("AddJobEvent empty: %v", err)
+		}
+		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got[job.ID] != "has a reason" {
+			t.Errorf("detail = %q, want %q", got[job.ID], "has a reason")
+		}
+	})
+
+	t.Run("non-allowlisted event is never returned", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 103, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "searched album", now); err != nil {
+			t.Fatalf("AddJobEvent: %v", err)
+		}
+		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if _, ok := got[job.ID]; ok {
+			t.Errorf("job with only a non-allowlisted event should be absent, got %q", got[job.ID])
+		}
+	})
+
+	t.Run("multiple job ids resolve independently, missing ids are absent", func(t *testing.T) {
+		jobA, err := s.UpsertWantedJob(ctx, 104, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob A: %v", err)
+		}
+		jobB, err := s.UpsertWantedJob(ctx, 105, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob B: %v", err)
+		}
+		jobC, err := s.UpsertWantedJob(ctx, 106, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob C: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, jobA.ID, core.EventCandidateRejected, "reason A", now); err != nil {
+			t.Fatalf("AddJobEvent A: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, jobB.ID, core.EventImportRejected, "reason B", now); err != nil {
+			t.Fatalf("AddJobEvent B: %v", err)
+		}
+		// jobC gets no event at all.
+		got, err := s.LatestFailureDetails(ctx, []int64{jobA.ID, jobB.ID, jobC.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got[jobA.ID] != "reason A" {
+			t.Errorf("job A detail = %q, want %q", got[jobA.ID], "reason A")
+		}
+		if got[jobB.ID] != "reason B" {
+			t.Errorf("job B detail = %q, want %q", got[jobB.ID], "reason B")
+		}
+		if _, ok := got[jobC.ID]; ok {
+			t.Errorf("job C should be absent, got %q", got[jobC.ID])
+		}
+	})
+}

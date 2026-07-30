@@ -668,6 +668,61 @@ func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int
 	return out, rows.Err()
 }
 
+// failureExplainingEvents is the allowlist of job_events kinds that actually
+// explain why a job failed. Without it, LatestFailureDetails would surface
+// whatever event happened to be written most recently for a job — e.g. a job
+// that died in discovery would show its 'search' summary under a column
+// labelled "reason", which has nothing to do with the failure. Built from the
+// core.Event* constants (not string literals) so a renamed constant fails to
+// compile rather than silently falling out of the allowlist.
+var failureExplainingEvents = []core.JobEventType{
+	core.EventImportRejected,
+	core.EventAttemptFailed,
+	core.EventCandidateRejected,
+	core.EventJobFailed,
+}
+
+// LatestFailureDetails returns the newest failure-explaining job_events detail
+// for each of the given job ids, keyed by job id. It backs Overview's Failed
+// Imports panel (issue #310): a job's own fail_reason/status is not enough to
+// show a human a *reason*, since the audit trail — not the job row — is where
+// that text (often Lidarr's verbatim rejection message) actually lives. Jobs
+// with no matching event are simply absent from the map, not present with "".
+func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(jobIDs))
+	if len(jobIDs) == 0 {
+		return out, nil
+	}
+	events := make([]string, len(failureExplainingEvents))
+	for i, e := range failureExplainingEvents {
+		events[i] = string(e)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (album_job_id) album_job_id, detail
+		FROM job_events
+		WHERE album_job_id = ANY($1) AND detail <> '' AND event = ANY($2)
+		-- id DESC is load-bearing, not cosmetic: one pipeline pass shares a
+		-- single `+"`now`"+` across every recordEvent call it makes (see
+		-- internal/pipeline), so multiple job_events rows for the same job can
+		-- genuinely share created_at. Without the id tiebreak, DISTINCT ON
+		-- would pick an arbitrary one of them instead of the actual latest.
+		ORDER BY album_job_id, created_at DESC, id DESC`,
+		jobIDs, events)
+	if err != nil {
+		return nil, fmt.Errorf("latest failure details: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID int64
+		var detail string
+		if err := rows.Scan(&jobID, &detail); err != nil {
+			return nil, fmt.Errorf("latest failure details: scan: %w", err)
+		}
+		out[jobID] = detail
+	}
+	return out, rows.Err()
+}
+
 // Peers returns every known Soulseek peer's global reliability plus their
 // per-artist rows, for the dashboard's Peers view (GET /api/peers). Ordered by
 // username for determinism; the dashboard sorts client-side. Score computation

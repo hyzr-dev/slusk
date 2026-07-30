@@ -307,6 +307,9 @@ func main() {
 	jobEventsFn := func(ctx context.Context, jobID int64) ([]core.JobEvent, error) {
 		return st.JobEvents(ctx, jobID)
 	}
+	failureDetailsFn := func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return st.LatestFailureDetails(ctx, jobIDs)
+	}
 	recentEventsFn := func(ctx context.Context, limit int) ([]core.JobEvent, error) {
 		return st.RecentEvents(ctx, limit)
 	}
@@ -538,6 +541,7 @@ func main() {
 		Status:               statusFn,
 		Jobs:                 jobsFn,
 		PagedJobs:            pagedJobsFn,
+		FailureDetails:       failureDetailsFn,
 		Cancel:               jobs.Cancel,
 		Retry:                jobs.Retry,
 		SearchJob:            jobs.ForceSearch,
