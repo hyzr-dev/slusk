@@ -123,14 +123,15 @@ fetches the raw JSON itself.
 tree. `-race` is not part of the baseline; it is too slow over ~717 tests to pay for
 itself here, and runs only for issues 1b flagged `concurrency`.
 
-Failures are matched against the known-noise list carried by the skill, keyed by issue
-number:
+Failures are matched against the known-noise list, which lives in the repo's `CLAUDE.md`
+rather than in the skill. That is deliberate: `CLAUDE.md` is loaded for every agent in the
+repo, so the same list also serves an implementer running the suite, and there is only one
+copy to keep true.
 
-| Failure | Known as |
-|---|---|
-| `TestOpenRecyclesIdleConnections` (flaky under load) | #171 |
-| `Settings.test.tsx` timeout under the full suite | #242 |
-| `TestConnectPeerIndirectSuccess` in container | #250 |
+The list must state *where* each failure is visible, not just that it exists. Verifying it
+on 2026-07-30 showed why: #171 passes a plain `go test ./...` and only fails under
+`-count=5`, so agent runs had been reporting green while the defect was still there — and
+#242, listed on the same reasoning, turned out not to reproduce at all and left the list.
 
 > A failure that is not on that list is not a backlog entry — it means `main` is red.
 > Triage aborts and the report consists of that single finding.
@@ -191,6 +192,40 @@ model, so a 30-way fan-out without one is 30 Opus agents.
 Model choice saves per call; not loading the artefact saves per observation. The browser
 stage therefore passes `filename` to `browser_snapshot` and greps the tree from disk
 rather than pulling a whole dashboard's accessibility tree into context.
+
+## Shell independence
+
+Every shell command this skill issues must run the same under bash, zsh and fish. The rule
+is not to find a dialect all three accept — there isn't one — but to **name the
+interpreter**:
+
+> Anything using command substitution, a loop, a heredoc, an environment prefix or an
+> exit-status variable is run as `bash -c '...'`, or written to a file and run with
+> `sh file.sh`. The ambient shell then sees a single word and its dialect is irrelevant.
+
+Plain single commands (`tea issues 42 --output json`, `go test ./...`) need no wrapper.
+
+What actually differs, and what does not:
+
+| Construct | fish |
+|---|---|
+| `$(cmd)` | Works since fish 3.4 — not the problem it is assumed to be |
+| `VAR=value cmd` | Unsupported. `env VAR=value cmd` works everywhere |
+| `$?` | Spelled `$status` |
+| `$PIPESTATUS` | Spelled `$pipestatus` — as in zsh; only bash uppercases it |
+| `for x in ...; do ...; done` | Different syntax; fish ends with `end` |
+| `<<'EOF'` heredoc | Unsupported entirely |
+
+This was written after assuming bash inside a zsh session: `${PIPESTATUS[0]}` expanded to
+nothing, and a test run reported an empty exit code that looked like a pass. A wrong shell
+assumption does not usually fail loudly — it produces a plausible wrong answer, which is
+the same failure mode the rest of this design exists to prevent.
+
+**Known limitation.** Phase 2 delegates to `verifying-ui-in-browser`, which currently uses
+an environment prefix and a `do/done` loop. Until that skill is updated, the browser leg is
+bash-dependent regardless of what this one does. It is not blocking — the triage runs the
+browser stage through a subagent whose own shell is bash — but the claim "shell
+independent" applies to this skill's commands, not to the whole chain.
 
 ## Output
 
