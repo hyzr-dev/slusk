@@ -177,3 +177,116 @@ func TestCleanupCompletedFolderLogsMissingDirQuietly(t *testing.T) {
 		t.Errorf("expected an INFO log line, got %q", logged)
 	}
 }
+
+func TestQuarantineFolderMovesLeftovers(t *testing.T) {
+	completeDir := t.TempDir()
+	folder := filepath.Join(completeDir, "1000 Forms of Fear (2014)")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "01 - Chandelier.flac.part"), []byte("partial"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var buf bytes.Buffer
+	dst, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "1000 Forms of Fear (2014)")
+
+	if !moved {
+		t.Fatalf("moved = false, want true; log = %q", buf.String())
+	}
+	want := filepath.Join(completeDir, quarantineDirName, "1000 Forms of Fear (2014)")
+	if dst != want {
+		t.Errorf("dst = %q, want %q", dst, want)
+	}
+	if _, err := os.Stat(folder); !os.IsNotExist(err) {
+		t.Errorf("expected source folder to be gone, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(want, "01 - Chandelier.flac.part")); err != nil {
+		t.Errorf("expected the partial file under quarantine, stat err = %v", err)
+	}
+	if logged := buf.String(); strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line, got %q", logged)
+	}
+}
+
+func TestQuarantineFolderNoOpWhenSourceAbsent(t *testing.T) {
+	completeDir := t.TempDir()
+
+	var buf bytes.Buffer
+	if _, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "never downloaded"); moved {
+		t.Error("moved = true, want false when the source never existed")
+	}
+	if _, err := os.Stat(filepath.Join(completeDir, quarantineDirName)); !os.IsNotExist(err) {
+		t.Errorf("expected no quarantine dir to be created, stat err = %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line for the common absent case, got %q", logged)
+	}
+	if !strings.Contains(logged, "nothing to quarantine") {
+		t.Errorf("expected an INFO line naming the absent folder, got %q", logged)
+	}
+}
+
+func TestQuarantineFolderSkipsAmbiguousLeafAndQuarantineDir(t *testing.T) {
+	completeDir := t.TempDir()
+	self := filepath.Join(completeDir, quarantineDirName)
+	if err := os.Mkdir(self, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	var buf bytes.Buffer
+	log := newTestLogger(&buf)
+	// commonLeaf's ambiguous result: the caller passes "" straight through.
+	if _, moved := quarantineFolder(log, 7, completeDir, ""); moved {
+		t.Error("moved = true, want false for an ambiguous leaf")
+	}
+	// A peer whose remote folder is literally named like the quarantine dir.
+	if _, moved := quarantineFolder(log, 7, completeDir, quarantineDirName); moved {
+		t.Error("moved = true, want false for the quarantine dir itself")
+	}
+	if _, err := os.Stat(self); err != nil {
+		t.Errorf("expected the quarantine dir untouched, stat err = %v", err)
+	}
+	if _, moved := quarantineFolder(log, 7, "", "some album"); moved {
+		t.Error("moved = true, want false when completeDir is empty")
+	}
+}
+
+func TestQuarantineFolderSuffixesOnCollision(t *testing.T) {
+	completeDir := t.TempDir()
+	folder := filepath.Join(completeDir, "Album")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "new.flac"), []byte("new"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	occupied := filepath.Join(completeDir, quarantineDirName, "Album")
+	if err := os.MkdirAll(occupied, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(occupied, "old.flac"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var buf bytes.Buffer
+	dst, moved := quarantineFolder(newTestLogger(&buf), 42, completeDir, "Album")
+
+	if !moved {
+		t.Fatalf("moved = false, want true; log = %q", buf.String())
+	}
+	want := filepath.Join(completeDir, quarantineDirName, "Album.job42")
+	if dst != want {
+		t.Errorf("dst = %q, want %q", dst, want)
+	}
+	if _, err := os.Stat(filepath.Join(want, "new.flac")); err != nil {
+		t.Errorf("expected the moved file under the suffixed dir, stat err = %v", err)
+	}
+	// The already-quarantined folder must survive untouched: os.Rename would
+	// have silently replaced it had it been empty.
+	body, err := os.ReadFile(filepath.Join(occupied, "old.flac"))
+	if err != nil || string(body) != "old" {
+		t.Errorf("pre-existing quarantined file = %q (%v), want %q", body, err, "old")
+	}
+}

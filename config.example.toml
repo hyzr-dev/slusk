@@ -124,6 +124,9 @@ listen_addr = "0.0.0.0:9090"
 # log_level = "info"
 
 [paths]
+# When a job exhausts its retry budget, whatever it left behind here is moved
+# into the ".failed" subdirectory rather than left in the root for Lidarr and
+# the next job to scan. Nothing ever prunes that directory - clear it yourself.
 slskd_complete_dir = "/music/slskd-downloads"
 
 # Optional: enable a direct connection to the central Soulseek server,

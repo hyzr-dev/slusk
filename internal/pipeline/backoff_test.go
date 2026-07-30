@@ -91,9 +91,12 @@ func TestFailOrBackoffMarksFailedAtMaxRetries(t *testing.T) {
 	job := core.AlbumJob{ID: 1, Retries: 2}
 	now := time.Now()
 
-	err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if !failed {
+		t.Error("failed = false, want true for the terminal transition")
 	}
 	if len(st.failedCalls) != 1 || st.failedCalls[0] != 1 {
 		t.Errorf("MarkJobFailed calls = %v, want [1]", st.failedCalls)
@@ -114,9 +117,12 @@ func TestFailOrBackoffSetsBackoffWhenNotResettingToWanted(t *testing.T) {
 	job := core.AlbumJob{ID: 5, Retries: 0}
 	now := time.Now()
 
-	err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, false, now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if failed {
+		t.Error("failed = true, want false when only backing off")
 	}
 	if len(st.backoffCalls) != 1 {
 		t.Fatalf("SetJobBackoff calls = %v, want 1 call", st.backoffCalls)
@@ -139,9 +145,12 @@ func TestFailOrBackoffResetsToWantedWhenRequested(t *testing.T) {
 	job := core.AlbumJob{ID: 9, Retries: 1}
 	now := time.Now()
 
-	err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, true, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, true, now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if failed {
+		t.Error("failed = true, want false when only backing off")
 	}
 	if len(st.resetCalls) != 1 {
 		t.Fatalf("ResetJobToWanted calls = %v, want 1 call", st.resetCalls)
@@ -164,9 +173,12 @@ func TestFailOrBackoffAddJobEventIsBestEffort(t *testing.T) {
 	job := core.AlbumJob{ID: 1, Retries: 2}
 	now := time.Now()
 
-	err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
 	if err != nil {
 		t.Fatalf("failOrBackoff should swallow AddJobEvent errors, got: %v", err)
+	}
+	if !failed {
+		t.Error("failed = false, want true for the terminal transition")
 	}
 	if len(st.failedCalls) != 1 {
 		t.Errorf("MarkJobFailed should still be called, got %v", st.failedCalls)

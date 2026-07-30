@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -417,6 +419,124 @@ func TestSelectingExhaustionAtMaxRetriesFails(t *testing.T) {
 	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
 		t.Fatalf("expected job FAILED, got %+v (%v)", jobs, err)
+	}
+}
+
+// seedExhaustedJobWithLeftovers builds a SELECTING job whose single candidate
+// has already been activated (so it has transfers naming a remote folder) and
+// then failed, plus that folder sitting in completeDir as leftover files. One
+// Tick over it takes the exhaustion path.
+func seedExhaustedJobWithLeftovers(t *testing.T, ctx context.Context, st *store.Store, p SelectingParams, lidarrID int64, now time.Time) (core.AlbumJob, string) {
+	t.Helper()
+	const leaf = "Leftover Album (2014)"
+
+	job, err := st.UpsertWantedJob(ctx, lidarrID, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.InsertCandidates(ctx, job.ID, []store.NewCandidate{{
+		Username: "alice",
+		Score:    1.0,
+		Files: []core.CandidateFile{
+			{Filename: `music\Sia\` + leaf + `\01.flac`, Size: 1},
+			{Filename: `music\Sia\` + leaf + `\02.flac`, Size: 1},
+		},
+	}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	cand, found, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	// Activation is what writes the transfer rows quarantineLeftovers reads.
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, now)
+	if err != nil || !activated {
+		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
+	}
+	if err := st.FailCandidate(ctx, cand.ID, "timeout", now); err != nil {
+		t.Fatalf("FailCandidate: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState back to SELECTING: %v", err)
+	}
+
+	folder := filepath.Join(p.CompleteDir, leaf)
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "01.flac.part"), []byte("partial"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return job, folder
+}
+
+func TestSelectingTerminalFailureQuarantinesLeftovers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.MaxRetries = 1 // job.Retries(0)+1 >= 1 -> FAILED on first exhaustion
+	p.CompleteDir = t.TempDir()
+
+	job, folder := seedExhaustedJobWithLeftovers(t, ctx, st, p, 40, now)
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED, got %+v (%v)", jobs, err)
+	}
+	if _, err := os.Stat(folder); !os.IsNotExist(err) {
+		t.Errorf("expected leftovers gone from the download root, stat err = %v", err)
+	}
+	quarantined := filepath.Join(p.CompleteDir, quarantineDirName, filepath.Base(folder), "01.flac.part")
+	if _, err := os.Stat(quarantined); err != nil {
+		t.Errorf("expected leftovers under %s, stat err = %v", quarantineDirName, err)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Event == core.EventQuarantined {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a %q job event, got %+v", core.EventQuarantined, events)
+	}
+}
+
+func TestSelectingNonTerminalExhaustionLeavesFilesAlone(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.MaxRetries = 3 // job.Retries(0)+1 < 3 -> back off, not terminal
+	p.CompleteDir = t.TempDir()
+
+	job, folder := seedExhaustedJobWithLeftovers(t, ctx, st, p, 41, now)
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateWanted, now.Add(2*time.Hour), 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job back to WANTED, got %+v (%v)", jobs, err)
+	}
+	if _, err := os.Stat(folder); err != nil {
+		t.Errorf("expected leftovers left in place for the next attempt, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.CompleteDir, quarantineDirName)); !os.IsNotExist(err) {
+		t.Errorf("expected no quarantine dir on a non-terminal failure, stat err = %v", err)
 	}
 }
 

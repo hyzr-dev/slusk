@@ -85,6 +85,7 @@ const (
 	EventImportRejected    JobEventType = "import_rejected"
 	EventDedup             JobEventType = "dedup"
 	EventJobFailed         JobEventType = "job_failed"
+	EventQuarantined       JobEventType = "quarantined"
 )
 
 // CandidateState is the lifecycle of one cached candidate (see core.Candidate).
