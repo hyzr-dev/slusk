@@ -329,6 +329,39 @@ describe('IdentifyModal states', () => {
     expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
   });
 
+  // MusicBrainzSearchResult.artist/artistId are `omitempty` on the Go DTO —
+  // genuinely absent, not empty strings, for a release-group whose
+  // artist-credit is itself empty. Neither the suggestion row nor the
+  // confirm path may render/post "undefined" for that; see the doc comment
+  // on MusicBrainzSearchResult and on IdentifyModal's canonicalArtistOf.
+  it('renders and selects a result with no artist/artistId without crashing, and confirms with the artist FIELD rather than an invented or undefined value', async () => {
+    const search: MusicBrainzSearchResponse = {
+      results: [searchResult({ artist: undefined, artistId: undefined, title: 'Anonymous Compilation' })],
+      total: 1,
+    };
+    stubFetch({
+      '/api/identify/search?': search,
+      '/api/identify/albums/al1/editions': { editions: [], total: 0 },
+      '/api/identify/albums/al1/lidarr': { known: false, inLibrary: false },
+    });
+    // Deliberately distinct from group.parent, so a fallback to the WRONG
+    // source (group.parent instead of the artist field) would be caught.
+    const { onConfirm } = renderModal(group({ title: 'Guessed Artist - Some Album [FLAC]', parent: 'DifferentParent' }));
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+    await waitFor(() => screen.getByRole('button', { name: /Anonymous Compilation/ }));
+    expect(screen.queryByText('undefined')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Anonymous Compilation/ }));
+    await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
+    // The summary line shows exactly what confirm() will send.
+    expect(screen.getByText(/Guessed Artist/)).toBeInTheDocument();
+    expect(screen.queryByText(/DifferentParent/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation' });
+  });
+
   it('closes on Escape and on a scrim click, but not on a click inside the panel', () => {
     const { onClose, container } = renderModal(group());
     fireEvent.keyDown(document, { key: 'Escape' });

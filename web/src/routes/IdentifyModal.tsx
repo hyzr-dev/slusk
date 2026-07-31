@@ -213,9 +213,23 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     setLidarr(lidarrResult);
   }
 
+  // MusicBrainzSearchResult.artist is absent, not empty, for a release-group
+  // whose artist-credit is itself empty — POST /api/jobs requires a string
+  // `artist`, so `undefined` can never be sent. Falls back to whatever is
+  // currently in the (user-editable, user-confirmed) artist field rather
+  // than silently reusing the raw folder guess — that field starts as the
+  // folder guess but the user may have corrected it before searching, so it
+  // is the more truthful of the two. group.parent is the last-resort
+  // fallback for the (unlikely) case that field is itself blank. Shared with
+  // the "WILL BE RECORDED AS" summary below so the modal never displays one
+  // artist and confirms a different one.
+  function canonicalArtistOf(result: MusicBrainzSearchResult): string {
+    return result.artist || artist.trim() || group.parent;
+  }
+
   function confirm() {
     if (!selectedResult) return;
-    onConfirm({ artist: selectedResult.artist, album: selectedResult.title });
+    onConfirm({ artist: canonicalArtistOf(selectedResult), album: selectedResult.title });
   }
 
   const selectedEdition = editions.find((e) => e.id === selectedEditionId);
@@ -286,7 +300,10 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                     <button type="button" className={styles.suggestionRow} onClick={() => pickResult(r)}>
                       <span className={styles.suggestionText}>
                         <span className={styles.suggestionAlbum}>{r.title}</span>
-                        <span className={styles.suggestionArtist}>{r.artist}</span>
+                        {/* Absent, not a placeholder, when the release-group's
+                            artist-credit is itself empty — see
+                            MusicBrainzSearchResult's doc comment. */}
+                        {r.artist && <span className={styles.suggestionArtist}>{r.artist}</span>}
                       </span>
                       <span className={styles.suggestionType}>{(r.primaryType ?? '—').toUpperCase()}</span>
                       <span className={styles.suggestionYear}>{yearOf(r.firstReleaseDate)}</span>
@@ -322,7 +339,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                 <div className={styles.fieldLabel}>{t.search.identify.willBeRecordedAs}</div>
                 <div className={styles.recordedAlbum}>{selectedResult.title}</div>
                 <div className={styles.recordedMeta}>
-                  {selectedResult.artist} · {(selectedResult.primaryType ?? '—').toUpperCase()} · {yearOf(selectedResult.firstReleaseDate)} ·{' '}
+                  {canonicalArtistOf(selectedResult)} · {(selectedResult.primaryType ?? '—').toUpperCase()} · {yearOf(selectedResult.firstReleaseDate)} ·{' '}
                   {/* From the search result's own editionCount — already in
                       hand from the same call that produced this row, unlike
                       the picker below which needs the separate editions list

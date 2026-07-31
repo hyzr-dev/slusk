@@ -739,12 +739,18 @@ export interface CreateSearchRequest {
  * EDITIONS column directly. `score` is MusicBrainz's own relevance score
  * (0-100); results already arrive ranked by it, so the frontend never
  * re-sorts.
+ *
+ * `artist`/`artistId` are `omitempty` on the Go DTO (mbSearchResultDTO) and
+ * genuinely absent — not empty strings — when a release-group's
+ * artist-credit is empty. Render their absence as absent (never a
+ * placeholder or "undefined"), per the project's "never invent data" rule —
+ * see IdentifyModal's suggestion row and its confirm() fallback.
  */
 export interface MusicBrainzSearchResult {
   id: string;
   title: string;
-  artist: string;
-  artistId: string;
+  artist?: string;
+  artistId?: string;
   primaryType?: string;
   secondaryTypes: string[];
   firstReleaseDate?: string;
