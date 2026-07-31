@@ -3,10 +3,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   LidarrMatch,
-  MusicBrainzAlbumListResult,
-  MusicBrainzArtistSearchResult,
   MusicBrainzEdition,
   MusicBrainzEditionListResult,
+  MusicBrainzSearchResponse,
+  MusicBrainzSearchResult,
   SearchGroup,
 } from '../api/types';
 import { t } from '../strings';
@@ -49,6 +49,21 @@ function edition(overrides: Partial<MusicBrainzEdition> = {}): MusicBrainzEditio
     status: 'Official',
     trackCount: 10,
     trackCountKnown: true,
+    ...overrides,
+  };
+}
+
+function searchResult(overrides: Partial<MusicBrainzSearchResult> = {}): MusicBrainzSearchResult {
+  return {
+    id: 'al1',
+    title: 'In Rainbows',
+    artist: 'Radiohead',
+    artistId: 'a1',
+    firstReleaseDate: '2007-10-10',
+    primaryType: 'Album',
+    secondaryTypes: [],
+    editionCount: 3,
+    score: 100,
     ...overrides,
   };
 }
@@ -204,28 +219,48 @@ describe('IdentifyModal states', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('goes through searching, into suggestions, and shows the truncation notice when total exceeds the array', async () => {
-    const artists: MusicBrainzArtistSearchResult = {
-      artists: [{ id: 'a1', name: 'Radiohead', score: 100 }],
-      total: 1,
-    };
-    const albums: MusicBrainzAlbumListResult = {
-      albums: [{ id: 'al1', title: 'In Rainbows', firstReleaseDate: '2007-10-10', primaryType: 'Album', secondaryTypes: [] }],
+  it('does not fire until the album field has something in it (the endpoint 422s on a blank one)', () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    renderModal(group({ title: '[FLAC]', parent: '' })); // parses to an empty album guess too
+    fireEvent.change(screen.getByRole('textbox', { name: t.search.identify.albumLabel }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('goes through searching, into suggestions, and shows the EDITIONS column and the best-matches notice when total exceeds the array', async () => {
+    const response: MusicBrainzSearchResponse = {
+      results: [searchResult({ editionCount: 60 })],
       total: 412,
     };
-    stubFetch({
-      '/api/identify/artists?': artists,
-      '/api/identify/artists/a1/albums': albums,
-    });
+    stubFetch({ '/api/identify/search?': response });
     renderModal(group());
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
     expect(screen.getByText(t.search.identify.searching)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: /In Rainbows/ })).toBeInTheDocument());
-    expect(screen.getByText(t.search.identify.showingOf(1, 412))).toBeInTheDocument();
+    expect(screen.getByText('60')).toBeInTheDocument();
+    expect(screen.getByText(t.search.identify.showingBestOf(1))).toBeInTheDocument();
   });
 
-  it('shows NO MATCHES when the artist search returns nothing', async () => {
-    stubFetch({ '/api/identify/artists?': { artists: [], total: 0 } satisfies MusicBrainzArtistSearchResult });
+  it('sends both artist and album as query params, url-encoded', async () => {
+    const fetchSpy = vi.fn((_url: string) =>
+      Promise.resolve(new Response(JSON.stringify({ results: [], total: 0 } satisfies MusicBrainzSearchResponse), { status: 200 })),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+    renderModal(group({ title: 'Sigur Rós - Ágætis byrjun', parent: 'x' }));
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const url = fetchSpy.mock.calls[0][0];
+    expect(url).toContain('/api/identify/search?');
+    // URLSearchParams encodes a space as '+', not '%20' — matching that
+    // rather than encodeURIComponent's own escaping.
+    const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+    expect(params.get('artist')).toBe('Sigur Rós');
+    expect(params.get('album')).toBe('Ágætis byrjun');
+  });
+
+  it('shows NO MATCHES when the combined search returns nothing', async () => {
+    stubFetch({ '/api/identify/search?': { results: [], total: 0 } satisfies MusicBrainzSearchResponse });
     renderModal(group());
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
     await waitFor(() => expect(screen.getByText(t.search.identify.noMatchesTitle)).toBeInTheDocument());
@@ -241,11 +276,7 @@ describe('IdentifyModal states', () => {
   });
 
   it('reaches the selected state, defaults the edition, and shows the three verdict/Lidarr facts — never rendering an unknown track count as 0', async () => {
-    const artists: MusicBrainzArtistSearchResult = { artists: [{ id: 'a1', name: 'Radiohead', score: 100 }], total: 1 };
-    const albums: MusicBrainzAlbumListResult = {
-      albums: [{ id: 'al1', title: 'In Rainbows', firstReleaseDate: '2007-10-10', primaryType: 'Album', secondaryTypes: [] }],
-      total: 1,
-    };
+    const search: MusicBrainzSearchResponse = { results: [searchResult({ editionCount: 3 })], total: 1 };
     const editions: MusicBrainzEditionListResult = {
       editions: [
         edition({ id: 'e1', trackCount: 10, trackCountKnown: true }),
@@ -255,8 +286,7 @@ describe('IdentifyModal states', () => {
     };
     const lidarr: LidarrMatch = { known: true, inLibrary: true };
     stubFetch({
-      '/api/identify/artists?': artists,
-      '/api/identify/artists/a1/albums': albums,
+      '/api/identify/search?': search,
       '/api/identify/albums/al1/editions': editions,
       '/api/identify/albums/al1/lidarr': lidarr,
     });
@@ -266,10 +296,16 @@ describe('IdentifyModal states', () => {
     fireEvent.click(screen.getByRole('button', { name: /In Rainbows/ }));
 
     await waitFor(() => expect(screen.getByText(t.search.identify.willBeRecordedAs)).toBeInTheDocument());
+    // The summary line's edition count comes straight from the search
+    // result (editionCount: 3), NOT from the separate editions list total
+    // (25) — those are deliberately different values in this test so a
+    // mix-up between the two would fail it.
+    expect(screen.getByText(t.search.identify.editionCount(3), { exact: false })).toBeInTheDocument();
     // Edition e1 (exact track match) is the default selection, so the
     // verdict reads COMPLETE against it.
     expect(screen.getByText(t.search.identify.verdictComplete(10))).toBeInTheDocument();
     expect(screen.getByText(t.search.identify.lidarrInLibrary)).toBeInTheDocument();
+    // The PICKER's own truncation notice, from the editions list call (2 of 25).
     expect(screen.getByText(t.search.identify.showingOf(2, 25))).toBeInTheDocument();
 
     // The unknown-track-count edition must say so, never show "0 tracks".
@@ -278,14 +314,9 @@ describe('IdentifyModal states', () => {
   });
 
   it('confirms with the canonical MusicBrainz artist/album, not the folder guess', async () => {
-    const artists: MusicBrainzArtistSearchResult = { artists: [{ id: 'a1', name: 'Radiohead', score: 100 }], total: 1 };
-    const albums: MusicBrainzAlbumListResult = {
-      albums: [{ id: 'al1', title: 'In Rainbows', primaryType: 'Album', secondaryTypes: [] }],
-      total: 1,
-    };
+    const search: MusicBrainzSearchResponse = { results: [searchResult()], total: 1 };
     stubFetch({
-      '/api/identify/artists?': artists,
-      '/api/identify/artists/a1/albums': albums,
+      '/api/identify/search?': search,
       '/api/identify/albums/al1/editions': { editions: [], total: 0 },
       '/api/identify/albums/al1/lidarr': { known: false, inLibrary: false },
     });

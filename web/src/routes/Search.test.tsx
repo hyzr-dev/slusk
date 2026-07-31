@@ -451,15 +451,22 @@ describe('identify & download (issue #321)', () => {
     const group = wireGroup();
     let jobsBody: unknown;
     await renderWithResults([group], 1, (url, init) => {
-      if (url === '/api/identify/artists?query=Radiohead') {
-        return Promise.resolve(
-          new Response(JSON.stringify({ artists: [{ id: 'a1', name: 'Radiohead', score: 100 }], total: 1 }), { status: 200 }),
-        );
-      }
-      if (url === '/api/identify/artists/a1/albums') {
+      if (url.startsWith('/api/identify/search?')) {
         return Promise.resolve(
           new Response(
-            JSON.stringify({ albums: [{ id: 'al1', title: 'In Rainbows', primaryType: 'Album', secondaryTypes: [] }], total: 1 }),
+            JSON.stringify({
+              results: [{
+                id: 'al1',
+                title: 'In Rainbows',
+                artist: 'Radiohead',
+                artistId: 'a1',
+                primaryType: 'Album',
+                secondaryTypes: [],
+                editionCount: 3,
+                score: 100,
+              }],
+              total: 1,
+            }),
             { status: 200 },
           ),
         );

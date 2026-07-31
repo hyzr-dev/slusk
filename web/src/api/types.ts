@@ -730,41 +730,39 @@ export interface CreateSearchRequest {
 // ---- MusicBrainz identify (issue #321) ----
 
 /**
- * GET /api/identify/artists — internal/observ identify.go artistDTO, one
- * MusicBrainz artist search hit. `score` is MusicBrainz's own relevance
- * score (0-100); the frontend never recomputes it, only picks the highest.
+ * GET /api/identify/search — internal/observ identify.go, one combined
+ * artist+release-group match. Replaces what was originally two endpoints
+ * (an artist search, then that artist's album list) — see the doc comment
+ * on IdentifyModal's searchMB for why the combined shape is the one that
+ * ships. `editionCount` is a genuine single-call field (the release-group
+ * search's own `count`), not a second per-row lookup — it fills the mock's
+ * EDITIONS column directly. `score` is MusicBrainz's own relevance score
+ * (0-100); results already arrive ranked by it, so the frontend never
+ * re-sorts.
  */
-export interface MusicBrainzArtist {
+export interface MusicBrainzSearchResult {
   id: string;
-  name: string;
-  type?: string;
-  country?: string;
-  disambiguation?: string;
+  title: string;
+  artist: string;
+  artistId: string;
+  primaryType?: string;
+  secondaryTypes: string[];
+  firstReleaseDate?: string;
+  editionCount: number;
   score: number;
 }
 
-/** GET /api/identify/artists response. `total` is the true match count; `artists` is capped at 25. */
-export interface MusicBrainzArtistSearchResult {
-  artists: MusicBrainzArtist[];
-  total: number;
-}
-
 /**
- * GET /api/identify/artists/{mbid}/albums — one release-group belonging to
- * the artist. `secondaryTypes` (Compilation, Live, Remix, …) is always an
- * array, never absent, matching the Go DTO's own zero-value slice.
+ * GET /api/identify/search response. `album` is required server-side (a
+ * blank one 422s before any upstream call); `artist` is optional. `total`
+ * is the true relevance-ranked hit count and routinely far exceeds
+ * `results.length` (a query can rank hundreds of loosely-related releases) —
+ * this is NOT a paginated catalogue the way the albums/editions endpoints
+ * are, so IdentifyModal's truncation notice for this response reads
+ * "showing the best N matches" rather than "showing N of total".
  */
-export interface MusicBrainzAlbum {
-  id: string;
-  title: string;
-  firstReleaseDate?: string;
-  primaryType?: string;
-  secondaryTypes: string[];
-}
-
-/** GET /api/identify/artists/{mbid}/albums response. `total` is the true count; `albums` is capped at 100. */
-export interface MusicBrainzAlbumListResult {
-  albums: MusicBrainzAlbum[];
+export interface MusicBrainzSearchResponse {
+  results: MusicBrainzSearchResult[];
   total: number;
 }
 

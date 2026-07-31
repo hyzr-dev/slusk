@@ -1,11 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import {
-  useIdentifyAlbums,
-  useIdentifyArtists,
-  useIdentifyEditions,
-  useIdentifyLidarr,
-} from '../api/queries';
-import type { LidarrMatch, MusicBrainzAlbum, MusicBrainzEdition } from '../api/types';
+import { useIdentifyEditions, useIdentifyLidarr, useIdentifySearch } from '../api/queries';
+import type { LidarrMatch, MusicBrainzEdition, MusicBrainzSearchResult } from '../api/types';
 import type { SearchGroup } from '../api/types';
 import Button from '../components/tui/Button';
 import { t } from '../strings';
@@ -116,17 +111,15 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   const [artist, setArtist] = useState(guess.artist);
   const [album, setAlbum] = useState(guess.album);
   const [state, setState] = useState<IdentifyState>('initial');
-  const [resolvedArtist, setResolvedArtist] = useState('');
-  const [albums, setAlbums] = useState<MusicBrainzAlbum[]>([]);
-  const [albumsTotal, setAlbumsTotal] = useState(0);
-  const [selectedAlbum, setSelectedAlbum] = useState<MusicBrainzAlbum | undefined>(undefined);
+  const [results, setResults] = useState<MusicBrainzSearchResult[]>([]);
+  const [resultsTotal, setResultsTotal] = useState(0);
+  const [selectedResult, setSelectedResult] = useState<MusicBrainzSearchResult | undefined>(undefined);
   const [editions, setEditions] = useState<MusicBrainzEdition[]>([]);
   const [editionsTotal, setEditionsTotal] = useState(0);
   const [selectedEditionId, setSelectedEditionId] = useState<string | undefined>(undefined);
   const [lidarr, setLidarr] = useState<LidarrMatch | undefined>(undefined);
 
-  const identifyArtists = useIdentifyArtists();
-  const identifyAlbums = useIdentifyAlbums();
+  const identifySearch = useIdentifySearch();
   const identifyEditions = useIdentifyEditions();
   const identifyLidarr = useIdentifyLidarr();
 
@@ -168,26 +161,30 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // One combined artist+album call, not the artist-resolve-then-list-albums
+  // two-step an earlier version of this modal used. That two-step had a real
+  // hazard: a mistyped artist field resolved confidently to *some* artist
+  // and listed *their* albums, with nothing in the UI signalling the wrong
+  // artist had been picked. GET /api/identify/search ranks the whole
+  // artist+album row together, so a bad guess now yields few or no matches
+  // rather than a confident wrong list — and it also carries editionCount
+  // per row for free, which the two-step design couldn't (a per-row edition
+  // count needed a separate rate-limited call per album).
   async function searchMB() {
     const artistQuery = artist.trim();
     const albumQuery = album.trim();
-    if (!artistQuery && !albumQuery) return;
+    // `album` is required server-side (a blank one 422s before any upstream
+    // call) — `artist` alone is never enough to search on.
+    if (!albumQuery) return;
     setState('searching');
     try {
-      const artistsResult = await identifyArtists.mutateAsync(artistQuery || albumQuery);
-      if (artistsResult.artists.length === 0) {
+      const result = await identifySearch.mutateAsync({ artist: artistQuery || undefined, album: albumQuery });
+      if (result.results.length === 0) {
         setState('empty');
         return;
       }
-      const topArtist = artistsResult.artists.reduce((best, a) => (a.score > best.score ? a : best));
-      const albumsResult = await identifyAlbums.mutateAsync(topArtist.id);
-      if (albumsResult.albums.length === 0) {
-        setState('empty');
-        return;
-      }
-      setResolvedArtist(topArtist.name);
-      setAlbums(albumsResult.albums);
-      setAlbumsTotal(albumsResult.total);
+      setResults(result.results);
+      setResultsTotal(result.total);
       setState('suggestions');
     } catch {
       setState('unavailable');
@@ -199,8 +196,8 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // editions call leaves the picker empty (verdict reads COMPLETENESS
   // UNKNOWN); a failed Lidarr call reads exactly like `known: false`,
   // because to the user those are the same fact: "can't say".
-  async function pickAlbum(picked: MusicBrainzAlbum) {
-    setSelectedAlbum(picked);
+  async function pickResult(picked: MusicBrainzSearchResult) {
+    setSelectedResult(picked);
     setEditions([]);
     setEditionsTotal(0);
     setSelectedEditionId(undefined);
@@ -217,13 +214,16 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   }
 
   function confirm() {
-    if (!selectedAlbum) return;
-    onConfirm({ artist: resolvedArtist, album: selectedAlbum.title });
+    if (!selectedResult) return;
+    onConfirm({ artist: selectedResult.artist, album: selectedResult.title });
   }
 
   const selectedEdition = editions.find((e) => e.id === selectedEditionId);
   const showFields = state === 'initial' || state === 'suggestions' || state === 'empty';
-  const albumsNotice = albumsTotal > albums.length ? t.search.identify.showingOf(albums.length, albumsTotal) : undefined;
+  // See MusicBrainzSearchResponse's doc comment: a relevance-ranked search,
+  // not a paginated catalogue, so this reads "showing the best N" rather
+  // than the editions picker's "showing N of total" below.
+  const resultsNotice = resultsTotal > results.length ? t.search.identify.showingBestOf(results.length) : undefined;
   const editionsNotice = editionsTotal > editions.length ? t.search.identify.showingOf(editions.length, editionsTotal) : undefined;
 
   return (
@@ -278,22 +278,24 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                 <span>{t.search.identify.colArtistAlbum}</span>
                 <span>{t.search.identify.colType}</span>
                 <span>{t.search.identify.colYear}</span>
+                <span className={styles.suggestionEditionsHead}>{t.search.identify.colEditions}</span>
               </div>
               <ul className={styles.suggestionsList}>
-                {albums.map((a) => (
-                  <li key={a.id}>
-                    <button type="button" className={styles.suggestionRow} onClick={() => pickAlbum(a)}>
+                {results.map((r) => (
+                  <li key={r.id}>
+                    <button type="button" className={styles.suggestionRow} onClick={() => pickResult(r)}>
                       <span className={styles.suggestionText}>
-                        <span className={styles.suggestionAlbum}>{a.title}</span>
-                        <span className={styles.suggestionArtist}>{resolvedArtist}</span>
+                        <span className={styles.suggestionAlbum}>{r.title}</span>
+                        <span className={styles.suggestionArtist}>{r.artist}</span>
                       </span>
-                      <span className={styles.suggestionType}>{(a.primaryType ?? '—').toUpperCase()}</span>
-                      <span className={styles.suggestionYear}>{yearOf(a.firstReleaseDate)}</span>
+                      <span className={styles.suggestionType}>{(r.primaryType ?? '—').toUpperCase()}</span>
+                      <span className={styles.suggestionYear}>{yearOf(r.firstReleaseDate)}</span>
+                      <span className={styles.suggestionEditions}>{r.editionCount}</span>
                     </button>
                   </li>
                 ))}
               </ul>
-              {albumsNotice && <div className={styles.truncationNotice}>{albumsNotice}</div>}
+              {resultsNotice && <div className={styles.truncationNotice}>{resultsNotice}</div>}
               <div className={styles.notIt}>{t.search.identify.notIt}</div>
             </div>
           )}
@@ -314,14 +316,18 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
             </div>
           )}
 
-          {state === 'selected' && selectedAlbum && (
+          {state === 'selected' && selectedResult && (
             <>
               <div className={styles.recorded}>
                 <div className={styles.fieldLabel}>{t.search.identify.willBeRecordedAs}</div>
-                <div className={styles.recordedAlbum}>{selectedAlbum.title}</div>
+                <div className={styles.recordedAlbum}>{selectedResult.title}</div>
                 <div className={styles.recordedMeta}>
-                  {resolvedArtist} · {(selectedAlbum.primaryType ?? '—').toUpperCase()} · {yearOf(selectedAlbum.firstReleaseDate)} ·{' '}
-                  {t.search.identify.editionCount(editionsTotal)}
+                  {selectedResult.artist} · {(selectedResult.primaryType ?? '—').toUpperCase()} · {yearOf(selectedResult.firstReleaseDate)} ·{' '}
+                  {/* From the search result's own editionCount — already in
+                      hand from the same call that produced this row, unlike
+                      the picker below which needs the separate editions list
+                      for actual per-edition detail. */}
+                  {t.search.identify.editionCount(selectedResult.editionCount)}
                 </div>
               </div>
 

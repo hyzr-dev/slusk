@@ -586,18 +586,24 @@ export const t = {
       albumLabel: 'Album (guessed — edit if wrong)',
       searchButton: 'Search MusicBrainz',
       searching: 'searching musicbrainz…',
-      // Suggestions table column headers. No EDITIONS column: the backend
-      // has no per-row edition count without a separate rate-limited call
-      // per row (see the brief) — the count only exists once an album is
-      // selected, where selEditions below renders it.
+      // Suggestions table column headers, matching the mock exactly —
+      // EDITIONS is a genuine single-call field on the combined search
+      // result (MusicBrainzSearchResult.editionCount), not a per-row lookup.
       colArtistAlbum: 'ARTIST / ALBUM',
       colType: 'TYPE',
       colYear: 'YEAR',
+      colEditions: 'EDITIONS',
       notIt: 'Not it? Edit the fields above and search again.',
-      // `shown`/`total` truncation notice, reused for the album suggestions
-      // list and the edition picker alike — both cap their arrays the same
-      // way (see MusicBrainzAlbumListResult/MusicBrainzEditionListResult).
+      // The edition PICKER's truncation notice (MusicBrainzEditionListResult
+      // is a genuinely paginated/capped list of one release-group's
+      // editions), distinct from showingBestOf below.
       showingOf: (shown: number, total: number) => `showing ${shown} of ${total}`,
+      // The SUGGESTIONS list's truncation notice. Deliberately not phrased
+      // like showingOf: GET /api/identify/search is a relevance-ranked
+      // search, not a paginated catalogue — `total` routinely reaches the
+      // hundreds, and "showing N of 412" would wrongly imply the rest are
+      // one more click away.
+      showingBestOf: (shown: number) => `showing the ${shown} best match${shown === 1 ? '' : 'es'}`,
       noMatchesTitle: 'NO MATCHES',
       noMatchesBody: 'MusicBrainz returned nothing for these terms. Edit the artist/album above and search again.',
       searchAgain: 'Search again',
