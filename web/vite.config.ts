@@ -17,10 +17,21 @@ import react from '@vitejs/plugin-react';
 const apiTarget = process.env.SLSKDARR_DEV_API ?? 'http://localhost:9090';
 const apiToken = process.env.SLSKDARR_DEV_TOKEN ?? 'slskdarr-pr-lab-observ-token-0001';
 
+// Origin must be rewritten alongside Host. changeOrigin only rewrites Host, so
+// a browser POST through this proxy still carries `Origin: http://localhost:5173`
+// while the backend believes it is serving 9090. ProtectPrivateEndpoints'
+// same-origin check (issue #279, internal/observ/security.go) then rejects every
+// browser-initiated mutation with 403 — search, job creation, retry, cancel,
+// config writes. Production is unaffected, because there the SPA is served from
+// the same origin as the API; it is only this proxy that splits them.
+//
+// A bearer-authenticated client may omit Origin but cannot override a
+// conflicting one, so stripping it would work too. Setting it to the target is
+// the more honest of the two: after proxying, the request really is same-origin.
 const backendProxy = {
   target: apiTarget,
   changeOrigin: true,
-  headers: { Authorization: `Bearer ${apiToken}` },
+  headers: { Authorization: `Bearer ${apiToken}`, Origin: apiTarget },
 };
 
 // Build output lands inside internal/observ/web/ because go:embed cannot read
