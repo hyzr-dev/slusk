@@ -42,7 +42,11 @@ export const t = {
     },
     search: {
       title: 'Search',
-      subtitle: 'Query the Soulseek network directly and import straight into Lidarr',
+      // Deliberately does not promise Lidarr import: a manual job downloads
+      // end-to-end, but app.Jobs.Create's doc comment records that the
+      // subsequent import step misbehaves for a NULL lidarr_album_id (#59/#60).
+      // Restore the import wording only once that lands.
+      subtitle: 'Query the Soulseek network directly and download what you find',
     },
     health: {
       title: 'Health',
