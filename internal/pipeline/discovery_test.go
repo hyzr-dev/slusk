@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,10 +53,10 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
 	searcher := &fakeSearcher{results: []core.SearchResult{
-		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
-		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
-		{Username: "good2", Filename: "good2/01.flac", Size: 10, BitRate: 900},
-		{Username: "good2", Filename: "good2/02.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/Artist - Album/02.flac", Size: 10, BitRate: 900},
+		{Username: "good2", Filename: "good2/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "good2", Filename: "good2/Artist - Album/02.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 
@@ -68,11 +69,11 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 	// track-band filter has something to reject: 5 files against a band of
 	// [2, 2] (the album's one known release has 2 tracks).
 	searcher.results = append(searcher.results, []core.SearchResult{
-		{Username: "toobig", Filename: "toobig/01.flac", Size: 10, BitRate: 900},
-		{Username: "toobig", Filename: "toobig/02.flac", Size: 10, BitRate: 900},
-		{Username: "toobig", Filename: "toobig/03.flac", Size: 10, BitRate: 900},
-		{Username: "toobig", Filename: "toobig/04.flac", Size: 10, BitRate: 900},
-		{Username: "toobig", Filename: "toobig/05.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/Artist - Album/02.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/Artist - Album/03.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/Artist - Album/04.flac", Size: 10, BitRate: 900},
+		{Username: "toobig", Filename: "toobig/Artist - Album/05.flac", Size: 10, BitRate: 900},
 	}...)
 
 	d := NewDiscovery(p)
@@ -151,7 +152,7 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 			break
 		}
 	}
-	wantRejectionDetail := "rejected 1 candidates: 1 above maximum track count, 0 below minimum track count"
+	wantRejectionDetail := "rejected 1 candidates: 1 above maximum track count, 0 below minimum track count, 0 not matching the requested album"
 	if rejectionDetail != wantRejectionDetail {
 		t.Errorf("candidate rejection detail = %q, want %q; events %+v", rejectionDetail, wantRejectionDetail, events)
 	}
@@ -203,7 +204,7 @@ func TestDiscoverySummarizesThousandsOfRejectedCandidates(t *testing.T) {
 	if len(rejectionEvents) != 1 {
 		t.Fatalf("candidate rejection events = %d, want 1; all events %+v", len(rejectionEvents), events)
 	}
-	wantDetail := "rejected 2000 candidates: 2000 above maximum track count, 0 below minimum track count"
+	wantDetail := "rejected 2000 candidates: 2000 above maximum track count, 0 below minimum track count, 0 not matching the requested album"
 	if rejectionEvents[0].Detail != wantDetail {
 		t.Errorf("rejection detail = %q, want %q", rejectionEvents[0].Detail, wantDetail)
 	}
@@ -309,10 +310,10 @@ func TestDiscoveryFallbackQuery(t *testing.T) {
 	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
 	primary := "Artist Album (Deluxe Edition)"
-	fallback := normalizeQuery(primary)
+	fallback := matcher.NormalizeQuery(primary)
 	searcher := &fakeSearcher{resultsForQuery: map[string][]core.SearchResult{
 		fallback: {
-			{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
+			{Username: "peer", Filename: "peer/Artist - Album (Deluxe Edition)/01.flac", Size: 10, BitRate: 900},
 		},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
@@ -417,13 +418,13 @@ func TestDiscoveryTrackBandFilter(t *testing.T) {
 	}
 	var results []core.SearchResult
 	for i := 1; i <= 9; i++ {
-		results = append(results, core.SearchResult{Username: "toosmall", Filename: fmt.Sprintf("toosmall/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "toosmall", Filename: fmt.Sprintf("toosmall/Artist - Album/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	for i := 1; i <= 11; i++ {
-		results = append(results, core.SearchResult{Username: "justright", Filename: fmt.Sprintf("justright/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "justright", Filename: fmt.Sprintf("justright/Artist - Album/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	for i := 1; i <= 30; i++ {
-		results = append(results, core.SearchResult{Username: "toobig", Filename: fmt.Sprintf("toobig/%02d.flac", i), Size: 10, BitRate: 900})
+		results = append(results, core.SearchResult{Username: "toobig", Filename: fmt.Sprintf("toobig/Artist - Album/%02d.flac", i), Size: 10, BitRate: 900})
 	}
 	searcher := &fakeSearcher{results: results}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
@@ -467,9 +468,9 @@ func TestDiscoveryTrackBandUnknownSkipsFilter(t *testing.T) {
 	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: nil}
 	searcher := &fakeSearcher{results: []core.SearchResult{
-		{Username: "peer", Filename: "peer/01.flac", Size: 10, BitRate: 900},
-		{Username: "peer", Filename: "peer/02.flac", Size: 10, BitRate: 900},
-		{Username: "peer", Filename: "peer/03.flac", Size: 10, BitRate: 900},
+		{Username: "peer", Filename: "peer/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "peer", Filename: "peer/Artist - Album/02.flac", Size: 10, BitRate: 900},
+		{Username: "peer", Filename: "peer/Artist - Album/03.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 
@@ -495,9 +496,13 @@ func TestDiscoveryTrackBandUnknownSkipsFilter(t *testing.T) {
 // fakeDiscoveryMetrics is a local DiscoveryMetrics fake counting
 // IncAlbumReleasesError calls, mirroring the fakeSink pattern used for
 // Downloading's MetricsSink.
-type fakeDiscoveryMetrics struct{ albumReleasesErrors int }
+type fakeDiscoveryMetrics struct {
+	albumReleasesErrors int
+	albumTracksErrors   int
+}
 
 func (f *fakeDiscoveryMetrics) IncAlbumReleasesError() { f.albumReleasesErrors++ }
+func (f *fakeDiscoveryMetrics) IncAlbumTracksError()   { f.albumTracksErrors++ }
 
 // TestDiscoveryAlbumReleasesErrorLeavesJobUntouched: an AlbumReleases error
 // aborts the pass without spending retry budget (same as the old AlbumStatus
@@ -609,8 +614,8 @@ func TestDiscoveryRecordsSearchPassMatchedOnCandidatesPath(t *testing.T) {
 	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
 	searcher := &fakeSearcher{results: []core.SearchResult{
-		{Username: "good1", Filename: "good1/01.flac", Size: 10, BitRate: 900},
-		{Username: "good1", Filename: "good1/02.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "good1", Filename: "good1/Artist - Album/02.flac", Size: 10, BitRate: 900},
 	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 	m := &fakeDiscoveryMetrics{}
@@ -769,5 +774,108 @@ func TestDiscoveryRecordSearchPassFailureDoesNotFailTick(t *testing.T) {
 	d := NewDiscovery(p)
 	if err := d.Tick(ctx, now); err != nil {
 		t.Fatalf("Tick should swallow a RecordSearchPass failure, got: %v", err)
+	}
+}
+
+// TestDiscoveryRejectsIrrelevantCandidate is the issue #316 regression case:
+// a search for "The Absence"/"The Absence" network-matches a peer whose real
+// share is an unrelated Kansas album (every query token appears somewhere in
+// that path), and the relevance gate must reject it, leaving no survivors.
+func TestDiscoveryRejectsIrrelevantCandidate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "The Absence", ArtistName: "The Absence"}}
+	music := &fakeMusic{
+		wanted: []core.WantedRelease{wanted[1]},
+		albumTracks: []core.AlbumTrack{
+			{Title: "Wartorn"}, {Title: "Riders of the Plague"}, {Title: "Skin and Bones"},
+		},
+	}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "wrongpeer", Filename: `Kansas\Kansas - The Absence Of Presence (2020) [FLAC]\01 - The Absence Of Presence.flac`, Size: 10, BitRate: 900},
+		{Username: "wrongpeer", Filename: `Kansas\Kansas - The Absence Of Presence (2020) [FLAC]\02 - Throwing Mountains.flac`, Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	cands, err := st.CandidatesForJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("CandidatesForJob: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Fatalf("expected the irrelevant candidate rejected, got %+v", cands)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var rejectionDetail string
+	for _, e := range events {
+		if e.Event == core.EventCandidateRejected {
+			rejectionDetail = e.Detail
+		}
+	}
+	if !strings.Contains(rejectionDetail, "not matching the requested album") {
+		t.Errorf("expected a rejection event mentioning the album mismatch, got %q; events %+v", rejectionDetail, events)
+	}
+}
+
+// TestDiscoveryAlbumTracksErrorDegradesToDirectoryCheck asserts an
+// AlbumTracks error DEGRADES the relevance gate to a directory-only check
+// rather than aborting discovery (unlike AlbumReleases, which is load-bearing
+// for the track-count band and does abort - see
+// TestDiscoveryAlbumReleasesErrorLeavesJobUntouched, the opposite
+// assertion): Peers.Search still runs, the AlbumTracksErrors metric is
+// incremented, and a directory-relevant candidate still survives.
+func TestDiscoveryAlbumTracksErrorDegradesToDirectoryCheck(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{
+		wanted:         []core.WantedRelease{wanted[1]},
+		albumTracksErr: errors.New("boom"),
+	}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "peer", Filename: "peer/Artist - Album/01.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	m := &fakeDiscoveryMetrics{}
+	p.Metrics = m
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(searcher.queries) == 0 {
+		t.Fatalf("expected Peers.Search still called despite the AlbumTracks error")
+	}
+	if m.albumTracksErrors != 1 {
+		t.Errorf("expected AlbumTracksErrors metric incremented once, got %d", m.albumTracksErrors)
+	}
+
+	cands, err := st.CandidatesForJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("CandidatesForJob: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Username != "peer" {
+		t.Fatalf("expected the directory-relevant candidate to still survive, got %+v", cands)
 	}
 }

@@ -28,6 +28,7 @@ type Metrics struct {
 	UnknownTransfers    prometheus.Gauge
 	DownloadsActive     prometheus.Gauge
 	AlbumReleasesErrors prometheus.Counter
+	AlbumTracksErrors   prometheus.Counter
 }
 
 // NewMetrics constructs and registers the collectors on reg.
@@ -45,8 +46,11 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		AlbumReleasesErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "slskdarr_album_releases_errors_total", Help: "Total failed Lidarr AlbumReleases calls during discovery.",
 		}),
+		AlbumTracksErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "slskdarr_album_tracks_errors_total", Help: "Total failed Lidarr AlbumTracks calls during discovery.",
+		}),
 	}
-	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors)
+	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors)
 	return m
 }
 
@@ -55,6 +59,9 @@ func (m *Metrics) IncReconcile() { m.ReconcileTotal.Inc() }
 
 // IncAlbumReleasesError counts one failed Lidarr AlbumReleases call in Discovery.
 func (m *Metrics) IncAlbumReleasesError() { m.AlbumReleasesErrors.Inc() }
+
+// IncAlbumTracksError counts one failed Lidarr AlbumTracks call in Discovery.
+func (m *Metrics) IncAlbumTracksError() { m.AlbumTracksErrors.Inc() }
 
 // SetUnknownTransfers records the current count of slskd transfers not tracked by slskdarr.
 func (m *Metrics) SetUnknownTransfers(n int) { m.UnknownTransfers.Set(float64(n)) }

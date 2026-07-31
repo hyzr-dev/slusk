@@ -293,6 +293,47 @@ func (c *Client) AlbumReleases(ctx context.Context, albumID int64) ([]core.Album
 	return out, nil
 }
 
+// AlbumTracks fetches an album's tracklist, used by the discovery relevance
+// gate (#316) to check candidate filenames against the album's real track
+// titles rather than trusting Soulseek's token-AND path match alone.
+//
+// The response shape assumed here — a flat JSON array of TrackResource, each
+// carrying title/trackNumber/mediumNumber — and whether it covers every
+// release of the album or only the one Lidarr currently has selected, are
+// both unverified against the deployed Lidarr version; that is confirmed in
+// the lab before this ships. A failure here degrades the caller to a
+// directory-only relevance check rather than aborting discovery (see
+// discovery.go), so a wrong assumption here is not a hard outage.
+func (c *Client) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTrack, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/track?albumId=%d", c.baseURL, albumID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("lidarr album tracks: status %d", resp.StatusCode)
+	}
+	var raw []struct {
+		Title        string `json:"title"`
+		TrackNumber  string `json:"trackNumber"`
+		MediumNumber int    `json:"mediumNumber"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	out := make([]core.AlbumTrack, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, core.AlbumTrack{Title: r.Title, TrackNumber: r.TrackNumber, MediumNumber: r.MediumNumber})
+	}
+	return out, nil
+}
+
 // ExecuteManualImport tells Lidarr to import the given items (move mode).
 func (c *Client) ExecuteManualImport(ctx context.Context, items []core.ImportItem) error {
 	files := make([]map[string]any, 0, len(items))
