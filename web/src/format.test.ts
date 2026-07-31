@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatDuration, formatEta, formatScore, formatShortTime, formatSize, formatSpeed, formatTime, formatVirtualPath, localDayKey, percent } from './format';
+import { basename, compareFileNames, formatAge, formatBytes, formatBytesOrDash, formatDateTime, formatDuration, formatEta, formatScore, formatShortTime, formatSize, formatSizeCompact, formatSpeed, formatTime, formatVirtualPath, localDayKey, percent } from './format';
 
 describe('formatBytes', () => {
   it('returns "0 MB" for zero and nullish input', () => {
@@ -136,6 +136,40 @@ describe('formatSize', () => {
 
   it('scales to TB at or above 1024 GB', () => {
     expect(formatSize(1.4 * 1024 * 1024 * 1024 * 1024)).toBe('1.4 TB');
+  });
+});
+
+describe('formatSizeCompact', () => {
+  it('returns "0M" for zero and nullish input', () => {
+    expect(formatSizeCompact(0)).toBe('0M');
+    expect(formatSizeCompact(null)).toBe('0M');
+    expect(formatSizeCompact(undefined)).toBe('0M');
+  });
+
+  // The whole point of this formatter: no decimal below 1 GB, so the widest
+  // pair it can produce stays inside the SIZE column (issue #332).
+  it('rounds megabytes to whole numbers', () => {
+    expect(formatSizeCompact(340.1 * 1024 * 1024)).toBe('340M');
+    expect(formatSizeCompact(1536 * 1024)).toBe('2M');
+  });
+
+  it('scales to GB at or above 1024 MB, with one decimal', () => {
+    expect(formatSizeCompact(2.2 * 1024 * 1024 * 1024)).toBe('2.2G');
+    expect(formatSizeCompact(742 * 1024 * 1024 * 1024)).toBe('742.0G');
+  });
+
+  it('scales to TB at or above 1024 GB', () => {
+    expect(formatSizeCompact(1.4 * 1024 * 1024 * 1024 * 1024)).toBe('1.4T');
+  });
+
+  // The width budget for the 84px SIZE column. An album transfer lives in the
+  // MB range, where the pair is at most "1024M / 1024M" (13 chars) — what the
+  // column was sized for. The GB range is wider ("1023.9G", 7 chars) and a
+  // pair of those can still overflow; `white-space: nowrap` on the cell makes
+  // that clip rather than wrap, which is the acceptable failure (issue #332).
+  it('stays at five characters through the MB range', () => {
+    expect(formatSizeCompact(1023.9 * 1024 * 1024)).toBe('1024M');
+    expect(formatSizeCompact(1023.9 * 1024 * 1024).length).toBeLessThanOrEqual(5);
   });
 });
 
