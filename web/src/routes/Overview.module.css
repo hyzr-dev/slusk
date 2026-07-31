@@ -61,6 +61,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* FAILED (#310): status · album · reason · when. Same 28px status gutter and
+   album column shape as .transferGrid/.finishedGrid so the three stacked
+   panels read as one, with a wider reason column in place of speed and size
+   — a failure's whole point is prose, not a byte count. */
+.failedGrid {
+  display: grid;
+  grid-template-columns: 28px minmax(150px, 2fr) minmax(120px, 2fr) 62px;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Dimmed like .peerCell, but nowrap+ellipsis rather than wrapping: a failure
+   detail can be a full sentence (often Lidarr's own rejection text), and
+   letting it wrap would blow out this fixed-height panel's row height. The
+   full text is still reachable via the row's title attribute. */
+.failedReason {
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .transferHead {
   padding: 9px 17px;
   border-bottom: 1px solid var(--line);
@@ -207,4 +230,13 @@
      the least essential field on a finished row. */
   .finishedGrid { grid-template-columns: 28px minmax(90px, 2fr) 62px; }
   .finishedGrid .peerCell { display: none; }
+
+  /* Same clipping hazard as .finishedGrid above (issue #215): .failedGrid's
+     390px minimum (28 + 150 + 120 + 62 + 3x10 gap) clips at a 375px viewport,
+     where available row width is roughly 291px. Here it's the status gutter
+     that goes, not reason or when: every row in a state-FAILED panel carries
+     an identical tag, so it's the only column conveying no information —
+     unlike .finishedGrid's peer, reason is this panel's whole point. */
+  .failedGrid { grid-template-columns: minmax(90px, 2fr) minmax(90px, 2fr) 62px; }
+  .failedGrid .statusCell { display: none; }
 }

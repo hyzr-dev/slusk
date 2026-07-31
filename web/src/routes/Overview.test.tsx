@@ -34,6 +34,19 @@ const FINISHED_PARAMS: JobPageParams = {
   skipFacets: true,
 };
 
+// Mirrors the params Overview.tsx passes for the FAILED panel (#310, review
+// follow-up: filter is 'failures', the state-keyed predicate, not 'failed').
+const FAILED_PARAMS: JobPageParams = {
+  page: 0,
+  filter: 'failures',
+  sort: 'recent',
+  dir: 'desc',
+  source: 'all',
+  q: '',
+  pageSize: 8,
+  skipFacets: true,
+};
+
 function makeJob(id: number, title: string, artist: string, status: JobStatus): Job {
   return {
     id,
@@ -124,6 +137,10 @@ function renderOverview(
   // alive...' below). A JS default parameter only fires for undefined, so
   // this distinction would collapse if null reused undefined's meaning.
   finishedData: JobPage | undefined | null = makeJobPage([]),
+  // Same undefined/null distinction as finishedData above, for the failed-
+  // imports panel (#310): undefined seeds an empty resolved page, null leaves
+  // the query pending against the hung-fetch stub.
+  failedData: JobPage | undefined | null = makeJobPage([]),
 ) {
   // A real refetch on mount would otherwise hit the unmocked global fetch;
   // keep it pending indefinitely so the seeded data is what's asserted on.
@@ -132,6 +149,9 @@ function renderOverview(
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
   if (finishedData !== null) {
     queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  }
+  if (failedData !== null) {
+    queryClient.setQueryData(queryKeys.jobsPage(FAILED_PARAMS), failedData);
   }
   queryClient.setQueryData(queryKeys.status, statusData);
   queryClient.setQueryData(queryKeys.charts, chartsData);
@@ -149,11 +169,12 @@ function renderOverview(
 // a MemoryRouter with an actual /jobs/:id route rendering a sentinel proves
 // navigate() actually fired, rather than mocking useNavigate and asserting
 // on the mock's call args.
-function renderOverviewWithNavigation(jobsData: JobPage, finishedData: JobPage) {
+function renderOverviewWithNavigation(jobsData: JobPage, finishedData: JobPage, failedData: JobPage = makeJobPage([])) {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.jobsPage(TRANSFER_PARAMS), jobsData);
   queryClient.setQueryData(queryKeys.jobsPage(FINISHED_PARAMS), finishedData);
+  queryClient.setQueryData(queryKeys.jobsPage(FAILED_PARAMS), failedData);
   queryClient.setQueryData(queryKeys.status, status);
   queryClient.setQueryData(queryKeys.charts, charts);
   return render(
@@ -471,6 +492,40 @@ describe('Overview', () => {
     );
     expect(screen.getByText('In Flight')).toBeInTheDocument();
     expect(screen.getByText('Finished Album')).toBeInTheDocument();
+  });
+
+  // #310: the FAILED panel, a third independent panel/query alongside
+  // TRANSFERS and RECENTLY FINISHED.
+  it('renders the failed panel with a reason, preferring failDetail over failReason', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([]), makeJobPage([
+      {
+        ...baseJob, id: 92, title: 'Bad Import', artist: 'Artist C', status: 'failed', state: 'FAILED',
+        peer: '', failReason: 'transfer failed', failDetail: 'Lidarr rejected: track count mismatch',
+        updatedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      },
+    ]));
+
+    expect(screen.getByText(t.overview.failedHeading)).toBeInTheDocument();
+    expect(screen.getByText('Bad Import')).toBeInTheDocument();
+    expect(screen.getByText('Lidarr rejected: track count mismatch')).toBeInTheDocument();
+    expect(screen.queryByText('transfer failed')).not.toBeInTheDocument();
+    expect(screen.getByText('5m')).toBeInTheDocument();
+  });
+
+  it('falls back to failReason, then an em dash, when failDetail is absent', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([]), makeJobPage([
+      { ...baseJob, id: 92, title: 'Bad Import', status: 'failed', state: 'FAILED', peer: '', failReason: 'transfer failed', failDetail: undefined },
+      { ...baseJob, id: 93, title: 'No Reason Import', status: 'failed', state: 'FAILED', peer: '', failReason: '', failDetail: undefined },
+    ]));
+
+    expect(screen.getByText('transfer failed')).toBeInTheDocument();
+    const noReasonRow = screen.getByText('No Reason Import').closest('[role="row"]') as HTMLElement;
+    expect(within(noReasonRow).getByText('—')).toBeInTheDocument();
+  });
+
+  it('shows an empty state when nothing has failed', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([]), makeJobPage([]));
+    expect(screen.getByText(`── ${t.overview.noneFailed} ──`)).toBeInTheDocument();
   });
 });
 

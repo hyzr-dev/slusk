@@ -29,6 +29,13 @@ export type JobSource = 'lidarr' | 'manual';
  * 'inflight' and 'finished' are Overview's two region filters (issue #287):
  * 'inflight' is every job the pipeline holds a MaxActive slot for, 'finished'
  * is a job that reached a terminal state within the backend's recent window.
+ * 'failures' is Overview's third region filter (issue #310, review
+ * follow-up): every job whose STATE is FAILED, time-unbounded. It is
+ * deliberately distinct from 'failed' below — 'failed' is status-derived
+ * (dashboardJobStatusSQL) and also matches a job still DOWNLOADING whose
+ * current candidate merely errored and will be retried; 'failures' is
+ * state-keyed and excludes that job, the same way 'inflight'/'finished' are
+ * kept disjoint from each other.
  */
 export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer' | 'recent';
 export type JobPageDirection = 'asc' | 'desc';
@@ -42,7 +49,8 @@ export type JobStatusFilter =
   | 'parked'
   | 'done'
   | 'inflight'
-  | 'finished';
+  | 'finished'
+  | 'failures';
 export type JobSourceFilter = 'all' | JobSource;
 
 export interface JobPageParams {
@@ -114,6 +122,12 @@ export interface Job {
   candidatesTried: number;
   maxCandidates: number;
   failReason: string;
+  // The pipeline's own last recorded failure explanation from job_events (see
+  // internal/observ jobDTO.FailDetail), typically Lidarr's verbatim rejection
+  // text. Unlike failReason (the current candidate's generic category), this
+  // is populated only by GET /api/jobs, never by the live stream — so it's
+  // optional and absent on stream-sourced jobs.
+  failDetail?: string;
   nextAttemptAt: string;
   retries: number;
   notBefore: string;

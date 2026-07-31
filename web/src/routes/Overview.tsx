@@ -37,6 +37,25 @@ const MAX_RECONCILE_ROWS = 7;
 // (issue #286).
 const FINISHED_PAGE_SIZE = 5;
 
+// Rows in the FAILED panel (#310, review follow-up). Selection is
+// server-side: filter=failures is every job whose STATE (not
+// dashboardJobStatusSQL's derived status) is FAILED — deliberately
+// state-keyed, like filter=inflight/finished, so a job still DOWNLOADING
+// whose current candidate merely errored and will be retried does not also
+// show up here. Time-unbounded — unlike filter=finished above, which is
+// windowed to store.DashboardFinishedWindow — since a failure a caller
+// hasn't dealt with yet is still worth surfacing regardless of when it
+// happened. sort=recent is newest-failure-first. The panel opts out of
+// facets (skipFacets) for the same reason as the finished panel: it reads
+// neither total nor chips.
+//
+// This panel's set can overlap with RECENTLY FINISHED above for the length
+// of DashboardFinishedWindow: a job that just failed is both "recently
+// finished" and "still failed". That overlap is deliberate, not a bug — the
+// two panels answer different questions ("what just happened" vs "what
+// still needs attention, however old").
+const FAILED_PAGE_SIZE = 8;
+
 /**
  * Tick colour for a TRANSFERS row: queued takes priority over stalled since a
  * job can carry a stale queuePosition into a terminal status, but never while
@@ -91,11 +110,16 @@ export default function Overview() {
     page: 0, filter: 'finished', sort: 'recent', dir: 'desc',
     source: 'all', q: '', pageSize: FINISHED_PAGE_SIZE, skipFacets: true,
   });
+  const failedQuery = useJobs({
+    page: 0, filter: 'failures', sort: 'recent', dir: 'desc',
+    source: 'all', q: '', pageSize: FAILED_PAGE_SIZE, skipFacets: true,
+  });
   const result = jobsQuery.data;
   const transferRows = result?.jobs ?? [];
   const status = statusQuery.data;
   const charts = chartsQuery.data;
   const finishedRows = finishedQuery.data?.jobs ?? [];
+  const failedRows = failedQuery.data?.jobs ?? [];
 
   // Only the in-flight rows: a finished job is terminal, so the stream never
   // sends deltas for it and there is no reason to make the backend track it.
@@ -117,6 +141,7 @@ export default function Overview() {
   const jobsPhase = queryPhase(jobsQuery);
   const chartsPhase = queryPhase(chartsQuery);
   const finishedPhase = queryPhase(finishedQuery);
+  const failedPhase = queryPhase(failedQuery);
 
   // IMPORTED 24H sums /api/charts' completedByHour, exactly 24 zero-filled
   // hourly buckets ending at the current hour (ChartsReport, api/types.ts).
@@ -312,6 +337,47 @@ export default function Overview() {
                   <span role="cell" className={styles.finishedWhen}>{finishedAge(job.updatedAt)}</span>
                 </div>
               ))}
+            </div>
+          ))}
+      </Panel>
+
+      <Panel>
+        <SectionHeader label={t.overview.failedHeading} />
+        <QueryNotice phase={failedPhase} />
+        {hasData(failedPhase) &&
+          (failedRows.length === 0 ? (
+            <EmptyState message={t.overview.noneFailed} />
+          ) : (
+            <div role="table">
+              <div role="row" className={`${styles.failedGrid} ${styles.transferHead}`}>
+                <span role="columnheader" className={styles.statusCell}>{t.overview.failedGridHead.status}</span>
+                <span role="columnheader">{t.overview.failedGridHead.album}</span>
+                <span role="columnheader">{t.overview.failedGridHead.reason}</span>
+                <span role="columnheader" className={styles.headRight}>{t.overview.failedGridHead.when}</span>
+              </div>
+              {failedRows.map((job) => {
+                const reason = job.failDetail || job.failReason || '—';
+                return (
+                  <div
+                    key={job.id}
+                    role="row"
+                    tabIndex={0}
+                    className={`${styles.failedGrid} ${styles.transferRow}`}
+                    onClick={() => navigate(`/jobs/${job.id}`)}
+                    onKeyDown={(event) => handleRowKeyDown(event, () => navigate(`/jobs/${job.id}`))}
+                  >
+                    <span role="cell" className={styles.statusCell}>
+                      <Tag status={job.status} bare />
+                    </span>
+                    <span role="cell" className={styles.albumCell}>
+                      <span className={styles.transferTitle}>{job.title}</span>
+                      <span className={styles.transferArtist}>{job.artist}</span>
+                    </span>
+                    <span role="cell" className={styles.failedReason} title={reason}>{reason}</span>
+                    <span role="cell" className={styles.finishedWhen}>{finishedAge(job.updatedAt)}</span>
+                  </div>
+                );
+              })}
             </div>
           ))}
       </Panel>

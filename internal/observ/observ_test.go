@@ -449,6 +449,17 @@ func TestPagedJobsEndpointParsesInflightFinishedAndFacets(t *testing.T) {
 			suffix: "?filter=finished&sort=recent&dir=desc&pageSize=5&facets=0",
 			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 5, SkipFacets: true},
 		},
+		{
+			// Overview's FAILED JOBS panel (issue #310). This case exists
+			// because parsePagedJobsQuery keeps its own filter allowlist,
+			// separate from store.validateDashboardJobsQuery's: #310 added
+			// "failures" to the store's copy only, and every store and
+			// frontend test still passed while the real endpoint answered
+			// 400. Only a request that actually crosses the URL parser
+			// catches that, so every filter Overview sends needs a case here.
+			suffix: "?filter=failures&sort=recent&dir=desc&pageSize=8&facets=0",
+			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "failures", Source: "all", PageSize: 8, SkipFacets: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.suffix, func(t *testing.T) {
@@ -797,6 +808,164 @@ func TestJobsEndpointReturnsFailReasonAndNextAttemptForFailedJob(t *testing.T) {
 	wantNextAttempt := updatedAt.Add(testFailedRetryAfter).Format(timeFormat)
 	if got[0].NextAttemptAt != wantNextAttempt {
 		t.Errorf("NextAttemptAt = %q, want %q", got[0].NextAttemptAt, wantNextAttempt)
+	}
+}
+
+// TestJobsEndpointReturnsFailDetailForFailedJob is issue #310: a failed job's
+// jobDTO should carry the pipeline's own recorded failure explanation, not
+// just the candidate's generic FailReason.
+func TestJobsEndpointReturnsFailDetailForFailedJob(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:    core.AlbumJob{ID: 9, Title: "Doomed Again", ArtistName: "Nobody"},
+				Status: "failed",
+			},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		if len(jobIDs) != 1 || jobIDs[0] != 9 {
+			t.Fatalf("FailureDetails called with %v, want [9]", jobIDs)
+		}
+		return map[int64]string{9: "Lidarr rejected: track count mismatch"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].FailDetail != "Lidarr rejected: track count mismatch" {
+		t.Errorf("FailDetail = %q, want %q", got[0].FailDetail, "Lidarr rejected: track count mismatch")
+	}
+}
+
+// TestJobsEndpointToleratesNilAndErroringFailureDetails is issue #310: a nil
+// FailureDetails dep (every pre-existing ServerDeps) and one that errors must
+// both still produce a 200 with the rest of the payload intact — the
+// enrichment is best-effort, exactly like LiveTransfers.
+func TestJobsEndpointToleratesNilAndErroringFailureDetails(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 9, Title: "Doomed Again", ArtistName: "Nobody"}, Status: "failed"},
+		}, nil
+	}
+
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = nil
+	h := NewServer(deps)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil FailureDetails: status = %d, want 200", rec.Code)
+	}
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].FailDetail != "" || got[0].Title != "Doomed Again" {
+		t.Errorf("nil FailureDetails: got %+v", got[0])
+	}
+
+	deps2 := testServerDeps(reg)
+	deps2.PagedJobs = pagedJobsFromFunc(jobs)
+	deps2.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return nil, errors.New("boom")
+	}
+	h2 := NewServer(deps2)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("erroring FailureDetails: status = %d, want 200", rec2.Code)
+	}
+	got2 := decodeJobsList(t, rec2.Body.Bytes())
+	if got2[0].FailDetail != "" || got2[0].Title != "Doomed Again" {
+		t.Errorf("erroring FailureDetails: got %+v", got2[0])
+	}
+}
+
+// TestJobsEndpointAssignsFailDetailToTheCorrectJobInAMixedPage is issue #310's
+// review follow-up: every prior FailDetail test seeds exactly one job, and it
+// is failed, so a mutant that writes FailDetail by looping over failedIDs and
+// indexing straight into dtos (rather than looking each dto up by its own
+// job ID, as enrichJobDTOs actually does) still passes them. Here a
+// NON-failed job is ordered BEFORE the failed one, so the two loops (over all
+// views vs. over failed-only IDs) walk different indices — the buggy form
+// would write the failed job's detail onto the non-failed job's row.
+func TestJobsEndpointAssignsFailDetailToTheCorrectJobInAMixedPage(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 1, Title: "Still Going", ArtistName: "Someone"}, Status: "active"},
+			{Job: core.AlbumJob{ID: 2, Title: "Doomed", ArtistName: "Nobody"}, Status: "failed"},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		if len(jobIDs) != 1 || jobIDs[0] != 2 {
+			t.Fatalf("FailureDetails called with %v, want [2]", jobIDs)
+		}
+		return map[int64]string{2: "Lidarr rejected: track count mismatch"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if len(got) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(got))
+	}
+	if got[0].ID != 1 || got[0].FailDetail != "" {
+		t.Errorf("non-failed job (index 0) = %+v, want FailDetail empty", got[0])
+	}
+	if got[1].ID != 2 || got[1].FailDetail != "Lidarr rejected: track count mismatch" {
+		t.Errorf("failed job (index 1) = %+v, want FailDetail %q", got[1], "Lidarr rejected: track count mismatch")
+	}
+}
+
+// TestJobsEndpointSerializesFailDetailUnderItsWireKey is issue #310's review
+// follow-up: decodeJobsList unmarshals into jobDTO itself, so every other
+// FailDetail test round-trips the struct tag against itself and would stay
+// green even if the tag were renamed away from what web/src/api/types.ts
+// actually expects. This decodes the raw response body generically instead,
+// so it checks the literal wire key.
+func TestJobsEndpointSerializesFailDetailUnderItsWireKey(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 9, Title: "Doomed Again", ArtistName: "Nobody"}, Status: "failed"},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return map[int64]string{9: "Lidarr rejected: track count mismatch"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var raw struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if len(raw.Jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(raw.Jobs))
+	}
+	if got, want := raw.Jobs[0]["failDetail"], "Lidarr rejected: track count mismatch"; got != want {
+		t.Errorf(`wire key "failDetail" = %v, want %q`, got, want)
 	}
 }
 

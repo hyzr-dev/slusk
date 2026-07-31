@@ -366,7 +366,11 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 		return fmt.Errorf("dir=asc is not supported for dashboard jobs sort %q", q.Sort)
 	}
 	switch q.Filter {
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished":
+	// "failed" here is the status-derived filter that falls through to
+	// dashboardJobsWhere's default case — it is NOT the same set as
+	// "failures" below; see that case's comment for why the two must never
+	// be merged.
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished", "failures":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -412,7 +416,32 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 			clauses = append(clauses,
 				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+")"+
 					" AND j.updated_at > "+bind(q.Now.Add(-DashboardFinishedWindow)))
+		case "failures":
+			// Overview's FAILED panel (issue #310/review follow-up). Keyed on
+			// j.state, for the same disjointness reason as inflight/finished
+			// above: dashboardJobStatusSQL's status-derived 'failed' (the
+			// default case below) also matches a job still in DOWNLOADING
+			// whose current candidate's transfers all errored and which the
+			// pipeline will retry with the next candidate — that job belongs
+			// in TRANSFERS, not here, and a status-keyed predicate would put
+			// it in both at once. j.state = 'FAILED' is terminal and
+			// unambiguous.
+			//
+			// Deliberately time-unbounded, unlike finished above: an
+			// unresolved failure is still worth showing however old it is,
+			// so this filter takes no Now and must not be added to the
+			// finished/Now validation guard in validateDashboardJobsQuery.
+			//
+			// "failures" and "failed" are deliberately different predicates:
+			// "failed" (the default case below) is the status-derived filter
+			// the Jobs page's facets are counted from, which also matches the
+			// mid-retry DOWNLOADING case above; "failures" is this
+			// state-derived one. Do not merge them.
+			clauses = append(clauses, "j.state = "+bind(string(core.StateFailed)))
 		default:
+			// q.Filter == "failed" lands here: it is status-derived
+			// (dashboardJobStatusSQL's CASE), not the same set as "failures"
+			// above — see that case's comment.
 			clauses = append(clauses, "("+dashboardJobStatusSQL+") = "+bind(q.Filter))
 		}
 	}
@@ -664,6 +693,84 @@ func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int
 			out[candidateID] = byFilename
 		}
 		byFilename[filename] = bytesDone
+	}
+	return out, rows.Err()
+}
+
+// failureExplainingEvents ranks job_events kinds that state a failure reason
+// outright above every other kind. It is a preference, NOT a filter — see
+// LatestFailureDetails for why it stopped being one.
+//
+// Built from the core.Event* constants (not string literals) so a renamed
+// constant fails to compile rather than silently dropping out of the ranking.
+// Declared as []string directly (rather than []core.JobEventType converted on
+// every call) so LatestFailureDetails doesn't re-allocate a copy per call.
+//
+// EventJobFailed earns its place on intent rather than on current behaviour:
+// the only writer is recordBackoffEvent (internal/pipeline/backoff.go), which
+// hardcodes an empty detail, so the non-empty-detail test below can never
+// match it today. It stays listed so that giving it a real detail (issue #318)
+// needs no change here.
+var failureExplainingEvents = []string{
+	string(core.EventImportRejected),
+	string(core.EventAttemptFailed),
+	string(core.EventCandidateRejected),
+	string(core.EventJobFailed),
+}
+
+// LatestFailureDetails returns one explanatory job_events detail per given job
+// id, keyed by job id. It backs Overview's FAILED JOBS panel (issue #310): a
+// job's own fail_reason/status is not enough to show a human a *reason*, since
+// the audit trail — not the job row — is where that text (often Lidarr's
+// verbatim rejection message) actually lives. Jobs with no detailed event at
+// all are simply absent from the map, not present with "". An empty or nil
+// jobIDs yields an empty, non-nil map.
+//
+// Selection is two-tier: an event from failureExplainingEvents always wins,
+// even over a newer event of another kind, because a real rejection describes
+// the failure better than whatever the pipeline happened to log afterwards.
+// Only when a job has none does the newest detail of any kind get used.
+//
+// The fallback tier is not a nicety. #310 first shipped the allowlist as a
+// hard filter, and on a real database that left the reason column empty for
+// most rows: the dominant failure mode is a search that returns nothing, whose
+// only record is a 'search' event ("results=0 candidates=0") plus a detail-less
+// job_failed. 10 of 12 failed jobs in a lab run rendered an em dash while the
+// reason sat in the audit trail one event-kind away. Restricting the tiers to
+// a curated list of "runner-up" kinds was rejected as the same bet the
+// allowlist already lost — any kind the pipeline gains later would silently
+// fall out again.
+func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(jobIDs))
+	if len(jobIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (album_job_id) album_job_id, detail
+		FROM job_events
+		WHERE album_job_id = ANY($1) AND detail <> ''
+		-- The event test is the first ORDER BY key, not a WHERE clause: it
+		-- ranks explanatory kinds above everything else while still leaving a
+		-- lesser event to be picked when a job has nothing better. Making it a
+		-- filter is what left most rows with no reason at all.
+		-- id DESC is load-bearing, not cosmetic: one pipeline pass shares a
+		-- single value of now across every recordEvent call it makes (see
+		-- internal/pipeline), so multiple job_events rows for the same job can
+		-- genuinely share created_at. Without the id tiebreak, DISTINCT ON
+		-- would pick an arbitrary one of them instead of the actual latest.
+		ORDER BY album_job_id, (event = ANY($2)) DESC, created_at DESC, id DESC`,
+		jobIDs, failureExplainingEvents)
+	if err != nil {
+		return nil, fmt.Errorf("latest failure details: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID int64
+		var detail string
+		if err := rows.Scan(&jobID, &detail); err != nil {
+			return nil, fmt.Errorf("latest failure details: scan: %w", err)
+		}
+		out[jobID] = detail
 	}
 	return out, rows.Err()
 }

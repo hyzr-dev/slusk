@@ -121,18 +121,27 @@ type jobDTO struct {
 	// independently-cached copies of the DB row with different staleness
 	// windows, so comparing them measured which cache last happened to read
 	// the DB, not which side's data was actually fresher.
-	FramedAt        string  `json:"framedAt"`
-	State           string  `json:"state"`
-	CandidatesTried int     `json:"candidatesTried"`
-	MaxCandidates   int     `json:"maxCandidates"`
-	FailReason      string  `json:"failReason"`
-	NextAttemptAt   string  `json:"nextAttemptAt"`
-	Retries         int     `json:"retries"`
-	NotBefore       string  `json:"notBefore"`
-	Source          string  `json:"source"`
-	Year            *int    `json:"year"`
-	Tracks          *int    `json:"tracks"`
-	Format          *string `json:"format"`
+	FramedAt        string `json:"framedAt"`
+	State           string `json:"state"`
+	CandidatesTried int    `json:"candidatesTried"`
+	MaxCandidates   int    `json:"maxCandidates"`
+	FailReason      string `json:"failReason"`
+	// FailDetail is the pipeline's own last recorded failure explanation from
+	// job_events (see store.LatestFailureDetails), typically carrying Lidarr's
+	// verbatim rejection text. It differs from FailReason above: FailReason is
+	// the CURRENT candidate's generic core.Candidate.FailReason (a short,
+	// engine-assigned category), while FailDetail is whatever detail string
+	// the pipeline actually wrote to the audit trail for the failure — often
+	// far more specific. It is populated only on the REST list path (see
+	// enrichJobDTOs) and is therefore absent from stream frames.
+	FailDetail    string  `json:"failDetail,omitempty"`
+	NextAttemptAt string  `json:"nextAttemptAt"`
+	Retries       int     `json:"retries"`
+	NotBefore     string  `json:"notBefore"`
+	Source        string  `json:"source"`
+	Year          *int    `json:"year"`
+	Tracks        *int    `json:"tracks"`
+	Format        *string `json:"format"`
 	// QueuePosition and Speed are live, non-persisted values aggregated
 	// across every live transfer belonging to the job's current candidate
 	// (see aggregateLiveAlbum, issue #157) — album-level analogues of
@@ -276,6 +285,11 @@ type PagedJobsResult struct {
 // PagedJobsFunc produces one persisted job page and its consistent counts.
 type PagedJobsFunc func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error)
 
+// FailureDetailsFunc looks up the newest failure-explaining job_events detail
+// for each of the given job ids (typically backed by store.LatestFailureDetails),
+// keyed by job id. Ids with no matching event are absent from the result.
+type FailureDetailsFunc func(ctx context.Context, jobIDs []int64) (map[int64]string, error)
+
 // CancelFunc cancels a job by id (typically backed by app.Jobs.Cancel).
 // Errors are mapped to a status code by the /api/jobs/{id}/cancel handler:
 // errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
@@ -352,6 +366,10 @@ type ServerDeps struct {
 	Jobs JobsFunc
 	// PagedJobs backs GET /api/jobs.
 	PagedJobs PagedJobsFunc
+	// FailureDetails enriches GET /api/jobs' failed rows with jobDTO.FailDetail
+	// (issue #310, Overview's Failed panel). A nil func is tolerated — see
+	// enrichJobDTOs.
+	FailureDetails FailureDetailsFunc
 	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
 	// /api/jobs/{id}.
 	Cancel    CancelFunc
@@ -857,7 +875,14 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if query.Sort == "recent" && query.Dir == "asc" {
 		return PagedJobsQuery{}, errors.New("dir=asc is not supported for sort=recent")
 	}
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished") {
+	// This list is a second, independent copy of the one in
+	// store.validateDashboardJobsQuery, and the two must be kept in step: the
+	// store's copy is never reached for a value rejected here, so a filter
+	// added there but not here is a 400 the store-level tests cannot see
+	// (issue #310 shipped exactly that until a lab run caught it).
+	// "failures" and "failed" are deliberately both present and deliberately
+	// different — see the case comments in store.dashboardJobsWhere.
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {
@@ -892,6 +917,30 @@ func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) [
 	dtos := make([]jobDTO, len(views))
 	for i, view := range views {
 		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted, now)
+	}
+	// FailDetail enrichment is best-effort, exactly like live album speed/ETA
+	// above: a lookup failure degrades to no detail rather than failing the
+	// whole request. It is REST-only — internal/observ/stream.go calls
+	// toJobDTO directly and deliberately does not do this, since terminal jobs
+	// are out of the stream's scope — so a job that just failed but is still
+	// rendered from a stale live frame shows no reason for up to
+	// LIVE_JOB_FRESH_MS; the next REST poll (this path) corrects it.
+	if deps.FailureDetails != nil {
+		var failedIDs []int64
+		for _, view := range views {
+			if view.Status == "failed" {
+				failedIDs = append(failedIDs, view.Job.ID)
+			}
+		}
+		if len(failedIDs) > 0 {
+			if details, err := deps.FailureDetails(ctx, failedIDs); err == nil {
+				for i, view := range views {
+					if detail, ok := details[view.Job.ID]; ok {
+						dtos[i].FailDetail = detail
+					}
+				}
+			}
+		}
 	}
 	return dtos
 }
