@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { queryKeys } from './queries';
+import { DEFAULT_JOB_PAGE_PARAMS, queryKeys } from './queries';
 import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope, useThroughputStream } from './stream';
 
 // EventSource does not exist in jsdom — this mock captures every instance
@@ -60,8 +60,8 @@ function ScopePublisher({ ids }: { ids: number[] | undefined }) {
 }
 
 // A fresh array with the same content on every render — exactly what Jobs.tsx
-// produces on each 15s poll/rerender even when the page's ids haven't
-// actually changed.
+// produces on each JOBS_INTERVAL poll/rerender even when the page's ids
+// haven't actually changed.
 function SameContentScope() {
   const [, forceRerender] = useState(0);
   return (
@@ -140,9 +140,9 @@ describe('StreamProvider', () => {
   });
 
   // The ids array is rebuilt fresh on every render (exactly what Jobs.tsx
-  // does on its 15s poll), so useJobScope must dedupe on the joined ids
-  // string, not on array identity — otherwise every poll would reopen the
-  // connection in a loop.
+  // does on its JOBS_INTERVAL poll), so useJobScope must dedupe on the
+  // joined ids string, not on array identity — otherwise every poll would
+  // reopen the connection in a loop.
   it('does not reopen the connection when the same ids arrive as a new array instance', () => {
     const queryClient = new QueryClient();
     render(
@@ -366,10 +366,10 @@ describe('StreamProvider', () => {
     expect(queryClient.getQueryData(queryKeys.live)).toBeNull();
   });
 
-  // Issue #276: Overview/Jobs republish their scope on every 15s poll as job
-  // state churns (see useJobScope), which reopens the connection via this
-  // exact dep-array change. That must not blank every row on screen for the
-  // gap until the new connection's first frame lands.
+  // Issue #276: Overview/Jobs republish their scope on every JOBS_INTERVAL
+  // poll as job state churns (see useJobScope), which reopens the connection
+  // via this exact dep-array change. That must not blank every row on screen
+  // for the gap until the new connection's first frame lands.
   it('keeps accumulated live data across a scope change, before any new frame arrives', () => {
     const queryClient = new QueryClient();
     render(
@@ -538,6 +538,124 @@ describe('StreamProvider', () => {
     expect(charts.throughput).toEqual([
       { at: '2026-07-26T12:00:00Z', bytesPerSecond: 1000, activeTransfers: 1 },
     ]);
+  });
+
+  // TestInvalidatePayloadExactBidirectionalJSON's Go-side counterpart: proves
+  // the client's reaction to `event: invalidate` (issue #275) is scoped to
+  // page queries only, per decision 6 — a bare `invalidateQueries({
+  // queryKey: queryKeys.jobs })` would also match jobDetail(id) and
+  // jobEvents(id), forcing a detail refetch that #274 deliberately removed.
+  it('refetches the jobs page on an invalidate event', () => {
+    const queryClient = new QueryClient();
+    const pageKey = queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS);
+    const detailKey = queryKeys.jobDetail(1);
+    queryClient.setQueryData(pageKey, { jobs: [], total: 0, facets: null });
+    queryClient.setQueryData(detailKey, { job: { id: 1 }, attempts: [] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs/1']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // onopen's own invalidation already ran on mount (it invalidates
+    // queryKeys.jobs unconditionally) — reset both queries' invalidated
+    // state so this test only observes the `invalidate` listener's own
+    // effect.
+    void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
+    void queryClient.getQueryCache().find({ queryKey: detailKey })?.setState({ isInvalidated: false });
+
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+
+    expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(true);
+    // Decision 6's whole point: a mounted jobDetail query must NOT be
+    // invalidated by this event — jobDetail(id) also shares the `jobs`
+    // prefix, and #274 deliberately turned off its own poll because the
+    // stream's `detail` field already keeps it live.
+    expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+  });
+
+  // Helper to stub document.hidden for the visibility-gated invalidate tests
+  // below. jsdom's `document.hidden` is a getter with no setter by default,
+  // so it must be redefined via Object.defineProperty; configurable: true
+  // lets afterEach restore it so other tests in this file (and other files
+  // sharing jsdom's single `document`) never see a stuck value.
+  function setDocumentHidden(hidden: boolean) {
+    Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
+  }
+
+  afterEach(() => {
+    setDocumentHidden(false);
+  });
+
+  // A background tab must cost nothing (issue #275 review, decision on FIX
+  // 2): invalidateQueries refetches an active query regardless of tab
+  // visibility, unlike refetchInterval (refetchIntervalInBackground defaults
+  // false), and the SSE connection stays open while backgrounded — so
+  // without this guard a parked tab would go from zero requests to up to 4/
+  // minute, worse than the poll this feature replaced.
+  it('does not invalidate the jobs page on an invalidate event while the tab is hidden', () => {
+    const queryClient = new QueryClient();
+    const pageKey = queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS);
+    queryClient.setQueryData(pageKey, { jobs: [], total: 0, facets: null });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
+
+    setDocumentHidden(true);
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+
+    expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(false);
+  });
+
+  // The other half of the same guard: a visible tab must still invalidate
+  // exactly as before — the hidden check must not accidentally swallow the
+  // common case.
+  it('still invalidates the jobs page on an invalidate event while the tab is visible', () => {
+    const queryClient = new QueryClient();
+    const pageKey = queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS);
+    queryClient.setQueryData(pageKey, { jobs: [], total: 0, facets: null });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
+
+    setDocumentHidden(false);
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+
+    expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(true);
+  });
+
+  // The negative half: nothing about the `live` listener (or any other
+  // event) should trigger the jobs-page invalidation — only `event:
+  // invalidate` does.
+  it('does not invalidate the jobs page before an invalidate event arrives', () => {
+    const queryClient = new QueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    invalidateSpy.mockClear();
+
+    act(() => MockEventSource.instances[0].emit('live', { jobs: [], down: 0, up: 0 }));
+
+    const jobsPrefixCalls = invalidateSpy.mock.calls.filter(
+      (c) => Array.isArray(c[0]?.queryKey) && c[0]!.queryKey[0] === 'jobs',
+    );
+    expect(jobsPrefixCalls).toHaveLength(0);
   });
 
   // Mirrors ScopePublisher above, but for the throughput opt-in.

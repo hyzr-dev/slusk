@@ -258,6 +258,147 @@ func TestBuildStreamDetailUncachedIsNil(t *testing.T) {
 	}
 }
 
+// TestComputeJobsFingerprintOrderIndependent pins the fingerprint's central
+// requirement (issue #275): ListJobsWithTransfer's ORDER BY j.updated_at DESC
+// has no tiebreaker, so at production row counts Postgres may hand back two
+// logically identical calls in different row order. A sequential hash over
+// the slice would pass every other test in this file yet still bump
+// jobsGeneration spuriously in production; only this test, which shuffles
+// the input, catches that regression.
+func TestComputeJobsFingerprintOrderIndependent(t *testing.T) {
+	views := []core.JobView{
+		{Job: core.AlbumJob{ID: 1, State: core.StateDownloading, Title: "A"}, Status: "active", Peer: "alice"},
+		{Job: core.AlbumJob{ID: 2, State: core.StateWanted, Title: "B"}, Status: "queued", Peer: ""},
+		{Job: core.AlbumJob{ID: 3, State: core.StateFailed, Title: "C"}, Status: "failed", Peer: "bob"},
+	}
+	shuffled := []core.JobView{views[2], views[0], views[1]}
+
+	got := computeJobsFingerprint(views)
+	gotShuffled := computeJobsFingerprint(shuffled)
+	if got != gotShuffled {
+		t.Fatalf("fingerprint must be order-independent: sequential = %+v, shuffled = %+v", got, gotShuffled)
+	}
+}
+
+// TestComputeJobsFingerprintChangesTable proves each page-membership-relevant
+// field independently moves the fingerprint when mutated alone.
+func TestComputeJobsFingerprintChangesTable(t *testing.T) {
+	base := func() core.JobView {
+		return core.JobView{
+			Job: core.AlbumJob{
+				ID:         1,
+				State:      core.StateDownloading,
+				Retries:    2,
+				UpdatedAt:  testNow,
+				Source:     core.SourceLidarr,
+				Title:      "Rounds",
+				ArtistName: "Doves",
+			},
+			Status: "active",
+			Peer:   "alice",
+		}
+	}
+	baseline := computeJobsFingerprint([]core.JobView{base()})
+
+	cases := []struct {
+		name   string
+		mutate func(v *core.JobView)
+	}{
+		{"Status", func(v *core.JobView) { v.Status = "stalled" }},
+		{"Job.State", func(v *core.JobView) { v.Job.State = core.StateFailed }},
+		{"Peer", func(v *core.JobView) { v.Peer = "bob" }},
+		{"Job.Retries", func(v *core.JobView) { v.Job.Retries = 3 }},
+		{"Job.UpdatedAt", func(v *core.JobView) { v.Job.UpdatedAt = testNow.Add(time.Second) }},
+		{"Job.Source", func(v *core.JobView) { v.Job.Source = core.SourceManual }},
+		{"Job.Title", func(v *core.JobView) { v.Job.Title = "Different" }},
+		{"Job.ArtistName", func(v *core.JobView) { v.Job.ArtistName = "Different" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := base()
+			tc.mutate(&v)
+			got := computeJobsFingerprint([]core.JobView{v})
+			if got == baseline {
+				t.Errorf("mutating %s did not move the fingerprint", tc.name)
+			}
+		})
+	}
+}
+
+// TestComputeJobsFingerprintIgnoresLiveOnlyFields keeps the busy-system win
+// (issue #275): fields that move on essentially every refresh during an
+// active download must NOT move the fingerprint, or the generation would
+// bump every ~5s forever and pin every subscriber to the invalidate throttle
+// floor permanently.
+func TestComputeJobsFingerprintIgnoresLiveOnlyFields(t *testing.T) {
+	base := core.JobView{
+		Job:                 core.AlbumJob{ID: 1, Title: "Rounds"},
+		Attempt:             &core.Candidate{ID: 9, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}}},
+		AlbumBytesDone:      100,
+		AlbumBytesTotal:     1000,
+		AlbumBytesRemaining: 900,
+	}
+	baseline := computeJobsFingerprint([]core.JobView{base})
+
+	mutated := base
+	mutated.AlbumBytesDone = 500
+	mutated.AlbumBytesTotal = 2000
+	mutated.AlbumBytesRemaining = 1500
+	mutated.Attempt = &core.Candidate{ID: 9, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1000}, {Filename: "b.flac", Size: 2000}}}
+
+	got := computeJobsFingerprint([]core.JobView{mutated})
+	if got != baseline {
+		t.Fatalf("live-only bytes/Attempt.Files fields must not move the fingerprint: baseline = %+v, got = %+v", baseline, got)
+	}
+}
+
+// TestComputeJobsFingerprintShrinkingSetChanges proves a job leaving the set
+// (CANCELLED, deleted) moves the fingerprint even though its own hash is
+// simply subtracted from — not corrupted, but absent from — the wrapping sum.
+func TestComputeJobsFingerprintShrinkingSetChanges(t *testing.T) {
+	views := []core.JobView{
+		{Job: core.AlbumJob{ID: 1, Title: "A"}},
+		{Job: core.AlbumJob{ID: 2, Title: "B"}},
+	}
+	full := computeJobsFingerprint(views)
+	shrunk := computeJobsFingerprint(views[:1])
+	if full == shrunk {
+		t.Fatalf("removing a job must move the fingerprint: full = %+v, shrunk = %+v", full, shrunk)
+	}
+}
+
+// TestComputeJobsFingerprintCountField proves the count field is actually
+// populated from len(views), independent of sum. Without this,
+// TestComputeJobsFingerprintShrinkingSetChanges alone is satisfied by sum's
+// own change and leaves a `count: 0` mutation undetected (issue #275 review):
+// the doc comment sells count as the guard against pathological wrapping-sum
+// cancellation, but nothing proved the field was ever assigned at all.
+func TestComputeJobsFingerprintCountField(t *testing.T) {
+	views := []core.JobView{
+		{Job: core.AlbumJob{ID: 1, Title: "A"}},
+		{Job: core.AlbumJob{ID: 2, Title: "B"}},
+		{Job: core.AlbumJob{ID: 3, Title: "C"}},
+	}
+	fp := computeJobsFingerprint(views)
+	if fp.count != len(views) {
+		t.Fatalf("count = %d, want %d", fp.count, len(views))
+	}
+}
+
+// TestComputeJobsFingerprintDuplicateHashesDoNotCancel is the direct test of
+// "wrapping addition, not XOR" (issue #275 review): two jobs whose per-job
+// hashes are identical (here, literally the same view twice) sum to a
+// nonzero value under wrapping addition (2h mod 2^64) but XOR to exactly
+// zero. TestComputeJobsFingerprintOrderIndependent cannot catch a XOR
+// regression — XOR is commutative too — so it needs this separate case.
+func TestComputeJobsFingerprintDuplicateHashesDoNotCancel(t *testing.T) {
+	v := core.JobView{Job: core.AlbumJob{ID: 1, Title: "A"}}
+	fp := computeJobsFingerprint([]core.JobView{v, v})
+	if fp.sum == 0 {
+		t.Fatalf("duplicate per-job hashes must not cancel to zero under wrapping addition (sum = 0 implies XOR combination): %+v", fp)
+	}
+}
+
 func TestChangedSinceLastTableCases(t *testing.T) {
 	detailA := &jobDetailDTO{Job: jobDTO{ID: 1}, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 10}}}}}
 	detailB := &jobDetailDTO{Job: jobDTO{ID: 1}, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 20}}}}}
@@ -386,6 +527,32 @@ func TestThroughputPayloadExactBidirectionalJSON(t *testing.T) {
 	}
 }
 
+// TestInvalidatePayloadExactBidirectionalJSON pins the wire shape of
+// `event: invalidate` (issue #275), matching the convention of
+// TestLivePayloadExactBidirectionalJSON/TestThroughputPayloadExactBidirectionalJSON:
+// the field is `generation`, and it is NOT omitempty — a generation of 0 is
+// meaningful (see TestStreamHubNoInvalidateOnFirstRefresh), so the key must
+// always be present rather than vanishing on the zero value.
+func TestInvalidatePayloadExactBidirectionalJSON(t *testing.T) {
+	payload := invalidatePayload{Generation: 3}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"generation":3}`
+	if string(body) != want {
+		t.Errorf("invalidate JSON = %s\nwant           = %s", body, want)
+	}
+
+	var decoded invalidatePayload
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded != payload {
+		t.Errorf("round-tripped = %+v, want %+v", decoded, payload)
+	}
+}
+
 // TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries covers the "down/
 // up stay global" criterion (issue #265): two subscribers scoped to
 // DIFFERENT ?jobs= sets, both opted into ?throughput=1, still see identical
@@ -400,10 +567,10 @@ func TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries(t *testing.T) {
 			Upload:   []core.ThroughputSample{{At: at, BytesPerSecond: 400}},
 		}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	unscopedID, _, _, unscoped, unscopedThroughput := hub.subscribe(context.Background(), 0, map[int64]struct{}{1: {}}, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	unscopedID, _, _, _, unscoped, unscopedThroughput := hub.subscribe(context.Background(), 0, map[int64]struct{}{1: {}}, true)
 	defer hub.unsubscribe(unscopedID)
-	scopedID, _, _, scoped, scopedThroughput := hub.subscribe(context.Background(), 7, map[int64]struct{}{2: {}}, true)
+	scopedID, _, _, _, scoped, scopedThroughput := hub.subscribe(context.Background(), 7, map[int64]struct{}{2: {}}, true)
 	defer hub.unsubscribe(scopedID)
 
 	if scoped.Down != unscoped.Down || scoped.Up != unscoped.Up {
@@ -611,14 +778,14 @@ func TestParseStreamJobIDsRejectsOverMax(t *testing.T) {
 // broadcaster lifecycle directly: started on the first subscriber, still
 // running with two, and stopped only once the last one leaves.
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 
-	id1, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id1, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	if !hubRunning(hub) {
 		t.Fatal("expected ticker running after first subscribe")
 	}
 
-	id2, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id2, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	if n := hubSubCount(hub); n != 2 {
 		t.Fatalf("expected 2 subs, got %d", n)
 	}
@@ -664,8 +831,8 @@ func hubSubCount(h *streamHub) int {
 // registered before this stale tick got the lock) must not send anything or
 // touch subscriber state.
 func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	_, ch, _, initial, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	_, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, nil, false)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -700,7 +867,7 @@ func TestStreamHubCorrelationTickBoundedByFetchTimeout(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	hub := newStreamHub(noopJobs, blockingLive, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, blockingLive, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 
 	done := make(chan struct{})
 	go func() {
@@ -736,11 +903,11 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick. Scoped to job 7
 	// (issue #268: unscoped subscribers get no job frames at all).
-	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}}, false)
+	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 100 {
 		t.Fatalf("initial payload = %+v, want job 7 at speed 100", initial)
@@ -767,6 +934,267 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 	}
 }
 
+// newInvalidateFixture builds a hub jobsFn that returns a single job, mutable
+// via changing title (a fingerprint field) so tests can force a generation
+// bump between correlationTicks.
+func newInvalidateFixture() (jobsFn JobsFunc, setTitle func(string), setErr func(error)) {
+	var mu sync.Mutex
+	title := "A"
+	var err error
+	jobsFn = func(ctx context.Context) ([]core.JobView, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return []core.JobView{{Job: core.AlbumJob{ID: 1, Title: title}}}, nil
+	}
+	setTitle = func(t string) {
+		mu.Lock()
+		defer mu.Unlock()
+		title = t
+	}
+	setErr = func(e error) {
+		mu.Lock()
+		defer mu.Unlock()
+		err = e
+	}
+	return jobsFn, setTitle, setErr
+}
+
+// TestStreamHubNoInvalidateOnFirstRefresh proves the first-ever refresh never
+// bumps jobsGeneration (issue #275): there is nothing to compare the very
+// first fingerprint against, so hasFingerprint alone must suppress a bump.
+func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
+	jobsFn, _, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("first refresh must not invalidate, got %+v", got)
+	default:
+	}
+	if hub.generationSnapshot() != 0 {
+		t.Fatalf("jobsGeneration = %d, want 0 after only the first refresh", hub.generationSnapshot())
+	}
+}
+
+// TestStreamHubFreshSubscriberGetsNoImmediateInvalidate proves subscribe's
+// two initial values together (issue #275, decision 3): lastInvalidateAt =
+// now, so the client's own onopen refetch isn't immediately followed by a
+// redundant server-sent one, AND lastSeenGeneration = h.generationSnapshot()
+// (read AFTER subscribe's own synchronous refresh), so a subscriber that
+// connects when jobsGeneration is already > 0 doesn't treat that pre-existing
+// generation as unseen.
+//
+// An interval of time.Hour (the original version of this test) makes the
+// throttle condition (`now.Sub(lastInvalidateAt) >= invalidateInterval`)
+// false regardless of either initial value, which is why that version could
+// not actually fail under either mutation it claimed to guard: this uses a
+// short interval and ticks past it with the generation already primed to a
+// nonzero value BEFORE subscribing, so only a correctly-initialized
+// lastSeenGeneration keeps the subscriber silent once the window elapses.
+func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 30*time.Millisecond)
+
+	// Prime the fingerprint, then bump jobsGeneration to a nonzero value
+	// BEFORE subscribing, so a fresh subscriber sees a generation already in
+	// play rather than the zero value a first-ever refresh would leave.
+	hub.correlationTick(context.Background())
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	if hub.generationSnapshot() != 1 {
+		t.Fatalf("jobsGeneration = %d, want 1 before subscribing", hub.generationSnapshot())
+	}
+
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	time.Sleep(40 * time.Millisecond) // past invalidateInterval
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("subscribe must have already caught up to jobsGeneration=1, so no invalidate should fire with no further change, got %+v", got)
+	default:
+	}
+}
+
+// TestStreamHubInvalidatesAfterThrottleElapses is the direct test of the
+// throttle window (issue #275, decision 1): a generation bump produces
+// nothing until invalidateInterval has elapsed since this subscriber's last
+// invalidation (connect counts as one), then produces exactly one frame.
+// The "nothing" half is asserted with an immediately-following tick so a
+// slow machine can't flake it into a false pass.
+func TestStreamHubInvalidatesAfterThrottleElapses(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("must not invalidate before the throttle window elapses, got %+v", got)
+	default:
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		if got.Generation != 1 {
+			t.Errorf("Generation = %d, want 1", got.Generation)
+		}
+	default:
+		t.Fatal("must invalidate once the throttle window elapses")
+	}
+}
+
+// TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost is the direct
+// test of decision 3 (a counter, not a dirty flag): two generation bumps
+// occurring back-to-back inside one subscriber's throttle window must not be
+// collapsed into "no signal" — the subscriber must still see the LATEST
+// generation once the window elapses, not miss it because some earlier tick
+// already "consumed" a bump.
+func TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	setTitle("C")
+	hub.correlationTick(context.Background())
+	if hub.generationSnapshot() != 2 {
+		t.Fatalf("jobsGeneration = %d, want 2 after two distinct changes", hub.generationSnapshot())
+	}
+
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("must not invalidate before the throttle window elapses, got %+v", got)
+	default:
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		if got.Generation != 2 {
+			t.Errorf("Generation = %d, want 2 (the latest, not lost)", got.Generation)
+		}
+	default:
+		t.Fatal("must invalidate exactly once carrying the latest generation")
+	}
+}
+
+// TestStreamHubFailedJobsFetchLeavesGenerationUntouched proves
+// refreshCorrelation's existing early return on a failed h.jobs call also
+// protects the fingerprint/generation state (issue #275): a transient
+// Postgres hiccup must not be indistinguishable from "the data changed".
+func TestStreamHubFailedJobsFetchLeavesGenerationUntouched(t *testing.T) {
+	jobsFn, _, setErr := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id)
+
+	setErr(fmt.Errorf("boom"))
+	hub.correlationTick(context.Background())
+	if hub.generationSnapshot() != 0 {
+		t.Fatalf("jobsGeneration = %d, want 0 after a failed fetch", hub.generationSnapshot())
+	}
+
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("a failed fetch must not invalidate, got %+v", got)
+	default:
+	}
+}
+
+// TestStreamHubInvalidateSentToSubscriberWithoutThroughput is the regression
+// guard for the invalidate block's placement in tick (issue #275): it must
+// run BEFORE the `if !sub.wantThroughput { continue }` guard, or every
+// non-Overview subscriber would silently never receive an invalidation.
+func TestStreamHubInvalidateSentToSubscriberWithoutThroughput(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Millisecond)
+	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false) // wantThroughput = false
+	defer hub.unsubscribe(id)
+
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	time.Sleep(2 * time.Millisecond)
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		if got.Generation != 1 {
+			t.Errorf("Generation = %d, want 1", got.Generation)
+		}
+	default:
+		t.Fatal("a wantThroughput=false subscriber must still receive an invalidate frame")
+	}
+}
+
+// TestStreamHubInvalidateThrottleIsPerSubscriber proves each subscriber's
+// throttle window is tracked independently: one connecting 80ms after
+// another must not inherit the first's window and must fire on its own
+// schedule.
+//
+// Interval/offsets scaled 4x from an earlier version (50ms/20ms/35ms/20ms)
+// that left only 15ms of margin on its negative assertion (sub2 must not
+// have fired at ~35ms elapsed against a 50ms window) — routine scheduling
+// jitter on a loaded CI box could overshoot that and trip t.Fatalf. 200ms/
+// 80ms/140ms/80ms keeps the identical proportions (and thus the identical
+// property under test) with 60ms of margin, at a negligible wall-clock cost.
+func TestStreamHubInvalidateThrottleIsPerSubscriber(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 200*time.Millisecond)
+	id1, _, _, ich1, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id1)
+
+	time.Sleep(80 * time.Millisecond)
+	id2, _, _, ich2, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	defer hub.unsubscribe(id2)
+
+	setTitle("B")
+	hub.correlationTick(context.Background())
+
+	time.Sleep(140 * time.Millisecond) // sub1: ~220ms since connect, past window; sub2: ~140ms, still inside
+	hub.tick(context.Background())
+	select {
+	case got := <-ich1:
+		if got.Generation != 1 {
+			t.Errorf("sub1 Generation = %d, want 1", got.Generation)
+		}
+	default:
+		t.Fatal("sub1's window has elapsed and must invalidate")
+	}
+	select {
+	case got := <-ich2:
+		t.Fatalf("sub2's window has not elapsed yet, must not invalidate, got %+v", got)
+	default:
+	}
+
+	time.Sleep(80 * time.Millisecond) // sub2: now past its own window
+	hub.tick(context.Background())
+	select {
+	case got := <-ich2:
+		if got.Generation != 1 {
+			t.Errorf("sub2 Generation = %d, want 1", got.Generation)
+		}
+	default:
+		t.Fatal("sub2's window has now elapsed and must invalidate")
+	}
+}
+
 // TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark ports the
 // pre-#265 test of the same name to the now-independent throughput channel:
 // the two directions' watermarks stay independent of one another, an
@@ -787,8 +1215,8 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 		}
 		return series, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, _, tch, initial, initialThroughput := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, initial, initialThroughput := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id)
 	if initial.Down != 100 || initial.Up != 300 {
 		t.Fatalf("initial down/up = %d/%d, want 100/300", initial.Down, initial.Up)
@@ -798,7 +1226,7 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 	}
 
 	uploadAdvanced.Store(true)
-	id2, _, tch2, _, secondInitialThroughput := hub.subscribe(context.Background(), 0, nil, true)
+	id2, _, tch2, _, _, secondInitialThroughput := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id2)
 	if len(secondInitialThroughput.Upload) != 2 {
 		t.Fatalf("second subscriber initial upload series = %+v, want t1 and t2", secondInitialThroughput.Upload)
@@ -856,8 +1284,8 @@ func TestStreamHubTickThroughputSurvivesUndrainedMailbox(t *testing.T) {
 		samples = append(samples, core.ThroughputSample{At: at, BytesPerSecond: bps})
 	}
 
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, _, tch, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id)
 
 	addSample(t0.Add(1*time.Second), 200)
@@ -897,8 +1325,8 @@ func TestStreamHubTickBuildsNoThroughputFrameWithoutSubscriber(t *testing.T) {
 			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: bps.Load()}},
 		}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, tch, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	defer hub.unsubscribe(id)
 
 	bps.Store(250)
@@ -945,8 +1373,8 @@ func TestStreamHubTickWatermarkSurvivesSubSecondPrecision(t *testing.T) {
 		copy(out, samples)
 		return core.ThroughputSeries{Download: out}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, _, tch, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, true)
 	defer hub.unsubscribe(id)
 
 	mu.Lock()
@@ -1001,8 +1429,8 @@ func TestStreamHubScopedJobPicksUpLiveMatchWithinOneTick(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 0 {
 		t.Fatalf("initial payload = %+v, want job 9 present with no live match yet", initial)
@@ -1072,8 +1500,8 @@ func TestStreamHubFileLevelRefreshKeepsMultiFileAlbumTotalMonotonic(t *testing.T
 		}
 		return map[int64]map[string]int64{101: {"a.flac": 9_000_000, "b.flac": 3_000_000}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 {
 		t.Fatalf("initial payload = %+v, want job 11 present", initial)
@@ -1154,8 +1582,8 @@ func TestStreamHubPreservesBytesCacheWhenTransferBytesFailsDuringEventDrivenRefr
 		// out of budget (see this test's doc comment).
 		return nil, context.DeadlineExceeded
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].BytesDone != 12_000_000 {
 		t.Fatalf("initial payload = %+v, want job 41 at 12_000_000 bytes", initial)
@@ -1227,8 +1655,8 @@ func TestStreamHubScopedJobViewRefreshesPromptlyOnLiveMatchChange(t *testing.T) 
 			AlbumBytesRemaining: 49_000_000 - albumBytesDone,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour)
-	id, ch, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}}, false)
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 999 {
 		t.Fatalf("initial payload = %+v, want job 30 at speed 999", initial)
@@ -1316,10 +1744,11 @@ func (r *testStreamRecorder) Code() int {
 
 // newStreamTestServer builds a bare mux with only GET /api/stream registered
 // (via registerStream directly, not NewServer), so tests can pass short
-// tick/correlation/heartbeat intervals instead of the real constants.
-func newStreamTestServer(deps ServerDeps, tick, correlation, heartbeat time.Duration) http.Handler {
+// tick/correlation/heartbeat/invalidate intervals instead of the real
+// constants.
+func newStreamTestServer(deps ServerDeps, tick, correlation, heartbeat, invalidate time.Duration) http.Handler {
 	mux := http.NewServeMux()
-	registerStream(mux, deps, tick, correlation, heartbeat)
+	registerStream(mux, deps, tick, correlation, heartbeat, invalidate)
 	return mux
 }
 
@@ -1342,7 +1771,7 @@ func TestStreamEndpointSetsHeadersAndSendsFirstPayload(t *testing.T) {
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
 	// Long tick/correlation/heartbeat: this test only cares about the
 	// immediate first frame sent at subscribe time, not the periodic timers.
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -1379,7 +1808,7 @@ func TestStreamEndpointSetsHeadersAndSendsFirstPayload(t *testing.T) {
 func TestStreamEndpointSendsHeartbeatWhenIdle(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, 15*time.Millisecond)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, 15*time.Millisecond, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -1403,7 +1832,7 @@ func TestStreamEndpointNilLiveTransfersAndThroughputDoesNotPanic(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = nil
 	deps.Throughput = nil
-	mux := newStreamTestServer(deps, 5*time.Millisecond, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, 5*time.Millisecond, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -1438,7 +1867,7 @@ func TestStreamEndpointNilLiveTransfersAndThroughputDoesNotPanic(t *testing.T) {
 func TestStreamEndpointTwoClientsBothGetInitialFrame(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
@@ -1468,7 +1897,7 @@ func TestStreamEndpointShutdownClosesConnection(t *testing.T) {
 	deps.LiveTransfers = func(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
 	shutdown := make(chan struct{})
 	deps.Shutdown = shutdown
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil)
 	rec := newTestStreamRecorder()
@@ -1490,7 +1919,7 @@ func TestStreamEndpointShutdownClosesConnection(t *testing.T) {
 
 func TestStreamEndpointInvalidJobIDReturns400(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	for _, raw := range []string{"not-a-number", "0", "-5"} {
 		t.Run(raw, func(t *testing.T) {
@@ -1509,7 +1938,7 @@ func TestStreamEndpointInvalidJobIDReturns400(t *testing.T) {
 // over streamMaxJobScope, must all 400 rather than silently degrading.
 func TestStreamEndpointInvalidJobsParamReturns400(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	over := make([]string, streamMaxJobScope+1)
 	for i := range over {
@@ -1533,7 +1962,7 @@ func TestStreamEndpointInvalidJobsParamReturns400(t *testing.T) {
 // "1" is a 400 rather than silently defaulting to off.
 func TestStreamEndpointInvalidThroughputParamReturns400(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	for _, raw := range []string{"0", "true", "yes", "2", "-1"} {
 		t.Run(raw, func(t *testing.T) {
@@ -1557,7 +1986,7 @@ func TestStreamEndpointThroughputOptInSendsEvent(t *testing.T) {
 			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: 123}},
 		}, nil
 	}
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream?throughput=1", nil).WithContext(ctx)
@@ -1587,7 +2016,7 @@ func TestStreamEndpointNoThroughputParamNeverSendsEvent(t *testing.T) {
 			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: 123}},
 		}, nil
 	}
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
@@ -1626,7 +2055,7 @@ func TestStreamEndpointJobsScopeRestrictsToRequestedIDs(t *testing.T) {
 			{Job: core.AlbumJob{ID: 2}, Attempt: &core.Candidate{Username: "bob", Files: []core.CandidateFile{{Filename: "02.flac", Size: 100}}}},
 		}, nil
 	}
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stream?jobs=1", nil)
 	rec := newTestStreamRecorder()
@@ -1683,7 +2112,7 @@ func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 			}},
 		}, true, nil
 	}
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/stream?job=42", nil).WithContext(ctx)
@@ -1703,12 +2132,50 @@ func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 	}
 }
 
+// TestStreamEndpointWritesInvalidateEvent is the only test in this file
+// pinning the literal wire bytes for `event: invalidate` (issue #275): the
+// event name and the `generation` JSON key are exactly what
+// web/src/api/stream.tsx depends on, so a rename either side would otherwise
+// not be caught until the frontend silently stopped refetching.
+func TestStreamEndpointWritesInvalidateEvent(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	var mu sync.Mutex
+	title := "A"
+	deps.Jobs = func(ctx context.Context) ([]core.JobView, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return []core.JobView{{Job: core.AlbumJob{ID: 1, Title: title}}}, nil
+	}
+	// tick/correlation/invalidate all short so the change below is picked up
+	// and delivered promptly; heartbeat stays out of the way at time.Hour.
+	mux := newStreamTestServer(deps, 5*time.Millisecond, 5*time.Millisecond, time.Hour, 5*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, "event: live")
+
+	mu.Lock()
+	title = "B"
+	mu.Unlock()
+
+	waitForBody(t, rec, "event: invalidate\ndata: {\"generation\":1}\n\n")
+	cancel()
+	<-done
+}
+
 // TestStreamEndpointRejectsOverCapacity is issue #161 review finding #7: past
 // streamMaxSubscribers open connections, a new one must get a proper 503
 // rather than an unbounded broadcaster fan-out.
 func TestStreamEndpointRejectsOverCapacity(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
-	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour)
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
 
 	var cancels []context.CancelFunc
 	var dones []chan struct{}
