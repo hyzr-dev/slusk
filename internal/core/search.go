@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // SearchResult is one search result file offered by a peer, enriched with the
@@ -10,6 +11,15 @@ import (
 // matcher consume this rather than a wire-specific type, so they have no
 // dependency on any particular Soulseek client library. Filename preserves
 // the provider's own path syntax (slskd uses "\" separators).
+//
+// Duration/SampleRate/BitDepth/VariableBitRate are the peer's optional file
+// attributes (issue #58). Zero means "the peer sent no such attribute" for
+// Duration/SampleRate/BitDepth — a 0-second track, a 0 Hz sample rate, and a
+// 0-bit depth are all physically impossible for a real audio file, so zero
+// unambiguously reads as unknown. This is deliberately not distinguished from
+// "the peer reported zero": a *int would push nil-checks through every
+// adapter, the session grouping, and the TypeScript for no informational
+// gain.
 type SearchResult struct {
 	Username          string
 	Filename          string
@@ -18,6 +28,93 @@ type SearchResult struct {
 	HasFreeUploadSlot bool
 	QueueLength       int
 	UploadSpeed       int
+	Duration          int  // seconds; 0 = the peer sent no duration attribute
+	SampleRate        int  // Hz; 0 = unknown
+	BitDepth          int  // bits; 0 = unknown
+	VariableBitRate   bool // the peer's VBR attribute (code 2)
+}
+
+// SearchFile is one file of a SearchGroup, the display-ready shape a manual
+// search session (issue #58) exposes per file. Filename is the full
+// peer-syntax path — exactly what POST /api/jobs requires to enqueue it; Name
+// is its display basename.
+type SearchFile struct {
+	Filename        string
+	Name            string
+	Size            int64
+	BitRate         int
+	Duration        int
+	SampleRate      int
+	BitDepth        int
+	VariableBitRate bool
+}
+
+// SearchGroup is one release — one (peer, release directory) pair — offered
+// by a manual search (issue #58), aggregating its files and the peer's
+// upload-availability signals. ID is a stable, opaque identifier
+// (sha256(username + "\x00" + releaseDir)[:16] hex) safe to use as a JSON
+// value and a React list key. Version is a per-session monotonic counter
+// bumped every time this group's file set changes, letting SearchDelta report
+// exactly which groups changed since a caller's cursor.
+type SearchGroup struct {
+	ID              string
+	Peer            string
+	Folder          string // raw peer folder path, e.g. "@@abc\Music\Radiohead\In Rainbows"
+	Title           string // path.Base(Folder)
+	Parent          string // path.Base(path.Dir(Folder)) — the peer's folder, not a resolved artist
+	TrackCount      int
+	SizeBytes       int64
+	DurationSeconds int // sum of Files' Duration; 0 when not every file reported one
+	Format          string
+	BitRate         int
+	SampleRate      int
+	BitDepth        int
+	VariableBitRate bool
+	FreeUploadSlot  bool
+	QueueLength     int
+	UploadSpeed     int
+	Score           float64
+	Version         int
+	Files           []SearchFile
+}
+
+// SearchSession is the whole state of one manual search (issue #58): the
+// truth source served by GET /api/search/{id} and the base a SearchDelta is
+// computed against. Groups is the complete current set, not a delta.
+type SearchSession struct {
+	ID         string
+	Query      string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Done       bool
+	// Streaming reports whether results genuinely arrive incrementally
+	// (native backend: true) or only as one batch at completion (slskd: see
+	// internal/slskd's SearchStreaming).
+	Streaming bool
+	// Truncated is set once the session's result cap (searchMaxResults) is
+	// reached — further results are dropped rather than silently miscounted.
+	Truncated bool
+	// Err is the backend failure that ended the search early, if any. Partial
+	// results (Groups) are retained rather than discarded.
+	Err    string
+	Total  int // accepted results so far, across every group
+	Groups []SearchGroup
+}
+
+// SearchDelta is the incremental shape served over SSE (`event: search`,
+// issue #58): every SearchGroup that changed since a subscriber's cursor
+// (Seq), not the whole session. A changed group is always resent whole, never
+// as a file-level diff, so grouping/scoring logic exists in exactly one place
+// (Go) rather than being reimplemented in TypeScript.
+type SearchDelta struct {
+	ID        string
+	Seq       int // cursor to pass as `since` on the next call
+	Groups    []SearchGroup
+	Total     int
+	Done      bool
+	Streaming bool
+	Truncated bool
+	Err       string
 }
 
 // RankedCandidate is one user offering a group of files, with an aggregate

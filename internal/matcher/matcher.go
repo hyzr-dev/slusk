@@ -49,8 +49,8 @@ type weighted struct {
 	minBitrate int
 }
 
-// formatScore returns a 0..1 quality score for a filename's extension.
-func formatScore(filename string) float64 {
+// FormatScore returns a 0..1 quality score for a filename's extension.
+func FormatScore(filename string) float64 {
 	lower := strings.ToLower(filename)
 	switch {
 	case strings.HasSuffix(lower, ".flac"):
@@ -65,14 +65,14 @@ func formatScore(filename string) float64 {
 // passesFloor reports whether a file meets the quality floor. Lossless formats
 // (score 1.0) are always kept; lossy files need bitRate >= minBitrate.
 func (x *weighted) passesFloor(r core.SearchResult) bool {
-	if formatScore(r.Filename) >= 1.0 {
+	if FormatScore(r.Filename) >= 1.0 {
 		return true
 	}
 	return r.BitRate >= x.minBitrate
 }
 
-// reliabilityScore maps a peer's upload signals to a 0..1 factor.
-func reliabilityScore(r core.SearchResult) float64 {
+// ReliabilityScore maps a peer's upload signals to a 0..1 factor.
+func ReliabilityScore(r core.SearchResult) float64 {
 	score := 0.0
 	if r.HasFreeUploadSlot {
 		score += 0.7
@@ -83,10 +83,10 @@ func reliabilityScore(r core.SearchResult) float64 {
 	return score
 }
 
-// releaseDir returns the directory portion of a slskd filename (which uses "\"
+// ReleaseDir returns the directory portion of a slskd filename (which uses "\"
 // separators). Candidates are grouped by this so each one is a single release,
 // not every matching file a user happens to share.
-func releaseDir(filename string) string {
+func ReleaseDir(filename string) string {
 	return path.Dir(strings.ReplaceAll(filename, `\`, "/"))
 }
 
@@ -97,11 +97,11 @@ func releaseDir(filename string) string {
 // across those variants.
 var leadingTrackNumber = regexp.MustCompile(`^(\d{1,3})\b`)
 
-// trackKey returns the track a file belongs to within its release directory,
+// TrackKey returns the track a file belongs to within its release directory,
 // used to deduplicate format/naming variants of the same track. Files without
 // a recognizable leading track number get a unique key (their own filename) so
 // they are never wrongly merged with an unrelated file.
-func trackKey(filename string) string {
+func TrackKey(filename string) string {
 	base := path.Base(strings.ReplaceAll(filename, `\`, "/"))
 	if m := leadingTrackNumber.FindStringSubmatch(base); m != nil {
 		return m[1]
@@ -109,22 +109,22 @@ func trackKey(filename string) string {
 	return base
 }
 
-// extOf returns a filename's lowercased extension, used to bucket a release's
+// ExtOf returns a filename's lowercased extension, used to bucket a release's
 // files by format.
-func extOf(filename string) string {
+func ExtOf(filename string) string {
 	return strings.ToLower(path.Ext(strings.ReplaceAll(filename, `\`, "/")))
 }
 
 // dedupeTracks collapses a release down to a single format (highest
-// formatScore; ties broken by larger bucket then extension name, for
+// FormatScore; ties broken by larger bucket then extension name, for
 // determinism) and, within that format, the single file per track (as
-// identified by trackKey). A release is one format end to end: a track only
+// identified by TrackKey). A release is one format end to end: a track only
 // available in a losing format is dropped rather than mixed in, so Lidarr
 // never receives a part-FLAC, part-MP3 album from one candidate.
 func dedupeTracks(files []core.SearchResult) []core.SearchResult {
 	byExt := map[string][]core.SearchResult{}
 	for _, f := range files {
-		ext := extOf(f.Filename)
+		ext := ExtOf(f.Filename)
 		byExt[ext] = append(byExt[ext], f)
 	}
 	var bestExt string
@@ -133,7 +133,7 @@ func dedupeTracks(files []core.SearchResult) []core.SearchResult {
 			bestExt = ext
 			continue
 		}
-		score, bestScore := formatScore(group[0].Filename), formatScore(byExt[bestExt][0].Filename)
+		score, bestScore := FormatScore(group[0].Filename), FormatScore(byExt[bestExt][0].Filename)
 		switch {
 		case score > bestScore:
 			bestExt = ext
@@ -146,7 +146,7 @@ func dedupeTracks(files []core.SearchResult) []core.SearchResult {
 	best := map[string]core.SearchResult{}
 	order := make([]string, 0, len(byExt[bestExt]))
 	for _, f := range byExt[bestExt] {
-		k := trackKey(f.Filename)
+		k := TrackKey(f.Filename)
 		if _, ok := best[k]; !ok {
 			order = append(order, k)
 			best[k] = f
@@ -169,7 +169,7 @@ func (x *weighted) Rank(results []core.SearchResult, rel map[string]core.PeerRel
 		if !x.passesFloor(r) {
 			continue
 		}
-		k := key{r.Username, releaseDir(r.Filename)}
+		k := key{r.Username, ReleaseDir(r.Filename)}
 		groups[k] = append(groups[k], r)
 	}
 	var candidates []core.RankedCandidate
@@ -177,11 +177,11 @@ func (x *weighted) Rank(results []core.SearchResult, rel map[string]core.PeerRel
 		files = dedupeTracks(files)
 		var score float64
 		for _, f := range files {
-			score += x.w.Format * formatScore(f.Filename)
+			score += x.w.Format * FormatScore(f.Filename)
 			score += x.w.Bitrate * (float64(f.BitRate) / 1000.0)
 		}
 		score += x.w.FileCount * float64(len(files))
-		score += x.w.Reliability * reliabilityScore(files[0]) // per-user, same across files
+		score += x.w.Reliability * ReliabilityScore(files[0]) // per-user, same across files
 		score += x.w.KnownUser * ReliabilityHistoryScore(rel[k.user], now)
 		candidates = append(candidates, core.RankedCandidate{Username: k.user, Files: files, Score: score})
 	}

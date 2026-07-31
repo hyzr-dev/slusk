@@ -86,12 +86,25 @@ func isRetryable(err error) bool {
 // peer's upload-availability signals (copied from the per-user response
 // group) — slskd's wire shape. Search maps it to core.SearchResult so callers
 // never depend on this type.
+//
+// Length/SampleRate/BitDepth/IsVariableBitRate are slskd's serialization of
+// Soulseek.NET's File, whose optional attributes are nullable. These field
+// names are INFERRED from slskd's source, not confirmed against a live
+// response — verify against the lab before trusting them (issue #58). Go int
+// fields (not pointers) are still correct either way: unmarshalling JSON
+// `null` into an int is a no-op leaving it at its zero value, which is
+// exactly core.SearchResult's "unknown" semantics for these fields (see its
+// doc comment) — no pointer indirection needed here.
 type result struct {
 	Username          string `json:"username"`
 	Filename          string `json:"filename"`
 	Size              int64  `json:"size"`
 	BitRate           int    `json:"bitRate"`
 	IsLocked          bool   `json:"isLocked"`
+	Length            int    `json:"length"`     // seconds
+	SampleRate        int    `json:"sampleRate"` // Hz
+	BitDepth          int    `json:"bitDepth"`   // bits
+	IsVariableBitRate bool   `json:"isVariableBitRate"`
 	HasFreeUploadSlot bool   `json:"-"`
 	QueueLength       int    `json:"-"`
 	UploadSpeed       int    `json:"-"`
@@ -107,6 +120,10 @@ func (r result) toCore() core.SearchResult {
 		HasFreeUploadSlot: r.HasFreeUploadSlot,
 		QueueLength:       r.QueueLength,
 		UploadSpeed:       r.UploadSpeed,
+		Duration:          r.Length,
+		SampleRate:        r.SampleRate,
+		BitDepth:          r.BitDepth,
+		VariableBitRate:   r.IsVariableBitRate,
 	}
 }
 
@@ -320,11 +337,15 @@ func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-// searchState is the subset of a slskd search object used for completion polling.
+// searchState is the subset of a slskd search object used for completion
+// polling. ResponseCount is additionally used by SearchStream to notice
+// growth worth a harvest attempt (issue #58) — its live-verified behavior is
+// documented on stopAndHarvest.
 type searchState struct {
-	ID         string `json:"id"`
-	State      string `json:"state"`
-	IsComplete bool   `json:"isComplete"`
+	ID            string `json:"id"`
+	State         string `json:"state"`
+	IsComplete    bool   `json:"isComplete"`
+	ResponseCount int    `json:"responseCount"`
 }
 
 // searchResponse is one peer's grouped response to a search.
@@ -370,6 +391,110 @@ func toCoreResults(in []result) []core.SearchResult {
 	}
 	return out
 }
+
+// searchResultKey identifies one (username, filename) pair, used by
+// SearchStream to dedupe a file it has already emitted from a later tick's
+// harvest of the same still-growing search.
+type searchResultKey struct {
+	username, filename string
+}
+
+// SearchStream runs a slskd search like Search, but attempts to harvest and
+// emit newly-seen results on every poll tick instead of returning the whole
+// set only once the search finishes. See SearchStreaming: on the slskd
+// version verified live for issue #58, GET /responses on a still-InProgress
+// search returns nothing at all even as responseCount climbs (documented on
+// stopAndHarvest), so in practice this degrades to one large batch delivered
+// at completion rather than a genuine incremental trickle — but the per-tick
+// attempt is one cheap GET and streams for free on any slskd version that
+// does allow it, so it is still worth making.
+//
+// emit is called only from this goroutine, never concurrently with itself
+// and never after SearchStream returns; each call's slice holds only files
+// not already emitted this search (deduped by username+filename), and may be
+// retained by the caller.
+//
+// Completion, stopAndHarvest, and deleteSearch ordering are UNCHANGED from
+// Search/searchOnce — reused verbatim via the same helper functions rather
+// than duplicated: the search is deleted only after slskd reports it
+// complete and its responses have been harvested.
+func (c *Client) SearchStream(ctx context.Context, query string, timeout time.Duration, emit func([]core.SearchResult)) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var started searchState
+	if err := c.do(ctx, http.MethodPost, "/api/v0/searches", map[string]string{"searchText": query}, &started); err != nil {
+		return err
+	}
+	if started.ID == "" {
+		return fmt.Errorf("slskd search returned no id")
+	}
+
+	seen := make(map[searchResultKey]struct{})
+	lastResponseCount := 0
+	emitNew := func(out []result) {
+		var fresh []core.SearchResult
+		for _, r := range out {
+			key := searchResultKey{r.Username, r.Filename}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			fresh = append(fresh, r.toCore())
+		}
+		if len(fresh) > 0 {
+			emit(fresh)
+		}
+	}
+
+	ticker := time.NewTicker(c.pollInterval)
+	defer ticker.Stop()
+	for {
+		var st searchState
+		if err := c.do(ctx, http.MethodGet, "/api/v0/searches/"+url.PathEscape(started.ID), nil, &st); err != nil {
+			if ctx.Err() != nil {
+				out, harvestErr := c.stopAndHarvest(ctx, started.ID)
+				emitNew(out)
+				return harvestErr
+			}
+			return err
+		}
+		// Best-effort: a failed harvest here does not end the search; the same
+		// growth is simply re-attempted (and correctly re-deduped) next tick.
+		if st.ResponseCount > lastResponseCount {
+			if out, err := c.searchResponses(ctx, started.ID); err == nil {
+				emitNew(out)
+				lastResponseCount = st.ResponseCount
+			}
+		}
+		if st.IsComplete {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			out, harvestErr := c.stopAndHarvest(ctx, started.ID)
+			emitNew(out)
+			return harvestErr
+		case <-ticker.C:
+		}
+	}
+	res, err := c.searchResponses(ctx, started.ID)
+	if err == nil {
+		emitNew(res)
+		// The poll loop broke on isComplete, so slskd finalized this search
+		// and its responses are now in hand: safe to remove it, same as
+		// searchOnce.
+		c.deleteSearch(ctx, started.ID)
+	}
+	return err
+}
+
+// SearchStreaming reports that slskd does NOT deliver search results
+// incrementally on the verified version (issue #58 §0): GET /responses on a
+// still-InProgress search returns an empty list even as responseCount
+// climbs, so SearchStream degrades to one large batch at completion. The UI
+// must not claim a live trickle for this backend.
+func (c *Client) SearchStreaming() bool { return false }
 
 // searchOnce starts one async slskd search, polls until it completes or timeout,
 // then returns the peers' result files (locked files skipped), each enriched with

@@ -131,13 +131,108 @@ func (r *searchRegistry) failAll(err error) {
 // generation and accumulates peer responses until timeout. The requested
 // timeout is successful completion (including nonpositive durations); caller
 // cancellation and connection/shutdown failures return partial results plus
-// their error.
+// their error. A thin wrapper over runSearch, which holds the actual
+// token-reservation / serverWriteMu / generation dance shared with
+// SearchStream.
 func (c *Client) Search(ctx context.Context, query string, timeout time.Duration) ([]core.SearchResult, error) {
+	var results []core.SearchResult
+	sink := func(result core.SearchResult) {
+		results = append(results, result)
+	}
+	err := c.runSearch(ctx, query, timeout, maxSearchResults, sink, nil)
+	return results, err
+}
+
+// searchStreamBatch is how many results SearchStream accumulates before
+// flushing to emit — batches many small deliveries into fewer, larger frames
+// for the session registry (internal/app) to fan out over SSE, rather than
+// emitting a slice of one for every single peer response.
+const searchStreamBatch = 64
+
+// SearchStream runs a native Soulseek search like Search, but calls emit
+// incrementally as results arrive — batched at searchStreamBatch, or flushed
+// sooner whenever the subscription's result channel momentarily drains (see
+// runSearch's drained hook), so a slow trickle of results well under
+// searchStreamBatch still surfaces promptly instead of waiting for the batch
+// to fill or the whole search to finish. emit is called only from this
+// goroutine, never concurrently with itself and never after SearchStream
+// returns; the slice it receives is not retained or mutated afterward by this
+// method, so the caller may keep it. Unlike Search, no cap is applied here —
+// the caller (internal/app's session registry) applies its own.
+//
+// Returns nil on normal timeout completion, and the failure (with everything
+// already emitted retained by the caller) on context cancellation or
+// connection/write failure — same contract as Search.
+func (c *Client) SearchStream(ctx context.Context, query string, timeout time.Duration, emit func([]core.SearchResult)) error {
+	var pending []core.SearchResult
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		emit(pending)
+		pending = nil
+	}
+	sink := func(result core.SearchResult) {
+		pending = append(pending, result)
+		if len(pending) >= searchStreamBatch {
+			flush()
+		}
+	}
+	// maxResults=0: no cap here — the caller (internal/app's session
+	// registry) applies its own, per SearchStream's own doc comment.
+	err := c.runSearch(ctx, query, timeout, 0, sink, flush)
+	// Final flush: runSearch's own post-return drain (see finish) delivers any
+	// results still buffered in the subscription's channel straight to sink,
+	// but never calls the drained hook itself, so a partial batch below
+	// searchStreamBatch left over at the very end needs this explicit flush.
+	flush()
+	return err
+}
+
+// SearchStreaming reports that the native backend delivers search results
+// genuinely incrementally as the network responds, not batched at
+// completion — unlike slskd (see internal/slskd.Client.SearchStreaming),
+// whose GET /responses returns nothing until its search finalizes.
+func (c *Client) SearchStreaming() bool { return true }
+
+// runSearch performs the whole lifecycle of one Soulseek network search:
+// reserves a token, registers a subscription against the current server
+// generation, writes the FileSearch frame, and pumps every result the peer
+// hooks deliver into sink until timeout, cancellation, or subscription
+// failure. This is the shared, subtlest part of Search and SearchStream and
+// must never be duplicated — the token-reservation / serverWriteMu /
+// generation dance binds registration to one exact central-server
+// generation, and teardown takes the same lock before clearing that
+// generation, so a reconnect cannot split the two operations.
+//
+// sink is called synchronously from this goroutine for every ACCEPTED result
+// (see maxResults), both during the wait loop and while draining any results
+// still buffered in the subscription's channel after it returns, so it never
+// races itself. drained, if non-nil, is called after the wait loop has fully
+// drained every result currently queued in the channel — i.e. at a natural
+// pause in delivery — letting a streaming caller (SearchStream) flush a
+// partial batch promptly rather than only at searchStreamBatch or at the
+// very end; it is never called from the post-return drain in finish; a
+// streaming caller does its own final flush after this method returns.
+//
+// maxResults caps how many results are ever passed to sink (0 = unlimited);
+// anything beyond the cap increments subscription.dropped instead — the same
+// counter offer's own channel-buffer overflow uses, so finish's single debug
+// log line accounts for both causes, exactly as it did before Search's body
+// was extracted into this shared method. Search passes maxSearchResults;
+// SearchStream passes 0 and applies no cap of its own — its caller
+// (internal/app's session registry) applies its own.
+//
+// Returns nil on normal timeout completion (including a nonpositive/expired
+// timeout, which is a no-op success), and the failure (with everything
+// already delivered to sink) on caller cancellation or a connection/write
+// failure.
+func (c *Client) runSearch(ctx context.Context, query string, timeout time.Duration, maxResults int, sink func(core.SearchResult), drained func()) error {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	if timeout <= 0 {
-		return nil, nil
+		return nil
 	}
 	if phrase, excluded := matchExcludedPhrase(query, c.excludedPhrases.Load()); excluded {
 		// Every well-behaved peer refuses to answer a search whose terms cover
@@ -150,7 +245,6 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 
 	reservation := c.tokens.Reserve()
 	subscription := newSearchSubscription()
-	var results []core.SearchResult
 	registered := false
 	defer func() {
 		if registered {
@@ -158,6 +252,15 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 		}
 		reservation.Release()
 	}()
+	accepted := 0
+	process := func(result core.SearchResult) {
+		if maxResults > 0 && accepted >= maxResults {
+			subscription.dropped.Add(1)
+			return
+		}
+		accepted++
+		sink(result)
+	}
 
 	// serverWriteMu binds registration and the code-26 write to one exact
 	// central-server generation. Teardown takes the same lock before clearing
@@ -167,17 +270,17 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	if c.serverConn == nil {
 		c.mu.Unlock()
 		c.serverWriteMu.Unlock()
-		return nil, errors.New("soulseek: not connected to server")
+		return errors.New("soulseek: not connected to server")
 	}
 	if err := ctx.Err(); err != nil {
 		c.mu.Unlock()
 		c.serverWriteMu.Unlock()
-		return nil, err
+		return err
 	}
 	if !time.Now().Before(deadline) {
 		c.mu.Unlock()
 		c.serverWriteMu.Unlock()
-		return nil, nil
+		return nil
 	}
 	conn := c.serverConn
 	cancelServer := c.serverCancel
@@ -185,7 +288,7 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	if !c.searches.add(reservation.token, generation, subscription) {
 		c.mu.Unlock()
 		c.serverWriteMu.Unlock()
-		return nil, errors.New("soulseek: reserved search token already active")
+		return errors.New("soulseek: reserved search token already active")
 	}
 	registered = true
 	c.mu.Unlock()
@@ -196,17 +299,17 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	// the write immediately with i/o timeout.
 	writeErr := writeServerLocked(c, conn, &server.FileSearch{Token: reservation.token, SearchQuery: query})
 	c.serverWriteMu.Unlock()
-	finish := func(err error) ([]core.SearchResult, error) {
+	finish := func(err error) error {
 		c.searches.removeIfSame(reservation.token, subscription)
 		for {
 			select {
 			case result := <-subscription.results:
-				appendSearchResult(subscription, &results, result)
+				process(result)
 			default:
 				if dropped := subscription.dropped.Load(); dropped > 0 && c.logger != nil {
 					c.logger.Debug("soulseek search results dropped", "count", dropped)
 				}
-				return results, err
+				return err
 			}
 		}
 	}
@@ -223,7 +326,23 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	for {
 		select {
 		case result := <-subscription.results:
-			appendSearchResult(subscription, &results, result)
+			process(result)
+			if drained == nil {
+				continue
+			}
+			// Non-blocking drain of anything else already queued, so drained
+			// fires once per natural pause in delivery rather than once per
+			// result.
+		drainLoop:
+			for {
+				select {
+				case r := <-subscription.results:
+					process(r)
+				default:
+					break drainLoop
+				}
+			}
+			drained()
 		case err := <-subscription.failures:
 			return finish(err)
 		case <-ctx.Done():
@@ -231,14 +350,6 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 		case <-timer.C:
 			return finish(nil)
 		}
-	}
-}
-
-func appendSearchResult(subscription *searchSubscription, results *[]core.SearchResult, result core.SearchResult) {
-	if len(*results) < maxSearchResults {
-		*results = append(*results, result)
-	} else {
-		subscription.dropped.Add(1)
 	}
 }
 
@@ -317,17 +428,38 @@ func mapSearchResult(username string, freeSlot bool, uploadSpeed, queueLength in
 		return core.SearchResult{}, false
 	}
 
+	var duration, sampleRate, bitDepth int
 	bitrate := 0
+	var variableBitRate bool
 	for _, attribute := range file.Attributes {
-		if attribute.Code != peer.Bitrate {
-			continue
+		switch attribute.Code {
+		case peer.Bitrate:
+			// Preserved byte-for-byte from before the switch: an out-of-range
+			// bitrate discards the whole file (it feeds matcher.passesFloor and
+			// therefore automation), unlike the new branches below which merely
+			// leave their field at zero on the same failure.
+			value, ok := checkedUint32ToInt(attribute.Value)
+			if !ok {
+				return core.SearchResult{}, false
+			}
+			bitrate = value
+		case peer.Duration:
+			if value, ok := checkedUint32ToInt(attribute.Value); ok {
+				duration = value
+			}
+		case peer.VBR:
+			variableBitRate = attribute.Value != 0
+		case peer.SampleRate:
+			if value, ok := checkedUint32ToInt(attribute.Value); ok {
+				sampleRate = value
+			}
+		case peer.BitDepth:
+			if value, ok := checkedUint32ToInt(attribute.Value); ok {
+				bitDepth = value
+			}
+		default:
+			// Unknown or unused (code 3) — ignored.
 		}
-		value, ok := checkedUint32ToInt(attribute.Value)
-		if !ok {
-			return core.SearchResult{}, false
-		}
-		bitrate = value
-		break
 	}
 
 	return core.SearchResult{
@@ -338,6 +470,10 @@ func mapSearchResult(username string, freeSlot bool, uploadSpeed, queueLength in
 		HasFreeUploadSlot: freeSlot,
 		QueueLength:       queueLength,
 		UploadSpeed:       uploadSpeed,
+		Duration:          duration,
+		SampleRate:        sampleRate,
+		BitDepth:          bitDepth,
+		VariableBitRate:   variableBitRate,
 	}, true
 }
 

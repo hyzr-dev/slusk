@@ -567,10 +567,10 @@ func TestStreamHubScopedSubscriptionKeepsGlobalRatesAndSeries(t *testing.T) {
 			Upload:   []core.ThroughputSample{{At: at, BytesPerSecond: 400}},
 		}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	unscopedID, _, _, _, unscoped, unscopedThroughput := hub.subscribe(context.Background(), 0, map[int64]struct{}{1: {}}, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, noopJobDetail, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	unscopedID, _, _, _, _, unscoped, unscopedThroughput, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{1: {}}, true, "")
 	defer hub.unsubscribe(unscopedID)
-	scopedID, _, _, _, scoped, scopedThroughput := hub.subscribe(context.Background(), 7, map[int64]struct{}{2: {}}, true)
+	scopedID, _, _, _, _, scoped, scopedThroughput, _ := hub.subscribe(context.Background(), 7, map[int64]struct{}{2: {}}, true, "")
 	defer hub.unsubscribe(scopedID)
 
 	if scoped.Down != unscoped.Down || scoped.Up != unscoped.Up {
@@ -778,14 +778,14 @@ func TestParseStreamJobIDsRejectsOverMax(t *testing.T) {
 // broadcaster lifecycle directly: started on the first subscriber, still
 // running with two, and stopped only once the last one leaves.
 func TestStreamHubSharesOneLoopAndStopsOnLastUnsubscribe(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 
-	id1, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id1, _, _, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	if !hubRunning(hub) {
 		t.Fatal("expected ticker running after first subscribe")
 	}
 
-	id2, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id2, _, _, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	if n := hubSubCount(hub); n != 2 {
 		t.Fatalf("expected 2 subs, got %d", n)
 	}
@@ -831,8 +831,8 @@ func hubSubCount(h *streamHub) int {
 // registered before this stale tick got the lock) must not send anything or
 // touch subscriber state.
 func TestStreamHubTickNoOpAfterContextCancelled(t *testing.T) {
-	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	_, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	_, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -867,7 +867,7 @@ func TestStreamHubCorrelationTickBoundedByFetchTimeout(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	hub := newStreamHub(noopJobs, blockingLive, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	hub := newStreamHub(noopJobs, blockingLive, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 
 	done := make(chan struct{})
 	go func() {
@@ -903,11 +903,11 @@ func TestStreamHubTickSendsChangedDataAndSuppressesUnchanged(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
 	// subscribe() itself does a synchronous correlation refresh, so the
 	// fixture above is already loaded before the first tick. Scoped to job 7
 	// (issue #268: unscoped subscribers get no job frames at all).
-	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}}, false)
+	id, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{7: {}}, false, "")
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 100 {
 		t.Fatalf("initial payload = %+v, want job 7 at speed 100", initial)
@@ -967,8 +967,8 @@ func newInvalidateFixture() (jobsFn JobsFunc, setTitle func(string), setErr func
 // first fingerprint against, so hasFingerprint alone must suppress a bump.
 func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
 	jobsFn, _, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	hub.tick(context.Background())
@@ -999,7 +999,7 @@ func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
 // lastSeenGeneration keeps the subscriber silent once the window elapses.
 func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 30*time.Millisecond)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 30*time.Millisecond)
 
 	// Prime the fingerprint, then bump jobsGeneration to a nonzero value
 	// BEFORE subscribing, so a fresh subscriber sees a generation already in
@@ -1011,7 +1011,7 @@ func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 		t.Fatalf("jobsGeneration = %d, want 1 before subscribing", hub.generationSnapshot())
 	}
 
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	time.Sleep(40 * time.Millisecond) // past invalidateInterval
@@ -1031,8 +1031,8 @@ func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 // slow machine can't flake it into a false pass.
 func TestStreamHubInvalidatesAfterThrottleElapses(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	setTitle("B")
@@ -1064,8 +1064,8 @@ func TestStreamHubInvalidatesAfterThrottleElapses(t *testing.T) {
 // already "consumed" a bump.
 func TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	setTitle("B")
@@ -1101,8 +1101,8 @@ func TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost(t *testing.T) {
 // Postgres hiccup must not be indistinguishable from "the data changed".
 func TestStreamHubFailedJobsFetchLeavesGenerationUntouched(t *testing.T) {
 	jobsFn, _, setErr := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	setErr(fmt.Errorf("boom"))
@@ -1125,8 +1125,8 @@ func TestStreamHubFailedJobsFetchLeavesGenerationUntouched(t *testing.T) {
 // non-Overview subscriber would silently never receive an invalidation.
 func TestStreamHubInvalidateSentToSubscriberWithoutThroughput(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Millisecond)
-	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false) // wantThroughput = false
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Millisecond)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "") // wantThroughput = false
 	defer hub.unsubscribe(id)
 
 	setTitle("B")
@@ -1156,12 +1156,12 @@ func TestStreamHubInvalidateSentToSubscriberWithoutThroughput(t *testing.T) {
 // property under test) with 60ms of margin, at a negligible wall-clock cost.
 func TestStreamHubInvalidateThrottleIsPerSubscriber(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 200*time.Millisecond)
-	id1, _, _, ich1, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 200*time.Millisecond)
+	id1, _, _, ich1, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id1)
 
 	time.Sleep(80 * time.Millisecond)
-	id2, _, _, ich2, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	id2, _, _, ich2, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id2)
 
 	setTitle("B")
@@ -1215,8 +1215,8 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 		}
 		return series, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, _, tch, _, initial, initialThroughput := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, _, initial, initialThroughput, _ := hub.subscribe(context.Background(), 0, nil, true, "")
 	defer hub.unsubscribe(id)
 	if initial.Down != 100 || initial.Up != 300 {
 		t.Fatalf("initial down/up = %d/%d, want 100/300", initial.Down, initial.Up)
@@ -1226,7 +1226,7 @@ func TestStreamHubTickSendsUploadOnlyDeltaWithIndependentWatermark(t *testing.T)
 	}
 
 	uploadAdvanced.Store(true)
-	id2, _, tch2, _, _, secondInitialThroughput := hub.subscribe(context.Background(), 0, nil, true)
+	id2, _, tch2, _, _, _, secondInitialThroughput, _ := hub.subscribe(context.Background(), 0, nil, true, "")
 	defer hub.unsubscribe(id2)
 	if len(secondInitialThroughput.Upload) != 2 {
 		t.Fatalf("second subscriber initial upload series = %+v, want t1 and t2", secondInitialThroughput.Upload)
@@ -1284,8 +1284,8 @@ func TestStreamHubTickThroughputSurvivesUndrainedMailbox(t *testing.T) {
 		samples = append(samples, core.ThroughputSample{At: at, BytesPerSecond: bps})
 	}
 
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, _, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, true, "")
 	defer hub.unsubscribe(id)
 
 	addSample(t0.Add(1*time.Second), 200)
@@ -1325,8 +1325,8 @@ func TestStreamHubTickBuildsNoThroughputFrameWithoutSubscriber(t *testing.T) {
 			Download: []core.ThroughputSample{{At: time.Now(), BytesPerSecond: bps.Load()}},
 		}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, ch, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, false)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, tch, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
 	defer hub.unsubscribe(id)
 
 	bps.Store(250)
@@ -1373,8 +1373,8 @@ func TestStreamHubTickWatermarkSurvivesSubSecondPrecision(t *testing.T) {
 		copy(out, samples)
 		return core.ThroughputSeries{Download: out}, nil
 	}
-	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, _, tch, _, _, _ := hub.subscribe(context.Background(), 0, nil, true)
+	hub := newStreamHub(noopJobs, noopLiveTransfers, throughputFn, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, tch, _, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, true, "")
 	defer hub.unsubscribe(id)
 
 	mu.Lock()
@@ -1429,8 +1429,8 @@ func TestStreamHubScopedJobPicksUpLiveMatchWithinOneTick(t *testing.T) {
 			AlbumBytesRemaining: 1000,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{9: {}}, false, "")
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 0 {
 		t.Fatalf("initial payload = %+v, want job 9 present with no live match yet", initial)
@@ -1500,8 +1500,8 @@ func TestStreamHubFileLevelRefreshKeepsMultiFileAlbumTotalMonotonic(t *testing.T
 		}
 		return map[int64]map[string]int64{101: {"a.flac": 9_000_000, "b.flac": 3_000_000}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{11: {}}, false, "")
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 {
 		t.Fatalf("initial payload = %+v, want job 11 present", initial)
@@ -1582,8 +1582,8 @@ func TestStreamHubPreservesBytesCacheWhenTransferBytesFailsDuringEventDrivenRefr
 		// out of budget (see this test's doc comment).
 		return nil, context.DeadlineExceeded
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, transferBytesFn, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{41: {}}, false, "")
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].BytesDone != 12_000_000 {
 		t.Fatalf("initial payload = %+v, want job 41 at 12_000_000 bytes", initial)
@@ -1655,8 +1655,8 @@ func TestStreamHubScopedJobViewRefreshesPromptlyOnLiveMatchChange(t *testing.T) 
 			AlbumBytesRemaining: 49_000_000 - albumBytesDone,
 		}}, nil
 	}
-	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
-	id, ch, _, _, initial, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}}, false)
+	hub := newStreamHub(jobsFn, liveFn, noopThroughput, noopTransferBytes, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, ch, _, _, _, initial, _, _ := hub.subscribe(context.Background(), 0, map[int64]struct{}{30: {}}, false, "")
 	defer hub.unsubscribe(id)
 	if len(initial.Jobs) != 1 || initial.Jobs[0].Speed != 999 {
 		t.Fatalf("initial payload = %+v, want job 30 at speed 999", initial)
@@ -2244,5 +2244,194 @@ func TestLivePayloadHasNoDBOnlyFieldsAtTopLevel(t *testing.T) {
 		if _, ok := tpRaw[forbidden]; ok {
 			t.Errorf("throughput payload top level must not contain %q (DB-only field)", forbidden)
 		}
+	}
+}
+
+// --- ?search= scope (issue #58) -------------------------------------------
+
+// TestStreamEndpointInvalidSearchParamReturns400 covers ?search= strict
+// parsing: anything that isn't 32 lowercase hex characters is a 400, matching
+// ?job=/?jobs=/?throughput='s own intolerance of malformed input.
+func TestStreamEndpointInvalidSearchParamReturns400(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
+
+	for _, raw := range []string{"not-hex", "ABCDEF00ABCDEF00ABCDEF00ABCDEF00", "a1b2c3", "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4x"} {
+		t.Run(raw, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/stream?search="+raw, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+		})
+	}
+}
+
+const testSearchID = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+
+// TestStreamEndpointSearchScopeSendsInitialDeltaThenTickUpdates covers the
+// happy path end to end: the initial frame carries the full delta from
+// since=0, and a later tick with a fresh delta advances it.
+func TestStreamEndpointSearchScopeSendsInitialDeltaThenTickUpdates(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	var mu sync.Mutex
+	seq := 1
+	deps.SearchDelta = func(id string, since int) (core.SearchDelta, bool) {
+		if id != testSearchID {
+			return core.SearchDelta{}, false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if since >= seq {
+			return core.SearchDelta{ID: id, Seq: seq, Done: false, Streaming: true}, true
+		}
+		return core.SearchDelta{
+			ID: id, Seq: seq, Streaming: true,
+			Groups: []core.SearchGroup{{ID: "g1", Peer: "peer1", Version: seq}},
+		}, true
+	}
+	mux := newStreamTestServer(deps, 10*time.Millisecond, time.Hour, time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/stream?search="+testSearchID, nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, `"peer":"peer1"`)
+
+	mu.Lock()
+	seq = 2
+	mu.Unlock()
+
+	waitForBody(t, rec, `"seq":2`)
+	cancel()
+	<-done
+}
+
+// TestStreamEndpointSearchUnknownIDSendsExpiredFrame covers a well-formed but
+// unresolved id (evicted between the POST and this connection, or a
+// reconnect after eviction): exactly one `expired: true` frame, never a 400.
+func TestStreamEndpointSearchUnknownIDSendsExpiredFrame(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.SearchDelta = func(id string, since int) (core.SearchDelta, bool) {
+		return core.SearchDelta{}, false
+	}
+	mux := newStreamTestServer(deps, 10*time.Millisecond, time.Hour, time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/stream?search="+testSearchID, nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, `"expired":true`)
+	time.Sleep(30 * time.Millisecond) // let a few more ticks pass
+	cancel()
+	<-done
+
+	if n := strings.Count(rec.String(), `"expired":true`); n != 1 {
+		t.Errorf("expired frame sent %d times, want exactly 1", n)
+	}
+}
+
+// TestStreamEndpointNoSearchParamNeverSendsSearchEvent is the negative half:
+// without ?search=, no `event: search` line ever appears.
+func TestStreamEndpointNoSearchParamNeverSendsSearchEvent(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.SearchDelta = func(id string, since int) (core.SearchDelta, bool) {
+		return core.SearchDelta{ID: id, Seq: 1, Groups: []core.SearchGroup{{ID: "g1"}}}, true
+	}
+	mux := newStreamTestServer(deps, time.Hour, time.Hour, time.Hour, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/stream", nil).WithContext(ctx)
+	rec := newTestStreamRecorder()
+	done := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	waitForBody(t, rec, "event: live")
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	if strings.Contains(rec.String(), "event: search") {
+		t.Errorf("no ?search=: expected no search event, got %q", rec.String())
+	}
+}
+
+// TestSendLatestSearchAccumulatesAcrossDisplacedFrame is the direct analogue
+// of TestSendLatestThroughputAccumulatesAcrossDisplacedFrame: a search delta
+// is append-only, so a displaced frame's groups must be unioned into the
+// next send, never discarded — the frontend does not poll REST during a live
+// search, so a dropped frame here would leave a permanent hole.
+func TestSendLatestSearchAccumulatesAcrossDisplacedFrame(t *testing.T) {
+	sch := make(chan searchPayload, 1)
+
+	g1 := searchGroupDTO{ID: "g1", Peer: "p1"}
+	first := searchPayload{ID: testSearchID, Seq: 1, Groups: []searchGroupDTO{g1}, Total: 1}
+	if got := sendLatestSearch(sch, first); len(got.Groups) != 1 {
+		t.Fatalf("first send: got %+v", got)
+	}
+
+	// Sent WITHOUT reading the channel first — first is still queued.
+	g2 := searchGroupDTO{ID: "g2", Peer: "p2"}
+	second := searchPayload{ID: testSearchID, Seq: 2, Groups: []searchGroupDTO{g2}, Total: 2, Done: true, Truncated: true}
+	merged := sendLatestSearch(sch, second)
+
+	if len(merged.Groups) != 2 {
+		t.Fatalf("merged Groups = %+v, want both g1 and g2 unioned", merged.Groups)
+	}
+	byID := map[string]searchGroupDTO{}
+	for _, g := range merged.Groups {
+		byID[g.ID] = g
+	}
+	if _, ok := byID["g1"]; !ok {
+		t.Error("g1 lost across the displaced frame")
+	}
+	if _, ok := byID["g2"]; !ok {
+		t.Error("g2 missing from the newer frame")
+	}
+	if merged.Seq != 2 {
+		t.Errorf("Seq = %d, want the newer (higher) value 2", merged.Seq)
+	}
+	if !merged.Done || !merged.Truncated {
+		t.Errorf("Done/Truncated = %v/%v, want both true (OR'd forward)", merged.Done, merged.Truncated)
+	}
+
+	queued := <-sch
+	if len(queued.Groups) != 2 {
+		t.Errorf("queued Groups = %+v, want both unioned", queued.Groups)
+	}
+}
+
+// TestSendLatestSearchUpdatingSameGroupKeepsNewerVersion verifies the "newer
+// wins per group id" half of the union: when the same group changes again
+// before the displaced frame is read, the fresher copy survives, not both.
+func TestSendLatestSearchUpdatingSameGroupKeepsNewerVersion(t *testing.T) {
+	sch := make(chan searchPayload, 1)
+
+	stale := searchGroupDTO{ID: "g1", Peer: "p1", TrackCount: 1}
+	sendLatestSearch(sch, searchPayload{ID: testSearchID, Seq: 1, Groups: []searchGroupDTO{stale}})
+
+	fresh := searchGroupDTO{ID: "g1", Peer: "p1", TrackCount: 2}
+	merged := sendLatestSearch(sch, searchPayload{ID: testSearchID, Seq: 2, Groups: []searchGroupDTO{fresh}})
+
+	if len(merged.Groups) != 1 {
+		t.Fatalf("merged Groups = %+v, want exactly one entry for g1", merged.Groups)
+	}
+	if merged.Groups[0].TrackCount != 2 {
+		t.Errorf("TrackCount = %d, want 2 (the newer version wins)", merged.Groups[0].TrackCount)
 	}
 }

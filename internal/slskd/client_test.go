@@ -630,3 +630,152 @@ func TestSearchStopsIncompleteSearchToHarvestPartial(t *testing.T) {
 		t.Fatal("client never asked slskd to stop the search (PUT /api/v0/searches/s1)")
 	}
 }
+
+// TestToCoreMapsAttributesIncludingJSONNull verifies result.toCore maps the
+// new nullable attribute fields (issue #58), and that JSON `null` for
+// sampleRate/bitDepth decodes as a no-op leaving the Go int fields at zero —
+// exactly core.SearchResult's "unknown" semantics, no pointer needed.
+func TestToCoreMapsAttributesIncludingJSONNull(t *testing.T) {
+	var r result
+	if err := json.Unmarshal([]byte(`{
+		"username":"bob","filename":"a.flac","size":1,"bitRate":320,
+		"length":245,"sampleRate":null,"bitDepth":null,"isVariableBitRate":true
+	}`), &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := r.toCore()
+	want := core.SearchResult{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Duration: 245, SampleRate: 0, BitDepth: 0, VariableBitRate: true,
+	}
+	if got != want {
+		t.Fatalf("toCore = %+v, want %+v", got, want)
+	}
+}
+
+// TestToCoreMapsAttributesAllPresent covers the non-null path for
+// length/sampleRate/bitDepth together.
+func TestToCoreMapsAttributesAllPresent(t *testing.T) {
+	r := result{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Length: 245, SampleRate: 44100, BitDepth: 16, IsVariableBitRate: false,
+	}
+	got := r.toCore()
+	want := core.SearchResult{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Duration: 245, SampleRate: 44100, BitDepth: 16, VariableBitRate: false,
+	}
+	if got != want {
+		t.Fatalf("toCore = %+v, want %+v", got, want)
+	}
+}
+
+// TestSearchStreamDedupesGrowingResponsesAndPreservesCompletionOrdering
+// verifies SearchStream harvests newly-seen (username, filename) pairs as
+// responseCount grows, never re-emits a pair it already emitted, and — the
+// non-negotiable from CLAUDE.md/the plan — preserves isComplete-before-delete
+// ordering unchanged from Search/searchOnce: the search is deleted only
+// after the poll loop observes isComplete AND the final harvest succeeds.
+func TestSearchStreamDedupesGrowingResponsesAndPreservesCompletionOrdering(t *testing.T) {
+	var mu sync.Mutex
+	var seq []string
+	var polls int
+
+	respond := func(w http.ResponseWriter, files string) {
+		w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[` + files + `]}]`))
+	}
+	const file1 = `{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}`
+	const file2 = `{"filename":"b.flac","size":2,"bitRate":900,"isLocked":false}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seq = append(seq, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			mu.Lock()
+			polls++
+			p := polls
+			mu.Unlock()
+			switch {
+			case p == 1:
+				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false, "responseCount": 1})
+			case p == 2:
+				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false, "responseCount": 2})
+			default:
+				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true, "responseCount": 2})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+			mu.Lock()
+			p := polls
+			mu.Unlock()
+			if p <= 1 {
+				respond(w, file1)
+			} else {
+				respond(w, file1+","+file2)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k")
+	c.pollInterval = 5 * time.Millisecond
+
+	var mu2 sync.Mutex
+	var emitted []core.SearchResult
+	emit := func(batch []core.SearchResult) {
+		mu2.Lock()
+		defer mu2.Unlock()
+		emitted = append(emitted, batch...)
+	}
+	if err := c.SearchStream(context.Background(), "q", time.Second, emit); err != nil {
+		t.Fatalf("SearchStream: %v", err)
+	}
+
+	mu2.Lock()
+	defer mu2.Unlock()
+	if len(emitted) != 2 {
+		t.Fatalf("emitted %d results, want 2 (no duplicate emission of a.flac): %+v", len(emitted), emitted)
+	}
+	seen := map[string]bool{}
+	for _, r := range emitted {
+		if seen[r.Filename] {
+			t.Fatalf("filename %q emitted more than once", r.Filename)
+		}
+		seen[r.Filename] = true
+	}
+	if !seen["a.flac"] || !seen["b.flac"] {
+		t.Fatalf("expected both files emitted, got %+v", emitted)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	lastResponsesIdx, deleteIdx := -1, -1
+	for i, s := range seq {
+		switch s {
+		case "GET /api/v0/searches/s1/responses":
+			lastResponsesIdx = i
+		case "DELETE /api/v0/searches/s1":
+			if deleteIdx == -1 {
+				deleteIdx = i
+			}
+		}
+	}
+	if deleteIdx == -1 {
+		t.Fatalf("search was never deleted, sequence: %v", seq)
+	}
+	if lastResponsesIdx == -1 || deleteIdx < lastResponsesIdx {
+		t.Fatalf("delete happened before the final harvest, sequence: %v", seq)
+	}
+}
+
+func TestSearchStreamingReportsFalseForSlskdBackend(t *testing.T) {
+	c := New("http://unused", "k")
+	if c.SearchStreaming() {
+		t.Fatal("slskd client must report SearchStreaming() == false")
+	}
+}
