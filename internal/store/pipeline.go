@@ -242,9 +242,20 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 //
 // Returns false when the job is not a retryable manual job (wrong source,
 // wrong state, or does not exist) - the dashboard button raced a state
-// change, or was pointed at a lidarr-sourced job. Returns ErrRemoteFileBusy,
-// leaving the job untouched, if another live candidate already owns one of
-// the revived candidate's (peer, filename) pairs - see the pre-check below.
+// change, or was pointed at a lidarr-sourced job - and also when it has no
+// candidate row left to revive (see the rollback below).
+//
+// There is deliberately no up-front check for another live candidate already
+// owning one of these (peer, filename) pairs, the conflict CreateManualJob
+// reports as ErrRemoteFileBusy. Creation gets that for free from the transfer
+// INSERT's unique violation; a retry inserts no transfers here, so detecting
+// it would cost a query for a case that resolves itself. Selecting's
+// ActivateCandidateWithTransfers already handles it: the 23505 on
+// idx_transfers_live_remote_owner turns into a DeferSelectingJob, which only
+// bumps updated_at - the job stays SELECTING, stays runnable, and re-attempts
+// activation every tick until the other owner's transfers settle. That is a
+// transient wait, not a livelock, and failing the retry outright would be a
+// worse answer than waiting for it.
 //
 // One deliberate asymmetry from CreateManualJob: creation bypasses the
 // MaxActive cap since the user asked for it explicitly, but a retry goes
@@ -274,43 +285,6 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 		return false, nil
 	}
 
-	// Mirror CreateManualJob's ErrRemoteFileBusy guard: unlike creation, which
-	// discovers the conflict for free from the transfer INSERT's unique-
-	// violation, a retry does not re-insert transfers here - that happens
-	// later, in Selecting/ActivateCandidateWithTransfers - so without this
-	// pre-check a busy file would instead hit DeferSelectingJob and livelock
-	// the job in SELECTING forever: the TTL branch that used to eventually
-	// rescue it is bypassed for manual jobs (see selectJob's Source guard),
-	// and nothing else ever un-defers a candidate-specific skip. Checking here
-	// cannot see an activation racing in between this commit and Selecting's
-	// next tick, but it catches the common case (a second manual job already
-	// claiming the same peer+filename) up front instead of silently spinning.
-	var username string
-	var files []byte
-	if err := tx.QueryRowContext(ctx,
-		`SELECT username, files FROM candidates WHERE album_job_id = $1 ORDER BY created_at DESC LIMIT 1`,
-		jobID).Scan(&username, &files); err != nil {
-		return false, fmt.Errorf("retry manual job: fetch candidate: %w", err)
-	}
-	var busy bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM transfers t
-		   JOIN candidates c ON c.id = t.candidate_id
-		   WHERE t.username = $1
-		     AND t.filename IN (SELECT f.value->>'filename' FROM jsonb_array_elements($2::jsonb) f)
-		     AND t.state IN ($3, $4, $5, $6)
-		     AND c.album_job_id <> $7
-		 )`,
-		username, string(files),
-		string(core.TransferPending), string(core.TransferQueued), string(core.TransferInProgress), string(core.TransferStalled),
-		jobID).Scan(&busy); err != nil {
-		return false, fmt.Errorf("retry manual job: check remote file ownership: %w", err)
-	}
-	if busy {
-		return false, ErrRemoteFileBusy
-	}
-
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
 		return false, fmt.Errorf("retry manual job: delete candidate transfers: %w", err)
@@ -324,10 +298,27 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 	// verify-vs-confirm on it (importing.go) and a non-NULL timestamp skips
 	// straight to confirm, whose timeout is measured from the *stale* value and
 	// so has already expired - an instant failUnconfirmed.
-	if _, err := tx.ExecContext(ctx,
+	res, err = tx.ExecContext(ctx,
 		`UPDATE candidates SET state = $1, fail_reason = '', import_submitted_at = NULL, updated_at = $2 WHERE album_job_id = $3`,
-		string(core.CandidateNew), now, jobID); err != nil {
+		string(core.CandidateNew), now, jobID)
+	if err != nil {
 		return false, fmt.Errorf("retry manual job: revive candidates: %w", err)
+	}
+	// A manual job with no candidate row left has nothing to retry, so roll the
+	// whole transaction back rather than parking it in SELECTING with an empty
+	// cache - Selecting would only fail it again on the next tick, and the user
+	// would watch the Retry button appear to do nothing. This is a real
+	// population, not a theoretical one: RetryFailedJob and ForceSearchJob both
+	// DELETE candidates, so every manual job that went through either of them
+	// before this branch shipped is sitting in production with none. Reporting
+	// not-retryable is the honest answer - the peer the user chose is gone and
+	// no retry can bring it back.
+	revived, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("retry manual job: candidate rows affected: %w", err)
+	}
+	if revived == 0 {
+		return false, nil
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("retry manual job: commit: %w", err)

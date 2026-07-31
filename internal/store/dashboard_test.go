@@ -1060,74 +1060,54 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 	}
 }
 
-// TestRetryManualJobReturnsErrRemoteFileBusy covers issue #347: without this
-// pre-check, retrying a manual job whose (peer, filename) is already claimed
-// by another live candidate would revive it to SELECTING anyway, only to hit
-// DeferSelectingJob's candidate-specific skip on the very next tick and
-// livelock there forever - manual jobs bypass the TTL branch that used to
-// eventually rescue that case. Mirrors CreateManualJob's ErrRemoteFileBusy
-// guard, and leaves the job untouched (still FAILED, candidate still FAILED)
-// rather than SELECTING with nothing to try.
-func TestRetryManualJobReturnsErrRemoteFileBusy(t *testing.T) {
+// TestRetryManualJobNoopWithoutCandidates covers issue #347's zero-candidate
+// case, which is a real production population rather than a hypothetical one:
+// RetryFailedJob and ForceSearchJob both DELETE candidates, so every manual
+// job that went through either before #347 shipped now sits FAILED with none.
+// Reviving such a job to SELECTING would only have Selecting fail it again on
+// the next tick, so the whole transaction rolls back and the caller is told
+// not-retryable instead - the peer the user chose is gone for good.
+func TestRetryManualJobNoopWithoutCandidates(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	jobA, err := s.CreateManualJob(ctx, "AlbumA", "Artist", "bob",
-		[]ManualJobFile{{Filename: "shared.flac", Size: 10}}, now)
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "bob",
+		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now)
 	if err != nil {
-		t.Fatalf("CreateManualJob (A): %v", err)
+		t.Fatalf("CreateManualJob: %v", err)
 	}
-	candA, found, err := s.ActiveCandidate(ctx, jobA.ID)
-	if err != nil || !found {
-		t.Fatalf("ActiveCandidate (A): %v found=%v", err, found)
-	}
-	trsA, err := s.TransfersForCandidate(ctx, candA.ID)
-	if err != nil || len(trsA) != 1 {
-		t.Fatalf("TransfersForCandidate (A) = %d (%v)", len(trsA), err)
-	}
-	// Terminalize job A's own transfer before failing it, exactly as a real
-	// failed download would - otherwise job A's own still-live transfer would
-	// trivially "conflict with itself" and the test would prove nothing about
-	// a genuinely different owner.
-	if err := s.UpdateTransferProgress(ctx, trsA[0].ID, core.TransferCancelled, 0, trsA[0].BytesTotal, now); err != nil {
-		t.Fatalf("UpdateTransferProgress: %v", err)
-	}
-	if _, err := s.FailCandidateAndAdvance(ctx, candA.ID, jobA.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
-		t.Fatalf("FailCandidateAndAdvance: %v", err)
-	}
-	if err := s.MarkJobFailed(ctx, jobA.ID, now); err != nil {
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
-
-	// Job B now claims the same (peer, filename) while job A sits FAILED.
-	if _, err := s.CreateManualJob(ctx, "AlbumB", "Artist", "bob",
-		[]ManualJobFile{{Filename: "shared.flac", Size: 10}}, now); err != nil {
-		t.Fatalf("CreateManualJob (B): %v", err)
+	// Reproduce what a pre-#347 retry did to this job: candidates (and their
+	// transfers) deleted, job left behind. Deleting through the store's own
+	// RetryFailedJob would also move the job to WANTED, so do it directly to
+	// isolate the condition under test.
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, job.ID); err != nil {
+		t.Fatalf("delete transfers: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, job.ID); err != nil {
+		t.Fatalf("delete candidates: %v", err)
 	}
 
-	later := now.Add(time.Minute)
-	ok, err := s.RetryManualJob(ctx, jobA.ID, later)
-	if !errors.Is(err, ErrRemoteFileBusy) {
-		t.Fatalf("RetryManualJob = ok=%v err=%v, want ErrRemoteFileBusy", ok, err)
+	ok, err := s.RetryManualJob(ctx, job.ID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RetryManualJob: %v", err)
 	}
 	if ok {
-		t.Error("expected ok=false when the retry is rejected")
+		t.Error("RetryManualJob = true, want false for a job with no candidate to revive")
 	}
 
-	view, found, err := s.JobWithTransfer(ctx, jobA.ID)
+	// The album_jobs UPDATE ran before the candidate check, so this asserts the
+	// rollback actually took: a committed transaction would leave SELECTING.
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
 	if err != nil || !found {
 		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
 	}
 	if view.Job.State != core.StateFailed {
-		t.Errorf("job A state = %q, want still FAILED (untouched)", view.Job.State)
-	}
-	cands, err := s.CandidatesForJob(ctx, jobA.ID)
-	if err != nil || len(cands) != 1 {
-		t.Fatalf("CandidatesForJob = %d (%v)", len(cands), err)
-	}
-	if cands[0].State != core.CandidateFailed {
-		t.Errorf("candidate state = %q, want still FAILED (untouched)", cands[0].State)
+		t.Errorf("job state = %q, want still FAILED (transaction rolled back)", view.Job.State)
 	}
 }
 

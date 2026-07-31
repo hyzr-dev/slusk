@@ -125,9 +125,9 @@ func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
 // (issue #347) retries the same peer via RetryManualJob rather than
 // re-searching: the user picked that peer for a reason the protocol carries
 // nowhere, and the pipeline must never go hunting on a manual job's behalf.
-// Returns ErrRemoteFileBusy if another live candidate already owns one of the
-// revived candidate's (peer, filename) pairs, the same error Create returns
-// for the same underlying conflict.
+// A manual job whose candidate rows are already gone (a pre-#347 retry or
+// force-search deleted them) is reported ErrJobNotRetryable: the peer the user
+// chose cannot be recovered, so there is nothing to retry.
 func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {
@@ -141,9 +141,6 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 		ok, err = j.Store.RetryManualJob(ctx, jobID, time.Now())
 	} else {
 		ok, err = j.Store.RetryFailedJob(ctx, jobID, time.Now())
-	}
-	if errors.Is(err, store.ErrRemoteFileBusy) {
-		return ErrRemoteFileBusy
 	}
 	if err != nil {
 		return err
