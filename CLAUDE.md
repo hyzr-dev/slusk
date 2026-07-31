@@ -260,10 +260,24 @@ Desktop-first, and honestly so. Mobile is not a priority: tables must not explod
 small screens are not optimised for. Keyboard operability is nice-to-have and welcome
 where it fits the terminal idiom, not a gate.
 
-WCAG AA contrast is the standing goal for text. **Known gap:** `--text-dim` (`#5f696f`)
-against `--bg` (`#08090a`) is 3.5:1 and fails AA for body text — it is used for
-column headers, timestamps and disabled glyphs in ~30 places. Treat that as debt to fix
-deliberately, not as licence to introduce more sub-AA pairs.
+WCAG AA contrast is the standing goal for text, and every text token meets it as of
+#212 (`73bf44f`), which raised `--text-dim` to `#758189` (4.99:1 against `--bg`) and
+`--bad` to `#c56164` (5.00:1). Do not reintroduce a sub-AA text colour.
+
+Two consequences of that fix are open in #335 and are worth knowing before touching the
+palette. Both are invisible to a check that only asks "is this ≥ 4.5:1?":
+
+- The dimmed ladder is now compressed — `--dim` 5.37, `--faint` 5.09, `--text-dim` 4.99.
+  Three steps inside 0.38 are formally distinct and visually nearly one. Raising a token
+  to clear AA without preserving separation from its neighbour trades hierarchy for a
+  passing number.
+- `--tick-queued` against `--tick-off` is 1.20:1, well under the 3:1 that WCAG 1.4.11
+  requires of meaningful non-text. Queued and not-started are effectively the same tick.
+
+Always measure against the surface the text actually lands on, not just `--bg`. `--btn`
+(`#14181b`) is the strictest, and both tokens #212 raised sit just under AA there —
+`--text-dim` 4.47:1, `--bad` 4.48:1 — while clearing 4.99 and 5.00 against `--bg`. A
+token that passes on the page background can still fail inside a button.
 
 `@media (prefers-reduced-motion: reduce)` already exists in `global.css`. Any new
 animation must be covered by it.
