@@ -18,6 +18,11 @@ type MusicSource interface {
 	ExecuteManualImport(ctx context.Context, items []core.ImportItem) error
 	AlbumStatus(ctx context.Context, albumID int64) (present, total int, err error)
 	AlbumReleases(ctx context.Context, albumID int64) ([]core.AlbumRelease, error)
+	// AlbumTracks is used by the discovery relevance gate (#316) to check
+	// candidate filenames against the album's real tracklist. A failure
+	// degrades that gate to a directory-only check rather than aborting
+	// discovery - see discovery.go's searchJob for why.
+	AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTrack, error)
 }
 
 // PeerSearcher is the slice of the peer backend (slskd daemon or native

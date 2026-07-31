@@ -170,7 +170,7 @@ func TestFullLifecycleWantedToDone(t *testing.T) {
 		},
 	}
 	search := &fakeSearcher{results: []core.SearchResult{
-		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
+		{Username: "peer1", Filename: "peer1/Artist - Album/01.flac", Size: 10, BitRate: 900},
 	}}
 	network := &fakeNetwork{}
 	lm := newLifecycleModules(t, music, search, network, 3)
@@ -213,7 +213,7 @@ func TestFullLifecycleWantedToDone(t *testing.T) {
 	if cand.Username != "peer1" {
 		t.Fatalf("expected peer1 activated, got %q", cand.Username)
 	}
-	files := []core.CandidateFile{{Filename: "peer1/01.flac", Size: 10}}
+	files := []core.CandidateFile{{Filename: "peer1/Artist - Album/01.flac", Size: 10}}
 
 	// IMPORTING (transfers complete)
 	completeTransfers(t, lm, cand.ID, "peer1", files, now)
@@ -271,8 +271,8 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 	}
 	search := &fakeSearcher{results: []core.SearchResult{
 		// peer1 scores higher (better bitrate) so it is tried first.
-		{Username: "peer1", Filename: "peer1/01.flac", Size: 10, BitRate: 900},
-		{Username: "peer2", Filename: "peer2/01.flac", Size: 10, BitRate: 320},
+		{Username: "peer1", Filename: "peer1/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "peer2", Filename: "peer2/Artist - Album/01.flac", Size: 10, BitRate: 320},
 	}}
 	network := &fakeNetwork{}
 	lm := newLifecycleModules(t, music, search, network, 3)
@@ -309,7 +309,7 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 	}
 
 	// Candidate 1's transfer errors terminally -> back to SELECTING, candidate 1 FAILED.
-	failTransfersTerminally(t, lm, "peer1", []core.CandidateFile{{Filename: "peer1/01.flac", Size: 10}}, now)
+	failTransfersTerminally(t, lm, "peer1", []core.CandidateFile{{Filename: "peer1/Artist - Album/01.flac", Size: 10}}, now)
 	if got := jobStateFor(t, lm.st, jobID); got != core.StateSelecting {
 		t.Fatalf("expected job back to SELECTING after candidate 1 failed, got %v", got)
 	}
@@ -336,7 +336,7 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 	}
 
 	// Candidate 2's transfer completes -> IMPORTING -> DONE.
-	files2 := []core.CandidateFile{{Filename: "peer2/01.flac", Size: 10}}
+	files2 := []core.CandidateFile{{Filename: "peer2/Artist - Album/01.flac", Size: 10}}
 	completeTransfers(t, lm, cand2.ID, "peer2", files2, now)
 	if got := jobStateFor(t, lm.st, jobID); got != core.StateImporting {
 		t.Fatalf("expected IMPORTING after candidate 2's transfers complete, got %v", got)

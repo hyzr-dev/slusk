@@ -1,6 +1,9 @@
 // Package matcher ranks provider-neutral search results into scored candidate
 // users. It is a pure function of its inputs: no I/O, no database. Weights
-// come from config so ranking can be tuned without recompiling.
+// come from config so ranking can be tuned without recompiling. It also
+// provides CheckRelevance (see relevance.go), a pure filter that rejects
+// candidates whose files do not actually belong to the requested album -
+// Rank alone has no notion of "wrong album", only "acceptable quality".
 package matcher
 
 import (

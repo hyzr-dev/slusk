@@ -32,6 +32,22 @@ ARTISTS = [
     ("Metallica", "65f4f0c5-ef9e-490c-aee3-909e7ae6b2ab"),
     ("The Cure", "69ee3720-a7cb-4402-b48d-a02c366f2bcf"),
     ("Fleetwood Mac", "bd13909f-1c29-4c27-a874-d4aaf27c5b1a"),
+    # Tampa melodic death metal, six albums - here for the relevance gate
+    # (#316), not for volume. Their self-titled album's title is a prefix of
+    # Kansas's far better-seeded "The Absence Of Presence", which is exactly
+    # the false positive the gate exists to reject, so a lab run that never
+    # searches for it never exercises the interesting path.
+    ("The Absence", "7f47ea76-e712-4d90-bd6f-4e0fb3239829"),
+]
+
+# Albums kept in the wanted set regardless of where they sort. select_wanted
+# orders by release date ascending and trims to TARGET, so anything recent is
+# cut - which would silently drop the very album a test artist was added for.
+PINNED_ALBUMS = [
+    # 2024, so it sorts last and would never survive the trim. See #316: this
+    # title is a prefix of Kansas's "The Absence Of Presence", the false
+    # positive the relevance gate exists to reject.
+    ("The Absence", "The Absence"),
 ]
 
 
@@ -188,6 +204,16 @@ def fetch_wanted_missing() -> list[dict]:
         page += 1
 
 
+def _matches(album: dict, artist_name: str, title: str) -> bool:
+    return (album.get("title") or "").casefold() == title.casefold() and (
+        (album.get("artist") or {}).get("artistName") or ""
+    ).casefold() == artist_name.casefold()
+
+
+def _is_pinned(album: dict) -> bool:
+    return any(_matches(album, name, title) for name, title in PINNED_ALBUMS)
+
+
 def select_wanted() -> list[int]:
     """Monitor everything, then keep exactly TARGET of Lidarr's own missing set.
 
@@ -216,7 +242,15 @@ def select_wanted() -> list[int]:
     candidates.sort(
         key=lambda item: (item.get("releaseDate") or "9999", item.get("title") or "", item["id"])
     )
-    selected = [int(album["id"]) for album in candidates[:TARGET]]
+    pinned = [album for album in candidates if _is_pinned(album)]
+    for name, title in PINNED_ALBUMS:
+        if not any(_matches(album, name, title) for album in pinned):
+            print(f"warning: pinned album {name} - {title} is not in Lidarr's missing set", file=sys.stderr)
+    pinned_ids = {int(album["id"]) for album in pinned}
+    rest = [album for album in candidates if int(album["id"]) not in pinned_ids]
+    selected = [int(album["id"]) for album in pinned] + [
+        int(album["id"]) for album in rest[: TARGET - len(pinned)]
+    ]
     set_album_monitored([i for i in all_ids if i not in set(selected)], False)
     print(f"kept {len(selected)} of Lidarr's {len(candidates)} missing albums monitored")
     return selected

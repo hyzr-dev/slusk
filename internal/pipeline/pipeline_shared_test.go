@@ -51,6 +51,16 @@ type fakeMusic struct {
 	albumReleases    []core.AlbumRelease
 	albumReleasesErr error
 
+	// albumTracks/albumTracksErr drive AlbumTracks, the relevance gate's
+	// (#316) source of the album's expected track titles. A nil/empty
+	// albumTracks (the zero value) exercises the gate's directory-only
+	// fallback without needing an explicit error. albumTracksCalls counts
+	// invocations, so tests can assert it is skipped when there is nothing
+	// to relevance-check against (an empty Peers.Search result).
+	albumTracks      []core.AlbumTrack
+	albumTracksErr   error
+	albumTracksCalls int
+
 	// manualImportItems/manualImportErr drive ManualImportCandidates; folders
 	// records every folder it was called with, in order, so tests can assert
 	// AlbumFolder computed the expected path.
@@ -99,6 +109,14 @@ func (f *fakeMusic) AlbumReleases(ctx context.Context, albumID int64) ([]core.Al
 		return nil, f.albumReleasesErr
 	}
 	return f.albumReleases, nil
+}
+
+func (f *fakeMusic) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTrack, error) {
+	f.albumTracksCalls++
+	if f.albumTracksErr != nil {
+		return nil, f.albumTracksErr
+	}
+	return f.albumTracks, nil
 }
 
 // fakeNetwork is an in-memory PeerNetwork fake for the Downloading module's

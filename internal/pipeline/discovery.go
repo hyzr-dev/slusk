@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slskdarr/internal/matcher"
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
@@ -46,6 +47,9 @@ type DiscoveryStore interface {
 // Downloading's MetricsSink).
 type DiscoveryMetrics interface {
 	IncAlbumReleasesError()
+	// IncAlbumTracksError counts one failed Lidarr AlbumTracks call (see
+	// searchJob's degrade-not-abort handling below).
+	IncAlbumTracksError()
 }
 
 // DiscoveryParams configures a Discovery.
@@ -75,6 +79,16 @@ type DiscoveryParams struct {
 // selection/enqueue, which Selecting now owns).
 type Discovery struct {
 	p DiscoveryParams
+	// warnedAlbumTracksFailure tracks whether the AlbumTracks degrade-path
+	// below has already logged at Warn once. Discovery runs one job per tick
+	// on a single goroutine (see runner.go), so this needs no locking. A
+	// Lidarr version missing the endpoint would otherwise fail on every
+	// wanted album on every tick forever; the first failure is surfaced at
+	// Warn (an operator should notice and investigate), every one after that
+	// only at Debug (the condition is already known, not new information).
+	// Cleared again on the next success, so the throttle covers one failure
+	// episode rather than the whole process lifetime.
+	warnedAlbumTracksFailure bool
 }
 
 // NewDiscovery constructs a Discovery.
@@ -216,7 +230,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// search into a match. Skipped entirely when normalizing is a no-op
 		// (to avoid doubling search traffic for nothing) or reduces the query
 		// to nothing (searching for "" is meaningless).
-		if fallback := normalizeQuery(query); fallback != "" && fallback != query {
+		if fallback := matcher.NormalizeQuery(query); fallback != "" && fallback != query {
 			fallbackDetail := fmt.Sprintf("primary search empty, trying normalized query %q", fallback)
 			d.log().Info(fallbackDetail, "album_job", job.ID, "query", fallback)
 			d.recordEvent(ctx, job.ID, core.EventSearchFallback, fallbackDetail, now)
@@ -238,13 +252,52 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		"results", len(results), "candidates", len(ranked))
 	d.recordEvent(ctx, job.ID, core.EventSearch, searchDetail, now)
 
+	// Fetch the album's expected track titles for the relevance gate below,
+	// now that there is at least one ranked candidate to check them against -
+	// fetching this unconditionally before the search (as originally written)
+	// doubled Discovery's Lidarr call rate for every job whose search came
+	// back empty, for no benefit. This DEGRADES rather than aborts on error -
+	// unlike AlbumReleases above, which is load-bearing for the track-count
+	// band. Making this second Lidarr endpoint a hard dependency of all
+	// discovery would mean a 404 on some deployed Lidarr version (this
+	// endpoint's shape is unverified, see lidarr.Client.AlbumTracks) silently
+	// stops slskdarr searching for everything. The directory-only half of the
+	// relevance gate still fixes issue #316 on its own, so losing
+	// track-title evidence only makes the gate slightly less precise, not
+	// inert.
+	var trackTitles []string
+	if len(ranked) > 0 {
+		tracks, err := d.p.Music.AlbumTracks(ctx, job.LidarrAlbumID)
+		if err != nil {
+			if d.p.Metrics != nil {
+				d.p.Metrics.IncAlbumTracksError()
+			}
+			logFn := d.log().Debug
+			if !d.warnedAlbumTracksFailure {
+				logFn = d.log().Warn
+				d.warnedAlbumTracksFailure = true
+			}
+			logFn("album tracks failed, relevance gate degrades to directory check",
+				"album_job", job.ID, "err", err)
+		} else {
+			// Arm the Warn again: the throttle is per failure episode, not per
+			// process. Without this a transient blip permanently demotes every
+			// later outage - including an unrelated one weeks on - to Debug.
+			d.warnedAlbumTracksFailure = false
+			trackTitles = make([]string, len(tracks))
+			for i, tr := range tracks {
+				trackTitles[i] = tr.Title
+			}
+		}
+	}
+
 	// Candidates are cached per search cycle - the previously-tried-username
 	// filter the legacy engine applied at enqueue time is deliberately absent
 	// here: a fresh cache is wiped on every retry cycle (see InsertCandidates
 	// resetting retries, and ResetJobToWanted deleting prior candidates), so
 	// there is no cross-cycle "already tried" state left to consult.
 	var survivors []store.NewCandidate
-	var tooManyTracks, tooFewTracks int
+	var tooManyTracks, tooFewTracks, irrelevant int
 	for _, cand := range ranked {
 		if len(survivors) >= d.p.MaxCandidates {
 			break
@@ -265,13 +318,41 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			tooFewTracks++
 			continue
 		}
+		// Placed after the (cheaper) track-count checks so those rejection
+		// reasons keep taking precedence in the counts below (issue #316):
+		// Soulseek search is a token-AND over a peer's whole shared path, so a
+		// query for "The Absence The Absence" network-matches
+		// "Kansas\The Absence Of Presence (2020)\..." - a valid hit for the
+		// wrong album. Neither the track-count band above nor matcher.Rank's
+		// scoring has any notion of "wrong album"; this is the only check
+		// that does.
+		if v := matcher.CheckRelevance(matcher.RelevanceInput{
+			ArtistName: album.ArtistName, AlbumTitle: album.Title,
+			TrackTitles: trackTitles, Files: filenamesOf(cand.Files),
+		}); !v.Match {
+			detail := fmt.Sprintf("candidate %s does not match the requested album (%s), skipping", cand.Username, v.Reason)
+			// "source" (which evidence decided - track titles vs directory),
+			// not a repeat of Reason, which detail above already carries:
+			// matches the neighbouring rejection branches' pattern of logging
+			// structured values, not a copy of the message (see v.Source's
+			// doc comment).
+			// .String() explicitly: production wires slog's JSON handler, which
+			// marshals the int-typed RelevanceSource as a bare number and never
+			// consults Stringer. Tests use the text handler, which does - so
+			// dropping this reads correctly in every test and logs "source":2
+			// in the only place that matters.
+			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "source", v.Source.String())
+			irrelevant++
+			continue
+		}
 		survivors = append(survivors, newCandidateFrom(cand))
 	}
 
-	if rejected := tooManyTracks + tooFewTracks; rejected > 0 {
-		detail := fmt.Sprintf("rejected %d candidates: %d above maximum track count, %d below minimum track count", rejected, tooManyTracks, tooFewTracks)
+	if rejected := tooManyTracks + tooFewTracks + irrelevant; rejected > 0 {
+		detail := fmt.Sprintf("rejected %d candidates: %d above maximum track count, %d below minimum track count, %d not matching the requested album",
+			rejected, tooManyTracks, tooFewTracks, irrelevant)
 		d.log().Info(detail, "album_job", job.ID, "rejected", rejected,
-			"above_max_tracks", tooManyTracks, "below_min_tracks", tooFewTracks)
+			"above_max_tracks", tooManyTracks, "below_min_tracks", tooFewTracks, "irrelevant", irrelevant)
 		d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 	}
 
@@ -304,6 +385,15 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			"album_job", job.ID)
 	}
 	return true, advanced, nil
+}
+
+// filenamesOf extracts a candidate's filenames for matcher.CheckRelevance.
+func filenamesOf(files []core.SearchResult) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		out[i] = f.Filename
+	}
+	return out
 }
 
 // newCandidateFrom converts a ranked core.RankedCandidate into the store's

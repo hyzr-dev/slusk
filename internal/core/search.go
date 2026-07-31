@@ -55,6 +55,22 @@ type AlbumRelease struct {
 	Monitored  bool
 }
 
+// AlbumTrack is one track of an album in Lidarr, mapped to a
+// music-source-neutral shape, used by the discovery relevance gate to check a
+// candidate's filenames against the album's real tracklist.
+//
+// Only Title is carried: an earlier version also decoded TrackNumber and
+// MediumNumber, but nothing ever consumed them, so they were removed
+// (YAGNI) - a type drift on either field in some deployed Lidarr version
+// (e.g. trackNumber returned as a JSON number rather than a string) would
+// otherwise fail the whole decode and degrade the relevance gate for every
+// album, for fields nobody read. If a real need for track number comes back,
+// keep it a string rather than parsing to int: vinyl releases use
+// side/position labels like "A1", which is not an int.
+type AlbumTrack struct {
+	Title string
+}
+
 // ImportItem is one file Lidarr found in a folder, with any import
 // rejections, mapped to a music-source-neutral shape.
 type ImportItem struct {

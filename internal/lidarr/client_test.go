@@ -201,6 +201,60 @@ func TestAlbumReleases(t *testing.T) {
 	}
 }
 
+func TestAlbumTracks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/track" {
+			t.Errorf("path = %q, want /api/v1/track", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("albumId"); got != "42" {
+			t.Errorf("albumId query param = %q, want 42", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "key" {
+			t.Errorf("api key = %q, want key", got)
+		}
+		// trackNumber/mediumNumber are deliberately unlike the old (now-removed)
+		// decode target - a number where "1" was a string, a string where an int
+		// was - to pin that AlbumTracks no longer cares about their type at all
+		// (see core.AlbumTrack's doc comment): only "title" is decoded, so a
+		// type drift on fields nobody reads must never fail the whole call.
+		fmt.Fprint(w, `[
+			{"id":1,"albumId":42,"title":"Wartorn","trackNumber":1,"mediumNumber":"A"},
+			{"id":2,"albumId":42,"title":"Riders","trackNumber":"A1","mediumNumber":1,"unknownField":{"nested":true}}
+		]`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key")
+	tracks, err := c.AlbumTracks(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("AlbumTracks: %v", err)
+	}
+	want := []core.AlbumTrack{
+		{Title: "Wartorn"},
+		{Title: "Riders"},
+	}
+	if len(tracks) != len(want) {
+		t.Fatalf("got %d tracks, want %d", len(tracks), len(want))
+	}
+	for i := range want {
+		if tracks[i] != want[i] {
+			t.Errorf("track %d = %+v, want %+v", i, tracks[i], want[i])
+		}
+	}
+}
+
+func TestAlbumTracksErrorOnNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "key")
+	if _, err := c.AlbumTracks(context.Background(), 42); err == nil {
+		t.Fatal("expected an error on a non-2xx response")
+	}
+}
+
 func TestExecuteManualImportBuildsCorrectPayload(t *testing.T) {
 	var captured map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
