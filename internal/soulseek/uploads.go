@@ -8,7 +8,9 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
 )
@@ -25,6 +27,73 @@ const (
 type uploadKey struct {
 	username string
 	filename string
+}
+
+// UploadRecord is one finished upload handed to an UploadSink (issue #325).
+// It is produced once the transfer's outcome is decided, never while bytes are
+// moving.
+//
+// Filename is the normalized virtual share path, exactly as UploadEntry
+// reports it — already visible to any peer that browses us, unlike the local
+// path, which must never appear here or in Detail.
+//
+// Detail is a short fixed reason string, deliberately not err.Error(): upload
+// failures routinely wrap *os.PathError, and this value is served over the API
+// (the same reason registerShares refuses to echo a rescan error). The raw
+// error is logged instead.
+//
+// BytesSent is what this attempt put on the wire, i.e. the delta above the
+// resume offset the peer asked for — not uploadJob.sent, which is absolute.
+// AvgBytesPerSecond divides that by the streaming phase's own duration, so it
+// is not derivable from FinishedAt-StartedAt, which also covers the time the
+// job spent queued and negotiating.
+type UploadRecord struct {
+	Username          string
+	Filename          string
+	Size              uint64
+	BytesSent         uint64
+	AvgBytesPerSecond uint64
+	StartedAt         time.Time
+	FinishedAt        time.Time
+	Status            core.UploadStatus
+	Detail            string
+}
+
+// UploadSink receives finished uploads so they survive a restart. Unlike
+// MessageSink nothing depends on the write succeeding — the peer has already
+// been served either way — so an error is logged and discarded rather than
+// retried, and the sink must never be given work that could stall the
+// protocol.
+//
+// Implementations are called from the upload's own goroutine after the
+// transfer is over, so a slow write delays releasing that upload slot (bounded
+// by uploadSinkTimeout) but never touches the streaming hot path.
+type UploadSink interface {
+	RecordUpload(ctx context.Context, r UploadRecord) error
+}
+
+// uploadSinkTimeout bounds a single sink write. It is shorter than
+// messageSinkTimeout because the write holds an upload slot for its duration
+// while nothing depends on its outcome, whereas a message write gates an ack.
+const uploadSinkTimeout = 5 * time.Second
+
+// recordUpload hands r to the configured UploadSink, if any. A nil sink is a
+// no-op, matching MessageSink and ShareMetaCache.
+//
+// The write gets a fresh bounded context derived with WithoutCancel: by the
+// time an upload's outcome is known its ctx is frequently already cancelled
+// (shutdown, or the peer connection going away is what ended the transfer),
+// and reusing it would make every interesting row fail to persist. Same
+// problem, same fix as runMessageWorker's persistCtx.
+func (c *Client) recordUpload(ctx context.Context, r UploadRecord) {
+	if c.cfg.UploadSink == nil {
+		return
+	}
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadSinkTimeout)
+	defer cancel()
+	if err := c.cfg.UploadSink.RecordUpload(persistCtx, r); err != nil && c.logger != nil {
+		c.logger.Error("upload history sink failed", "username", r.Username, "filename", r.Filename, "err", err)
+	}
 }
 
 // uploadJob is only ever handled through a *uploadJob (see byKey/waiting),

@@ -232,7 +232,7 @@ func TestZeroByteTransferHandshakeCreatesDestinationAndCompletesUpload(t *testin
 	uploadConn := &recordingReadConn{Conn: rawUploadConn}
 	uploadDone := make(chan error, 1)
 	go func() {
-		uploadDone <- streamUploadConn(uploadConn, 123, bytes.NewReader(nil), 0, time.Second, time.Second, 0, 0, nil, nil)
+		uploadDone <- streamUploadConn(uploadConn, 123, bytes.NewReader(nil), 0, time.Second, time.Second, 0, 0, nil, nil, nil)
 	}()
 
 	init := &file.TransferInit{}

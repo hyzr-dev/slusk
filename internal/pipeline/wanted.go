@@ -28,6 +28,10 @@ type WantedSyncStore interface {
 	// store.PruneThroughputMinutes, issue #157), on the same fixed 30-day
 	// window as job events and search passes.
 	PruneThroughputMinutes(ctx context.Context, now time.Time) error
+	// PruneUploadHistory deletes expired upload_history rows (see
+	// store.PruneUploadHistory, issue #325), on the same fixed 30-day window
+	// as the three above.
+	PruneUploadHistory(ctx context.Context, now time.Time) error
 }
 
 // WantedSyncParams configures a WantedSync.
@@ -126,6 +130,9 @@ func (w *WantedSync) Tick(ctx context.Context, now time.Time) error {
 		return err
 	}
 	if err := w.p.Store.PruneThroughputMinutes(ctx, now); err != nil {
+		return err
+	}
+	if err := w.p.Store.PruneUploadHistory(ctx, now); err != nil {
 		return err
 	}
 

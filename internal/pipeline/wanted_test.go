@@ -190,6 +190,9 @@ type recordingWantedSyncStore struct {
 	revived    int
 	syncErr    error
 	pruneErr   error
+	// uploadHistoryPrunedAt records the now PruneUploadHistory was called
+	// with; the zero value means it was never called.
+	uploadHistoryPrunedAt time.Time
 }
 
 func (s *recordingWantedSyncStore) SyncWantedJobs(_ context.Context, releases []core.WantedRelease, cutoff, now time.Time) (int, int, error) {
@@ -211,6 +214,28 @@ func (s *recordingWantedSyncStore) PruneSearchPasses(context.Context, time.Time)
 
 func (s *recordingWantedSyncStore) PruneThroughputMinutes(context.Context, time.Time) error {
 	return nil
+}
+
+func (s *recordingWantedSyncStore) PruneUploadHistory(_ context.Context, now time.Time) error {
+	s.uploadHistoryPrunedAt = now
+	return nil
+}
+
+// TestWantedSyncPrunesUploadHistory asserts upload_history retention actually
+// runs on the sync tick (issue #325). A busy share appends rows continuously,
+// so a prune that is defined but never called is unbounded growth with a
+// reassuring-looking implementation next to it.
+func TestWantedSyncPrunesUploadHistory(t *testing.T) {
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	store := &recordingWantedSyncStore{}
+	w := NewWantedSync(WantedSyncParams{Music: &fakeMusic{}, Store: store})
+
+	if err := w.Tick(context.Background(), now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if !store.uploadHistoryPrunedAt.Equal(now) {
+		t.Errorf("PruneUploadHistory called with %v, want the tick's now %v", store.uploadHistoryPrunedAt, now)
+	}
 }
 
 func TestWantedSyncUsesOneBulkCallPublishesLastDuplicateAndLogs(t *testing.T) {
