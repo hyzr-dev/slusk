@@ -11,7 +11,7 @@ import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice'
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
-import { formatAge, formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
+import { formatAge, formatDateTime, formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
 import { t } from '../strings';
 import styles from './Overview.module.css';
 
@@ -80,6 +80,22 @@ function finishedAge(updatedAt: string): string {
   const ms = Date.now() - new Date(updatedAt).getTime();
   if (Number.isNaN(ms)) return '—';
   return formatAge(Math.max(0, Math.floor(ms / 1000)));
+}
+
+/**
+ * The exact instant behind a WHEN cell's age, for its title attribute.
+ *
+ * formatAge is coarse by design and gets coarser with age — "4d" cannot answer
+ * "exactly when did it finish?" (issue #333). The tooltip is the only route to
+ * that precision, which makes it more warranted the shorter the visible form
+ * is, not less. Returns undefined rather than an em dash when there is no
+ * usable timestamp, so the cell carries no tooltip at all instead of one that
+ * says nothing.
+ */
+function finishedAt(updatedAt: string): string | undefined {
+  if (!updatedAt) return undefined;
+  const exact = formatDateTime(updatedAt);
+  return exact === '—' ? undefined : exact;
 }
 
 /**
@@ -334,7 +350,7 @@ export default function Overview() {
                     <span className={styles.transferArtist}>{job.artist}</span>
                   </span>
                   <span role="cell" className={styles.peerCell}>{job.peer || '—'}</span>
-                  <span role="cell" className={styles.finishedWhen}>{finishedAge(job.updatedAt)}</span>
+                  <span role="cell" className={styles.finishedWhen} title={finishedAt(job.updatedAt)}>{finishedAge(job.updatedAt)}</span>
                 </div>
               ))}
             </div>
@@ -374,7 +390,7 @@ export default function Overview() {
                       <span className={styles.transferArtist}>{job.artist}</span>
                     </span>
                     <span role="cell" className={styles.failedReason} title={reason}>{reason}</span>
-                    <span role="cell" className={styles.finishedWhen}>{finishedAge(job.updatedAt)}</span>
+                    <span role="cell" className={styles.finishedWhen} title={finishedAt(job.updatedAt)}>{finishedAge(job.updatedAt)}</span>
                   </div>
                 );
               })}
