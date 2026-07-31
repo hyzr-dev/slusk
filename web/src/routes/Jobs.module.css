@@ -148,7 +148,7 @@
 .artist {
   flex: 0 2 auto;
   min-width: 0;
-  color: var(--faint);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -165,7 +165,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.formatCell { color: var(--faint); }
+.formatCell { color: var(--text-dim); }
 
 .progressCell { display: flex; align-items: center; gap: 8px; }
 .ticksWrap { flex: 1; }

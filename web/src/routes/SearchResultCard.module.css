@@ -54,7 +54,7 @@
    Matches .folderPath and .meta, the view's other two raw-path/stat cells. */
 .parent {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--text-dim);
   font-family: var(--font-mono);
   min-width: 0;
   overflow-wrap: anywhere;
@@ -84,7 +84,7 @@
 .availOk { color: var(--ok); font-size: 11px; white-space: nowrap; }
 .availDim { color: var(--dim); font-size: 11px; white-space: nowrap; }
 
-.peerSpeed { font-size: 11px; color: var(--faint); font-family: var(--font-mono); white-space: nowrap; }
+.peerSpeed { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); white-space: nowrap; }
 
 .chevron { color: var(--text-dim); font-size: 13px; flex: 0 0 auto; }
 
@@ -141,7 +141,7 @@
 }
 
 .fileDur { color: var(--text-dim); font-size: 10.5px; }
-.fileSize { color: var(--faint); font-size: 10.5px; width: 60px; text-align: right; }
+.fileSize { color: var(--text-dim); font-size: 10.5px; width: 60px; text-align: right; }
 
 .actions {
   display: flex;

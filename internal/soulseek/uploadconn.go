@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/file"
 	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
@@ -22,10 +23,43 @@ import (
 // indefinitely (see #108).
 var errUploadTooSlow = errors.New("soulseek: upload aborted, peer below minimum throughput")
 
+// Upload detail strings recorded alongside an UploadRecord's status. They are
+// fixed values on purpose: an upload error's text routinely carries a local
+// filesystem path (*os.PathError from opening or seeking the shared file) and
+// UploadRecord.Detail is served over the API. The raw error keeps going to the
+// log, which is not.
+const (
+	uploadDetailFileUnavailable   = "file unavailable"
+	uploadDetailPeerUnreachable   = "peer session unavailable"
+	uploadDetailRequestNotSent    = "transfer request not sent"
+	uploadDetailPeerDeclined      = "peer declined"
+	uploadDetailNegotiationTimout = "negotiation timeout"
+	uploadDetailClientStopping    = "client stopping"
+	uploadDetailTooSlow           = "below minimum throughput"
+	uploadDetailTransferFailed    = "transfer failed"
+)
+
 func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
+	startedAt := time.Now()
+	// rejected records an outcome where not a single body byte was streamed,
+	// so BytesSent and AvgBytesPerSecond are a truthful zero rather than an
+	// unmeasured one (see core.UploadRejected).
+	rejected := func(detail string) {
+		c.recordUpload(ctx, UploadRecord{
+			Username:   job.key.username,
+			Filename:   job.key.filename,
+			Size:       job.size.Load(),
+			StartedAt:  startedAt,
+			FinishedAt: time.Now(),
+			Status:     core.UploadRejected,
+			Detail:     detail,
+		})
+	}
+
 	indexed := c.shareSnapshot().files[job.key.filename]
 	if indexed == nil {
 		c.denyQueuedUpload(ctx, job, peer.ErrFileNotShared)
+		rejected(uploadDetailFileUnavailable)
 		return
 	}
 	// Store size before the file is even opened, so job.size is always
@@ -35,12 +69,14 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 	shared, err := openIndexedFile(indexed)
 	if err != nil {
 		c.denyQueuedUpload(ctx, job, peer.ErrFileReadError)
+		rejected(uploadDetailFileUnavailable)
 		return
 	}
 	defer shared.Close()
 
 	session, err := c.getOrConnectPeerSession(ctx, job.key.username)
 	if err != nil {
+		rejected(uploadDetailPeerUnreachable)
 		return
 	}
 	reservation := c.tokens.Reserve()
@@ -51,6 +87,7 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 
 	request := &peer.TransferRequest{Direction: peer.UploadToPeer, Token: reservation.token, Filename: job.key.filename, FileSize: indexed.wire.Size}
 	if !sendUploadPeerMessage(session, request) {
+		rejected(uploadDetailRequestNotSent)
 		return
 	}
 
@@ -59,24 +96,74 @@ func (c *Client) runUpload(ctx context.Context, job *uploadJob) {
 	select {
 	case response := <-responses:
 		if !response.Allowed {
+			rejected(uploadDetailPeerDeclined)
 			return
 		}
 	case <-timer.C:
+		rejected(uploadDetailNegotiationTimout)
 		return
 	case <-ctx.Done():
+		rejected(uploadDetailClientStopping)
 		return
 	}
 
-	if err := c.streamUpload(ctx, job.key.username, reservation.token, shared, indexed.wire.Size, &job.sent); err != nil {
+	// startOffset is where the peer asked the transfer to resume, filled in by
+	// streamUploadConn. job.sent is absolute and starts there, so only the
+	// delta is this attempt's contribution — recording job.sent directly would
+	// silently overstate a resumed upload's volume and speed.
+	var startOffset atomic.Uint64
+	streamStarted := time.Now()
+	err = c.streamUpload(ctx, job.key.username, reservation.token, shared, indexed.wire.Size, &job.sent, &startOffset)
+	streamDuration := time.Since(streamStarted)
+
+	status, detail := core.UploadCompleted, ""
+	if err != nil {
+		status = core.UploadAborted
+		detail = uploadDetailTransferFailed
 		_ = sendUploadPeerMessage(session, &peer.UploadFailed{Filename: job.key.filename})
-		if c.logger != nil {
-			if errors.Is(err, errUploadTooSlow) {
+		if errors.Is(err, errUploadTooSlow) {
+			detail = uploadDetailTooSlow
+			if c.logger != nil {
 				c.logger.Info("soulseek upload aborted: below minimum throughput", "username", job.key.username, "filename", job.key.filename)
-			} else {
-				c.logger.Debug("soulseek upload failed", "username", job.key.username, "filename", job.key.filename, "err", err)
 			}
+		} else if c.logger != nil {
+			c.logger.Debug("soulseek upload failed", "username", job.key.username, "filename", job.key.filename, "err", err)
 		}
 	}
+	c.recordUpload(ctx, UploadRecord{
+		Username:          job.key.username,
+		Filename:          job.key.filename,
+		Size:              job.size.Load(),
+		BytesSent:         uploadBytesSent(job.sent.Load(), startOffset.Load()),
+		AvgBytesPerSecond: uploadAvgBytesPerSecond(uploadBytesSent(job.sent.Load(), startOffset.Load()), streamDuration),
+		StartedAt:         startedAt,
+		FinishedAt:        time.Now(),
+		Status:            status,
+		Detail:            detail,
+	})
+}
+
+// uploadBytesSent is this attempt's contribution: the absolute progress
+// counter minus the resume offset it was seeded with. It saturates at 0 rather
+// than underflowing, since both values are read without a lock and a
+// still-settling write could in principle order them the wrong way round — an
+// unsigned wrap here would turn a tiny discrepancy into an exabyte.
+func uploadBytesSent(sent, startOffset uint64) uint64 {
+	if sent < startOffset {
+		return 0
+	}
+	return sent - startOffset
+}
+
+// uploadAvgBytesPerSecond is the streaming phase's own average rate. A
+// non-positive duration yields 0 rather than dividing: a transfer that failed
+// before it began has no rate to report, and 0 is how core.UploadRejected
+// already spells "no measurement".
+func uploadAvgBytesPerSecond(bytesSent uint64, d time.Duration) uint64 {
+	if d <= 0 || bytesSent == 0 {
+		return 0
+	}
+	return uint64(float64(bytesSent) / d.Seconds())
 }
 
 func (c *Client) denyQueuedUpload(ctx context.Context, job *uploadJob, reason error) {
@@ -126,7 +213,10 @@ func openIndexedFile(indexed *indexedFile) (*os.File, error) {
 	return f, nil
 }
 
-func (c *Client) streamUpload(ctx context.Context, username string, token soul.Token, shared *os.File, size uint64, sent *atomic.Uint64) error {
+// streamUpload opens the file connection and streams the upload. startOffset
+// receives the resume offset the peer requested, which the caller needs to
+// turn the absolute sent counter into this attempt's own byte delta.
+func (c *Client) streamUpload(ctx context.Context, username string, token soul.Token, shared *os.File, size uint64, sent, startOffset *atomic.Uint64) error {
 	conn, err := c.ConnectPeer(ctx, username, file.ConnectionType)
 	if err != nil {
 		return err
@@ -142,7 +232,7 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 		}
 	}()
 
-	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval, sent, &c.uploads.totalWritten)
+	return streamUploadConn(conn, token, shared, size, c.cfg.fileInitTimeout, c.cfg.fileIdleTimeout, c.cfg.uploadMinThroughput, c.cfg.uploadThroughputSampleInterval, sent, startOffset, &c.uploads.totalWritten)
 }
 
 // uploadThroughputStrikeLimit is how many consecutive sub-floor sample
@@ -151,9 +241,12 @@ func (c *Client) streamUpload(ctx context.Context, username string, token soul.T
 // initial read latency never counts against it.
 const uploadThroughputStrikeLimit = 2
 
-func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent, totalWritten *atomic.Uint64) error {
+func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, size uint64, initTimeout, idleTimeout time.Duration, minThroughput int, sampleInterval time.Duration, sent, startOffset, totalWritten *atomic.Uint64) error {
 	if sent == nil {
 		sent = new(atomic.Uint64)
+	}
+	if startOffset == nil {
+		startOffset = new(atomic.Uint64)
 	}
 	if err := conn.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
 		return err
@@ -181,6 +274,10 @@ func streamUploadConn(conn net.Conn, token soul.Token, shared io.ReadSeeker, siz
 	// 10%; and when offset.Offset == size the body is skipped entirely,
 	// which would leave sent at 0 forever.
 	sent.Store(offset.Offset)
+	// Same value, separate counter: sent keeps growing as the body streams,
+	// so the caller cannot recover the offset from it afterwards, and it needs
+	// exactly that to report the delta this attempt actually sent (#325).
+	startOffset.Store(offset.Offset)
 	if offset.Offset < size {
 		if _, err := shared.Seek(int64(offset.Offset), io.SeekStart); err != nil {
 			return err

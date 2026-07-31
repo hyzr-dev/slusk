@@ -11,7 +11,7 @@
 .statLabel {
   font-size: 10px;
   letter-spacing: 1.3px;
-  color: var(--faint);
+  color: var(--text-dim);
   text-transform: uppercase;
 }
 
@@ -37,7 +37,12 @@
    columns always line up (mock, docs/design/slskdarr-tui.dc.html:102). */
 .transferGrid {
   display: grid;
-  grid-template-columns: 28px minmax(150px, 2fr) minmax(76px, 1fr) minmax(130px, 1.4fr) 62px 84px;
+  /* SIZE is 92px, not the mock's 84px: the mock's formatter rounded to whole
+     MB with no unit space ("340M"), but a pair of four-digit values —
+     "1015M / 1020M", an ordinary ~1 GB FLAC album — measures 89.7px at the
+     11.5px monospace this renders in. 84px was the right width for a narrower
+     worst case than the app actually produces (issue #332). */
+  grid-template-columns: 28px minmax(150px, 2fr) minmax(76px, 1fr) minmax(130px, 1.4fr) 62px 92px;
   gap: 10px;
   align-items: center;
 }
@@ -134,7 +139,7 @@
 .transferArtist {
   flex: 0 2 auto;
   min-width: 0;
-  color: var(--faint);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,7 +173,12 @@
 .pctBad { color: var(--bad); }
 .pctQueued { color: var(--dim); }
 
-.right { text-align: right; color: var(--dim); }
+/* nowrap for the same reason .failedReason has it: this grid gives every row
+   a shared height, so letting a cell wrap blows the row out and the panel
+   grows past its intended height. Jobs.module.css's .right has always had it;
+   this copy was missing it (issue #332). Clipping is the acceptable failure
+   here — an uneven row is not. */
+.right { text-align: right; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .mainGrid {
   display: grid;

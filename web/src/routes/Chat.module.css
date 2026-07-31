@@ -114,7 +114,7 @@
 }
 
 .presenceOnline { color: var(--ok); }
-.presenceOffline { color: var(--faint); }
+.presenceOffline { color: var(--text-dim); }
 
 .pane {
   flex: 1;

@@ -16,7 +16,7 @@
 }
 
 .quiet {
-  color: var(--faint);
+  color: var(--text-dim);
 }
 
 .ok {

@@ -84,7 +84,7 @@
 .link:hover { color: var(--fg); }
 
 .detail {
-  color: var(--faint);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

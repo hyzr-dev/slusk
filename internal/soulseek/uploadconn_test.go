@@ -106,7 +106,8 @@ func TestStreamUploadConnResumeOffsets(t *testing.T) {
 			sent := &atomic.Uint64{}
 			sent.Store(12345)
 			totalWritten := &atomic.Uint64{}
-			err := streamUploadConn(client, 99, bytes.NewReader(payload), uint64(len(payload)), time.Second, time.Second, 0, 0, sent, totalWritten)
+			startOffset := &atomic.Uint64{}
+			err := streamUploadConn(client, 99, bytes.NewReader(payload), uint64(len(payload)), time.Second, time.Second, 0, 0, sent, startOffset, totalWritten)
 			if err != nil {
 				t.Fatalf("streamUploadConn: %v", err)
 			}
@@ -124,6 +125,12 @@ func TestStreamUploadConnResumeOffsets(t *testing.T) {
 			}
 			if got, want := totalWritten.Load(), uint64(len(payload))-offset; got != want {
 				t.Fatalf("totalWritten.Load() = %d, want actual body writes %d (offset %d)", got, want, offset)
+			}
+			// startOffset keeps the resume point after sent has moved past it,
+			// which is the only way the caller can report this attempt's own
+			// byte delta rather than the absolute counter (#325).
+			if got := startOffset.Load(); got != offset {
+				t.Fatalf("startOffset.Load() = %d, want the peer's requested offset %d", got, offset)
 			}
 		})
 	}
@@ -144,7 +151,7 @@ func TestStreamUploadConnWaitsBoundedlyForDownloaderClose(t *testing.T) {
 		// Deliberately retain the downloader side instead of closing it.
 	}()
 	start := time.Now()
-	err := streamUploadConn(client, 1, bytes.NewReader([]byte("abc")), 3, time.Second, 30*time.Millisecond, 0, 0, nil, nil)
+	err := streamUploadConn(client, 1, bytes.NewReader([]byte("abc")), 3, time.Second, 30*time.Millisecond, 0, 0, nil, nil, nil)
 	<-peerReady
 	if err == nil || time.Since(start) < 20*time.Millisecond {
 		t.Fatalf("completion wait error=%v elapsed=%v", err, time.Since(start))
@@ -160,7 +167,7 @@ func TestStreamUploadConnRejectsOversizedOffset(t *testing.T) {
 		_ = init.Deserialize(remote)
 		_, _ = file.Write(remote, &file.Offset{Offset: 11})
 	}()
-	if err := streamUploadConn(client, 1, bytes.NewReader([]byte("0123456789")), 10, time.Second, time.Second, 0, 0, nil, nil); err == nil {
+	if err := streamUploadConn(client, 1, bytes.NewReader([]byte("0123456789")), 10, time.Second, time.Second, 0, 0, nil, nil, nil); err == nil {
 		t.Fatal("oversized offset accepted")
 	}
 }
@@ -196,7 +203,7 @@ func TestStreamUploadConnAbortsSlowPeer(t *testing.T) {
 	rs := &readSeeker{r: bytes.NewReader(payload)}
 	// threshold = minThroughput * sampleInterval.Seconds() = 100000 * 0.02 = 2000 bytes/window,
 	// far above the 10 bytes/20ms (~500 bytes/s) the fake peer above trickles at.
-	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 100000, 20*time.Millisecond, nil, nil)
+	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 100000, 20*time.Millisecond, nil, nil, nil)
 	if !errors.Is(err, errUploadTooSlow) {
 		t.Fatalf("streamUploadConn err = %v, want errUploadTooSlow", err)
 	}
@@ -231,7 +238,7 @@ func TestStreamUploadConnAllowsSteadySlowPeer(t *testing.T) {
 	rs := &readSeeker{r: bytes.NewReader(payload)}
 	// threshold = minThroughput * sampleInterval.Seconds() = 1000 * 0.02 = 20 bytes/window;
 	// the unthrottled reader below drains the whole 300-byte payload well within that.
-	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 1000, 20*time.Millisecond, nil, nil)
+	err := streamUploadConn(client, 1, rs, uint64(len(payload)), time.Second, time.Second, 1000, 20*time.Millisecond, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("streamUploadConn: %v", err)
 	}

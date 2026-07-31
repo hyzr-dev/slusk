@@ -142,6 +142,22 @@ export function formatSize(bytes: number | null | undefined): string {
   return `${(gb / 1024).toFixed(1)} TB`;
 }
 
+// The compact byte formatter, for cells where the column width is fixed and
+// two values share it. It follows the unit scale the TUI mock was drawn
+// against (docs/design/slskdarr-tui.dc.html:958) — no decimal below 1 GB, no
+// space before the unit letter — which is what makes "340M / 911M" fit the
+// Overview TRANSFERS SIZE column where "340.1 MB / 911.8 MB" does not.
+// Prefer formatSize everywhere the spelled-out form fits; this one trades
+// legibility for width and should not spread beyond cells that need it.
+export function formatSizeCompact(bytes: number | null | undefined): string {
+  if (!bytes) return '0M';
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${Math.round(mb)}M`;
+  const gb = mb / 1024;
+  if (gb < 1024) return `${gb.toFixed(1)}G`;
+  return `${(gb / 1024).toFixed(1)}T`;
+}
+
 // UploadEntry.filename is a Soulseek virtual path, which is always
 // backslash-separated regardless of the host OS that shared it — never
 // forward-slash. The full path stays available (e.g. in a `title`

@@ -5,7 +5,7 @@
 .title {
   font-size: 11px;
   letter-spacing: 1.4px;
-  color: var(--faint);
+  color: var(--text-dim);
 }
 
 .intro {
@@ -27,9 +27,9 @@
 
 .stateOk { font-size: 11px; letter-spacing: 0.6px; color: var(--ok); }
 .stateFailed { font-size: 11px; letter-spacing: 0.6px; color: var(--bad); }
-.stateUntested { font-size: 11px; letter-spacing: 0.6px; color: var(--faint); }
+.stateUntested { font-size: 11px; letter-spacing: 0.6px; color: var(--text-dim); }
 .stateTesting { font-size: 11px; letter-spacing: 0.6px; color: var(--dim); }
-.stateDisabled { font-size: 11px; letter-spacing: 0.6px; color: var(--faint); }
+.stateDisabled { font-size: 11px; letter-spacing: 0.6px; color: var(--text-dim); }
 
 .fields {
   padding: 11px 16px 15px 43px;
@@ -43,7 +43,7 @@
 }
 
 .fieldKey {
-  color: var(--faint);
+  color: var(--text-dim);
   width: 106px;
   letter-spacing: 0.4px;
   flex: 0 0 auto;

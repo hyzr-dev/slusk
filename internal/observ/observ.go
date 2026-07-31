@@ -445,6 +445,11 @@ type ServerDeps struct {
 	// served at GET /api/uploads (issue #179). nil when native Soulseek
 	// sharing is not enabled, mirroring Shares.
 	Uploads UploadsFunc
+	// UploadHistory pages the persisted history of finished uploads at GET
+	// /api/uploads/history (issue #325). Unlike Uploads it is wired
+	// unconditionally: the rows are already in the database, so they stay
+	// readable with the native backend switched off. nil answers 503.
+	UploadHistory UploadHistoryFunc
 	// Throughput supplies the Overview view's live directional throughput
 	// series served at /api/charts. nil (the non-native backends, or tests that
 	// don't care) yields empty arrays rather than omitting either field.
@@ -796,7 +801,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerSearch(mux, deps.StartSearch, deps.SearchSnapshot, deps.StopSearch)
-	registerUploads(mux, deps.Uploads)
+	registerUploads(mux, deps.Uploads, deps.UploadHistory)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval, streamInvalidateInterval)
 	mux.Handle("/", newAssetHandler())
