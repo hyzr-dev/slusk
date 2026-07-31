@@ -597,6 +597,50 @@ func TestClientPresenceDispatchPreservesSelfSpeedAndHandlesTransitions(t *testin
 	}
 }
 
+func excludedSearchPhrasesFrame(t *testing.T, phrases []string) []byte {
+	t.Helper()
+	payload := new(bytes.Buffer)
+	mustWrite(t, writeUint32(payload, uint32(server.CodeExcludedSearchPhrases)))
+	mustWrite(t, writeUint32(payload, uint32(len(phrases))))
+	for _, phrase := range phrases {
+		mustWrite(t, writeString(payload, phrase))
+	}
+	return packFrame(payload.Bytes())
+}
+
+// TestClientDispatchesExcludedSearchPhrases confirms handleMessage's
+// server.CodeExcludedSearchPhrases arm (issue #319) actually populates
+// c.excludedPhrases from a real code-160 frame, rather than the field only
+// ever being written by tests poking it directly. Without this the dispatch
+// arm could be deleted and the whole suite would stay green while every
+// search sailed onto the wire again.
+func TestClientDispatchesExcludedSearchPhrases(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+
+	if got := c.excludedPhrases.Load(); got != nil {
+		t.Fatalf("excludedPhrases before dispatch = %v, want nil", got)
+	}
+
+	want := []string{"bob dylan", "some other phrase"}
+	frame := excludedSearchPhrasesFrame(t, want)
+	if err := c.handleMessage(context.Background(), server.CodeExcludedSearchPhrases, bytes.NewReader(frame)); err != nil {
+		t.Fatalf("handle ExcludedSearchPhrases: %v", err)
+	}
+
+	got := c.excludedPhrases.Load()
+	if got == nil {
+		t.Fatal("excludedPhrases after dispatch = nil, want populated")
+	}
+	if len(*got) != len(want) {
+		t.Fatalf("excludedPhrases = %v, want %v", *got, want)
+	}
+	for i := range want {
+		if (*got)[i] != want[i] {
+			t.Errorf("excludedPhrases[%d] = %q, want %q", i, (*got)[i], want[i])
+		}
+	}
+}
+
 func TestClientSynchronizesWatchUnwatchAndReconnect(t *testing.T) {
 	c := New(Config{}, testLogger())
 	clientConn, serverConn := net.Pipe()

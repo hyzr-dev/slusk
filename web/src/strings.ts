@@ -160,6 +160,7 @@ export const t = {
   event: {
     search: 'Searched',
     search_fallback: 'Searched (fallback)',
+    search_excluded: 'Search excluded by server',
     candidate_selected: 'Candidate selected',
     candidate_rejected: 'Candidate rejected',
     attempt_failed: 'Attempt failed',
