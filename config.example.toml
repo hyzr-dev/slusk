@@ -112,7 +112,10 @@ dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 # create an account) OR this token. auth_token is now OPTIONAL: it exists for
 # machine/API access alongside the browser login (curl, Prometheus scraping,
 # the Vite dev proxy in `make dev`), not as the only way in. Leave it blank
-# to disable machine access entirely. Generate one, for example, with:
+# to disable machine access entirely - if you have a Prometheus (or other
+# non-browser) scrape already configured against /metrics, blanking this on
+# an existing deployment will break it, since /metrics accepts no session
+# cookie. Generate one, for example, with:
 #   openssl rand -hex 32
 # API and Prometheus clients send: Authorization: Bearer <token>
 # Non-browser Basic-auth clients use any username and this token as the password.

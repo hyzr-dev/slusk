@@ -21,7 +21,7 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 		deps.Cancel = cancel
 	}
 	h := NewServer(deps)
-	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
+	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 
 // TestSPAShellAndAuthEndpointsRemainPublic pins the issue #279 inversion:
@@ -239,7 +239,7 @@ func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	deps := testServerDeps(reg)
 	deps.DeleteJob = del
 	h := NewServer(deps)
-	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 
 	tests := []struct {
 		name       string
@@ -303,7 +303,7 @@ func TestMarkReadAuthenticationAndSameOriginProtection(t *testing.T) {
 	deps := testServerDeps(reg)
 	deps.MarkRead = markRead
 	h := NewServer(deps)
-	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 
 	tests := []struct {
 		name       string

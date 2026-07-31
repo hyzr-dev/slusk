@@ -47,17 +47,22 @@ const queryClient = new QueryClient({
 
 // Gates the whole app behind GET /api/auth/session (issue #279): renders
 // nothing while that boot-time check is in flight (no spinner, no flash of
-// the login form), then either the login/first-run card in place of the
-// router outlet, or `children` unchanged. setupRequired wins over
-// authenticated — it means no account exists at all, which is a stronger
-// fact than how this particular request happened to authenticate (a bearer
-// token, in `make dev`'s case — see SessionResponse's doc comment).
+// the login form), then either `children` unchanged or the login/first-run
+// card in its place. `authenticated` wins over `setupRequired`: the gate
+// exists to get the caller authenticated, and a caller who already is has
+// nothing to gain from being handed an account-creation form. The only way
+// to be authenticated:true with setupRequired:true is the machine bearer
+// token (a browser cannot produce one on its own — see SessionResponse's
+// doc comment), so this branch is reachable only via the Vite dev proxy or
+// curl, not a real visitor. There is no security consequence to the
+// ordering either way: an unauthenticated visitor still gets the setup card
+// whenever setupRequired is true.
 export function AuthGate({ children }: { children: ReactNode }) {
   const session = useSession();
   if (session.isLoading) return null;
+  if (session.data?.authenticated) return <>{children}</>;
   if (session.data?.setupRequired) return <Login mode="setup" />;
-  if (session.data?.authenticated === false) return <Login mode="login" />;
-  return <>{children}</>;
+  return <Login mode="login" />;
 }
 
 export default function App() {

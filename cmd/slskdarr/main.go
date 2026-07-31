@@ -579,13 +579,18 @@ func main() {
 			return st.RecordOutgoingMessage(ctx, username, body, time.Now())
 		}
 	}
-	// authenticator accepts EITHER the configured bearer/Basic token (may be
-	// unconfigured, see internal/config) OR a valid session cookie
-	// (sessionLookupFn, always available since form login needs no config
-	// key). Constructed once and threaded into both ServerDeps.TokenAuth
-	// below and the ProtectPrivateEndpoints wrap further down, so the two
-	// can never disagree about what authenticates a request.
-	authenticator := observ.NewTokenAuthenticator(cfg.Observ.AuthToken, sessionLookupFn)
+	// tokenAuthenticator and sessionAuthenticator are two separate,
+	// single-purpose Authenticators (issue #279): the configured bearer/Basic
+	// token (may be unconfigured, see internal/config) and the session
+	// cookie (sessionLookupFn, always available since form login needs no
+	// config key) respectively. tokenAuthenticator alone is threaded into
+	// ServerDeps.TokenAuth (see its doc comment for why GET /api/auth/session
+	// needs the token-only view), while combinedAuthenticator - the AnyOf of
+	// both - is what actually wraps the whole handler via
+	// ProtectPrivateEndpoints below.
+	tokenAuthenticator := observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
+	sessionAuthenticator := observ.NewSessionAuthenticator(sessionLookupFn)
+	combinedAuthenticator := observ.AnyOf(tokenAuthenticator, sessionAuthenticator)
 	// The four Search* fields below take direct method values, not adapters:
 	// the search session shapes (core.SearchSession/SearchDelta) already live
 	// in internal/core, so no wiring-boundary conversion is needed (issue #58).
@@ -640,11 +645,11 @@ func main() {
 		Shutdown: restartCtx.Done(),
 		// TokenAuth and the SetupRequired/SessionUser/Setup/Login/Logout
 		// funcs back GET /api/auth/session and POST /api/auth/{setup,login,
-		// logout} (issue #279). TokenAuth is deliberately the same
-		// Authenticator instance ProtectPrivateEndpoints wraps the handler
-		// with below, not a second one, so the two can never disagree about
-		// whether a bearer/Basic credential is valid.
-		TokenAuth:     authenticator,
+		// logout} (issue #279). TokenAuth is deliberately tokenAuthenticator
+		// alone (not combinedAuthenticator, which ProtectPrivateEndpoints
+		// wraps the handler with below) - see ServerDeps.TokenAuth's doc
+		// comment.
+		TokenAuth:     tokenAuthenticator,
 		SetupRequired: setupRequiredFn,
 		SessionUser:   sessionUserFn,
 		Setup:         setupFn,
@@ -653,7 +658,7 @@ func main() {
 	})
 	srv := &http.Server{
 		Addr:              cfg.Observ.ListenAddr,
-		Handler:           observ.ProtectPrivateEndpoints(handler, authenticator),
+		Handler:           observ.ProtectPrivateEndpoints(handler, combinedAuthenticator),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		WriteTimeout:      httpWriteTimeout,

@@ -192,13 +192,15 @@ describe('AuthGate', () => {
     expect(screen.queryByText('protected content')).not.toBeInTheDocument();
   });
 
-  // setupRequired wins even over an otherwise-authenticated request (a
-  // bearer token against a lab DB with zero users — see SessionResponse's
-  // doc comment): no account existing at all is a stronger fact than how
-  // this one request happened to authenticate.
-  it('prefers the setup card over a bearer-token-authenticated session with no account yet', () => {
+  // authenticated wins even when setupRequired is also true (a bearer token
+  // against a lab DB with zero users — the `make dev` case, see
+  // SessionResponse's doc comment): the gate exists to get the caller
+  // authenticated, and a caller who already is has nothing to gain from
+  // being handed an account-creation form.
+  it('prefers the app over the setup card for a bearer-token-authenticated session with no account yet', () => {
     renderGate({ authenticated: true, username: null, setupRequired: true });
-    expect(screen.getByRole('heading', { name: t.auth.setupHeader })).toBeInTheDocument();
+    expect(screen.getByText('protected content')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: t.auth.setupHeader })).not.toBeInTheDocument();
   });
 
   it('renders the login card once an account exists but this request is unauthenticated', () => {

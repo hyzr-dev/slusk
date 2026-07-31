@@ -46,6 +46,48 @@ func TestCreateUserRejectsDuplicateUsername(t *testing.T) {
 	}
 }
 
+func TestCreateFirstUserSucceedsOnceThenCloses(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateFirstUser(ctx, "alice", "hash-one"); err != nil {
+		t.Fatalf("first CreateFirstUser: %v", err)
+	}
+
+	// A second call with a DIFFERENT username must still be rejected - this
+	// is exactly the race CreateFirstUser exists to close (issue #279 review):
+	// a plain CountUsers-then-CreateUser check could let two concurrent
+	// first-run requests with different usernames both succeed.
+	err := s.CreateFirstUser(ctx, "bob", "hash-two")
+	if !errors.Is(err, ErrSetupClosed) {
+		t.Fatalf("second CreateFirstUser (different username) = %v, want ErrSetupClosed", err)
+	}
+
+	n, err := s.CountUsers(ctx)
+	if err != nil {
+		t.Fatalf("CountUsers: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CountUsers = %d, want 1 (the second call must not have inserted)", n)
+	}
+}
+
+func TestCreateFirstUserRejectsDuplicateUsername(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateFirstUser(ctx, "alice", "hash-one"); err != nil {
+		t.Fatalf("CreateFirstUser: %v", err)
+	}
+	// The table is non-empty at this point, so ErrSetupClosed already covers
+	// this in practice, but a duplicate-username call specifically must not
+	// panic or return an unwrapped SQL error.
+	err := s.CreateFirstUser(ctx, "alice", "hash-two")
+	if !errors.Is(err, ErrSetupClosed) && !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("CreateFirstUser (duplicate username) = %v, want ErrSetupClosed or ErrUsernameTaken", err)
+	}
+}
+
 func TestUserByNameNotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.UserByName(context.Background(), "nobody")

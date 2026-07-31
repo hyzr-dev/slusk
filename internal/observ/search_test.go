@@ -227,7 +227,7 @@ func TestSearchMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	deps := testServerDeps(reg)
 	deps.StartSearch = start
 	h := NewServer(deps)
-	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 
 	tests := []struct {
 		name       string

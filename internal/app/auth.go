@@ -61,7 +61,7 @@ var ErrPasswordTooLong = errors.New("password must be 72 bytes or fewer")
 // what a use case is allowed to call - the same convention as JobStore above.
 type AuthStore interface {
 	CountUsers(ctx context.Context) (int, error)
-	CreateUser(ctx context.Context, username, passwordHash string) error
+	CreateFirstUser(ctx context.Context, username, passwordHash string) error
 	UserByName(ctx context.Context, username string) (core.User, error)
 	CreateSession(ctx context.Context, tokenHash []byte, userID int64, expiresAt time.Time) error
 	SessionUser(ctx context.Context, tokenHash []byte) (core.User, error)
@@ -73,15 +73,6 @@ type AuthStore interface {
 // /session.
 type Auth struct {
 	Store AuthStore
-	// Now is overridable in tests; a nil value defaults to time.Now.
-	Now func() time.Time
-}
-
-func (a *Auth) now() time.Time {
-	if a.Now != nil {
-		return a.Now()
-	}
-	return time.Now()
 }
 
 // SetupRequired reports whether no account exists yet, i.e. whether Setup is
@@ -114,22 +105,11 @@ func validatePassword(password string) error {
 
 // Setup creates the first account and immediately logs it in, returning a raw
 // session token for the caller to set as a cookie (see observ.newSessionCookie).
-// Returns ErrSetupClosed if an account already exists, or
+// Returns ErrSetupClosed if an account already exists (checked atomically by
+// the store's CreateFirstUser - see its doc comment - so two concurrent
+// first-run requests cannot both succeed), or
 // ErrInvalidUsername/ErrPasswordTooShort/ErrPasswordTooLong on bad input.
-//
-// The SetupRequired check and the CreateUser call are not atomic: two
-// concurrent first-run requests with different usernames could both pass the
-// check and both insert. That is an accepted, narrow race (issue #279) - the
-// realistic setup path is one operator, once, right after first deploy - and
-// not one this method closes.
 func (a *Auth) Setup(ctx context.Context, username, password string) (token string, expiresAt time.Time, err error) {
-	setupRequired, err := a.SetupRequired(ctx)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	if !setupRequired {
-		return "", time.Time{}, ErrSetupClosed
-	}
 	username, err = validateUsername(username)
 	if err != nil {
 		return "", time.Time{}, err
@@ -141,7 +121,10 @@ func (a *Auth) Setup(ctx context.Context, username, password string) (token stri
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("hash password: %w", err)
 	}
-	if err := a.Store.CreateUser(ctx, username, string(hash)); err != nil {
+	if err := a.Store.CreateFirstUser(ctx, username, string(hash)); err != nil {
+		if errors.Is(err, store.ErrSetupClosed) {
+			return "", time.Time{}, ErrSetupClosed
+		}
 		if errors.Is(err, store.ErrUsernameTaken) {
 			return "", time.Time{}, ErrUsernameTaken
 		}
@@ -174,7 +157,17 @@ func mustHash(password string) []byte {
 // Login verifies credentials and, on success, creates a new session and
 // returns its raw token. Returns ErrInvalidCredentials for both an unknown
 // username and a wrong password.
+//
+// username is trimmed the same way Setup trims it before storing (see
+// validateUsername) - not merely cosmetic: v1 has no password reset, so an
+// operator who typed a trailing space at setup and not at login (or vice
+// versa) would otherwise get an indistinguishable, permanent 401. Login does
+// NOT reject an empty/oversized trimmed username with ErrInvalidUsername the
+// way Setup does - it simply won't match any account, which UserByName
+// already turns into the same ErrInvalidCredentials as any other unknown
+// username.
 func (a *Auth) Login(ctx context.Context, username, password string) (token string, expiresAt time.Time, err error) {
+	username = strings.TrimSpace(username)
 	user, err := a.Store.UserByName(ctx, username)
 	if errors.Is(err, store.ErrUserNotFound) {
 		// Run a real bcrypt comparison anyway, against the fixed decoy hash,
@@ -200,7 +193,7 @@ func (a *Auth) createSession(ctx context.Context, userID int64) (token string, e
 	}
 	token = base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
-	expiresAt = a.now().Add(SessionTTL)
+	expiresAt = time.Now().Add(SessionTTL)
 	if err := a.Store.CreateSession(ctx, hash[:], userID, expiresAt); err != nil {
 		return "", time.Time{}, err
 	}

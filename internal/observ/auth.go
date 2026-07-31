@@ -13,11 +13,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"time"
 
 	"github.com/samuelenocsson/slskdarr/internal/app"
 )
+
+// maxAuthRequestBytes bounds the raw POST /api/auth/{setup,login} request
+// body (issue #279): these are public, unauthenticated endpoints that buffer
+// a JSON decode, so they need the same MaxBytesReader guard
+// serveSendMessage applies (messages.go) even though the payload - two short
+// strings - is far smaller than a message body.
+const maxAuthRequestBytes = 4096
 
 // SetupRequiredFunc reports whether no account exists yet (backed by
 // app.Auth.SetupRequired). Used by GET /api/auth/session's setupRequired
@@ -62,18 +70,24 @@ type sessionResponse struct {
 	SetupRequired bool    `json:"setupRequired"`
 }
 
-// registerAuth wires the four public auth endpoints onto mux. tokenAuth
-// checks the bearer/Basic token alone (not the session cookie) so GET
-// /api/auth/session can tell "authenticated by the machine token" (username
-// stays null) apart from "authenticated by a browser session" (username is
-// populated) - see the type's doc comment on Authenticated below.
+// registerAuth wires the four public auth endpoints onto mux. tokenAuth is
+// deliberately the TOKEN-ONLY authenticator (see NewTokenAuthenticator, not
+// the AnyOf-combined one cmd/slskdarr/main.go wraps the rest of the handler
+// with) so GET /api/auth/session can tell "authenticated by the machine
+// token" (username stays null) apart from "authenticated by a browser
+// session" (username is populated, checked separately via sessionUser
+// below) - a combined authenticator would blur that distinction depending on
+// which credential it happened to try first.
 func registerAuth(mux *http.ServeMux, tokenAuth Authenticator, setupRequired SetupRequiredFunc, sessionUser SessionUserFunc, setup SetupFunc, login LoginFunc, logout LogoutFunc) {
 	mux.HandleFunc("GET /api/auth/session", func(w http.ResponseWriter, r *http.Request) {
 		resp := sessionResponse{}
 		if setupRequired != nil {
 			required, err := setupRequired(r.Context())
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				// Public endpoint - never echo a store error, which can carry
+				// a filesystem path or the Postgres DSN (see uploads.go's
+				// UploadEntry doc comment for the same house rule).
+				writeConfigError(w, http.StatusInternalServerError, "failed to check session state", nil)
 				return
 			}
 			resp.SetupRequired = required
@@ -95,14 +109,23 @@ func registerAuth(mux *http.ServeMux, tokenAuth Authenticator, setupRequired Set
 	})
 
 	mux.HandleFunc("POST /api/auth/setup", func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSONBody(w, r) {
+			return
+		}
 		serveAuthCreate(w, r, authCreateFunc(setup), http.StatusConflict, app.ErrSetupClosed)
 	})
 
 	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSONBody(w, r) {
+			return
+		}
 		serveAuthCreate(w, r, authCreateFunc(login), http.StatusUnauthorized, app.ErrInvalidCredentials)
 	})
 
 	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		if !requireJSONBody(w, r) {
+			return
+		}
 		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" && logout != nil {
 			// Best-effort: a store error here must not stop the client from
 			// clearing its own cookie below (logout is expected to always
@@ -112,6 +135,29 @@ func registerAuth(mux *http.ServeMux, tokenAuth Authenticator, setupRequired Set
 		http.SetCookie(w, clearSessionCookie(r))
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// requireJSONBody rejects a request whose Content-Type is not
+// application/json with 415, writing the error response itself; callers
+// should return immediately when it reports false.
+//
+// This is the actual CSRF defence for POST /api/auth/{setup,login,logout}
+// (see ProtectPrivateEndpoints' doc comment in security.go for why
+// SameSite=Strict alone is NOT sufficient): application/json is not a
+// CORS-safelisted content type, so a cross-origin HTML form - which cannot
+// set an arbitrary Content-Type without triggering a preflight the browser
+// then refuses to send past - cannot reach these handlers with a body they
+// will decode. Parameters (e.g. "; charset=utf-8") are ignored via
+// mime.ParseMediaType, matching how web/src/api/client.ts's JSON POST helper
+// sets the header with no parameters.
+func requireJSONBody(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeConfigError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json", nil)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthRequestBytes)
+	return true
 }
 
 // authCreateFunc is the shape shared by SetupFunc and LoginFunc, so
@@ -154,22 +200,31 @@ func serveAuthCreate(w http.ResponseWriter, r *http.Request, create authCreateFu
 // - defensive only, since app.Auth always computes expiresAt as now+SessionTTL.
 const sessionCookieMaxAgeFloor = 0
 
-// newSessionCookie builds the Set-Cookie value for a freshly created
-// session. Secure is set only when the request itself arrived over https -
-// see requestScheme in security.go, which sameOriginMutation also uses, so
-// the two can never disagree about the request's scheme.
+// requestSecureCookie decides the cookie Secure flag from requestScheme: true
+// when the request provably arrived over https, and ALSO true (fail closed)
+// when requestScheme can't determine the scheme at all - a malformed or
+// multi-valued X-Forwarded-Proto (e.g. a two-hop proxy chain producing
+// "https,https") must never silently downgrade to a cleartext cookie. See
+// requestScheme's doc comment in security.go for why this resolves ok==false
+// the opposite way sameOriginMutation does.
+func requestSecureCookie(r *http.Request) bool {
+	scheme, ok := requestScheme(r)
+	return !ok || scheme == "https"
+}
+
+// newSessionCookie builds the Set-Cookie value for a freshly created session.
+// See requestSecureCookie for the Secure flag's fail-closed rule.
 func newSessionCookie(r *http.Request, token string, expiresAt time.Time) *http.Cookie {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < sessionCookieMaxAgeFloor {
 		maxAge = sessionCookieMaxAgeFloor
 	}
-	scheme, _ := requestScheme(r)
 	return &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   scheme == "https",
+		Secure:   requestSecureCookie(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   maxAge,
 	}
@@ -179,13 +234,12 @@ func newSessionCookie(r *http.Request, token string, expiresAt time.Time) *http.
 // cookie (Max-Age=0), matching newSessionCookie's other attributes so the
 // browser recognizes it as the same cookie.
 func clearSessionCookie(r *http.Request) *http.Cookie {
-	scheme, _ := requestScheme(r)
 	return &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   scheme == "https",
+		Secure:   requestSecureCookie(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	}

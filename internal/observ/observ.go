@@ -484,12 +484,14 @@ type ServerDeps struct {
 	// connection then only ends when the client disconnects, matching
 	// today's behavior for every other endpoint.
 	Shutdown <-chan struct{}
-	// TokenAuth is the same Authenticator cmd/slskdarr/main.go wraps the
-	// whole handler in via ProtectPrivateEndpoints, threaded in separately so
-	// GET /api/auth/session (itself public, see isPrivatePath) can report
-	// whether the request already carries a valid bearer/Basic token
-	// (issue #279). nil means no token is configured - see auth.go's
-	// registerAuth.
+	// TokenAuth is the TOKEN-ONLY authenticator (observ.NewTokenAuthenticator,
+	// NOT the AnyOf-combined instance cmd/slskdarr/main.go wraps the whole
+	// handler in via ProtectPrivateEndpoints), threaded in separately so GET
+	// /api/auth/session (itself public, see isPrivatePath) can specifically
+	// report whether the request carries a valid bearer/Basic token, as
+	// opposed to a valid session cookie - see auth.go's registerAuth doc
+	// comment for why blurring that distinction would be wrong. nil means no
+	// token is configured.
 	TokenAuth Authenticator
 	// SetupRequired, SessionUser, Setup, Login and Logout back the four
 	// public /api/auth/* endpoints (issue #279); see auth.go.

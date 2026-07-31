@@ -28,29 +28,27 @@ const sessionCookieName = "slskdarr_session"
 // store error rather than granting access.
 type SessionLookupFunc func(r *http.Request, token string) bool
 
-// TokenAuthenticator authenticates a request by EITHER of two independent
-// credentials (issue #279): the configured bearer/Basic token (machine
-// access - curl, Prometheus, the Vite dev proxy), or a valid
-// slskdarr_session cookie (browser form login). Either one is sufficient;
-// neither present is a 401. The token is now optional - see
-// cmd/slskdarr/main.go and internal/config - so a deployment can rely on
-// session login alone.
+// TokenAuthenticator authenticates the configured bearer/Basic token alone
+// (machine access - curl, Prometheus, the Vite dev proxy). It knows nothing
+// about session cookies - see SessionAuthenticator and AnyOf for how
+// cmd/slskdarr/main.go combines the two, and ServerDeps.TokenAuth's doc
+// comment for why GET /api/auth/session specifically needs the token-only
+// instance rather than the combined one.
 //
 // Tokens are hashed before comparison so comparisons always have equal
 // length.
 type TokenAuthenticator struct {
 	tokenHash [sha256.Size]byte
 	hasToken  bool
-	session   SessionLookupFunc
 }
 
 // NewTokenAuthenticator returns a constant-time token authenticator. token
-// may be empty, meaning no bearer/Basic credential is accepted and only
-// session cookies authenticate. session may be nil, meaning no cookie is
-// accepted and only the token authenticates; passing both nil/empty makes
-// every request fail authentication.
-func NewTokenAuthenticator(token string, session SessionLookupFunc) *TokenAuthenticator {
-	a := &TokenAuthenticator{session: session}
+// may be empty (issue #279 made it optional - see internal/config), meaning
+// this authenticator rejects every request; combine it with a
+// SessionAuthenticator via AnyOf so a deployment can still rely on session
+// login alone.
+func NewTokenAuthenticator(token string) *TokenAuthenticator {
+	a := &TokenAuthenticator{}
 	if token != "" {
 		a.tokenHash = sha256.Sum256([]byte(token))
 		a.hasToken = true
@@ -60,11 +58,6 @@ func NewTokenAuthenticator(token string, session SessionLookupFunc) *TokenAuthen
 
 // Authenticate implements Authenticator.
 func (a *TokenAuthenticator) Authenticate(r *http.Request) bool {
-	if a.session != nil {
-		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" && a.session(r, cookie.Value) {
-			return true
-		}
-	}
 	if !a.hasToken {
 		return false
 	}
@@ -72,6 +65,55 @@ func (a *TokenAuthenticator) Authenticate(r *http.Request) bool {
 	candidateHash := sha256.Sum256([]byte(candidate))
 	matches := subtle.ConstantTimeCompare(candidateHash[:], a.tokenHash[:]) == 1
 	return ok && matches
+}
+
+// SessionAuthenticator authenticates a request by its slskdarr_session
+// cookie alone (browser form login, issue #279). It knows nothing about the
+// bearer/Basic token - see TokenAuthenticator and AnyOf.
+type SessionAuthenticator struct {
+	lookup SessionLookupFunc
+}
+
+// NewSessionAuthenticator returns a session-cookie authenticator. lookup may
+// be nil, meaning this authenticator rejects every request (no cookie ever
+// authenticates).
+func NewSessionAuthenticator(lookup SessionLookupFunc) *SessionAuthenticator {
+	return &SessionAuthenticator{lookup: lookup}
+}
+
+// Authenticate implements Authenticator.
+func (a *SessionAuthenticator) Authenticate(r *http.Request) bool {
+	if a.lookup == nil {
+		return false
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	return a.lookup(r, cookie.Value)
+}
+
+// anyOfAuthenticator authenticates a request if ANY of its member
+// Authenticators does. See AnyOf.
+type anyOfAuthenticator []Authenticator
+
+// AnyOf combines several Authenticators into one that accepts a request
+// authenticated by any of them (issue #279: the bearer/Basic token and the
+// session cookie are independent, equally sufficient credentials). A nil
+// member is skipped rather than panicking, so a caller can pass an
+// Authenticator that might itself be nil without a separate check.
+func AnyOf(auths ...Authenticator) Authenticator {
+	return anyOfAuthenticator(auths)
+}
+
+// Authenticate implements Authenticator.
+func (a anyOfAuthenticator) Authenticate(r *http.Request) bool {
+	for _, auth := range a {
+		if auth != nil && auth.Authenticate(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestToken(r *http.Request) (string, bool) {
@@ -119,9 +161,18 @@ func isPrivatePath(path string) bool {
 // same-origin Origin header; bearer-authenticated non-browser clients may
 // omit Origin, but cannot override a conflicting one (see sameOriginMutation).
 // Public paths - including /api/auth/login and /api/auth/setup - never reach
-// that check at all: SameSite=Strict already makes a cross-site login-CSRF
-// inert, and the Vite dev proxy's changeOrigin:true rewrites Host but not
-// Origin, so requiring a same-origin Origin there would break `make dev`.
+// that check at all: the Vite dev proxy's changeOrigin:true rewrites Host but
+// not Origin, so requiring a same-origin Origin there would break `make dev`.
+// SameSite=Strict does NOT make login/setup CSRF-safe on its own - it governs
+// whether the browser SENDS a cookie, not whether it STORES a Set-Cookie from
+// a cross-site response, so an attacker's page can still trigger a same-site
+// POST that creates the first account or swaps a victim onto an attacker
+// session. What actually defends /api/auth/login and /api/auth/setup is the
+// Content-Type: application/json requirement in auth.go's requireJSONBody:
+// application/json is not one of the CORS-safelisted content types, so a
+// cross-origin form (which cannot set arbitrary headers without triggering a
+// preflight, and application/json's preflight would fail for a truly
+// cross-origin request) cannot reach these handlers with a body they accept.
 func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler {
 	if auth == nil {
 		return next
@@ -175,13 +226,20 @@ func sameOriginMutation(r *http.Request) bool {
 // trusted X-Forwarded-Proto header (config.example.toml documents that the
 // reverse proxy in front of slskdarr must discard any client-supplied
 // X-Forwarded-Proto and set exactly one trusted value). ok is false when
-// X-Forwarded-Proto is present but malformed - comma-separated (more than one
-// hop disagreeing) or neither http nor https - in which case the caller
-// should treat the request as untrustworthy rather than guess.
+// X-Forwarded-Proto is present but malformed - comma-separated (e.g. a
+// two-hop proxy chain each appending its own value, such as "https,https")
+// or neither http nor https.
 //
 // Shared by sameOriginMutation's Origin check and newSessionCookie's Secure
-// flag (auth.go) so the two can never disagree about what scheme a request
-// arrived over.
+// flag (auth.go), but the two callers MUST fail closed in opposite
+// directions on ok==false, because "closed" means something different for
+// each: sameOriginMutation cannot prove the Origin matches, so it rejects the
+// request (returns false); newSessionCookie cannot prove the request is
+// plain http, so it must still mark the cookie Secure (assume https) rather
+// than silently sending the session token in the clear. Treating this
+// function's zero-value scheme ("") as anything in particular is a mistake -
+// always check ok, and always resolve it in the safer direction for what
+// you're deciding.
 func requestScheme(r *http.Request) (scheme string, ok bool) {
 	scheme = "http"
 	if r.TLS != nil {

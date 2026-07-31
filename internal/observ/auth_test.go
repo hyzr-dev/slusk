@@ -44,7 +44,15 @@ func newFakeAuthStore() *fakeAuthStore {
 
 func (s *fakeAuthStore) CountUsers(context.Context) (int, error) { return len(s.users), nil }
 
-func (s *fakeAuthStore) CreateUser(_ context.Context, username, passwordHash string) error {
+// CreateFirstUser mirrors store.Store.CreateFirstUser's semantics closely
+// enough for these HTTP-layer tests: it only succeeds while the table is
+// empty. It is not a faithful reproduction of the real method's atomicity
+// (no concurrent-request race is exercised here - that belongs in
+// internal/store's own tests), just its observable success/failure shape.
+func (s *fakeAuthStore) CreateFirstUser(_ context.Context, username, passwordHash string) error {
+	if len(s.users) > 0 {
+		return store.ErrSetupClosed
+	}
 	if _, exists := s.users[username]; exists {
 		return store.ErrUsernameTaken
 	}
@@ -106,9 +114,10 @@ func (s *fakeAuthStore) DeleteExpiredSessions(context.Context) (int64, error) {
 
 // newAuthTestHandler wires a real app.Auth (backed by fakeAuthStore) into a
 // full NewServer + ProtectPrivateEndpoints stack, exactly as
-// cmd/slskdarr/main.go wires the production one, minus the token (auth is
-// session-cookie-only in these tests unless withToken is true).
-func newAuthTestHandler(t *testing.T, withToken bool) (http.Handler, *app.Auth) {
+// cmd/slskdarr/main.go wires the production one (tokenAuth/sessionAuth/AnyOf),
+// minus the token (auth is session-cookie-only in these tests unless
+// withToken is true).
+func newAuthTestHandler(t *testing.T, withToken bool) http.Handler {
 	t.Helper()
 	authSvc := &app.Auth{Store: newFakeAuthStore()}
 	reg := prometheus.NewRegistry()
@@ -133,10 +142,11 @@ func newAuthTestHandler(t *testing.T, withToken bool) (http.Handler, *app.Auth) 
 	if withToken {
 		token = testAuthToken
 	}
-	authenticator := NewTokenAuthenticator(token, sessionLookup)
-	deps.TokenAuth = authenticator
+	tokenAuth := NewTokenAuthenticator(token)
+	sessionAuth := NewSessionAuthenticator(sessionLookup)
+	deps.TokenAuth = tokenAuth
 	h := NewServer(deps)
-	return ProtectPrivateEndpoints(h, authenticator), authSvc
+	return ProtectPrivateEndpoints(h, AnyOf(tokenAuth, sessionAuth))
 }
 
 func decodeJSON[T any](t *testing.T, body *httptest.ResponseRecorder) T {
@@ -155,6 +165,7 @@ func setupAccount(t *testing.T, h http.Handler, username, password string) *http
 	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/auth/setup", strings.NewReader(string(body)))
 	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
@@ -168,7 +179,7 @@ func setupAccount(t *testing.T, h http.Handler, username, password string) *http
 }
 
 func TestSessionCookieAuthenticatesPrivateEndpoint(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 	cookie := setupAccount(t, h, "alice", "hunter22")
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
@@ -181,7 +192,7 @@ func TestSessionCookieAuthenticatesPrivateEndpoint(t *testing.T) {
 }
 
 func TestUnknownOrExpiredSessionCookieDoesNotAuthenticate(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 	setupAccount(t, h, "alice", "hunter22") // establishes a real, valid cookie we deliberately don't use
 
 	tests := []struct {
@@ -205,12 +216,13 @@ func TestUnknownOrExpiredSessionCookieDoesNotAuthenticate(t *testing.T) {
 }
 
 func TestSetupSucceedsOnceThenReturnsConflict(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 	setupAccount(t, h, "alice", "hunter22")
 
 	body, _ := json.Marshal(map[string]string{"username": "bob", "password": "anotherpassword"})
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/auth/setup", strings.NewReader(string(body)))
 	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
@@ -219,13 +231,14 @@ func TestSetupSucceedsOnceThenReturnsConflict(t *testing.T) {
 }
 
 func TestLoginRejectsWrongPasswordAndUnknownUserIdentically(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 	setupAccount(t, h, "alice", "correct-password")
 
 	login := func(username, password string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(map[string]string{"username": username, "password": password})
 		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/auth/login", strings.NewReader(string(body)))
 		req.Header.Set("Origin", "http://example.com")
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec
@@ -252,11 +265,12 @@ func TestLoginRejectsWrongPasswordAndUnknownUserIdentically(t *testing.T) {
 }
 
 func TestLogoutRevokesSession(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 	cookie := setupAccount(t, h, "alice", "hunter22")
 
 	logoutReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/auth/logout", nil)
 	logoutReq.Header.Set("Origin", "http://example.com")
+	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(cookie)
 	logoutRec := httptest.NewRecorder()
 	h.ServeHTTP(logoutRec, logoutReq)
@@ -274,7 +288,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 }
 
 func TestSessionEndpointReflectsSetupAndAuthState(t *testing.T) {
-	h, _ := newAuthTestHandler(t, false)
+	h := newAuthTestHandler(t, false)
 
 	fresh := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
 	freshRec := httptest.NewRecorder()
@@ -305,7 +319,7 @@ func TestSessionEndpointReflectsSetupAndAuthState(t *testing.T) {
 // authenticated=true (with a null username, since a token has no identity),
 // even against a store with zero users.
 func TestSessionEndpointReportsTokenAuthWithNoUsername(t *testing.T) {
-	h, _ := newAuthTestHandler(t, true)
+	h := newAuthTestHandler(t, true)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
 	req.Header.Set("Authorization", "Bearer "+testAuthToken)
@@ -327,18 +341,15 @@ func TestSessionEndpointReportsTokenAuthWithNoUsername(t *testing.T) {
 // an explicit bearer token (which a cross-origin form cannot attach) is
 // allowed through with no Origin at all.
 func TestCookieMutationRequiresOriginBearerDoesNot(t *testing.T) {
-	h, _ := newAuthTestHandler(t, true)
+	h := newAuthTestHandler(t, true)
 	cookie := setupAccount(t, h, "alice", "hunter22")
 
 	t.Run("cookie without origin is forbidden", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/auth/logout", nil)
-		// Re-login isn't needed: logout only needs a plausible cookie value to
-		// reach the same-origin check, which runs before the handler is
-		// reached for a PRIVATE path. logout is public, though, so exercise
-		// the check against a private mutation instead: none of this test's
-		// ServerDeps expose one taking a cookie without a body, so use
-		// /api/jobs/42/cancel's no-op Cancel from testServerDeps.
-		req = httptest.NewRequest(http.MethodPost, "http://example.com/api/jobs/42/cancel", nil)
+		// logout is public, so the same-origin check never runs for it - it
+		// applies only to PRIVATE paths (see ProtectPrivateEndpoints).
+		// /api/jobs/42/cancel exercises it instead, using testServerDeps'
+		// no-op Cancel.
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/api/jobs/42/cancel", nil)
 		req.AddCookie(cookie)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -375,16 +386,28 @@ func TestCookieMutationRequiresOriginBearerDoesNot(t *testing.T) {
 // messages.go, search.go, shares.go, stream.go, uploads.go, auth.go). This
 // is the "build the list another way" escape hatch: net/http's ServeMux
 // exposes no public API to enumerate its own registered patterns, so this
-// test cannot discover the list by reflection - it can only confirm, via
-// mux.Handler(), that every entry here actually resolves to a real
-// registration (catching a typo in either direction), and separately assert
-// each one's PRIVATE/PUBLIC classification. It does NOT protect against a
-// route registered on the mux and never added to this list - see
-// isPrivatePath's own doc comment on that exact failure mode.
+// test cannot discover the list by reflection.
+//
+// It instead probes each entry and asserts mux.Handler's returned pattern
+// EQUALS the entry's own method+path exactly (not merely "is non-empty") -
+// that is what actually catches a stale entry: a typo'd or removed route
+// falls through to a DIFFERENT registered pattern (usually "/", the SPA
+// catch-all) rather than to no pattern at all, so a non-empty check alone
+// would never fail. probeMethod exists only to disambiguate the two paths
+// that carry both a method-specific AND a method-less registration
+// (/debug/pprof and /debug/pprof/, see observ.go) - probing those with GET
+// would always match the more specific "GET ..." pattern, never the
+// method-less one this entry is meant to pin.
+//
+// This test does NOT protect against a route registered on the mux and never
+// added to this list at all - see isPrivatePath's own doc comment on that
+// exact failure mode; that half of the guarantee is inherently unavailable
+// without reflecting into ServeMux's private state.
 var registeredRoutes = []struct {
-	method string // "" means the pattern has no method prefix
-	path   string
-	public bool
+	method      string // "" means the pattern has no method prefix
+	probeMethod string // only set when it must differ from method; see doc comment
+	path        string
+	public      bool
 }{
 	{method: "", path: "/metrics", public: false},
 	{method: "GET", path: "/debug/pprof", public: false},
@@ -393,8 +416,8 @@ var registeredRoutes = []struct {
 	{method: "GET", path: "/debug/pprof/profile", public: false},
 	{method: "GET", path: "/debug/pprof/symbol", public: false},
 	{method: "GET", path: "/debug/pprof/trace", public: false},
-	{method: "", path: "/debug/pprof", public: false},
-	{method: "", path: "/debug/pprof/", public: false},
+	{method: "", probeMethod: http.MethodPut, path: "/debug/pprof", public: false},
+	{method: "", probeMethod: http.MethodPut, path: "/debug/pprof/", public: false},
 	{method: "", path: "/healthz", public: true},
 	{method: "", path: "/readyz", public: true},
 	{method: "", path: "/status", public: false},
@@ -431,10 +454,11 @@ var registeredRoutes = []struct {
 
 // TestEveryRegisteredRouteIsClassifiedAsIntended is the route-registration
 // guard the brief for issue #279 asked for: it confirms every pattern in
-// registeredRoutes actually resolves on NewServer's mux (so the list can't
-// silently drift from reality), and asserts isPrivatePath classifies each
-// one exactly as intended - private by default, public only for the
-// documented allowlist.
+// registeredRoutes resolves EXACTLY as registered on NewServer's mux (see
+// registeredRoutes' doc comment for why exact-match, not merely non-empty, is
+// what makes this a real staleness check), and asserts isPrivatePath
+// classifies each one exactly as intended - private by default, public only
+// for the documented allowlist.
 func TestEveryRegisteredRouteIsClassifiedAsIntended(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	NewMetrics(reg)
@@ -443,20 +467,26 @@ func TestEveryRegisteredRouteIsClassifiedAsIntended(t *testing.T) {
 		t.Fatal("NewServer's handler is not *http.ServeMux; update this test's assumptions")
 	}
 
-	seen := map[string]bool{}
 	for _, route := range registeredRoutes {
-		method := route.method
-		if method == "" {
-			method = http.MethodGet
+		probeMethod := route.probeMethod
+		if probeMethod == "" {
+			probeMethod = route.method
 		}
+		if probeMethod == "" {
+			probeMethod = http.MethodGet
+		}
+		wantPattern := route.path
+		if route.method != "" {
+			wantPattern = route.method + " " + route.path
+		}
+
 		probe := strings.ReplaceAll(strings.ReplaceAll(route.path, "{id}", "1"), "{username}", "someuser")
-		req := httptest.NewRequest(method, "http://example.com"+probe, nil)
-		_, pattern := mux.Handler(req)
-		if pattern == "" {
-			t.Errorf("route %q %q does not resolve on the mux - list is stale", route.method, route.path)
+		req := httptest.NewRequest(probeMethod, "http://example.com"+probe, nil)
+		_, gotPattern := mux.Handler(req)
+		if gotPattern != wantPattern {
+			t.Errorf("route %q %q resolved to pattern %q, want %q - list is stale", route.method, route.path, gotPattern, wantPattern)
 			continue
 		}
-		seen[pattern] = true
 
 		got := isPrivatePath(route.path)
 		wantPrivate := !route.public

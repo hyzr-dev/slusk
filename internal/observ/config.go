@@ -515,10 +515,12 @@ var allowedLogLevels = map[string]bool{"debug": true, "info": true, "warn": true
 // field are duplicated here (so the settings view gets immediate, precisely
 // located feedback for them). Cross-field rules — e.g. slskd.url is only
 // required when pipeline.backend = "slskd", soulseek.* presence is only
-// required when the section ends up enabled, observ.authToken is only
-// required for a non-loopback listenAddr — are deliberately left to
+// required when the section ends up enabled — are deliberately left to
 // internal/config's LoadBytes backstop, which ConfigWriter surfaces as a 422
-// with an empty fieldErrors map (see ConfigValidationError).
+// with an empty fieldErrors map (see ConfigValidationError). observ.authToken
+// has no cross-field rule at all since issue #279: it is unconditionally
+// optional now that browser access goes through form-based session login
+// instead.
 func validateConfigUpdate(req configUpdateRequest) (ConfigUpdate, map[string]string) {
 	fieldErrors := make(map[string]string)
 	var update ConfigUpdate

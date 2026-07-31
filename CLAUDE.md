@@ -252,7 +252,10 @@ only purpose is to make one possible later.
 - The mock **recesses, never elevates** — nested content goes darker (`--panel-inset`),
   not lighter. There are no shadows.
 - One typeface: IBM Plex Mono. Hierarchy comes from weight, size, letter-spacing and
-  the `--fg` → `--dim` → `--faint` → `--text-dim` ladder — never from a second family.
+  the `--fg` → `--dim` → `--text-dim` ladder — never from a second family. The ladder is
+  three steps, not four: `--faint` is not a token and never has been in `tokens.css`. The
+  design mocks use `--faint` freely, so translating one means collapsing it onto this
+  ladder — `check-css-tokens.mjs` will fail the build if you copy the name across.
 
 ### Accessibility
 
@@ -260,10 +263,14 @@ Desktop-first, and honestly so. Mobile is not a priority: tables must not explod
 small screens are not optimised for. Keyboard operability is nice-to-have and welcome
 where it fits the terminal idiom, not a gate.
 
-WCAG AA contrast is the standing goal for text. **Known gap:** `--text-dim` (`#5f696f`)
-against `--bg` (`#08090a`) is 3.5:1 and fails AA for body text — it is used for
-column headers, timestamps and disabled glyphs in ~30 places. Treat that as debt to fix
-deliberately, not as licence to introduce more sub-AA pairs.
+WCAG AA contrast is the standing goal for text and is enforced, not aspirational:
+`npm test` runs `scripts/check-contrast.mjs`, which fails the build if any text token in
+`tokens.css` drops below 4.5:1 against any surface it can land on, or if adjacent steps
+of the `--fg` → `--dim` → `--text-dim` ladder sit closer than 8 L\* apart (#335).
+`--text-dim`, the bottom of that ladder and the one used for column headers, timestamps
+and disabled glyphs, currently clears AA on every surface it's checked against. Keep it
+that way: introducing a token that only passes against `--bg` and not the rest of
+`SURFACES` in that script is exactly the regression it exists to catch.
 
 `@media (prefers-reduced-motion: reduce)` already exists in `global.css`. Any new
 animation must be covered by it.

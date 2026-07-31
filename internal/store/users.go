@@ -21,10 +21,15 @@ import (
 // other error" without reaching into database/sql.
 var ErrUserNotFound = errors.New("user not found")
 
-// ErrUsernameTaken is returned by CreateUser when username already exists
-// (unique violation on users.username), so the HTTP handler can return 409
-// without a redundant existence check.
+// ErrUsernameTaken is returned by CreateUser and CreateFirstUser when
+// username already exists (unique violation on users.username), so the HTTP
+// handler can return 409 without a redundant existence check.
 var ErrUsernameTaken = errors.New("username already taken")
+
+// ErrSetupClosed is returned by CreateFirstUser when the users table is no
+// longer empty - either another account already existed, or a concurrent
+// CreateFirstUser call won the race (see CreateFirstUser's doc comment).
+var ErrSetupClosed = errors.New("setup already completed")
 
 // userSelect is shared by every read below so the column order can never
 // drift from the corresponding Scan call.
@@ -52,6 +57,35 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) e
 			return ErrUsernameTaken
 		}
 		return fmt.Errorf("create user: %w", err)
+	}
+	return nil
+}
+
+// CreateFirstUser atomically creates the account for the first-run setup
+// endpoint (issue #279): the INSERT only takes effect if the users table is
+// currently empty, so two concurrent setup requests cannot both succeed the
+// way a separate CountUsers-then-CreateUser check could race. Returns
+// ErrSetupClosed if the table was already non-empty (whether from an earlier
+// account or a concurrent CreateFirstUser call that won the race), or
+// ErrUsernameTaken on a unique violation.
+func (s *Store) CreateFirstUser(ctx context.Context, username, passwordHash string) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (username, password_hash)
+		 SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM users)`,
+		username, passwordHash)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrUsernameTaken
+		}
+		return fmt.Errorf("create first user: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("create first user: rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrSetupClosed
 	}
 	return nil
 }
