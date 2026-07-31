@@ -1006,6 +1006,16 @@ func TestDiscoverySearchExcludedOnFallbackFailsJobImmediately(t *testing.T) {
 		t.Fatalf("Tick should swallow the excluded-search error, got: %v", err)
 	}
 
+	// Assert the fallback is what tripped the exclusion. The event detail cannot
+	// carry that on its own: the fallback query is a substring of the primary
+	// one, so a detail naming "Artist Album" would read the same either way.
+	if len(searcher.queries) != 2 {
+		t.Fatalf("expected the primary search then the normalized fallback, got %q", searcher.queries)
+	}
+	if searcher.queries[1] != "Artist Album" {
+		t.Fatalf("second search = %q, want the normalized fallback query", searcher.queries[1])
+	}
+
 	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
 	if err != nil {
 		t.Fatalf("RunnableJobsInState: %v", err)
