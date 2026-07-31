@@ -764,7 +764,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
-	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval)
+	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval, streamInvalidateInterval)
 	mux.Handle("/", newAssetHandler())
 	return mux
 }

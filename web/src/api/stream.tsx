@@ -52,9 +52,11 @@ const JobScopeSetterContext = createContext<(ids: number[] | undefined) => void>
  * page of them.
  *
  * Dedupes on the ids joined into a string rather than on `ids` itself: the
- * array is rebuilt fresh on every render and on every 15s REST poll, so
- * comparing by reference would reopen the EventSource in a loop even when
- * the page's ids haven't actually changed.
+ * array is rebuilt fresh on every render and on every REST refetch — whether
+ * triggered by the safety-net poll (JOBS_INTERVAL) or by an `event:
+ * invalidate` frame (issue #275) — so comparing by reference would reopen
+ * the EventSource in a loop even when the page's ids haven't actually
+ * changed.
  */
 export function useJobScope(ids: number[] | undefined): void {
   const setScope = useContext(JobScopeSetterContext);
@@ -143,6 +145,15 @@ export function useThroughputStream(): void {
  * `throughput` listener below — since the directional series was split off
  * livePayload entirely so a subscriber with no chart on screen never pays
  * for building or receiving it.
+ *
+ * A fourth event, `event: invalidate` (issue #275), carries no page data at
+ * all — every connection receives it, unconditionally, whether or not it has
+ * a jobs-list scope. It exists so a Jobs/Overview-style page can stop
+ * polling GET /api/jobs on a fixed timer and instead refetch only when the
+ * backend's own fingerprint of the jobs table says something worth
+ * refetching happened — see the `invalidate` listener below and
+ * JOBS_INTERVAL's doc comment in queries.ts for why the poll survives
+ * anyway, as a safety net rather than the primary freshness mechanism.
  */
 export function StreamProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -276,6 +287,29 @@ export function StreamProvider({ children }: { children: ReactNode }) {
             ? mergeThroughputSamples(prev.uploadThroughput, payload.upload)
             : prev.uploadThroughput,
         };
+      });
+    });
+
+    // `event: invalidate` (issue #275): the backend's own fingerprint of the
+    // jobs table says GET /api/jobs would now answer differently for SOMEONE
+    // (not necessarily this connection), so refetch the PAGE queries. Scoped
+    // to `queryKeys.jobs` entries whose second key segment is 'page' —
+    // deliberately NOT a bare `invalidateQueries({ queryKey: queryKeys.jobs
+    // })`, which also prefixes jobDetail(id) = ['jobs', id, 'detail'] and
+    // jobEvents(id): forcing every mounted job-detail view to refetch on
+    // every page-level change would reintroduce the extra REST call issue
+    // #274 deliberately removed by setting useJobDetail's refetchInterval to
+    // false (the stream's own `detail` field already keeps it live). Also
+    // deliberately NOT queryKeys.charts (its own independent poll; this
+    // fingerprint says nothing about search passes) and NOT queryKeys.live
+    // (the stream's own cache, not a REST query).
+    source.addEventListener('invalidate', () => {
+      // The payload (see InvalidatePayload) carries only a generation number,
+      // useful in a test to distinguish two invalidations — nothing here
+      // reads it. Any receipt of this event means "refetch", full stop.
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.jobs,
+        predicate: (q) => q.queryKey[1] === 'page',
       });
     });
 

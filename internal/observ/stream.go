@@ -1,16 +1,22 @@
 // Package observ: stream.go serves GET /api/stream (issue #161), a
-// server-sent-events endpoint of live dashboard data over two independently
+// server-sent-events endpoint of live dashboard data over three independently
 // fired named events on the SAME connection: `event: live` (whole per-job
 // objects for changed jobs, aggregate current download/upload speeds, and,
-// when ?job=<id> is set, that job's whole detail body) and `event: throughput`
+// when ?job=<id> is set, that job's whole detail body), `event: throughput`
 // (recent directional throughput samples, sent only to a subscriber that
-// opted in with ?throughput=1 — issue #265). Splitting them onto separate
-// events, rather than folding throughput's series into every `live` frame,
+// opted in with ?throughput=1 — issue #265), and `event: invalidate`
+// (a bare monotonic generation number telling every subscriber that GET
+// /api/jobs would now return different pages/facets/sort order for SOMEONE,
+// not necessarily this connection — issue #275). `event: invalidate`
+// carries NO page data of its own: the chain still begins with a GET, same
+// as #161 established: the stream tells a subscriber WHEN to refetch, never
+// WHAT to render. Splitting these onto separate events, rather than folding
+// throughput's series or the invalidation signal into every `live` frame,
 // is what lets a subscriber with no sparkline on screen (Jobs, JobDetail,
 // Settings, ...) skip the cost of building and marshalling it entirely,
 // while a browser's 6-connections-per-origin limit isn't a reason to avoid a
-// second event on the same connection — an SSE connection holds its slot for
-// its whole lifetime regardless of how many named events it carries.
+// further event on the same connection — an SSE connection holds its slot
+// for its whole lifetime regardless of how many named events it carries.
 //
 // Both the job-list half and the scoped detail half carry the FINISHED
 // object rather than a partial live-only view (issue #258): built by the
@@ -49,8 +55,10 @@ package observ
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"net/http"
 	"reflect"
@@ -99,6 +107,13 @@ const streamRetryInterval = 5 * time.Second
 // unconditionally for the life of the connection — it is not reset by data
 // frames — so a busy connection also emits it alongside its live events.
 const streamHeartbeatInterval = 15 * time.Second
+
+// streamInvalidateInterval is the minimum gap between two `event: invalidate`
+// frames on one connection (issue #275). Deliberately equal to the
+// /api/jobs poll cadence it replaces, so this can never cost more requests
+// than the polling it removes — the win is that an idle system now fires
+// ZERO invalidations instead of one poll every 15s.
+const streamInvalidateInterval = 15 * time.Second
 
 // streamFetchTimeout bounds each tick's calls into deps.LiveTransfers,
 // deps.Throughput and deps.Jobs. Without it, a single hung call (the slskd
@@ -166,6 +181,20 @@ type throughputPayload struct {
 	Upload   []throughputSampleDTO `json:"upload,omitempty"`
 }
 
+// invalidatePayload is the JSON body of every `event: invalidate` SSE frame
+// (issue #275). Unlike livePayload/throughputPayload it carries no page data
+// at all — the client's only correct reaction is to refetch GET /api/jobs
+// itself (see web/src/api/stream.tsx), so the chain still begins with a GET,
+// exactly as #161 established. Generation is included rather than sending an
+// empty frame because writeEvent has no empty-body mode (an "empty" event
+// would marshal as `data: null`, reading as a bug in a network log), and
+// because a strictly-increasing number is what lets a test prove
+// generation-counter semantics — a second invalidation carrying a higher
+// Generation than the first — rather than merely observing two frames exist.
+type invalidatePayload struct {
+	Generation uint64 `json:"generation"`
+}
+
 // jobCorrelation is the minimal per-job data the stream hub needs to notice
 // that the set of live-matched candidate files has changed (see
 // liveMatchedFileSet) and to decide which candidates' persisted bytes
@@ -201,6 +230,98 @@ func projectJobCorrelation(views []core.JobView) []jobCorrelation {
 		})
 	}
 	return out
+}
+
+// jobsFingerprint is a cheap, order-independent summary of the whole jobs
+// table's page-membership-relevant fields (issue #275), used by
+// refreshCorrelation to notice when GET /api/jobs would return different
+// pages/facets/sort order for ANY subscriber, without keeping any per-job
+// state around to compare against — the fingerprint itself is the only
+// retained state, at a fixed ~32 bytes (padded) regardless of job count. That
+// is the direct answer to jobCorrelation's stated constraint (#161 review,
+// #258, #268) about not retaining per-job state for the process lifetime.
+//
+// count is carried independently of sum so a shrinking set is caught even
+// under pathological wrapping-addition cancellation (e.g. two jobs' hashes
+// summing to the same total after one is replaced by another with a
+// complementary hash) — count alone already changes whenever the set's size
+// does, regardless of what sum does.
+type jobsFingerprint struct {
+	count int
+	sum   uint64 // wrapping sum of per-job fnv64a hashes
+}
+
+// computeJobsFingerprint hashes the fields of each core.JobView that can move
+// a job across a page boundary, a filter, a facet count, or a sort position —
+// see the field tables below — combined with WRAPPING ADDITION rather than
+// XOR (XOR is self-inverse: two jobs swapping two fields' values, or a field
+// simply being reset to its zero value and back, can cancel out and leave the
+// combined hash unchanged) and rather than a sequential hash over the slice.
+//
+// Order-independence is not an optimization here, it is the whole point:
+// ListJobsWithTransfer's ORDER BY j.updated_at DESC has NO tiebreaker, so at
+// production row counts (many WANTED jobs sharing an updated_at from the same
+// wanted-sync pass) Postgres is free to return two logically identical calls
+// in a different row order. A sequential hash would then bump jobsGeneration
+// on every refresh even when nothing changed, invalidating every connected
+// tab for a no-op — a bug invisible in tests unless one specifically shuffles
+// the input and asserts an identical fingerprint (see
+// TestComputeJobsFingerprintOrderIndependent). Do not "simplify" this back to
+// a sequential hash; that reintroduces exactly this bug.
+//
+// Included (all already present on core.JobView, already fetched):
+//   - Job.ID: membership and `total`; also makes each job's own hash unique
+//     so the wrapping sum can't cancel across jobs sharing every other field.
+//   - Job.State: filter=inflight/filter=finished key on j.state DIRECTLY, and
+//     it is not recoverable from Status alone (a DOWNLOADING job with every
+//     transfer errored still reports Status "failed").
+//   - Status: every filter=<status>, status facets, sort=st, sort=transfer.
+//   - Peer: sort=peer, and q matches a.username since #269.
+//   - Job.Retries: sort=try.
+//   - Job.UpdatedAt: sort=recent (j.updated_at DESC) and filter=finished's
+//     window bound.
+//   - Job.Source: source facets.
+//   - Job.Title, Job.ArtistName: sort=album, and q matches both — the
+//     wanted-sync metadata backfill leaves updated_at alone for jobs already
+//     past WANTED, so a title correction would otherwise never bump anything.
+//
+// Deliberately excluded, with reasons (a future contributor adding one of
+// these back should read this first): AlbumBytesDone/AlbumBytesTotal/
+// AlbumBytesRemaining move on essentially every refresh during any active
+// download — including one would bump the generation every ~5s forever,
+// pinning every subscriber to the invalidate throttle floor permanently and
+// throwing away the entire idle-system win this feature exists for. The rest
+// of Job.Attempt (ID/Score/State/UpdatedAt/Files) never moves page membership
+// independent of the fields already covered above (a candidate swap always
+// also moves Retries and UpdatedAt), and CreatedAt/NextAttemptAt/NotBefore/
+// FailedAt/Year/Tracks/Format are display-only or move together with a field
+// already included.
+func computeJobsFingerprint(views []core.JobView) jobsFingerprint {
+	h := fnv.New64a()
+	var buf []byte
+	var sum uint64
+	for _, v := range views {
+		h.Reset()
+		buf = binary.LittleEndian.AppendUint64(buf[:0], uint64(v.Job.ID))
+		h.Write(buf)
+		h.Write([]byte(v.Job.State))
+		h.Write([]byte{0})
+		h.Write([]byte(v.Status))
+		h.Write([]byte{0})
+		h.Write([]byte(v.Peer))
+		h.Write([]byte{0})
+		buf = binary.LittleEndian.AppendUint64(buf[:0], uint64(v.Job.Retries))
+		h.Write(buf)
+		buf = binary.LittleEndian.AppendUint64(buf[:0], uint64(v.Job.UpdatedAt.UnixNano()))
+		h.Write(buf)
+		h.Write([]byte(v.Job.Source))
+		h.Write([]byte{0})
+		h.Write([]byte(v.Job.Title))
+		h.Write([]byte{0})
+		h.Write([]byte(v.Job.ArtistName))
+		sum += h.Sum64() // wrapping addition, deliberately not XOR — see doc comment above
+	}
+	return jobsFingerprint{count: len(views), sum: sum}
 }
 
 // liveMatchedFileKey identifies one candidate file for liveMatchedFileSet:
@@ -443,6 +564,14 @@ func changedSinceLast(prev, next livePayload, newJobCount int) bool {
 type streamSubscriber struct {
 	ch           chan livePayload
 	throughputCh chan throughputPayload
+	// invalidateCh carries `event: invalidate` frames (issue #275). A third,
+	// independent cap-1 channel rather than folding this into ch: an
+	// invalidation is idempotent (newest generation wins outright, no merge —
+	// see sendLatestInvalidate), unlike ch's per-job delta which must be
+	// unioned across a displaced send (mergeJobsDelta) and tch's samples
+	// which must be accumulated (sendLatestThroughput) — three different
+	// degrade-under-backpressure contracts, three channels.
+	invalidateCh chan invalidatePayload
 	// wantThroughput is whether this connection asked for the throughput
 	// event (?throughput=1). false for every subscriber that never mentions
 	// it — the common case — which is what lets fetchThroughput's result
@@ -475,6 +604,19 @@ type streamSubscriber struct {
 	// them.
 	lastDownloadThroughputAt time.Time
 	lastUploadThroughputAt   time.Time
+	// lastSeenGeneration/lastInvalidateAt are the throttle state issue #275's
+	// decision 3 requires: lastSeenGeneration alone would let a bump at t+1s
+	// fire immediately; lastInvalidateAt alone would let a stale generation
+	// fire at t+invalidateInterval for a change this subscriber's own connect
+	// GET already saw. Both are needed together — see subscribe's and tick's
+	// doc comments for how each is set. lastSeenGeneration only advances on
+	// an actual send (not merely on observing a bump), which is exactly why
+	// an unsent bump inside the throttle window is never lost: the condition
+	// in tick stays true until the window elapses, then fires immediately —
+	// the behavior decision 3 rejected a dirty flag in favor of a counter to
+	// get.
+	lastSeenGeneration uint64
+	lastInvalidateAt   time.Time
 }
 
 // streamHub is the shared broadcaster behind GET /api/stream: one ticking
@@ -493,6 +635,7 @@ type streamHub struct {
 	maxCandidates       int
 	tickInterval        time.Duration
 	correlationInterval time.Duration
+	invalidateInterval  time.Duration
 
 	corrMu           sync.RWMutex
 	correlation      []jobCorrelation
@@ -530,6 +673,23 @@ type streamHub struct {
 	// compared tick to tick, at file granularity, to trigger the
 	// event-driven refresh below.
 	matchedFiles map[liveMatchedFileKey]struct{}
+	// jobsFingerprint/hasFingerprint/jobsGeneration implement issue #275's
+	// page-invalidation signal. hasFingerprint distinguishes "never
+	// refreshed" from "refreshed to the zero-job fingerprint" so the very
+	// first refresh after process start never bumps jobsGeneration (belt and
+	// braces with subscribe's own lastSeenGeneration initialization below —
+	// keeping both makes the invariant local to refreshCorrelation instead of
+	// depending on call-site reasoning three functions away). jobsGeneration
+	// is a monotonic COUNTER, not a dirty flag: a subscriber's own
+	// lastSeenGeneration/lastInvalidateAt (see streamSubscriber) compares
+	// against it directly, which is what lets a generation bump that occurs
+	// inside a subscriber's throttle window still fire the moment the window
+	// elapses (see tick) — a dirty flag cleared by the first subscriber to
+	// see it would let a second subscriber, still inside ITS OWN window,
+	// silently miss the same change.
+	jobsFingerprint jobsFingerprint
+	hasFingerprint  bool
+	jobsGeneration  uint64
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -537,7 +697,7 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
 	return &streamHub{
 		jobs:                jobs,
 		liveTransfers:       liveTransfers,
@@ -548,6 +708,7 @@ func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput Thr
 		maxCandidates:       maxCandidates,
 		tickInterval:        tickInterval,
 		correlationInterval: correlationInterval,
+		invalidateInterval:  invalidateInterval,
 		subs:                make(map[uint64]*streamSubscriber),
 	}
 }
@@ -758,12 +919,27 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 		}
 	}
 
+	// Computed here, AFTER the h.jobs error early return above, and applied
+	// inside the same corrMu.Lock() block as every other cache below (issue
+	// #275): a failed h.jobs call already leaves this function's other
+	// caches untouched by that early return, and putting the fingerprint
+	// update in the same critical section gets the identical guarantee for
+	// free, with no new branch. Never compute this from a partial or
+	// fallback value.
+	fp := computeJobsFingerprint(views)
+
 	h.corrMu.Lock()
 	h.correlation = corr
 	h.bytesByCandidate = bytesByCandidate
 	h.detailByJob = details
 	h.viewByJob = viewByJob
 	h.matchedFiles = liveMatchedFileSet(corr, idx)
+	if !h.hasFingerprint {
+		h.hasFingerprint = true
+	} else if fp != h.jobsFingerprint {
+		h.jobsGeneration++
+	}
+	h.jobsFingerprint = fp
 	h.corrMu.Unlock()
 }
 
@@ -813,6 +989,15 @@ func (h *streamHub) viewsSnapshot() map[int64]core.JobView {
 	return h.viewByJob
 }
 
+// generationSnapshot returns the hub's current jobsGeneration (issue #275).
+// Read under corrMu, same lock as every other snapshot in this file, and
+// before h.mu is ever taken (see scopedJobIDs).
+func (h *streamHub) generationSnapshot() uint64 {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.jobsGeneration
+}
+
 // matchedFilesSnapshot returns the cached live-matched-file set (see
 // liveMatchedFileSet) without copying — like detailsSnapshot/viewsSnapshot,
 // it's replaced wholesale by refreshCorrelation and never mutated in place,
@@ -836,7 +1021,7 @@ func (h *streamHub) atCapacity() bool {
 // subscribe registers a new subscriber (jobID 0 for no ?job= detail scope,
 // jobIDs nil/empty for no ?jobs= list scope, wantThroughput for ?throughput=1
 // — issue #265) and starts the shared ticker if this is the first one.
-// Returns the subscriber's id (for unsubscribe), its two channels, and an
+// Returns the subscriber's id (for unsubscribe), its three channels, and an
 // immediate snapshot of each event computed synchronously against ctx, so
 // the connection's very first frames don't wait for the next tick —
 // including a synchronous correlation refresh, so a subscriber connecting
@@ -848,7 +1033,7 @@ func (h *streamHub) atCapacity() bool {
 // wantThroughput's doc comment on streamSubscriber — but the initial
 // full-window conversion into initialThroughput is skipped for a subscriber
 // that never asked for it.
-func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool) (id uint64, ch chan livePayload, tch chan throughputPayload, initial livePayload, initialThroughput throughputPayload) {
+func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool) (id uint64, ch chan livePayload, tch chan throughputPayload, ich chan invalidatePayload, initial livePayload, initialThroughput throughputPayload) {
 	// jobID/jobIDs are passed explicitly: this subscriber is not in h.subs
 	// yet, and without them a freshly opened detail or list view would wait a
 	// whole correlationInterval for its first Detail/Jobs.
@@ -870,9 +1055,28 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 	sub := &streamSubscriber{
 		ch:             make(chan livePayload, 1),
 		throughputCh:   make(chan throughputPayload, 1),
+		invalidateCh:   make(chan invalidatePayload, 1),
 		wantThroughput: wantThroughput,
 		jobID:          jobID,
 		jobIDs:         jobIDs,
+		// lastInvalidateAt = now, NOT the zero time and NOT now.Add(-interval):
+		// the client's onopen fires invalidateQueries the instant the
+		// connection opens, so a fresh subscriber has just done its own GET.
+		// Treating connect as an invalidation is what makes the first
+		// server-sent `event: invalidate` land no sooner than
+		// t+invalidateInterval (issue #275, decision 3).
+		lastInvalidateAt: now,
+		// Read AFTER refreshCorrelation above, so a generation bump that
+		// happened as part of THIS subscriber's own synchronous refresh is
+		// already reflected and never fires a redundant invalidation later.
+		//
+		// Known benign race: a correlationTick on the shared broadcaster
+		// goroutine can bump the generation between this read and this
+		// subscriber's registration under h.mu below, so the new subscriber
+		// may still get one invalidation at t+invalidateInterval for a
+		// change its own connect GET already covered. One extra refetch,
+		// bounded by the throttle — not worth widening a lock to close.
+		lastSeenGeneration: h.generationSnapshot(),
 	}
 	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 
@@ -905,7 +1109,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		h.cancel = cancel
 		go h.run(tickCtx)
 	}
-	return id, sub.ch, sub.throughputCh, initial, initialThroughput
+	return id, sub.ch, sub.throughputCh, sub.invalidateCh, initial, initialThroughput
 }
 
 // unsubscribe removes a subscriber and stops the shared ticker once none
@@ -998,6 +1202,9 @@ func (h *streamHub) tick(ctx context.Context) {
 	// Snapshotted before h.mu is taken: detailsSnapshot needs corrMu, and
 	// tick must never acquire corrMu while holding h.mu (see scopedJobIDs).
 	details := h.detailsSnapshot()
+	// Snapshotted alongside the others, under the same corrMu-before-h.mu
+	// ordering (issue #275).
+	gen := h.generationSnapshot()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1023,6 +1230,27 @@ func (h *streamHub) tick(ctx context.Context) {
 			payload.Jobs = jobsDelta
 			sub.last = next
 			sendLatest(sub.ch, payload)
+		}
+
+		// `event: invalidate` (issue #275) — deliberately BEFORE the
+		// wantThroughput guard below: that guard only exists to skip building
+		// the throughput event for a subscriber that never asked for it, and
+		// putting this block after it would mean every non-Overview
+		// subscriber (every wantThroughput=false connection) silently never
+		// gets an invalidation at all.
+		//
+		// `!=` rather than `>`: the hub's generation only ever increases, so
+		// this is the same test without depending on that invariant holding
+		// forever. lastSeenGeneration advances only on an actual send below,
+		// never merely on observing a bump, which is exactly why a
+		// generation bump inside this subscriber's throttle window is never
+		// lost (issue #275 decision 3, rejecting a dirty flag): the
+		// condition here stays true across ticks until the window elapses,
+		// then fires on the very next tick.
+		if gen != sub.lastSeenGeneration && now.Sub(sub.lastInvalidateAt) >= h.invalidateInterval {
+			sendLatestInvalidate(sub.invalidateCh, invalidatePayload{Generation: gen})
+			sub.lastSeenGeneration = gen
+			sub.lastInvalidateAt = now
 		}
 
 		// The `event: throughput` frame is entirely independent of the
@@ -1109,6 +1337,28 @@ func sendLatest(ch chan livePayload, payload livePayload) livePayload {
 			select {
 			case old := <-ch:
 				payload.Jobs = mergeJobsDelta(old.Jobs, payload.Jobs)
+			default:
+			}
+		}
+	}
+}
+
+// sendLatestInvalidate delivers payload to ch without ever blocking, the same
+// non-blocking drain-and-replace shape as sendLatest — but with no merge at
+// all (unlike mergeJobsDelta) and no accumulation (unlike
+// sendLatestThroughput): an invalidation is idempotent, so newest generation
+// simply wins outright. Drain-and-replace rather than a bare
+// `select { case ch <- p: default: }` so the DELIVERED payload, once the
+// reader catches up, always carries the newest generation rather than
+// whichever one happened to still be sitting in the channel.
+func sendLatestInvalidate(ch chan invalidatePayload, p invalidatePayload) {
+	for {
+		select {
+		case ch <- p:
+			return
+		default:
+			select {
+			case <-ch:
 			default:
 			}
 		}
@@ -1245,13 +1495,13 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 // as `event: search` on this same endpoint later, and named events let it do
 // so without touching anything here.
 //
-// tickInterval/correlationInterval/heartbeatInterval are parameters rather
-// than reading the streamInterval/streamCorrelationInterval/
-// streamHeartbeatInterval constants directly so tests can use short
-// durations instead of the real cadences; NewServer's call site passes the
-// real constants.
-func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval time.Duration) {
-	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval)
+// tickInterval/correlationInterval/heartbeatInterval/invalidateInterval are
+// parameters rather than reading the streamInterval/streamCorrelationInterval/
+// streamHeartbeatInterval/streamInvalidateInterval constants directly so
+// tests can use short durations instead of the real cadences; NewServer's
+// call site passes the real constants.
+func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval, invalidateInterval time.Duration) {
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {
@@ -1311,7 +1561,7 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 			return
 		}
 
-		id, ch, tch, initial, initialThroughput := hub.subscribe(r.Context(), jobID, jobIDs, wantThroughput)
+		id, ch, tch, ich, initial, initialThroughput := hub.subscribe(r.Context(), jobID, jobIDs, wantThroughput)
 		defer hub.unsubscribe(id)
 
 		// event: live is written ALWAYS, even for a throughput-only
@@ -1328,6 +1578,11 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 				return
 			}
 		}
+		// No initial `event: invalidate` frame on connect (issue #275): the
+		// client's own onopen handler already calls invalidateQueries the
+		// instant the connection opens, so an initial server-sent one here
+		// would just be a redundant refetch — see subscribe's
+		// lastInvalidateAt = now for the other half of this contract.
 
 		heartbeat := time.NewTicker(heartbeatInterval)
 		defer heartbeat.Stop()
@@ -1343,6 +1598,10 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 				}
 			case tp := <-tch:
 				if !writeEvent(w, rc, "throughput", tp) {
+					return
+				}
+			case p := <-ich:
+				if !writeEvent(w, rc, "invalidate", p) {
 					return
 				}
 			case <-heartbeat.C:

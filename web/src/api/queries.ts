@@ -34,10 +34,24 @@ import type {
 } from './types';
 
 // jobs was 3s before the SSE stream (#161) carried its live fields at ~1s
-// instead; it now only needs to be fresh enough for the DB-backed fields
-// (status/state/events-derived data), which change on a pipeline tick, not
-// continuously. See the #161 design doc's poll-interval table.
-const JOBS_INTERVAL = 15000;
+// instead, then 15s once the DB-backed fields (status/state/events-derived
+// data) were the only thing left to poll for. Issue #275 replaced that fixed
+// timer as the primary freshness mechanism with the stream's own `event:
+// invalidate`: the backend fingerprints the jobs table and pushes a signal
+// only when a page/facet/sort-relevant field actually changed, so an idle
+// system now polls zero times instead of every 15s. This is now a SAFETY
+// NET, not the primary mechanism, for two known gaps `event: invalidate`
+// cannot close:
+//   - a dropped or missed SSE frame (reconnects self-heal via onopen's own
+//     invalidateQueries, but a frame lost without a disconnect would not);
+//   - `filter=finished`'s window bound (DashboardFinishedWindow, 1h): a job
+//     ages out of Overview's RECENTLY FINISHED panel with no database write
+//     at all, so no fingerprint change and no invalidation ever fires for
+//     it — this poll is the ONLY thing that ever corrects it, which is why
+//     this constant can never become `false` as long as that panel exists.
+// 60000 (matching streamInvalidateInterval's own floor) rather than removed
+// entirely is deliberately conservative given those two gaps.
+const JOBS_INTERVAL = 60000;
 // Job detail deliberately keeps the old 3s cadence rather than following
 // JOBS_INTERVAL. The stream only carries a detail for the job its connection
 // was opened with (/api/stream?job=<id>, set on the /jobs/:id route), but
@@ -78,9 +92,10 @@ const THREAD_INTERVAL = 3000;
 // replaceLiveJobs stops trusting it and falls back to REST (issue #285).
 // Comfortably above internal/observ's streamCorrelationInterval (5s,
 // stream.go) — the worst-case gap between two genuine view refreshes for
-// a job that's still actually live — and below JOBS_INTERVAL (15s), so a
-// job that has truly left the live-matched set unpins before REST's own
-// next poll would have corrected it anyway.
+// a job that's still actually live — and below the invalidate throttle (15s,
+// streamInvalidateInterval), so a job that has truly left the live-matched
+// set unpins before the next `event: invalidate`-triggered refetch (or
+// JOBS_INTERVAL's safety-net poll) would have corrected it anyway.
 const LIVE_JOB_FRESH_MS = 10000;
 
 export const queryKeys = {
@@ -150,9 +165,11 @@ export function useLiveData(): ScopedLivePayload | null | undefined {
 // that only settle after the last live frame (e.g. DOWNLOADING -> IMPORTING
 // -> COMPLETED once a transfer finishes and reconcile runs). If presence in
 // `live` were enough to win, a job would stay pinned at its last live values
-// for the remaining lifetime of the connection, and REST's 15s poll — the
-// only source left correcting those trailing DB transitions — could never
-// self-heal it.
+// for the remaining lifetime of the connection with nothing left to
+// self-heal it: a trailing DOWNLOADING -> IMPORTING -> COMPLETED transition
+// moves `state`, `Status` and `updatedAt`, all fingerprinted fields (issue
+// #275), so it bumps jobsGeneration and a refetch follows within
+// streamInvalidateInterval regardless of framedAt's own staleness window.
 //
 // An earlier version compared `updatedAt` instead. That measured the wrong
 // thing (issue #285): REST's updatedAt and the stream's updatedAt are read
