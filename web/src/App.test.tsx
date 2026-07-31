@@ -192,15 +192,16 @@ describe('AuthGate', () => {
     expect(screen.queryByText('protected content')).not.toBeInTheDocument();
   });
 
-  // authenticated wins even when setupRequired is also true (a bearer token
-  // against a lab DB with zero users — the `make dev` case, see
-  // SessionResponse's doc comment): the gate exists to get the caller
-  // authenticated, and a caller who already is has nothing to gain from
-  // being handed an account-creation form.
-  it('prefers the app over the setup card for a bearer-token-authenticated session with no account yet', () => {
+  // setupRequired wins even when the request is already authenticated. This is
+  // NOT the rare curl case it looks like: every install that used the pre-#279
+  // native Basic prompt has that credential cached in the browser and replays
+  // it automatically, so ordering these the other way round means an upgrading
+  // operator never sees the account-creation screen at all. Do not "simplify"
+  // by checking authenticated first.
+  it('prefers the setup card over the app when a credential is present but no account exists yet', () => {
     renderGate({ authenticated: true, username: null, setupRequired: true });
-    expect(screen.getByText('protected content')).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: t.auth.setupHeader })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: t.auth.setupHeader })).toBeInTheDocument();
+    expect(screen.queryByText('protected content')).not.toBeInTheDocument();
   });
 
   it('renders the login card once an account exists but this request is unauthenticated', () => {

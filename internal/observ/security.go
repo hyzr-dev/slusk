@@ -183,7 +183,15 @@ func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler
 			return
 		}
 		if !auth.Authenticate(r) {
-			w.Header().Add("WWW-Authenticate", `Basic realm="slskdarr"`)
+			// Deliberately no `Basic` challenge: that header's only effect is to
+			// make a browser open its native credential dialog, which is exactly
+			// what the login form at / replaces (issue #279). Advertising it here
+			// pops that dialog on top of our own login screen, and a stale
+			// credential the browser then replays makes GET /api/auth/session
+			// answer authenticated:true, silently skipping first-run setup on
+			// every install that ever used the pre-#279 prompt. Basic is still
+			// ACCEPTED for machine callers - curl -u sends it preemptively and
+			// never needs the challenge.
 			w.Header().Add("WWW-Authenticate", `Bearer realm="slskdarr"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
