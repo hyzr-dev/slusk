@@ -391,3 +391,83 @@ func TestPing(t *testing.T) {
 		}
 	})
 }
+
+func TestAlbumByForeignID(t *testing.T) {
+	t.Run("found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("foreignAlbumId"); got != "rg-1" {
+				t.Errorf("foreignAlbumId = %q, want rg-1", got)
+			}
+			w.Write([]byte(`[{"id":42,"artistId":7,"monitored":true}]`))
+		}))
+		defer srv.Close()
+		album, found, err := New(srv.URL, "k").AlbumByForeignID(context.Background(), "rg-1")
+		if err != nil {
+			t.Fatalf("AlbumByForeignID: %v", err)
+		}
+		if !found || album.ID != 42 || album.ArtistID != 7 || !album.Monitored {
+			t.Fatalf("unexpected: found=%v album=%+v", found, album)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`[]`))
+		}))
+		defer srv.Close()
+		_, found, err := New(srv.URL, "k").AlbumByForeignID(context.Background(), "rg-1")
+		if err != nil {
+			t.Fatalf("AlbumByForeignID: %v", err)
+		}
+		if found {
+			t.Fatal("expected found = false for an empty array")
+		}
+	})
+
+	t.Run("unreachable is an error, not an absence", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		_, found, err := New(srv.URL, "k").AlbumByForeignID(context.Background(), "rg-1")
+		if err == nil {
+			t.Fatal("expected an error for a non-2xx response")
+		}
+		if found {
+			t.Fatal("found must be false alongside an error")
+		}
+	})
+}
+
+func TestArtistByMBID(t *testing.T) {
+	t.Run("found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("mbId"); got != "artist-1" {
+				t.Errorf("mbId = %q, want artist-1", got)
+			}
+			w.Write([]byte(`[{"id":9,"monitored":false}]`))
+		}))
+		defer srv.Close()
+		artist, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
+		if err != nil {
+			t.Fatalf("ArtistByMBID: %v", err)
+		}
+		if !found || artist.ID != 9 || artist.Monitored {
+			t.Fatalf("unexpected: found=%v artist=%+v", found, artist)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`[]`))
+		}))
+		defer srv.Close()
+		_, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
+		if err != nil {
+			t.Fatalf("ArtistByMBID: %v", err)
+		}
+		if found {
+			t.Fatal("expected found = false for an empty array")
+		}
+	})
+}

@@ -186,3 +186,19 @@ slskd_complete_dir = "/music/slskd-downloads"
 # [[soulseek.shared_folders]]
 # name = "Live"
 # path = "/shares/live"
+
+# Optional: let a manual search result be identified against MusicBrainz
+# before download (issue #321), showing the canonical artist/album, a
+# complete-tracklist assessment against the chosen edition, and whether the
+# album is already in the Lidarr library. Leaving the whole section absent
+# (or every field blank) keeps it disabled and the /api/identify/* endpoints
+# answer "not enabled".
+#
+# MusicBrainz allows one request per second and requires every client to
+# identify itself with contact info in its User-Agent - contact has no
+# default and is required once this section is enabled.
+# [musicbrainz]
+# base_url = "https://musicbrainz.org"
+# contact = "you@example.com"
+# timeout = "10s"
+# cache_ttl = "1h"
