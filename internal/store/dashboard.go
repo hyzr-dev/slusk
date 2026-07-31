@@ -708,9 +708,9 @@ func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int
 //
 // EventJobFailed earns its place on intent rather than on current behaviour:
 // the only writer is recordBackoffEvent (internal/pipeline/backoff.go), which
-// hardcodes an empty detail, so it can never satisfy the detail <> ” test
-// today. It stays listed so that giving it a real detail later needs no change
-// here — tracked separately as the "job_failed carries no detail" follow-up.
+// hardcodes an empty detail, so the non-empty-detail test below can never
+// match it today. It stays listed so that giving it a real detail (issue #318)
+// needs no change here.
 var failureExplainingEvents = []string{
 	string(core.EventImportRejected),
 	string(core.EventAttemptFailed),
