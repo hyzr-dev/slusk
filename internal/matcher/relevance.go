@@ -3,6 +3,7 @@ package matcher
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ import (
 // the gate that asks that question, in the two ways evidence is normally
 // available: the peer's own filenames (track titles), or the release
 // directory name (against the requested artist/title).
+
 const (
 	// minTitleRecall is the fraction of the album title's own (non-noise)
 	// tokens that must appear in a candidate's directory tokens. Kept at 0.8
@@ -70,6 +72,21 @@ const (
 	SourceDirectory
 )
 
+// String renders s readably for logging (see discovery.go's rejection log,
+// which logs Source alongside Reason).
+func (s RelevanceSource) String() string {
+	switch s {
+	case SourceNoData:
+		return "no_data"
+	case SourceTrackTitles:
+		return "track_titles"
+	case SourceDirectory:
+		return "directory"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
+
 // RelevanceInput carries everything CheckRelevance needs to judge whether a
 // candidate's files actually belong to the requested album.
 type RelevanceInput struct {
@@ -96,8 +113,9 @@ type Relevance struct {
 // CheckRelevance reports whether a candidate's files plausibly belong to the
 // requested album, as a defense against Soulseek's whole-path token-AND
 // search matching an unrelated album that happens to contain every query
-// token (see the package-level comment above). It never has full certainty -
-// only two proxies for it, tried in order of the better evidence:
+// token (see the design-rationale note at the top of this file). It never
+// has full certainty - only two proxies for it, tried in order of the better
+// evidence:
 //
 //  1. If the album's expected track titles are usable evidence (enough of
 //     the candidate's filenames are non-numeric, i.e. actually named), match
@@ -105,9 +123,17 @@ type Relevance struct {
 //     directions: it can accept a well-matching candidate in a badly-named
 //     folder, and reject a wrong candidate that happens to sit in a
 //     plausible-looking folder.
-//  2. Otherwise, compare the candidate's release directory name (and its
-//     parent, for multi-disc releases split into CD1/CD2 subfolders) against
-//     the requested artist/title tokens.
+//  2. Otherwise, compare the candidate's release directory name against the
+//     requested artist/title tokens. Only when that last segment carries no
+//     usable tokens at all (a multi-disc layout like ".../The Absence
+//     (2016)/CD1/", where "CD1" has none) does this fall back to its parent
+//     segment - never merely because the last segment's dirCheck failed. A
+//     fail-then-try-parent OR would give a second, unrelated chance to every
+//     candidate: for a self-titled album ("The Absence" by "The Absence"),
+//     titleTokens == artistTokens, so a peer's ordinary
+//     Music\<Artist>\<any other album>\ layout would satisfy the parent
+//     check on the artist name alone, defeating the gate for exactly the
+//     album shape issue #316 was filed about.
 func CheckRelevance(in RelevanceInput) Relevance {
 	titleTokens := nonNoise(in.AlbumTitle)
 	artistTokens := nonNoise(in.ArtistName)
@@ -117,7 +143,18 @@ func CheckRelevance(in RelevanceInput) Relevance {
 
 	var expected []map[string]bool
 	for _, t := range in.TrackTitles {
-		if toks := nonNoise(t); len(toks) > 0 {
+		// Bracketed groups ("(feat. Guest)", "(Live)", "(Remastered 2011)")
+		// are stripped from expected TRACK TITLES before tokenizing - unlike
+		// directory segments in dirCheck below, which deliberately keep every
+		// token. This is not an inconsistency: a Lidarr track title's
+		// parenthetical is routine edition/collaborator metadata that a
+		// peer's filename legitimately omits ("01 - Song One.flac" for
+		// "Song One (feat. Guest A)"), so keeping it here would reject
+		// correct hip-hop/pop and live albums on nearly every track. A
+		// directory's parenthetical is exactly the opposite case - it is the
+		// only thing standing between "The Absence" and "The Absence Of
+		// Presence" (issue #316) - so it must never be stripped there.
+		if toks := nonNoise(stripBracketedGroups(t)); len(toks) > 0 {
 			expected = append(expected, toks)
 		}
 	}
@@ -145,24 +182,30 @@ func CheckRelevance(in RelevanceInput) Relevance {
 	}
 
 	last, parent := splitReleaseDir(in.Files)
-	if ok, reason := dirCheck(last, titleTokens, artistTokens); ok {
-		return Relevance{Match: true, Source: SourceDirectory, Reason: reason}
-	} else if parent != "" {
-		if ok2, reason2 := dirCheck(parent, titleTokens, artistTokens); ok2 {
-			return Relevance{Match: true, Source: SourceDirectory, Reason: "parent segment: " + reason2}
-		} else {
-			return Relevance{Match: false, Source: SourceDirectory, Reason: reason + "; parent segment: " + reason2}
+	// The parent segment is a fallback for the multi-disc case only (see
+	// CheckRelevance's doc comment): consulted solely when the last segment
+	// has no usable tokens to judge in the first place, never merely because
+	// dirCheck rejected it.
+	if len(nonNoise(stripTrailingBracketNoise(last))) == 0 && parent != "" {
+		ok, reason := dirCheck(parent, titleTokens, artistTokens)
+		if ok {
+			return Relevance{Match: true, Source: SourceDirectory, Reason: "parent segment: " + reason}
 		}
-	} else {
-		return Relevance{Match: false, Source: SourceDirectory, Reason: reason}
+		return Relevance{Match: false, Source: SourceDirectory,
+			Reason: fmt.Sprintf("directory %q carries no usable tokens; parent segment: %s", last, reason)}
 	}
+	ok, reason := dirCheck(last, titleTokens, artistTokens)
+	return Relevance{Match: ok, Source: SourceDirectory, Reason: reason}
 }
 
 // splitReleaseDir returns the last path segment and its parent segment of
 // the first file's directory, used to evaluate multi-disc releases (e.g.
 // ".../The Absence (2016)/CD1/01 - Wartorn.flac") where the immediate
-// directory carries no album information but its parent does. parent is ""
-// when there is no grandparent segment to check.
+// directory carries no album information (its non-noise token set is empty)
+// but its parent does. parent is "" when there is no grandparent segment to
+// check. Note this is only ever consulted by CheckRelevance when the last
+// segment is empty of usable tokens - a last segment that has tokens but
+// fails dirCheck is a real verdict, not a reason to look at parent.
 func splitReleaseDir(files []string) (last, parent string) {
 	if len(files) == 0 {
 		return "", ""
@@ -176,13 +219,43 @@ func splitReleaseDir(files []string) (last, parent string) {
 	return last, path.Base(up)
 }
 
+// trailingBracketGroupRe matches a square- or curly-bracket group - never a
+// parenthesized one - trailing a release directory segment, e.g.
+// " [Epic Records]" or " {MB3984-15107}". Applied repeatedly so multiple
+// trailing groups (" [FLAC] {MB3984-15107}") are all removed. In scene/peer
+// naming these hold labels, catalogue numbers and quality tags - metadata,
+// never the album title - so dirCheck treats their contents as noise.
+//
+// This deliberately does NOT extend to parentheses: the issue #316 false
+// positive is "The Absence" matching "The Absence Of Presence", where "Of
+// Presence" is unbracketed, and forgiving parenthesized directory content is
+// exactly what would defeat the gate (see the package comment and tokens'
+// doc comment in normalize.go). Square/curly groups are safe to forgive
+// because real album titles are essentially never wrapped in them; "(...)"
+// is used for exactly that far too often (live albums, editions, and - as
+// #316 shows - real subtitles).
+var trailingBracketGroupRe = regexp.MustCompile(`\s*[\[{][^\[\]{}]*[\]}]\s*$`)
+
+// stripTrailingBracketNoise repeatedly removes trailing "[...]"/"{...}"
+// groups from a directory segment (see trailingBracketGroupRe).
+func stripTrailingBracketNoise(s string) string {
+	for {
+		next := trailingBracketGroupRe.ReplaceAllString(s, "")
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return s
+}
+
 // dirCheck compares one directory segment's non-noise tokens against the
 // requested album's title (required AND explaining) and artist (explaining
 // only, never required - many peers name the release folder without the
 // artist at all, under a per-artist parent directory, and requiring it would
 // reject good candidates wholesale).
 func dirCheck(segment string, titleTokens, artistTokens map[string]bool) (bool, string) {
-	dir := nonNoise(segment)
+	dir := nonNoise(stripTrailingBracketNoise(segment))
 	if len(dir) == 0 {
 		return false, fmt.Sprintf("directory %q carries no usable tokens", segment)
 	}
@@ -205,21 +278,22 @@ func dirCheck(segment string, titleTokens, artistTokens map[string]bool) (bool, 
 	return ok, reason
 }
 
-// trackFilenameTokens returns the non-noise tokens of a filename's base name
-// (extension and leading track number stripped), for comparison against an
-// expected track title's tokens.
-func trackFilenameTokens(filename string) map[string]bool {
-	base := strings.TrimSuffix(path.Base(strings.ReplaceAll(filename, `\`, "/")), path.Ext(filename))
+// trackBaseName returns filename's base name with its path, extension and
+// leading track number stripped, for both trackFilenameTokens and
+// interpretable to classify.
+func trackBaseName(filename string) string {
+	normalized := strings.ReplaceAll(filename, `\`, "/")
+	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
 	if m := leadingTrackNumber.FindStringSubmatch(base); m != nil {
 		base = strings.TrimSpace(strings.TrimLeft(base[len(m[0]):], " -._"))
 	}
-	out := map[string]bool{}
-	for _, t := range tokens(base) {
-		if !isNoise(t) {
-			out[t] = true
-		}
-	}
-	return out
+	return base
+}
+
+// trackFilenameTokens returns the non-noise tokens of a filename's base name,
+// for comparison against an expected track title's tokens.
+func trackFilenameTokens(filename string) map[string]bool {
+	return nonNoise(trackBaseName(filename))
 }
 
 // matchesSomeTrack reports whether filename's tokens sufficiently cover any
@@ -257,10 +331,7 @@ var interpretableExclusions = map[string]bool{
 // token usable as track-title evidence: not release-naming noise, not a
 // generic placeholder word, and not purely numeric (a bare track number).
 func interpretable(filename string) bool {
-	base := strings.TrimSuffix(path.Base(strings.ReplaceAll(filename, `\`, "/")), path.Ext(filename))
-	if m := leadingTrackNumber.FindStringSubmatch(base); m != nil {
-		base = strings.TrimSpace(strings.TrimLeft(base[len(m[0]):], " -._"))
-	}
+	base := trackBaseName(filename)
 	for _, t := range tokens(base) {
 		if isNoise(t) || interpretableExclusions[t] {
 			continue

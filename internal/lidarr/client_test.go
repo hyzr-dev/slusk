@@ -212,9 +212,14 @@ func TestAlbumTracks(t *testing.T) {
 		if got := r.Header.Get("X-Api-Key"); got != "key" {
 			t.Errorf("api key = %q, want key", got)
 		}
+		// trackNumber/mediumNumber are deliberately unlike the old (now-removed)
+		// decode target - a number where "1" was a string, a string where an int
+		// was - to pin that AlbumTracks no longer cares about their type at all
+		// (see core.AlbumTrack's doc comment): only "title" is decoded, so a
+		// type drift on fields nobody reads must never fail the whole call.
 		fmt.Fprint(w, `[
-			{"id":1,"albumId":42,"title":"Wartorn","trackNumber":"1","mediumNumber":1},
-			{"id":2,"albumId":42,"title":"Riders","trackNumber":"A1","mediumNumber":1}
+			{"id":1,"albumId":42,"title":"Wartorn","trackNumber":1,"mediumNumber":"A"},
+			{"id":2,"albumId":42,"title":"Riders","trackNumber":"A1","mediumNumber":1,"unknownField":{"nested":true}}
 		]`)
 	}))
 	defer srv.Close()
@@ -225,8 +230,8 @@ func TestAlbumTracks(t *testing.T) {
 		t.Fatalf("AlbumTracks: %v", err)
 	}
 	want := []core.AlbumTrack{
-		{Title: "Wartorn", TrackNumber: "1", MediumNumber: 1},
-		{Title: "Riders", TrackNumber: "A1", MediumNumber: 1},
+		{Title: "Wartorn"},
+		{Title: "Riders"},
 	}
 	if len(tracks) != len(want) {
 		t.Fatalf("got %d tracks, want %d", len(tracks), len(want))

@@ -298,12 +298,13 @@ func (c *Client) AlbumReleases(ctx context.Context, albumID int64) ([]core.Album
 // titles rather than trusting Soulseek's token-AND path match alone.
 //
 // The response shape assumed here — a flat JSON array of TrackResource, each
-// carrying title/trackNumber/mediumNumber — and whether it covers every
-// release of the album or only the one Lidarr currently has selected, are
-// both unverified against the deployed Lidarr version; that is confirmed in
-// the lab before this ships. A failure here degrades the caller to a
-// directory-only relevance check rather than aborting discovery (see
-// discovery.go), so a wrong assumption here is not a hard outage.
+// carrying at least "title" — and whether it covers every release of the
+// album or only the one Lidarr currently has selected, are both unverified
+// against the deployed Lidarr version. A failure here degrades the caller to
+// a directory-only relevance check rather than aborting discovery (see
+// discovery.go), so a wrong assumption here is not a hard outage. Only
+// "title" is decoded (see core.AlbumTrack) - other fields' types are
+// therefore free to drift between Lidarr versions without breaking this call.
 func (c *Client) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTrack, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/track?albumId=%d", c.baseURL, albumID), nil)
@@ -320,16 +321,14 @@ func (c *Client) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTr
 		return nil, fmt.Errorf("lidarr album tracks: status %d", resp.StatusCode)
 	}
 	var raw []struct {
-		Title        string `json:"title"`
-		TrackNumber  string `json:"trackNumber"`
-		MediumNumber int    `json:"mediumNumber"`
+		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
 	}
 	out := make([]core.AlbumTrack, 0, len(raw))
 	for _, r := range raw {
-		out = append(out, core.AlbumTrack{Title: r.Title, TrackNumber: r.TrackNumber, MediumNumber: r.MediumNumber})
+		out = append(out, core.AlbumTrack{Title: r.Title})
 	}
 	return out, nil
 }

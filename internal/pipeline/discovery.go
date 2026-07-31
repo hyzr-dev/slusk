@@ -79,6 +79,14 @@ type DiscoveryParams struct {
 // selection/enqueue, which Selecting now owns).
 type Discovery struct {
 	p DiscoveryParams
+	// warnedAlbumTracksFailure tracks whether the AlbumTracks degrade-path
+	// below has already logged at Warn once. Discovery runs one job per tick
+	// on a single goroutine (see runner.go), so this needs no locking. A
+	// Lidarr version missing the endpoint would otherwise fail on every
+	// wanted album on every tick forever; the first failure is surfaced at
+	// Warn (an operator should notice and investigate), every one after that
+	// only at Debug (the condition is already known, not new information).
+	warnedAlbumTracksFailure bool
 }
 
 // NewDiscovery constructs a Discovery.
@@ -206,29 +214,6 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		return false, false, err
 	}
 
-	// Fetch the album's expected track titles for the relevance gate below.
-	// This DEGRADES rather than aborts on error - unlike AlbumReleases above,
-	// which is load-bearing for the track-count band. Making this second
-	// Lidarr endpoint a hard dependency of all discovery would mean a 404 on
-	// some deployed Lidarr version (this endpoint's shape is unverified, see
-	// lidarr.Client.AlbumTracks) silently stops slskdarr searching for
-	// everything. The directory-only half of the relevance gate still fixes
-	// issue #316 on its own, so losing track-title evidence only makes the
-	// gate slightly less precise, not inert.
-	tracks, err := d.p.Music.AlbumTracks(ctx, job.LidarrAlbumID)
-	if err != nil {
-		if d.p.Metrics != nil {
-			d.p.Metrics.IncAlbumTracksError()
-		}
-		d.log().Warn("album tracks failed, relevance gate degrades to directory check",
-			"album_job", job.ID, "err", err)
-		tracks = nil
-	}
-	trackTitles := make([]string, len(tracks))
-	for i, tr := range tracks {
-		trackTitles[i] = tr.Title
-	}
-
 	query := album.ArtistName + " " + album.Title
 	results, err := d.p.Peers.Search(ctx, query, d.p.SearchTimeout)
 	if err != nil {
@@ -264,6 +249,41 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	d.log().Info(searchDetail, "album_job", job.ID, "query", query,
 		"results", len(results), "candidates", len(ranked))
 	d.recordEvent(ctx, job.ID, core.EventSearch, searchDetail, now)
+
+	// Fetch the album's expected track titles for the relevance gate below,
+	// now that there is at least one ranked candidate to check them against -
+	// fetching this unconditionally before the search (as originally written)
+	// doubled Discovery's Lidarr call rate for every job whose search came
+	// back empty, for no benefit. This DEGRADES rather than aborts on error -
+	// unlike AlbumReleases above, which is load-bearing for the track-count
+	// band. Making this second Lidarr endpoint a hard dependency of all
+	// discovery would mean a 404 on some deployed Lidarr version (this
+	// endpoint's shape is unverified, see lidarr.Client.AlbumTracks) silently
+	// stops slskdarr searching for everything. The directory-only half of the
+	// relevance gate still fixes issue #316 on its own, so losing
+	// track-title evidence only makes the gate slightly less precise, not
+	// inert.
+	var trackTitles []string
+	if len(ranked) > 0 {
+		tracks, err := d.p.Music.AlbumTracks(ctx, job.LidarrAlbumID)
+		if err != nil {
+			if d.p.Metrics != nil {
+				d.p.Metrics.IncAlbumTracksError()
+			}
+			logFn := d.log().Debug
+			if !d.warnedAlbumTracksFailure {
+				logFn = d.log().Warn
+				d.warnedAlbumTracksFailure = true
+			}
+			logFn("album tracks failed, relevance gate degrades to directory check",
+				"album_job", job.ID, "err", err)
+		} else {
+			trackTitles = make([]string, len(tracks))
+			for i, tr := range tracks {
+				trackTitles[i] = tr.Title
+			}
+		}
+	}
 
 	// Candidates are cached per search cycle - the previously-tried-username
 	// filter the legacy engine applied at enqueue time is deliberately absent
@@ -305,7 +325,12 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			TrackTitles: trackTitles, Files: filenamesOf(cand.Files),
 		}); !v.Match {
 			detail := fmt.Sprintf("candidate %s does not match the requested album (%s), skipping", cand.Username, v.Reason)
-			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "reason", v.Reason)
+			// "source" (which evidence decided - track titles vs directory),
+			// not a repeat of Reason, which detail above already carries:
+			// matches the neighbouring rejection branches' pattern of logging
+			// structured values, not a copy of the message (see v.Source's
+			// doc comment).
+			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "source", v.Source)
 			irrelevant++
 			continue
 		}

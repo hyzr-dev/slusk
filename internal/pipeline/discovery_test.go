@@ -879,3 +879,31 @@ func TestDiscoveryAlbumTracksErrorDegradesToDirectoryCheck(t *testing.T) {
 		t.Fatalf("expected the directory-relevant candidate to still survive, got %+v", cands)
 	}
 }
+
+// TestDiscoverySkipsAlbumTracksWhenSearchIsEmpty asserts AlbumTracks is not
+// fetched at all when Peers.Search (both the primary and normalized-fallback
+// query) returns no results - there is nothing for the relevance gate to
+// check against, so the extra Lidarr call would be pure waste on every job
+// whose search comes back empty.
+func TestDiscoverySkipsAlbumTracksWhenSearchIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	searcher := &fakeSearcher{} // no results ever, primary or fallback
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	if _, err := st.UpsertWantedJob(ctx, 1, now); err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if music.albumTracksCalls != 0 {
+		t.Errorf("expected AlbumTracks not called on an empty search, got %d calls", music.albumTracksCalls)
+	}
+}

@@ -1,6 +1,9 @@
 package matcher
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestNormalizeQuery(t *testing.T) {
 	cases := []struct {
@@ -135,27 +138,25 @@ func TestTokens(t *testing.T) {
 			input: "",
 			want:  nil,
 		},
+		{
+			name:  "apostrophe is elided, not split on",
+			input: "Don't Cry",
+			want:  []string{"dont", "cry"},
+		},
+		{
+			name:  "curly apostrophe is elided too",
+			input: "Don’t Cry",
+			want:  []string{"dont", "cry"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tokens(tc.input)
-			if !equalStrings(got, tc.want) {
+			if !slices.Equal(got, tc.want) {
 				t.Errorf("tokens(%q) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestIsNoise(t *testing.T) {

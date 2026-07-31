@@ -23,6 +23,24 @@ var (
 	whitespaceRe  = regexp.MustCompile(`\s+`)
 )
 
+// stripBracketedGroups removes parenthesized/bracketed groups from s,
+// including nested ones (e.g. "Album (Deluxe (Bonus Disc))" -> "Album"),
+// applying innermostGroupRe repeatedly until a fixpoint. Shared by
+// NormalizeQuery (search-fallback queries) and CheckRelevance's expected
+// track titles (relevance.go) - the two legitimate uses of "this bracketed
+// group is metadata, not album identity". Directory segments in the
+// relevance gate deliberately do NOT go through this; see dirCheck.
+func stripBracketedGroups(s string) string {
+	for {
+		next := innermostGroupRe.ReplaceAllString(s, "")
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return s
+}
+
 // NormalizeQuery derives a looser search query from a primary query that
 // returned zero raw results. Soulseek search matches on tokens in shared
 // folder/file paths and is sensitive to characters that rarely occur in
@@ -40,38 +58,37 @@ var (
 // (e.g. a query that is nothing but bracketed groups); callers must not
 // search with that.
 func NormalizeQuery(query string) string {
-	q := query
-	// Remove innermost groups until a fixpoint so nested groups vanish fully.
-	for {
-		next := innermostGroupRe.ReplaceAllString(q, "")
-		if next == q {
-			break
-		}
-		q = next
-	}
+	q := stripBracketedGroups(query)
 	q = strings.ReplaceAll(q, "&", "and")
 	q = punctuationRe.ReplaceAllString(q, "")
 	q = whitespaceRe.ReplaceAllString(q, " ")
 	return strings.TrimSpace(q)
 }
 
-// diacriticFold is intentionally NOT built on top of innermostGroupRe: this
-// tokenizer feeds the relevance gate (see relevance.go), which must not
-// forgive parenthesized content the way NormalizeQuery's search-fallback use
-// case does - a peer's folder named "(Of Presence)" must still count as
-// tokens, not disappear.
 var diacriticFold = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
 
+// elisionReplacer deletes (rather than splits on) elision characters -
+// straight and curly apostrophes and the grave accent occasionally used in
+// their place - before tokens splits on punctuation. Peer folder naming
+// routinely drops apostrophes ("Dont Cry" for "Don't Cry"), and splitting on
+// them instead of deleting them would tokenize "Don't" as {don, t}, which
+// then fails to recall against "Dont" -> {dont}.
+var elisionReplacer = strings.NewReplacer("'", "", "’", "", "`", "")
+
 // tokens splits s into lowercase, diacritic-folded, alphanumeric tokens for
-// the relevance gate. Unlike NormalizeQuery it never strips bracketed groups:
-// every substantive word must be seen, since the gate's whole job is to
-// notice unexplained tokens.
+// the relevance gate. Unlike NormalizeQuery (stripBracketedGroups) it never
+// strips bracketed groups: every substantive word must be seen, since the
+// gate's whole job is to notice unexplained tokens. It is intentionally NOT
+// built on top of NormalizeQuery/stripBracketedGroups for that reason - a
+// peer's folder named "(Of Presence)" must still count as tokens, not
+// disappear.
 func tokens(s string) []string {
 	s = strings.ReplaceAll(s, `\`, "/")
 	s = strings.ToLower(s)
 	if folded, _, err := transform.String(diacriticFold, s); err == nil {
 		s = folded
 	}
+	s = elisionReplacer.Replace(s)
 	s = strings.ReplaceAll(s, "&", " and ")
 	return strings.FieldsFunc(s, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
@@ -103,9 +120,10 @@ var noiseWords = map[string]bool{
 	"flac": true, "mp3": true, "m4a": true, "aac": true, "ogg": true,
 	"opus": true, "wav": true, "alac": true, "ape": true, "wv": true,
 	"aiff": true, "dsf": true,
-	// quality
+	// quality (bit depth is matched by bitDepthRe below, not listed here, so
+	// there is one unambiguous place to extend it)
 	"vbr": true, "cbr": true, "kbps": true, "kbs": true, "lossless": true,
-	"16bit": true, "24bit": true, "96khz": true, "192khz": true,
+	"96khz": true, "192khz": true,
 	// source
 	"web": true, "webrip": true, "cd": true, "cdrip": true, "cdda": true,
 	"vinyl": true, "lp": true, "ep": true, "single": true, "promo": true,
@@ -130,12 +148,17 @@ var noiseWords = map[string]bool{
 // codec/quality/source/edition marketing, disc/side structure, scene rip
 // artifacts).
 //
-// SAFETY PROPERTY: noise only ever forgives an unexplained token; it can
-// never satisfy recall, since recall is computed purely from the requested
-// album/artist's own tokens (see relevance.go), and noise classification is
-// never applied to those. An over-broad noise list therefore only ever
-// weakens the gate (lets more candidates through) - it can never cause a
-// false rejection of a real match. Err on the side of adding to this list.
+// This IS applied to the requested album/artist's own tokens, not just to
+// candidate directory/track tokens (see relevance.go's nonNoise(in.AlbumTitle)
+// and nonNoise(in.ArtistName)) - despite how tempting it is to assume
+// otherwise. An over-broad entry therefore has a real cost in both
+// directions: it can swallow a real title/artist token as well as a
+// candidate's, shrinking the set of tokens the gate has to work with. Taken
+// far enough, an entry that swallows an entire short album title (e.g. a
+// purely numeric one) empties titleTokens and falls into SourceNoData, which
+// accepts every candidate unconditionally - "err on the side of adding" is
+// not free. Verify against real Lidarr/Soulseek data before adding, not just
+// plausibility.
 //
 // English stopwords ("the", "of", "a", "and", "in", ...) are DELIBERATELY NOT
 // noise. Forgiving "of" is exactly what would let "The Absence" match "The
