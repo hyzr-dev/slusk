@@ -164,3 +164,46 @@
 
 .notice { padding: 7px 15px; color: var(--ok); font-size: 11px; border-top: 1px solid var(--line-inner); }
 .error { padding: 7px 15px; color: var(--bad); font-size: 11px; border-top: 1px solid var(--line-inner); }
+
+/* Narrow viewports. Both rows below are single-line flex whose min-content
+   width exceeds a phone's: .header because .availBlock is `flex: 0 0 auto`
+   with two nowrap lines, .actions because two buttons plus a path never
+   shrink. The card's own container does not scroll horizontally, so at 375px
+   ~105px of each row was simply clipped and unreachable — the title crushed
+   to a ~80px column wrapping to nine lines, and "Download selected (n)" cut
+   off mid-word. Wrapping is the fix, not overflow: issue #215 already tracks
+   eleven views where hidden overflow made content unreachable, and this must
+   not become the twelfth. */
+@media (max-width: 640px) {
+  .header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px 10px;
+  }
+
+  /* Reordered rather than just wrapped: in source order .availBlock sits
+     between the title and the chevron, so a plain wrap would leave the
+     disclosure arrow marooned on the second line. Pushing .availBlock last
+     gives line 1 = title + chevron (the title now competing with ~13px
+     instead of a nowrap two-line block) and line 2 = availability. */
+  .availBlock {
+    order: 1;
+    flex: 1 0 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    text-align: left;
+  }
+
+  /* A long Soulseek username can exceed the card on its own, and this is the
+     one cell here with no ellipsis to fall back on. */
+  .peerSpeed { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
+
+  .actions { flex-wrap: wrap; }
+
+  /* `margin-left: auto` would strand it alone on a line pushed hard right;
+     as a full-width row under the buttons it keeps its ellipsis and its
+     title attribute still carries the untruncated path. */
+  .folderPath { margin-left: 0; flex: 1 0 100%; }
+}

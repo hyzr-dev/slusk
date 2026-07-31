@@ -1168,6 +1168,12 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		// lastInvalidateAt = now, NOT the zero time and NOT now.Add(-interval):
 		// the client's onopen fires invalidateQueries the instant the
 		// connection opens, so a fresh subscriber has just done its own GET.
+		// Since issue #58 that is true only of the opens with a gap behind
+		// them — the very first one and the browser's own automatic reconnect
+		// (see web/src/api/stream.tsx's onopen). The rest are the client
+		// deliberately tearing the connection down and rebuilding it with new
+		// ?job=/?search= params, missing nothing in between, so there is no
+		// gap for `now` to be too optimistic about either way.
 		// Treating connect as an invalidation is what makes the first
 		// server-sent `event: invalidate` land no sooner than
 		// t+invalidateInterval (issue #275, decision 3).
@@ -1412,7 +1418,8 @@ func (h *streamHub) tick(ctx context.Context) {
 
 		// The `event: search` frame (issue #58) is likewise independent of
 		// `live`/`throughput` above: it fires whenever this subscriber's
-		// search session has new group versions or its Done flag flipped,
+		// search session has new group versions, its Done flag flipped or it
+		// became Truncated,
 		// via a plain in-memory map read (searchDelta), never a DB query —
 		// costs nothing extra at 1Hz x streamMaxSubscribers. Skipped
 		// outright for a subscriber with no ?search= scope.

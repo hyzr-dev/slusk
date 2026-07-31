@@ -145,7 +145,16 @@ export default function Search() {
     setActiveFormats(new Set());
     startSearch.mutate(trimmed, {
       onSuccess: (started) => setSearchId(started.id),
-      onError: (err) => setStartError(messageForStartError(err)),
+      onError: (err) => {
+        setStartError(messageForStartError(err));
+        // Drop the PREVIOUS search's id too. Without this, `starting` goes
+        // false while `searchId` still points at the search before this one,
+        // so its cards, its result count and its header all come back looking
+        // like the answer to a query that never ran — and `noHits` would name
+        // that query in `noHitsTitle(submittedQuery)`. Clearing it leaves the
+        // idle prompt under the error, which is what actually happened.
+        setSearchId(undefined);
+      },
     });
   }
 
@@ -215,7 +224,16 @@ export default function Search() {
   // Deliberately not gated on having results: a search with nothing back yet
   // is exactly the state that most needs to say it is working. Rendered
   // outside the `showResults` block below for the same reason.
-  const searching = starting || (hasSession && !session?.done);
+  //
+  // The 'error' phase is excluded rather than relying on `!session?.done`:
+  // when the GET fails with nothing cached, `session` is undefined, so
+  // `!session?.done` reads as "still running" and the view renders
+  // QueryNotice's failure AND "Asking peers on the network…" at once. Nothing
+  // ever clears that pairing either — refetchInterval returns false with no
+  // data, so no further request is made and the state is terminal. 'stale'
+  // deliberately stays in: there the poll IS still armed and the session may
+  // genuinely still be running.
+  const searching = starting || (hasSession && phase !== 'error' && !session?.done);
 
   return (
     <Page title={t.page.search.title} subtitle={t.page.search.subtitle}>

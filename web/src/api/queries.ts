@@ -371,7 +371,8 @@ export function replaceSearchGroups(prev: SearchSession | undefined, frame: Sear
 // question to answer here. A streamed `search` frame is a cumulative delta
 // over a cursor, not a competing snapshot of the same row, so union-by-id is
 // the correct semantics for BOTH writers and a split would only force this
-// accumulation to exist twice. The scalars REST does own are taken from the
+// accumulation to exist twice. Where both sides hold the same group id the
+// one with more files wins — see the loop below. The scalars REST does own are taken from the
 // fetched snapshot, except the three that are monotonic over a session's life
 // (`done`, `expired`, `truncated`) and `total`, which are OR'd/maxed so a
 // stale snapshot cannot un-finish, un-expire or un-truncate the view.
@@ -380,7 +381,22 @@ export function replaceSearchGroups(prev: SearchSession | undefined, frame: Sear
 export function mergeSearchSession(prev: SearchSession | undefined, fetched: SearchSession): SearchSession {
   if (!prev || prev.id !== fetched.id) return fetched;
   const byId = new Map(prev.groups.map((g) => [g.id, g]));
-  for (const g of fetched.groups) byId.set(g.id, g);
+  for (const g of fetched.groups) {
+    // Union-by-id alone only closes half the race. A snapshot computed at T1
+    // that lands after a frame folded in at T2 > T1 still carries T1's copy
+    // of a group the frame GREW, and a plain set() reverts it to that shorter
+    // file list — the cursor has advanced, so the stream won't resend it, and
+    // "Download album" then enqueues an incomplete album with nothing on
+    // screen looking wrong. Resolving that by file count is sound because a
+    // group's file set is strictly append-only within a session: app/search.go's
+    // accept() only ever appends to the accumulator and rebuilds the whole
+    // group from that slice, so `files.length` is monotone per id and the
+    // longer list is by definition the newer one. (Deliberately not a `version`
+    // comparison — seq is not on the wire per group and must not be added.)
+    const cached = byId.get(g.id);
+    if (cached && cached.files.length > g.files.length) continue;
+    byId.set(g.id, g);
+  }
   return {
     ...fetched,
     groups: Array.from(byId.values()),

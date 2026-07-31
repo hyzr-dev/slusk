@@ -140,6 +140,34 @@ describe('mergeSearchSession', () => {
     expect(merged.groups.map((g) => g.id)).toEqual(['a', 'streamed']);
   });
 
+  // The other half of that same race, and the half union-by-id alone leaves
+  // open: the snapshot is not MISSING the group, it holds an older, shorter
+  // copy of it. A plain set() reverts the group to that copy, the cursor has
+  // already advanced past the version the frame carried, so the files are
+  // never resent — and "Download album" then enqueues a short album with
+  // nothing on screen looking wrong. Resolved by file count because a group's
+  // file set is append-only within a session (app/search.go's accept()).
+  it('keeps the longer file list when the snapshot holds an older copy of a group', () => {
+    const file = (n: string) => ({ filename: n, name: n, size: 1_000 });
+    const grown = makeGroup({ id: 'a', trackCount: 3, files: [file('1'), file('2'), file('3')] });
+    const older = makeGroup({ id: 'a', trackCount: 1, files: [file('1')] });
+    const merged = mergeSearchSession(makeSession({ groups: [grown] }), makeSession({ groups: [older] }));
+    expect(merged.groups).toHaveLength(1);
+    expect(merged.groups[0].files.map((f) => f.filename)).toEqual(['1', '2', '3']);
+  });
+
+  // The converse, so the rule above cannot be satisfied by simply never
+  // taking the fetched copy: when REST is the side that is ahead — the poll
+  // is the only freshness mechanism on a batching backend — its longer list
+  // must win.
+  it('adopts the fetched copy of a group when it is the one with more files', () => {
+    const file = (n: string) => ({ filename: n, name: n, size: 1_000 });
+    const cached = makeGroup({ id: 'a', trackCount: 1, files: [file('1')] });
+    const fresh = makeGroup({ id: 'a', trackCount: 2, files: [file('1'), file('2')] });
+    const merged = mergeSearchSession(makeSession({ groups: [cached] }), makeSession({ groups: [fresh] }));
+    expect(merged.groups[0].files.map((f) => f.filename)).toEqual(['1', '2']);
+  });
+
   it('adopts a group only REST has seen', () => {
     const cached = makeSession({ groups: [makeGroup({ id: 'a' })] });
     const fetched = makeSession({ groups: [makeGroup({ id: 'a' }), makeGroup({ id: 'b' })], total: 2 });

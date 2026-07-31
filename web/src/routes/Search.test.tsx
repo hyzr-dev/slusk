@@ -233,6 +233,80 @@ describe('searching state', () => {
 
     releaseSecondPost?.();
   });
+
+  // A terminal contradiction: the session GET fails with nothing cached, so
+  // `session` is undefined and `!session?.done` reads as "still running" — the
+  // view rendered QueryNotice's failure AND "Asking peers on the network…" at
+  // the same time, and nothing ever cleared it, because refetchInterval
+  // returns false with no data so no further request is ever made.
+  //
+  // The cache being empty for a mounted id is not hypothetical: useStopSearch
+  // removes exactly that key (it 404s once stopped), which is what this test
+  // reproduces.
+  it('stops claiming it is working once the session query fails with nothing cached', async () => {
+    const running = wireSession({ done: false, streaming: true, groups: [], total: 0 });
+    let sessionGetFails = false;
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/search' && init?.method === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify(running), { status: 201 }));
+      }
+      if (/^\/api\/search\//.test(url)) {
+        if (sessionGetFails) return Promise.resolve(new Response('gone', { status: 404 }));
+        return Promise.resolve(new Response(JSON.stringify(running), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    }));
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderSearch(qc);
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'obscure bootleg' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+    expect(await screen.findByText(t.search.askingPeers)).toBeInTheDocument();
+
+    // What useStopSearch does to this key, plus the 404 that follows it.
+    sessionGetFails = true;
+    qc.removeQueries({ queryKey: ['search', running.id] });
+
+    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    expect(screen.queryByText(t.search.askingPeers)).not.toBeInTheDocument();
+  });
+});
+
+describe('a failed start', () => {
+  // `searchId` only advances in the 201's onSuccess, so on a FAILED start it
+  // keeps pointing at the previous search. `starting` drops back to false and
+  // the previous search's cards, count and header all reappear looking like
+  // the answer to a query that never ran — and noHitsTitle(submittedQuery)
+  // would name that query outright.
+  it('does not resurrect the previous search\'s results when the next start fails', async () => {
+    const first = wireSession({ groups: [wireGroup({ id: 'g-old', title: 'Old Release' })], total: 1, done: true });
+    let posts = 0;
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/search' && init?.method === 'POST') {
+        posts += 1;
+        if (posts === 1) return Promise.resolve(new Response(JSON.stringify(first), { status: 201 }));
+        return Promise.resolve(new Response('boom', { status: 500 }));
+      }
+      if (/^\/api\/search\//.test(url)) {
+        return Promise.resolve(new Response(JSON.stringify(first), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    }));
+
+    renderSearch();
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+    expect(await screen.findByText('Old Release')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'second' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+
+    expect(await screen.findByText(t.search.startFailed)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Old Release')).not.toBeInTheDocument());
+    expect(screen.queryByText(t.search.resultsCount(1))).not.toBeInTheDocument();
+    // And nothing claims the query that never ran came back empty.
+    expect(screen.queryByText(t.search.noHitsTitle('second'))).not.toBeInTheDocument();
+  });
 });
 
 // Shared setup for the results-view interaction tests below: drives the real

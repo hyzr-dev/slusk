@@ -38,9 +38,10 @@ interface Props {
 
 // Badges derived from whatever attributes the peer actually reported (issue
 // #58 §1/§4) — format, sample-rate/bit-depth quality, and bitrate/VBR.
-// Exported so Search.test.tsx can assert on it directly without depending on
-// DOM order.
-export function cardBadges(group: SearchGroup): string[] {
+// Unexported, like cardMeta below: it was exported for a Search.test.tsx
+// assertion that was never written, and an export nothing imports is a
+// claim about the module's surface that isn't true.
+function cardBadges(group: SearchGroup): string[] {
   const badges: string[] = [];
   if (group.format) badges.push(group.format.toUpperCase());
   const quality = formatQualityLabel(group);
