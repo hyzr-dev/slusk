@@ -239,7 +239,11 @@ func (c *Client) runSearch(ctx context.Context, query string, timeout time.Durat
 		// an excluded phrase, so nothing is gained by putting this on the wire
 		// (issue #319). Report it truthfully rather than silently returning an
 		// empty result set indistinguishable from "nobody has this".
-		return nil, fmt.Errorf("%w: %q", core.ErrSearchExcluded, phrase)
+		//
+		// The check sits in runSearch rather than in Search so that the manual
+		// search path (SearchStream, issue #58) inherits it: a user typing an
+		// excluded phrase gets the real reason instead of "no hits".
+		return fmt.Errorf("%w: %q", core.ErrSearchExcluded, phrase)
 	}
 	deadline := time.Now().Add(timeout)
 
