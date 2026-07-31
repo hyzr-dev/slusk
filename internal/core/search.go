@@ -57,9 +57,13 @@ type SearchFile struct {
 // bumped every time this group's file set changes, letting SearchDelta report
 // exactly which groups changed since a caller's cursor.
 type SearchGroup struct {
-	ID              string
-	Peer            string
-	Folder          string // raw peer folder path, e.g. "@@abc\Music\Radiohead\In Rainbows"
+	ID   string
+	Peer string
+	// Folder is the peer's release directory, SLASH-separated: it comes from
+	// matcher.ReleaseDir, which normalizes the peer's native "\" separators to
+	// "/". A peer path that arrives as `@@abc\Music\Radiohead\In Rainbows` is
+	// therefore stored as "@@abc/Music/Radiohead/In Rainbows".
+	Folder          string
 	Title           string // path.Base(Folder)
 	Parent          string // path.Base(path.Dir(Folder)) — the peer's folder, not a resolved artist
 	TrackCount      int
@@ -82,11 +86,10 @@ type SearchGroup struct {
 // truth source served by GET /api/search/{id} and the base a SearchDelta is
 // computed against. Groups is the complete current set, not a delta.
 type SearchSession struct {
-	ID         string
-	Query      string
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Done       bool
+	ID        string
+	Query     string
+	StartedAt time.Time
+	Done      bool
 	// Streaming reports whether results genuinely arrive incrementally
 	// (native backend: true) or only as one batch at completion (slskd: see
 	// internal/slskd's SearchStreaming).

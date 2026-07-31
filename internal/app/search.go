@@ -30,13 +30,6 @@ import (
 // issue #106).
 var ErrSearchBusy = errors.New("too many concurrent searches")
 
-// ErrSearchNotFound documents the "no such session" outcome the observ HTTP
-// layer maps to 404. Snapshot/Delta/Stop themselves report this as a bool
-// rather than this error (there is nothing to wrap), so this sentinel is
-// declared for symmetry with the rest of the app package's error vocabulary
-// and for any future caller that does want to return it as an error.
-var ErrSearchNotFound = errors.New("search session not found")
-
 // ErrSearchUnavailable is returned by Start when no peer backend is wired
 // (Searches.Peers is nil) — mirrors registerShares' nil-safe convention:
 // searching is a capability that can be entirely absent from a build/config,
@@ -140,7 +133,11 @@ func NewSearches(p SearchesParams) *Searches {
 // backend search on a goroutine derived from Root (not ctx — see Root's doc
 // comment), and returns the session's initial (empty) snapshot immediately,
 // without waiting for any results.
-func (s *Searches) Start(ctx context.Context, query string) (core.SearchSession, error) {
+//
+// ctx is deliberately unused; the session runs on SearchesParams.Root — see
+// its doc comment. The parameter is load-bearing for observ's handler-shaped
+// StartSearchFunc signature, so it stays.
+func (s *Searches) Start(_ context.Context, query string) (core.SearchSession, error) {
 	query = strings.TrimSpace(query)
 	if query == "" || len(query) > searchQueryMaxLen {
 		return core.SearchSession{}, ErrSearchQueryInvalid
@@ -184,6 +181,13 @@ func (s *Searches) Start(ctx context.Context, query string) (core.SearchSession,
 // terminal outcome. forceCtx bounds the whole run independently of whatever
 // timeout behavior the backend itself honors (searchForceCancelGrace).
 func (s *Searches) run(ctx context.Context, sess *searchSession) {
+	// sess.cancel is the session context's own CancelFunc. Cancelling it here
+	// — not only from Stop — is what detaches the session's context node from
+	// SearchesParams.Root, which lives for the whole process: on the ordinary
+	// path (search completes, TTL evicts the session) nothing else ever calls
+	// it, so every search would otherwise retain a cancelCtx on the root
+	// forever. CancelFunc is idempotent, so Stop calling it too is fine.
+	defer sess.cancel()
 	forceCtx, forceCancel := context.WithTimeout(ctx, s.timeout+searchForceCancelGrace)
 	defer forceCancel()
 
@@ -254,10 +258,11 @@ func (s *Searches) liveCountLocked() int {
 	return n
 }
 
-// evictLocked removes every FINISHED session whose FinishedAt is older than
-// searchSessionTTL. A still-running session is never evicted here — it is
-// bounded instead by run's forceCtx, which will finish it (with an error)
-// on its own. Must be called with s.mu held.
+// evictLocked removes every session expired() reports as no longer servable:
+// a finished one past searchSessionTTL, or — as a defensive fallback that is
+// not expected to fire — a still-running one past its own force-cancel
+// deadline, since run's forceCtx should already have finished it long before.
+// Must be called with s.mu held.
 func (s *Searches) evictLocked(now time.Time) {
 	for id, sess := range s.sessions {
 		if sess.expired(now, s.timeout) {
@@ -383,16 +388,15 @@ func (sess *searchSession) snapshot() core.SearchSession {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].ID < groups[j].ID })
 	return core.SearchSession{
-		ID:         sess.id,
-		Query:      sess.query,
-		StartedAt:  sess.startedAt,
-		FinishedAt: sess.finishedAt,
-		Done:       sess.done,
-		Streaming:  sess.streaming,
-		Truncated:  sess.truncated,
-		Err:        sess.err,
-		Total:      sess.total,
-		Groups:     groups,
+		ID:        sess.id,
+		Query:     sess.query,
+		StartedAt: sess.startedAt,
+		Done:      sess.done,
+		Streaming: sess.streaming,
+		Truncated: sess.truncated,
+		Err:       sess.err,
+		Total:     sess.total,
+		Groups:    groups,
 	}
 }
 

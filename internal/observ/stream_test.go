@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2368,6 +2369,208 @@ func TestStreamEndpointNoSearchParamNeverSendsSearchEvent(t *testing.T) {
 
 	if strings.Contains(rec.String(), "event: search") {
 		t.Errorf("no ?search=: expected no search event, got %q", rec.String())
+	}
+}
+
+// TestStreamHubSearchScopedSubscriberStillGetsInvalidateAndThroughput guards
+// tick's block ORDER. The `event: search` block ends every iteration in a
+// `continue`, so it must stay LAST in tick's per-subscriber loop.
+//
+// The uncovered case this pins is specifically a search-scoped subscriber on a
+// tick where its SEARCH HAS NOTHING NEW — the `len(delta.Groups) == 0 && ...`
+// early `continue`. That is the ordinary steady state of a live search (the
+// hub ticks at 1Hz, results do not arrive every tick), and if the search block
+// were hoisted above the invalidate/throughput blocks those subscribers would
+// silently stop receiving either event for the rest of the connection. #275's
+// own tests only cover subscribers with NO ?search= scope, so they do not
+// reach this path. This branch was rebased over #275 by hand, so this is the
+// guard against the next such merge.
+//
+// Table-driven over wantThroughput because the two events sit on opposite
+// sides of a guard the search block must not be hoisted past either.
+func TestStreamHubSearchScopedSubscriberStillGetsInvalidateAndThroughput(t *testing.T) {
+	tests := []struct {
+		name           string
+		wantThroughput bool
+	}{
+		{name: "search scope with throughput", wantThroughput: true},
+		{name: "search scope without throughput", wantThroughput: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobsFn, setTitle, _ := newInvalidateFixture()
+			var tmu sync.Mutex
+			sample := core.ThroughputSample{At: time.Now(), BytesPerSecond: 1024}
+			throughputFn := func(context.Context) (core.ThroughputSeries, error) {
+				tmu.Lock()
+				defer tmu.Unlock()
+				return core.ThroughputSeries{Download: []core.ThroughputSample{sample}}, nil
+			}
+			// Deliberately unchanging: after subscribe's initial frame the
+			// search block always takes its "nothing to send" continue.
+			searchDeltaFn := func(id string, since int) (core.SearchDelta, bool) {
+				delta := core.SearchDelta{ID: id, Seq: 1, Streaming: true}
+				if since < 1 {
+					delta.Groups = []core.SearchGroup{{ID: "g1", Peer: "p1", Version: 1}}
+				}
+				return delta, true
+			}
+			hub := newStreamHub(jobsFn, noopLiveTransfers, throughputFn, noopTransferBytes, nil, searchDeltaFn, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Millisecond)
+			id, _, tch, ich, sch, _, _, _ := hub.subscribe(context.Background(), 0, nil, tt.wantThroughput, testSearchID)
+			defer hub.unsubscribe(id)
+
+			// Drain whatever subscribe already delivered, so every assertion
+			// below is about what tick produced.
+			select {
+			case <-tch:
+			default:
+			}
+			select {
+			case <-sch:
+			default:
+			}
+
+			setTitle("B")
+			hub.correlationTick(context.Background())
+			time.Sleep(2 * time.Millisecond)
+			// A fresh sample, newer than the one subscribe already watermarked.
+			tmu.Lock()
+			sample = core.ThroughputSample{At: time.Now(), BytesPerSecond: 2048}
+			tmu.Unlock()
+			hub.tick(context.Background())
+
+			select {
+			case got := <-ich:
+				if got.Generation != 1 {
+					t.Errorf("Generation = %d, want 1", got.Generation)
+				}
+			default:
+				t.Fatal("a ?search=-scoped subscriber must still receive an invalidate frame; tick's search block must stay after the invalidate block")
+			}
+
+			select {
+			case got := <-tch:
+				if !tt.wantThroughput {
+					t.Fatalf("wantThroughput=false subscriber received a throughput frame: %+v", got)
+				}
+				if len(got.Download) == 0 {
+					t.Errorf("throughput frame carried no download samples: %+v", got)
+				}
+			default:
+				if tt.wantThroughput {
+					t.Fatal("a ?search=-scoped subscriber must still receive a throughput frame; tick's search block must stay after the throughput block")
+				}
+			}
+
+			// Sanity check on the fixture itself: the assertions above are only
+			// meaningful if the search block really did take its early
+			// `continue` this tick, i.e. produced no frame of its own.
+			select {
+			case got := <-sch:
+				t.Fatalf("fixture produced a search frame; this test must exercise the no-change continue path, got %+v", got)
+			default:
+			}
+		})
+	}
+}
+
+// TestStreamHubSearchTruncatedFlipReachesSubscriberWithoutDone pins the
+// failure the "is there anything to send" predicate used to have: once
+// app.searchMaxResults is reached every later result is dropped, so no group
+// version changes and the session's Seq freezes. A delta whose ONLY change is
+// Truncated flipping to true therefore produced no frame at all until Done
+// flipped — on a broad query that saturates in the first seconds of a 60s
+// search, the UI showed a frozen count and no "showing the first N" notice for
+// the rest of the run.
+func TestStreamHubSearchTruncatedFlipReachesSubscriberWithoutDone(t *testing.T) {
+	var mu sync.Mutex
+	truncated := false
+	searchDeltaFn := func(id string, since int) (core.SearchDelta, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		delta := core.SearchDelta{ID: id, Seq: 1, Total: 2000, Streaming: true, Truncated: truncated}
+		if since < 1 {
+			delta.Groups = []core.SearchGroup{{ID: "g1", Peer: "p1", Version: 1}}
+		}
+		return delta, true
+	}
+	hub := newStreamHub(noopJobs, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, searchDeltaFn, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	id, _, _, _, sch, _, _, initialSearch := hub.subscribe(context.Background(), 0, nil, false, testSearchID)
+	defer hub.unsubscribe(id)
+
+	if initialSearch.Truncated {
+		t.Fatalf("initial frame already truncated, fixture is wrong: %+v", initialSearch)
+	}
+
+	// Nothing changed: no frame.
+	hub.tick(context.Background())
+	select {
+	case got := <-sch:
+		t.Fatalf("unchanged delta produced a frame: %+v", got)
+	default:
+	}
+
+	// Seq and Groups are unchanged — only Truncated flips. Done stays false.
+	mu.Lock()
+	truncated = true
+	mu.Unlock()
+	hub.tick(context.Background())
+	select {
+	case got := <-sch:
+		if !got.Truncated {
+			t.Fatalf("frame does not carry Truncated: %+v", got)
+		}
+		if got.Done {
+			t.Fatalf("Done flipped too; this test must exercise Truncated alone: %+v", got)
+		}
+	default:
+		t.Fatal("the truncated flip produced no frame; a saturated search would show a frozen count with no notice until Done")
+	}
+
+	// And it is not resent every tick once the subscriber knows.
+	hub.tick(context.Background())
+	select {
+	case got := <-sch:
+		t.Fatalf("truncated frame resent after the subscriber already had it: %+v", got)
+	default:
+	}
+}
+
+// TestMergeSearchGroupsNeverDropsGroups pins the decision to leave the union
+// UNCAPPED. It used to truncate at 500 entries of a slice sorted by group id
+// (a sha256 prefix), so an arbitrary subset vanished — and because the
+// subscriber's searchSeq cursor had already advanced past those versions and
+// the frontend does not poll REST during a live search, they were never
+// resent. The union is keyed by group id and app.searchMaxResults bounds a
+// session at 2000 files (hence at most 2000 groups), so it is already bounded
+// without a cap.
+func TestMergeSearchGroupsNeverDropsGroups(t *testing.T) {
+	const total = 1200
+	var old, next []searchGroupDTO
+	for i := range total {
+		g := searchGroupDTO{ID: fmt.Sprintf("%04x", i), Peer: "p1"}
+		if i%2 == 0 {
+			old = append(old, g)
+		} else {
+			next = append(next, g)
+		}
+	}
+
+	merged := mergeSearchGroups(old, next)
+	if len(merged) != total {
+		t.Fatalf("merged %d groups, want all %d — a cap here drops groups permanently", len(merged), total)
+	}
+	seen := make(map[string]struct{}, len(merged))
+	for _, g := range merged {
+		seen[g.ID] = struct{}{}
+	}
+	for i := range total {
+		if _, ok := seen[fmt.Sprintf("%04x", i)]; !ok {
+			t.Fatalf("group %04x was dropped by the merge", i)
+		}
+	}
+	if !sort.SliceIsSorted(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID }) {
+		t.Error("merged groups are not sorted by id")
 	}
 }
 

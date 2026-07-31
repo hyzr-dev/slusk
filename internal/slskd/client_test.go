@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -670,106 +671,130 @@ func TestToCoreMapsAttributesAllPresent(t *testing.T) {
 	}
 }
 
-// TestSearchStreamDedupesGrowingResponsesAndPreservesCompletionOrdering
-// verifies SearchStream harvests newly-seen (username, filename) pairs as
-// responseCount grows, never re-emits a pair it already emitted, and — the
-// non-negotiable from CLAUDE.md/the plan — preserves isComplete-before-delete
-// ordering unchanged from Search/searchOnce: the search is deleted only
-// after the poll loop observes isComplete AND the final harvest succeeds.
-func TestSearchStreamDedupesGrowingResponsesAndPreservesCompletionOrdering(t *testing.T) {
-	var mu sync.Mutex
-	var seq []string
-	var polls int
-
-	respond := func(w http.ResponseWriter, files string) {
-		w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[` + files + `]}]`))
+// TestSearchStreamDelegatesToSearch pins the two properties SearchStream gets
+// for free by delegating to Search instead of re-implementing the POST → poll
+// → isComplete → harvest → delete sequence (issue #58 review):
+//
+//   - "inherits the empty-result retry": a first attempt that finishes with
+//     zero responses must be retried, exactly as Search documents. An
+//     independent SearchStream implementation without the retry reports "no
+//     hits" here, and the manual-search UI then tells the user nobody on the
+//     network is sharing the album — which is false.
+//   - "preserves delete-after-harvest ordering": the search is DELETEd only
+//     after its responses are in hand (the "affected 0 rows" race recorded on
+//     stopAndHarvest), and everything arrives as exactly one emit call, since
+//     slskd cannot stream (see SearchStreaming).
+func TestSearchStreamDelegatesToSearch(t *testing.T) {
+	tests := []struct {
+		name           string
+		emptyAttempts  int // how many search attempts return zero responses
+		wantBatches    int
+		wantPOSTCount  int
+		wantFilenames  []string
+		wantDeleteLast bool
+	}{
+		{
+			name:           "inherits the empty-result retry",
+			emptyAttempts:  1,
+			wantBatches:    1,
+			wantPOSTCount:  2,
+			wantFilenames:  []string{"a.flac"},
+			wantDeleteLast: true,
+		},
+		{
+			name:           "preserves delete-after-harvest ordering",
+			emptyAttempts:  0,
+			wantBatches:    1,
+			wantPOSTCount:  1,
+			wantFilenames:  []string{"a.flac"},
+			wantDeleteLast: true,
+		},
 	}
-	const file1 = `{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}`
-	const file2 = `{"filename":"b.flac","size":2,"bitRate":900,"isLocked":false}`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var seq []string
+			posts := 0
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		seq = append(seq, r.Method+" "+r.URL.Path)
-		mu.Unlock()
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
-			json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				seq = append(seq, r.Method+" "+r.URL.Path)
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches" {
+					posts++
+				}
+				attempt := posts
+				mu.Unlock()
+
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+					json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+					json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+					if attempt <= tt.emptyAttempts {
+						w.Write([]byte(`[]`))
+						return
+					}
+					w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+				case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
+					w.WriteHeader(http.StatusNoContent)
+				}
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, "k")
+			c.pollInterval = 5 * time.Millisecond
+			c.searchBackoff = time.Millisecond
+
+			var batches [][]core.SearchResult
+			emit := func(batch []core.SearchResult) { batches = append(batches, batch) }
+			if err := c.SearchStream(context.Background(), "q", time.Second, emit); err != nil {
+				t.Fatalf("SearchStream: %v", err)
+			}
+
+			if len(batches) != tt.wantBatches {
+				t.Fatalf("emit called %d times, want %d (slskd delivers one batch at completion)", len(batches), tt.wantBatches)
+			}
+			var got []string
+			for _, b := range batches {
+				for _, r := range b {
+					got = append(got, r.Filename)
+				}
+			}
+			if !slices.Equal(got, tt.wantFilenames) {
+				t.Fatalf("emitted %v, want %v", got, tt.wantFilenames)
+			}
+
 			mu.Lock()
-			polls++
-			p := polls
-			mu.Unlock()
-			switch {
-			case p == 1:
-				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false, "responseCount": 1})
-			case p == 2:
-				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false, "responseCount": 2})
-			default:
-				json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true, "responseCount": 2})
+			defer mu.Unlock()
+			if posts != tt.wantPOSTCount {
+				t.Fatalf("POST /api/v0/searches happened %d times, want %d: %v", posts, tt.wantPOSTCount, seq)
 			}
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
-			mu.Lock()
-			p := polls
-			mu.Unlock()
-			if p <= 1 {
-				respond(w, file1)
-			} else {
-				respond(w, file1+","+file2)
+			if tt.wantDeleteLast {
+				// Checked per attempt, not across the whole sequence: a retry
+				// legitimately produces POST, harvest, DELETE, POST, harvest,
+				// DELETE, so a global "first delete after last harvest" test
+				// would be wrong. What must hold is that no attempt ever
+				// deletes its search before harvesting it.
+				harvested, deletes := false, 0
+				for _, s := range seq {
+					switch s {
+					case "POST /api/v0/searches":
+						harvested = false
+					case "GET /api/v0/searches/s1/responses":
+						harvested = true
+					case "DELETE /api/v0/searches/s1":
+						if !harvested {
+							t.Fatalf("delete happened before this attempt harvested its responses: %v", seq)
+						}
+						deletes++
+					}
+				}
+				if deletes == 0 {
+					t.Fatalf("search was never deleted: %v", seq)
+				}
 			}
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}))
-	defer srv.Close()
-
-	c := New(srv.URL, "k")
-	c.pollInterval = 5 * time.Millisecond
-
-	var mu2 sync.Mutex
-	var emitted []core.SearchResult
-	emit := func(batch []core.SearchResult) {
-		mu2.Lock()
-		defer mu2.Unlock()
-		emitted = append(emitted, batch...)
-	}
-	if err := c.SearchStream(context.Background(), "q", time.Second, emit); err != nil {
-		t.Fatalf("SearchStream: %v", err)
-	}
-
-	mu2.Lock()
-	defer mu2.Unlock()
-	if len(emitted) != 2 {
-		t.Fatalf("emitted %d results, want 2 (no duplicate emission of a.flac): %+v", len(emitted), emitted)
-	}
-	seen := map[string]bool{}
-	for _, r := range emitted {
-		if seen[r.Filename] {
-			t.Fatalf("filename %q emitted more than once", r.Filename)
-		}
-		seen[r.Filename] = true
-	}
-	if !seen["a.flac"] || !seen["b.flac"] {
-		t.Fatalf("expected both files emitted, got %+v", emitted)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	lastResponsesIdx, deleteIdx := -1, -1
-	for i, s := range seq {
-		switch s {
-		case "GET /api/v0/searches/s1/responses":
-			lastResponsesIdx = i
-		case "DELETE /api/v0/searches/s1":
-			if deleteIdx == -1 {
-				deleteIdx = i
-			}
-		}
-	}
-	if deleteIdx == -1 {
-		t.Fatalf("search was never deleted, sequence: %v", seq)
-	}
-	if lastResponsesIdx == -1 || deleteIdx < lastResponsesIdx {
-		t.Fatalf("delete happened before the final harvest, sequence: %v", seq)
+		})
 	}
 }
 

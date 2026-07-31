@@ -430,14 +430,24 @@ func mapSearchResult(username string, freeSlot bool, uploadSpeed, queueLength in
 
 	var duration, sampleRate, bitDepth int
 	bitrate := 0
+	bitrateSeen := false
 	var variableBitRate bool
 	for _, attribute := range file.Attributes {
 		switch attribute.Code {
 		case peer.Bitrate:
-			// Preserved byte-for-byte from before the switch: an out-of-range
-			// bitrate discards the whole file (it feeds matcher.passesFloor and
-			// therefore automation), unlike the new branches below which merely
-			// leave their field at zero on the same failure.
+			// First Bitrate attribute wins; later ones are ignored. This is
+			// the `break` the pre-switch loop had, expressed so the loop can
+			// still reach the other codes below: a file carrying a valid
+			// bitrate followed by an out-of-range one keeps the first value
+			// and is accepted, exactly as before. Only a FIRST out-of-range
+			// bitrate discards the whole file, because BitRate feeds
+			// matcher.passesFloor and therefore automation — unlike the
+			// branches below, which merely leave their field at zero on the
+			// same conversion failure.
+			if bitrateSeen {
+				continue
+			}
+			bitrateSeen = true
 			value, ok := checkedUint32ToInt(attribute.Value)
 			if !ok {
 				return core.SearchResult{}, false

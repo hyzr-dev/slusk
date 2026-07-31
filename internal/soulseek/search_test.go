@@ -814,6 +814,75 @@ func TestMapSearchResultOutOfRangeNewAttributeLeavesFieldZero(t *testing.T) {
 	}
 }
 
+// TestMapSearchResultFirstBitrateAttributeWins guards the regression the
+// attribute `switch` introduced when it replaced a loop that did
+// `bitrate = value; break` on the first peer.Bitrate attribute: without an
+// explicit first-wins guard, a switch inside the range loop has no way to stop
+// and the LAST Bitrate attribute silently wins instead.
+//
+// This is not cosmetic — BitRate feeds matcher.passesFloor, so which of two
+// reported bitrates is kept decides whether automation keeps the candidate.
+//
+// The second sub-case (a valid bitrate followed by an out-of-range one, which
+// must still be ACCEPTED with the first value, since the loop never reads the
+// second) can only be exercised where checkedUint32ToInt can actually fail —
+// on a 64-bit int every uint32 converts cleanly — hence the same 32-bit skip
+// TestMapSearchResultOutOfRangeNewAttributeLeavesFieldZero uses.
+func TestMapSearchResultFirstBitrateAttributeWins(t *testing.T) {
+	tests := []struct {
+		name        string
+		attributes  []peer.Attribute
+		want        core.SearchResult
+		only32Bit   bool
+		alsoAsserts string
+	}{
+		{
+			name: "two valid bitrates, the first wins",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: 128},
+			},
+			want: core.SearchResult{Username: "u", Filename: "f", Size: 1, BitRate: 320},
+		},
+		{
+			name: "later attributes are still read after the first bitrate",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: 128},
+				{Code: peer.Duration, Value: 245},
+				{Code: peer.SampleRate, Value: 44100},
+			},
+			want: core.SearchResult{
+				Username: "u", Filename: "f", Size: 1,
+				BitRate: 320, Duration: 245, SampleRate: 44100,
+			},
+		},
+		{
+			name: "valid bitrate then out-of-range one keeps the file",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: math.MaxUint32},
+			},
+			want:      core.SearchResult{Username: "u", Filename: "f", Size: 1, BitRate: 320},
+			only32Bit: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.only32Bit && uint64(^uint(0))>>32 != 0 {
+				t.Skip("out-of-range uint32->int only fails on 32-bit platforms")
+			}
+			got, ok := mapSearchResult("u", false, 0, 0, peer.File{Name: "f", Size: 1, Attributes: tt.attributes})
+			if !ok {
+				t.Fatal("mapSearchResult discarded the file; want it accepted with the FIRST bitrate")
+			}
+			if got != tt.want {
+				t.Fatalf("mapSearchResult = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestSearchStreamEmitsIncrementallyAndMatchesBlockingSearch verifies
 // SearchStream delivers results across multiple emit calls (proving the
 // batch/drain flush actually fires below searchStreamBatch) and that the

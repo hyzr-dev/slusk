@@ -688,6 +688,14 @@ type streamSubscriber struct {
 	// detect the flip from false to true even on a tick with no changed
 	// groups (see changedSinceLast's analogous role for jobs/detail).
 	searchDone bool
+	// searchTruncated is the Truncated flag last sent to this subscriber, for
+	// exactly the same reason as searchDone — and it is not a theoretical
+	// case: once app.searchMaxResults is hit, every later result is DROPPED,
+	// so no group version ever changes again and the session's Seq freezes.
+	// Without this field the `truncated: true` flip would produce no frame at
+	// all until Done flipped, leaving a broad query showing a frozen count and
+	// no "showing the first 2000" notice for the rest of its run.
+	searchTruncated bool
 	// searchExpiredSent guards against sending more than one `expired: true`
 	// frame to a subscriber whose searchID never resolves (or stops
 	// resolving) — once sent, the connection should fall silent on this
@@ -1193,6 +1201,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 			initialSearch = toSearchPayload(delta)
 			sub.searchSeq = delta.Seq
 			sub.searchDone = delta.Done
+			sub.searchTruncated = delta.Truncated
 		} else {
 			initialSearch = searchPayload{ID: searchID, Expired: true}
 			sub.searchExpiredSent = true
@@ -1422,11 +1431,12 @@ func (h *streamHub) tick(ctx context.Context) {
 			}
 			continue
 		}
-		if len(delta.Groups) == 0 && delta.Done == sub.searchDone {
+		if len(delta.Groups) == 0 && delta.Done == sub.searchDone && delta.Truncated == sub.searchTruncated {
 			continue
 		}
 		sub.searchSeq = delta.Seq
 		sub.searchDone = delta.Done
+		sub.searchTruncated = delta.Truncated
 		sendLatestSearch(sub.searchCh, toSearchPayload(delta))
 	}
 }
@@ -1574,6 +1584,19 @@ func sendLatestThroughput(tch chan throughputPayload, payload throughputPayload)
 // mergeSearchGroups unions two ticks' worth of changed groups by group id,
 // the newer entry winning when both changed the same group — the same
 // "union, don't discard" shape mergeJobsDelta uses for job deltas.
+//
+// Deliberately UNCAPPED, unlike capThroughputSamples. The union is keyed by
+// group id, so it can never hold more groups than the session itself has
+// distinct (peer, releaseDir) pairs — and app.searchMaxResults already bounds
+// a session at 2000 accepted files, hence at most 2000 groups. That is the
+// stalled-reader bound throughput lacks (a throughput window grows by a
+// sample every second forever), so no second cap is needed here. A cap would
+// be actively harmful: the slice is sorted by group id, a sha256 prefix, so
+// truncating it drops an arbitrary subset — and because the subscriber's
+// searchSeq cursor has already advanced past those versions and the frontend
+// does not poll REST during a live search, a dropped group is never resent.
+// That is exactly the permanent hole this accumulate design exists to
+// prevent.
 func mergeSearchGroups(old, next []searchGroupDTO) []searchGroupDTO {
 	if len(old) == 0 {
 		return next
@@ -1590,22 +1613,8 @@ func mergeSearchGroups(old, next []searchGroupDTO) []searchGroupDTO {
 		merged = append(merged, g)
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
-	if len(merged) > searchMaxDeltaGroups {
-		merged = merged[:searchMaxDeltaGroups]
-	}
 	return merged
 }
-
-// searchMaxDeltaGroups bounds sendLatestSearch's accumulation across a
-// displaced frame, the same stalled-reader rationale streamThroughputCap
-// exists for: without a cap, a subscriber that never reads (a backgrounded
-// tab) would grow the queued slice by however many groups change every tick,
-// forever. Deliberately generous relative to searchMaxResults/typical group
-// sizes — unlike throughput's fixed-size window, a search's own natural
-// bound (searchMaxSessions.searchMaxResults worth of files, folded into far
-// fewer groups) already keeps this cheap; the cap exists as a backstop, not
-// a routine truncation path.
-const searchMaxDeltaGroups = 500
 
 // sendLatestSearch delivers payload to sch without ever blocking — the same
 // non-blocking drain-and-merge shape as sendLatest/sendLatestThroughput, but
@@ -1668,21 +1677,6 @@ func writeEvent(w http.ResponseWriter, rc *http.ResponseController, name string,
 	return rc.Flush() == nil
 }
 
-// parseStreamJobIDs parses the ?jobs= comma-separated job-id list (issue
-// #258). An absent or empty parameter is not an error — it means the
-// connection carries no job-list scope, so it will simply never receive a
-// `jobs` frame (issue #268 — see this file's package comment). Every entry
-// must parse as a positive int64; duplicates are silently deduplicated (the
-// returned
-// set), but a non-numeric or non-positive entry (including a blank one, from
-// e.g. a stray comma) is a 400, and so is more than streamMaxJobScope
-// distinct ids — the same rationale streamMaxSubscribers has: an id array is
-// free for a client to send and expensive for the hub to serve. The cap is
-// enforced inside the loop, immediately after each insertion, rather than
-// once at the end against the fully-built map: a well-formed request up to
-// the server's header-size limit could otherwise force allocating and
-// populating a map with hundreds of thousands of entries before being
-// rejected.
 // searchSessionIDPattern matches app.newSearchSessionID's output: 16 bytes of
 // crypto/rand hex-encoded, i.e. exactly 32 lowercase hex characters. Used to
 // validate ?search= strictly enough that a malformed id is a 400 rather than
@@ -1691,6 +1685,20 @@ func writeEvent(w http.ResponseWriter, rc *http.ResponseController, name string,
 // see registerStream's doc comment on that query param.
 var searchSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// parseStreamJobIDs parses the ?jobs= comma-separated job-id list (issue
+// #258). An absent or empty parameter is not an error — it means the
+// connection carries no job-list scope, so it will simply never receive a
+// `jobs` frame (issue #268 — see this file's package comment). Every entry
+// must parse as a positive int64; duplicates are silently deduplicated (the
+// returned set), but a non-numeric or non-positive entry (including a blank
+// one, from e.g. a stray comma) is a 400, and so is more than
+// streamMaxJobScope distinct ids — the same rationale streamMaxSubscribers
+// has: an id array is free for a client to send and expensive for the hub to
+// serve. The cap is enforced inside the loop, immediately after each
+// insertion, rather than once at the end against the fully-built map: a
+// well-formed request up to the server's header-size limit could otherwise
+// force allocating and populating a map with hundreds of thousands of entries
+// before being rejected.
 func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 	if raw == "" {
 		return nil, nil

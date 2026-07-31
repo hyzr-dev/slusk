@@ -97,11 +97,11 @@ func ReleaseDir(filename string) string {
 // across those variants.
 var leadingTrackNumber = regexp.MustCompile(`^(\d{1,3})\b`)
 
-// TrackKey returns the track a file belongs to within its release directory,
+// trackKey returns the track a file belongs to within its release directory,
 // used to deduplicate format/naming variants of the same track. Files without
 // a recognizable leading track number get a unique key (their own filename) so
 // they are never wrongly merged with an unrelated file.
-func TrackKey(filename string) string {
+func trackKey(filename string) string {
 	base := path.Base(strings.ReplaceAll(filename, `\`, "/"))
 	if m := leadingTrackNumber.FindStringSubmatch(base); m != nil {
 		return m[1]
@@ -118,7 +118,7 @@ func ExtOf(filename string) string {
 // dedupeTracks collapses a release down to a single format (highest
 // FormatScore; ties broken by larger bucket then extension name, for
 // determinism) and, within that format, the single file per track (as
-// identified by TrackKey). A release is one format end to end: a track only
+// identified by trackKey). A release is one format end to end: a track only
 // available in a losing format is dropped rather than mixed in, so Lidarr
 // never receives a part-FLAC, part-MP3 album from one candidate.
 func dedupeTracks(files []core.SearchResult) []core.SearchResult {
@@ -146,7 +146,7 @@ func dedupeTracks(files []core.SearchResult) []core.SearchResult {
 	best := map[string]core.SearchResult{}
 	order := make([]string, 0, len(byExt[bestExt]))
 	for _, f := range byExt[bestExt] {
-		k := TrackKey(f.Filename)
+		k := trackKey(f.Filename)
 		if _, ok := best[k]; !ok {
 			order = append(order, k)
 			best[k] = f
