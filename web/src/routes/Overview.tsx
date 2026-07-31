@@ -11,7 +11,7 @@ import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice'
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
-import { formatAge, formatDuration, formatShortTime, formatSize, formatSpeed, percent } from '../format';
+import { formatAge, formatDuration, formatShortTime, formatSizeCompact, formatSpeed, percent } from '../format';
 import { t } from '../strings';
 import styles from './Overview.module.css';
 
@@ -266,7 +266,7 @@ export default function Overview() {
                   ? t.overview.queuePosShort(job.queuePosition ?? 0)
                   : job.state === 'IMPORTING'
                     ? t.jobs.verifying
-                    : `${formatSize(job.bytesDone)} / ${formatSize(job.bytesTotal)}`;
+                    : `${formatSizeCompact(job.bytesDone)} / ${formatSizeCompact(job.bytesTotal)}`;
 
                 return (
                   <div
