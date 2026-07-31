@@ -162,6 +162,21 @@ export function formatAge(seconds: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
+// A track's own measured length, mm:ss — distinct from formatEta (a duration
+// still to come) and formatDuration (an already-measured span rendered in
+// the same units formatEta uses, i.e. "3 min"): a Soulseek search result's
+// per-track duration is short enough, and compared often enough against
+// other tracks in the same folder, that the clock-face mm:ss reads better
+// than "4 min". Undefined (the peer sent no Duration attribute — issue #58
+// §1) renders as '—', matching every other optional search-result field.
+export function formatTrackDuration(seconds: number | undefined): string {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const whole = Math.round(seconds);
+  const m = Math.floor(whole / 60);
+  const s = (whole % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
 // Collation for file listings. `numeric` makes "02" sort before "10" instead of
 // after it, which is the whole trick here: a Soulseek transfer carries no track
 // field — when a track number exists at all it is part of the filename — so one

@@ -5,7 +5,14 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
-import { normalizeJob, normalizeJobDetail, normalizeJobPage, normalizeStatusReport } from './normalize';
+import {
+  normalizeJob,
+  normalizeJobDetail,
+  normalizeJobPage,
+  normalizeSearchGroup,
+  normalizeSearchSession,
+  normalizeStatusReport,
+} from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -13,6 +20,7 @@ import type {
   ConfigUpdateResult,
   ConnectionTestResult,
   Conversation,
+  CreateJobRequest,
   Job,
   JobDetail,
   JobEvent,
@@ -22,6 +30,8 @@ import type {
   Peer,
   PrivateMessage,
   ScopedLivePayload,
+  SearchPayload,
+  SearchSession,
   ShareRescanResult,
   SharesReport,
   ThreadPage,
@@ -30,6 +40,7 @@ import type {
   WireJob,
   WireJobDetail,
   WireJobPage,
+  WireSearchSession,
   WireStatusReport,
 } from './types';
 
@@ -98,6 +109,25 @@ const THREAD_INTERVAL = 3000;
 // set unpins before the next `event: invalidate`-triggered refetch (or
 // JOBS_INTERVAL's safety-net poll) would have corrected it anyway.
 const LIVE_JOB_FRESH_MS = 10000;
+// Fallback poll for a manual search session (issue #58), used only while the
+// SSE connection isn't the one keeping it current: a batching backend
+// (streaming === false, i.e. slskd — see core.SearchSession's doc comment)
+// never gets incremental frames at all, and a genuinely dead connection
+// (queryKeys.live === null — the shared EventSource errored) can't deliver
+// them either. Matches JOB_DETAIL_INTERVAL's cadence: a search view is
+// actively watched, unlike JOBS_INTERVAL's idle-safety-net profile.
+const SEARCH_POLL_INTERVAL = 3000;
+// How long an open SSE connection may deliver no `event: search` frame at all
+// before useSearchSession stops trusting it and arms the poll anyway.
+//
+// The connection being *up* is not evidence that frames are arriving: a hub
+// bug, a dropped sendLatestSearch, or a proxy buffering the response body all
+// leave EventSource perfectly healthy while nothing reaches the view — and
+// that open-but-silent state is precisely what the REST fallback exists to
+// cover. Two poll intervals, so a genuinely sparse but working search (peers
+// trickling in) costs at most one redundant GET, which merges losslessly
+// anyway (see mergeSearchSession) rather than dropping anything.
+const SEARCH_STREAM_STALE_MS = 2 * SEARCH_POLL_INTERVAL;
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -135,6 +165,15 @@ export const queryKeys = {
   // new scope, see issue #276. null rather than undefined because
   // setQueryData ignores undefined; see the comment there).
   live: ['live'] as const,
+  // One manual search session (issue #58). Written by two independent
+  // sources sharing this same key — useSearchSession's queryFn (the REST
+  // snapshot, and the fallback poll's re-fetch of it) and api/stream.tsx's
+  // `search` listener (incremental group deltas, folded in by
+  // replaceSearchGroups) — unlike queryKeys.live, there is no separate
+  // live-only cache to pick between at read time: both writers produce the
+  // same SearchSession shape, so the stream's writes are ordinary
+  // setQueryData patches onto the REST-seeded object, not a parallel source.
+  search: (id: string) => ['search', id] as const,
 };
 
 // Reads the SSE stream's latest frame (see api/stream.tsx's StreamProvider)
@@ -275,6 +314,99 @@ export function mergeThroughputSamples(existing: ThroughputSample[], incoming: T
   const deduped = incoming.filter((s) => !seen.has(s.at));
   if (deduped.length === 0) return existing;
   return [...existing, ...deduped].slice(-THROUGHPUT_CAP);
+}
+
+// Folds one `event: search` frame into the cached session for its id
+// (mirrors replaceLiveJobs' by-id merge, but patches a single session object
+// in place rather than picking between two independent caches — see
+// queryKeys.search's doc comment for why that's safe here). `prev` is either
+// the REST snapshot useSearchSession/useStartSearch already cached, or an
+// earlier frame already folded in — both share the same SearchSession shape,
+// so this is always a legitimate base to patch onto. A frame for a
+// different id than `prev` (a stale frame arriving after the view has moved
+// to a new search — the connection reopens on every new search, but a frame
+// already in flight when it does could still land) is ignored outright, and
+// so is a frame arriving before anything has been fetched yet (`prev`
+// undefined) — the imminent REST response will carry the same information.
+export function replaceSearchGroups(prev: SearchSession | undefined, frame: SearchPayload): SearchSession | undefined {
+  if (!prev || prev.id !== frame.id) return prev;
+  if (frame.expired) {
+    // The session was evicted server-side between subscribing and this
+    // frame (or a reconnect landed on an id that has since finished and
+    // aged out) — no more `search` frames will ever arrive for this id.
+    // Mark it done so the view stops rendering a "searching…" state, but
+    // keep whatever groups are already cached rather than blanking them,
+    // and record `expired` so the header can say the session was evicted
+    // rather than claiming the search finished (see SearchSession).
+    return prev.done && prev.expired ? prev : { ...prev, done: true, expired: true };
+  }
+  const byId = new Map(prev.groups.map((g) => [g.id, g]));
+  for (const g of frame.groups ?? []) byId.set(g.id, normalizeSearchGroup(g));
+  return {
+    ...prev,
+    groups: Array.from(byId.values()),
+    total: frame.total,
+    done: frame.done,
+    streaming: frame.streaming,
+    truncated: frame.truncated ?? prev.truncated,
+    error: frame.error || prev.error,
+    // Local clock, stamped on every frame actually folded in — the freshness
+    // signal useSearchSession's fallback poll arms on. See SearchSession.
+    streamedAt: Date.now(),
+  };
+}
+
+// Folds a REST snapshot onto whatever is already cached for the same session,
+// rather than replacing it (issue #58 review).
+//
+// The two writers of queryKeys.search(id) can be live at the same time — the
+// stream blips, `onerror` arms the poll, EventSource reconnects on its own,
+// and now both are running. A GET computed at T1 that lands after a frame
+// folded in at T2 > T1 would, on a plain replace, wipe the groups that frame
+// added; the server's per-subscriber cursor has already advanced past them, so
+// they are never resent and the cards visibly flicker out mid-search.
+//
+// Merging by group id rather than splitting the two into separate caches (the
+// shape replaceLiveJobs uses) is deliberate: there is no "which source wins"
+// question to answer here. A streamed `search` frame is a cumulative delta
+// over a cursor, not a competing snapshot of the same row, so union-by-id is
+// the correct semantics for BOTH writers and a split would only force this
+// accumulation to exist twice. Where both sides hold the same group id the
+// one with more files wins — see the loop below. The scalars REST does own are taken from the
+// fetched snapshot, except the three that are monotonic over a session's life
+// (`done`, `expired`, `truncated`) and `total`, which are OR'd/maxed so a
+// stale snapshot cannot un-finish, un-expire or un-truncate the view.
+// `streamedAt` is carried over untouched — a REST fetch says nothing about
+// when the stream last spoke.
+export function mergeSearchSession(prev: SearchSession | undefined, fetched: SearchSession): SearchSession {
+  if (!prev || prev.id !== fetched.id) return fetched;
+  const byId = new Map(prev.groups.map((g) => [g.id, g]));
+  for (const g of fetched.groups) {
+    // Union-by-id alone only closes half the race. A snapshot computed at T1
+    // that lands after a frame folded in at T2 > T1 still carries T1's copy
+    // of a group the frame GREW, and a plain set() reverts it to that shorter
+    // file list — the cursor has advanced, so the stream won't resend it, and
+    // "Download album" then enqueues an incomplete album with nothing on
+    // screen looking wrong. Resolving that by file count is sound because a
+    // group's file set is strictly append-only within a session: app/search.go's
+    // accept() only ever appends to the accumulator and rebuilds the whole
+    // group from that slice, so `files.length` is monotone per id and the
+    // longer list is by definition the newer one. (Deliberately not a `version`
+    // comparison — seq is not on the wire per group and must not be added.)
+    const cached = byId.get(g.id);
+    if (cached && cached.files.length > g.files.length) continue;
+    byId.set(g.id, g);
+  }
+  return {
+    ...fetched,
+    groups: Array.from(byId.values()),
+    total: Math.max(fetched.total, prev.total),
+    done: fetched.done || prev.done,
+    expired: fetched.expired || prev.expired,
+    truncated: fetched.truncated || prev.truncated,
+    error: fetched.error || prev.error,
+    streamedAt: prev.streamedAt,
+  };
 }
 
 export const JOBS_PAGE_SIZE = 12;
@@ -520,6 +652,115 @@ export function useDeleteJob(id: number) {
       void qc.invalidateQueries({ queryKey: queryKeys.jobs });
       qc.removeQueries({ queryKey: queryKeys.jobDetail(id) });
       qc.removeQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+// Reads a manual search session (issue #58): id is undefined before a search
+// has been started (Search.tsx's idle state), which the query stays disabled
+// for rather than firing a request against a nonsense URL.
+//
+// refetchInterval is a fallback, not the primary freshness mechanism — see
+// SEARCH_POLL_INTERVAL's doc comment. While the session is still open
+// (!done) on a genuinely streaming backend with a live connection, incoming
+// `event: search` frames (folded in by api/stream.tsx via
+// replaceSearchGroups, straight onto this same cache key) are what actually
+// keep it current; this poll only takes over once that stops being true.
+export function useSearchSession(id: string | undefined) {
+  const live = useLiveData();
+  const qc = useQueryClient();
+  const key = id ?? '';
+  return useQuery({
+    queryKey: queryKeys.search(key),
+    // Merges onto whatever the stream has already folded in rather than
+    // replacing it — see mergeSearchSession for why a plain replace can drop
+    // groups permanently.
+    queryFn: () =>
+      apiGet<WireSearchSession>(`/api/search/${key}`)
+        .then(normalizeSearchSession)
+        .then((fetched) => mergeSearchSession(qc.getQueryData<SearchSession>(queryKeys.search(key)), fetched)),
+    enabled: id !== undefined,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.done) return false;
+      // A batching backend (slskd) never sends incremental frames at all, so
+      // the poll is the only freshness mechanism there — not a fallback.
+      if (!data.streaming) return SEARCH_POLL_INTERVAL;
+      // The shared EventSource errored (stream.tsx's clearLive writes null,
+      // never undefined — see queryKeys.live). Arm immediately rather than
+      // waiting out the staleness window below.
+      //
+      // `null` and `undefined` are NOT interchangeable here and this predicate
+      // must never conflate them: `undefined` is the ordinary state on /search
+      // with nothing downloading, because `event: live` only fires when a job
+      // is actually live. An `live !== null` guard therefore reads as "the
+      // stream is healthy" forever and disarms the poll permanently.
+      if (live === null) return SEARCH_POLL_INTERVAL;
+      // Otherwise arm on silence, which covers `live === undefined` and, more
+      // importantly, the open-but-silent connection no connection-level check
+      // can see at all. See SEARCH_STREAM_STALE_MS.
+      //
+      // While frames are still fresh this returns the time REMAINING until
+      // they go stale rather than `false`. That distinction is load-bearing:
+      // `false` schedules no timer at all, and React Query only re-evaluates
+      // this predicate when the query's result changes — so a session whose
+      // frames simply STOP would never be reconsidered, and the staleness
+      // fallback could never fire for the one failure it exists to catch.
+      // Returning the remaining time schedules the refetch exactly at the
+      // staleness boundary instead; each frame that does arrive updates the
+      // data, which recomputes this and pushes that boundary out again.
+      const streamedAt = data.streamedAt;
+      if (streamedAt !== undefined) {
+        const remaining = streamedAt + SEARCH_STREAM_STALE_MS - Date.now();
+        if (remaining > 0) return remaining;
+      }
+      return SEARCH_POLL_INTERVAL;
+    },
+  });
+}
+
+// Starts a new manual search session. Seeds queryKeys.search(id) with the
+// 201 body directly on success — byte-identical in shape to what GET
+// /api/search/{id} would return (see WireSearchSession's doc comment) — so
+// the caller can render the first frame of results without a second round
+// trip, and so useSearchStream/useSearchSession have something to patch onto
+// the instant the id is published.
+export function useStartSearch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (query: string) => apiPostJson<WireSearchSession>('/api/search', { query }).then(normalizeSearchSession),
+    onSuccess: (session) => {
+      qc.setQueryData(queryKeys.search(session.id), session);
+    },
+  });
+}
+
+// Cancels a search session server-side (releasing its reserved Soulseek
+// token early — see internal/app/search.go's Stop). Removes the cache entry
+// outright rather than invalidating it: once stopped, GET /api/search/{id}
+// answers 404, so there is nothing left to refetch.
+export function useStopSearch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiDelete(`/api/search/${id}`),
+    onSuccess: (_void, id) => {
+      qc.removeQueries({ queryKey: queryKeys.search(id) });
+    },
+  });
+}
+
+// The first frontend consumer of POST /api/jobs (issue #58's "Download
+// album"/"Download selected" actions; #155 shipped the endpoint itself with
+// none). Invalidates queryKeys.jobs so the next visit to /jobs shows the new
+// job — the search view itself doesn't render a job list, so there's nothing
+// more specific to patch here (see Search.tsx's local "queued" card state
+// for the immediate feedback instead).
+export function useCreateJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateJobRequest) => apiPostJson<WireJob>('/api/jobs', body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.jobs });
     },
   });
 }

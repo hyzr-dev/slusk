@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { WireJob, WireStatusReport } from './types';
-import { normalizeJobDetail, normalizeJobPage, normalizeJobs, normalizeStatusReport } from './normalize';
+import type { WireJob, WireSearchGroup, WireSearchSession, WireStatusReport } from './types';
+import {
+  formatBitrateLabel,
+  formatQualityLabel,
+  normalizeJobDetail,
+  normalizeJobPage,
+  normalizeJobs,
+  normalizeSearchSession,
+  normalizeStatusReport,
+} from './normalize';
 
 function wireJob(overrides: Partial<WireJob> = {}): WireJob {
   return {
@@ -90,5 +98,106 @@ describe('wire compatibility normalization', () => {
 
     expect(normalized.parked).toBe(5);
     expect(normalized).not.toHaveProperty('orphaned');
+  });
+});
+
+function wireSearchGroup(overrides: Partial<WireSearchGroup> = {}): WireSearchGroup {
+  return {
+    id: 'a1b2c3',
+    peer: 'lossless_lars',
+    // The server normalizes `folder` to `/`-separated for display
+    // (matcher.ReleaseDir) — unlike files[].filename below, which stays the
+    // raw peer-syntax path.
+    folder: '@@abc/Music/Radiohead/In Rainbows',
+    title: 'In Rainbows',
+    parent: 'Radiohead',
+    trackCount: 10,
+    sizeBytes: 432000000,
+    freeUploadSlot: true,
+    queueLength: 0,
+    uploadSpeed: 940000,
+    score: 0.91,
+    files: [],
+    ...overrides,
+  };
+}
+
+describe('search normalization', () => {
+  it('normalizes a session and every nested group and file, preserving optional attributes', () => {
+    const wire: WireSearchSession = {
+      id: 'deadbeef',
+      query: 'in rainbows',
+      startedAt: '2026-01-01T00:00:00Z',
+      done: false,
+      streaming: true,
+      total: 1,
+      groups: [
+        wireSearchGroup({
+          format: 'flac',
+          bitrate: 1010,
+          sampleRate: 44100,
+          bitDepth: 16,
+          files: [
+            { filename: '@@abc\\Music\\Radiohead\\In Rainbows\\05 - Nude.flac', name: '05 - Nude.flac', size: 34112000, bitrate: 1010 },
+          ],
+        }),
+      ],
+    };
+
+    const session = normalizeSearchSession(wire);
+
+    expect(session.id).toBe('deadbeef');
+    expect(session.groups[0].format).toBe('flac');
+    expect(session.groups[0].files[0].filename).toBe('@@abc\\Music\\Radiohead\\In Rainbows\\05 - Nude.flac');
+    // The full peer-syntax path must pass through untouched — POST /api/jobs
+    // needs it verbatim, unlike `folder`, which the server already
+    // normalizes to `/` for display.
+    expect(session.groups[0].files[0].bitrate).toBe(1010);
+  });
+
+  it('leaves every omitted optional attribute absent, not zeroed', () => {
+    const session = normalizeSearchSession({
+      id: 'deadbeef',
+      query: 'q',
+      startedAt: '2026-01-01T00:00:00Z',
+      done: true,
+      streaming: false,
+      total: 1,
+      groups: [wireSearchGroup({ files: [{ filename: 'f.mp3', name: 'f.mp3', size: 1000 }] })],
+    });
+
+    expect(session.groups[0].format).toBeUndefined();
+    expect(session.groups[0].bitrate).toBeUndefined();
+    expect(session.groups[0].files[0].bitrate).toBeUndefined();
+    expect(session.groups[0].files[0].durationSeconds).toBeUndefined();
+  });
+});
+
+describe('formatBitrateLabel', () => {
+  it('renders VBR instead of a number when the group is flagged variable', () => {
+    expect(formatBitrateLabel({ bitrate: 245, variableBitRate: true })).toBe('VBR');
+  });
+
+  it('renders a fixed kbps figure for a CBR file', () => {
+    expect(formatBitrateLabel({ bitrate: 320, variableBitRate: false })).toBe('320 kbps');
+  });
+
+  it('renders nothing when the peer reported no bitrate attribute at all', () => {
+    expect(formatBitrateLabel({ variableBitRate: false })).toBeUndefined();
+  });
+});
+
+describe('formatQualityLabel', () => {
+  it('combines bit depth and sample rate in kHz', () => {
+    expect(formatQualityLabel({ sampleRate: 44100, bitDepth: 16 })).toBe('16/44.1');
+  });
+
+  it('renders a whole-number kHz figure when the sample rate divides evenly', () => {
+    expect(formatQualityLabel({ sampleRate: 48000, bitDepth: 24 })).toBe('24/48');
+  });
+
+  it('renders nothing when only one of the two attributes is present', () => {
+    expect(formatQualityLabel({ sampleRate: 44100, bitDepth: undefined })).toBeUndefined();
+    expect(formatQualityLabel({ sampleRate: undefined, bitDepth: 16 })).toBeUndefined();
   });
 });

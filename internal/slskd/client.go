@@ -86,12 +86,25 @@ func isRetryable(err error) bool {
 // peer's upload-availability signals (copied from the per-user response
 // group) — slskd's wire shape. Search maps it to core.SearchResult so callers
 // never depend on this type.
+//
+// Length/SampleRate/BitDepth/IsVariableBitRate are slskd's serialization of
+// Soulseek.NET's File, whose optional attributes are nullable. These field
+// names are INFERRED from slskd's source, not confirmed against a live
+// response — verify against the lab before trusting them (issue #58). Go int
+// fields (not pointers) are still correct either way: unmarshalling JSON
+// `null` into an int is a no-op leaving it at its zero value, which is
+// exactly core.SearchResult's "unknown" semantics for these fields (see its
+// doc comment) — no pointer indirection needed here.
 type result struct {
 	Username          string `json:"username"`
 	Filename          string `json:"filename"`
 	Size              int64  `json:"size"`
 	BitRate           int    `json:"bitRate"`
 	IsLocked          bool   `json:"isLocked"`
+	Length            int    `json:"length"`     // seconds
+	SampleRate        int    `json:"sampleRate"` // Hz
+	BitDepth          int    `json:"bitDepth"`   // bits
+	IsVariableBitRate bool   `json:"isVariableBitRate"`
 	HasFreeUploadSlot bool   `json:"-"`
 	QueueLength       int    `json:"-"`
 	UploadSpeed       int    `json:"-"`
@@ -107,6 +120,10 @@ func (r result) toCore() core.SearchResult {
 		HasFreeUploadSlot: r.HasFreeUploadSlot,
 		QueueLength:       r.QueueLength,
 		UploadSpeed:       r.UploadSpeed,
+		Duration:          r.Length,
+		SampleRate:        r.SampleRate,
+		BitDepth:          r.BitDepth,
+		VariableBitRate:   r.IsVariableBitRate,
 	}
 }
 
@@ -320,7 +337,8 @@ func (c *Client) DeleteDownloadFolder(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
-// searchState is the subset of a slskd search object used for completion polling.
+// searchState is the subset of a slskd search object used for completion
+// polling.
 type searchState struct {
 	ID         string `json:"id"`
 	State      string `json:"state"`
@@ -370,6 +388,38 @@ func toCoreResults(in []result) []core.SearchResult {
 	}
 	return out
 }
+
+// SearchStream satisfies app.PeerStreamSearcher for the slskd backend by
+// delegating to Search and emitting its whole result set as a single batch.
+// It deliberately does NOT re-implement the POST → poll → isComplete →
+// harvest → delete sequence: slskd cannot stream anyway (see SearchStreaming —
+// GET /responses on a still-InProgress search returns nothing on the verified
+// version, so a per-tick harvest yields exactly one batch at completion, which
+// is what this already does), and a second copy of that sequence would fork
+// two hard-won behaviours that only Search has:
+//
+//   - the empty-result retry, without which a manual search reports "no hits"
+//     for the intermittent slskd concurrency bug Search's doc describes, and
+//     the UI then tells the user nobody is sharing the album — untrue;
+//   - the delete-after-isComplete ordering recorded on stopAndHarvest, which
+//     fixed a live "affected 0 rows" race that dropped responses.
+//
+// emit is called at most once, from the caller's goroutine, before this
+// function returns; the slice may be retained by the caller.
+func (c *Client) SearchStream(ctx context.Context, query string, timeout time.Duration, emit func([]core.SearchResult)) error {
+	res, err := c.Search(ctx, query, timeout)
+	if len(res) > 0 {
+		emit(res)
+	}
+	return err
+}
+
+// SearchStreaming reports that slskd does NOT deliver search results
+// incrementally on the verified version (issue #58 §0): GET /responses on a
+// still-InProgress search returns an empty list even as responseCount
+// climbs, so SearchStream degrades to one large batch at completion. The UI
+// must not claim a live trickle for this backend.
+func (c *Client) SearchStreaming() bool { return false }
 
 // searchOnce starts one async slskd search, polls until it completes or timeout,
 // then returns the peers' result files (locked files skipped), each enriched with

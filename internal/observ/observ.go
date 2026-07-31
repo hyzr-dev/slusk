@@ -449,6 +449,14 @@ type ServerDeps struct {
 	// series served at /api/charts. nil (the non-native backends, or tests that
 	// don't care) yields empty arrays rather than omitting either field.
 	Throughput ThroughputFunc
+	// StartSearch, SearchSnapshot, SearchDelta and StopSearch back manual
+	// Soulseek search (issue #58): POST/GET/DELETE /api/search[/{id}] and the
+	// SSE stream's ?search= scope. nil-safe, mirroring Shares/RescanShares —
+	// see registerSearch.
+	StartSearch    StartSearchFunc
+	SearchSnapshot SearchSnapshotFunc
+	SearchDelta    SearchDeltaFunc
+	StopSearch     StopSearchFunc
 	// Conversations and Thread back GET /api/messages and GET
 	// /api/messages/{username} (issue #183). Unlike Shares/RescanShares these
 	// are wired unconditionally — message history stays readable even when
@@ -787,6 +795,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
+	registerSearch(mux, deps.StartSearch, deps.SearchSnapshot, deps.StopSearch)
 	registerUploads(mux, deps.Uploads)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval, streamInvalidateInterval)

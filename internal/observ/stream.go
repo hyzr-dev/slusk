@@ -1,22 +1,25 @@
 // Package observ: stream.go serves GET /api/stream (issue #161), a
-// server-sent-events endpoint of live dashboard data over three independently
+// server-sent-events endpoint of live dashboard data over four independently
 // fired named events on the SAME connection: `event: live` (whole per-job
 // objects for changed jobs, aggregate current download/upload speeds, and,
 // when ?job=<id> is set, that job's whole detail body), `event: throughput`
 // (recent directional throughput samples, sent only to a subscriber that
-// opted in with ?throughput=1 — issue #265), and `event: invalidate`
-// (a bare monotonic generation number telling every subscriber that GET
-// /api/jobs would now return different pages/facets/sort order for SOMEONE,
-// not necessarily this connection — issue #275). `event: invalidate`
-// carries NO page data of its own: the chain still begins with a GET, same
-// as #161 established: the stream tells a subscriber WHEN to refetch, never
-// WHAT to render. Splitting these onto separate events, rather than folding
-// throughput's series or the invalidation signal into every `live` frame,
-// is what lets a subscriber with no sparkline on screen (Jobs, JobDetail,
-// Settings, ...) skip the cost of building and marshalling it entirely,
-// while a browser's 6-connections-per-origin limit isn't a reason to avoid a
-// further event on the same connection — an SSE connection holds its slot
-// for its whole lifetime regardless of how many named events it carries.
+// opted in with ?throughput=1 — issue #265), `event: search` (group deltas
+// for one manual search session, sent only to a subscriber that opted in with
+// ?search=<id> — issue #58), and `event: invalidate` (a bare monotonic
+// generation number telling every subscriber that GET /api/jobs would now
+// return different pages/facets/sort order for SOMEONE, not necessarily this
+// connection — issue #275). `event: invalidate` carries NO page data of its
+// own: the chain still begins with a GET, same as #161 established: the
+// stream tells a subscriber WHEN to refetch, never WHAT to render. Splitting
+// these onto separate events, rather than folding throughput's series, a
+// search's groups or the invalidation signal into every `live` frame, is what
+// lets a subscriber with no sparkline or search view on screen (Jobs,
+// JobDetail, Settings, ...) skip the cost of building and marshalling it
+// entirely, while a browser's 6-connections-per-origin limit isn't a reason
+// to avoid a further event on the same connection — an SSE connection holds
+// its slot for its whole lifetime regardless of how many named events it
+// carries.
 //
 // Both the job-list half and the scoped detail half carry the FINISHED
 // object rather than a partial live-only view (issue #258): built by the
@@ -62,6 +65,7 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,6 +203,48 @@ type throughputPayload struct {
 // Generation than the first — rather than merely observing two frames exist.
 type invalidatePayload struct {
 	Generation uint64 `json:"generation"`
+}
+
+// searchPayload is the JSON body of every `event: search` SSE frame (issue
+// #58), sent only to a subscriber that opened the connection with
+// ?search=<id>. Groups carries only whole groups (see searchGroupDTO) that
+// changed since this subscriber's own cursor (Seq) — never a file-level
+// diff, so grouping/scoring logic exists in exactly one place (Go, sharing
+// matcher's primitives via internal/app) rather than being reimplemented in
+// TypeScript. Seq is the cursor to pass as `since` on the subscriber's next
+// frame; it is bookkeeping, not carried across reconnects — a fresh
+// connection always starts its own cursor at 0 (see subscribe's initial
+// frame).
+//
+// Expired is set, with every other field at its zero value, when the
+// requested session id is well-formed but no longer known — evicted between
+// the POST and this connection (or a reconnect). It is deliberately NOT a
+// 400: a stale-but-well-formed id is a routine outcome, not a malformed
+// request, and answering 400 would make EventSource reconnect-thrash on it.
+type searchPayload struct {
+	ID        string           `json:"id"`
+	Seq       int              `json:"seq"`
+	Groups    []searchGroupDTO `json:"groups,omitempty"`
+	Total     int              `json:"total"`
+	Done      bool             `json:"done"`
+	Streaming bool             `json:"streaming"`
+	Truncated bool             `json:"truncated,omitempty"`
+	Expired   bool             `json:"expired,omitempty"`
+	Error     string           `json:"error,omitempty"`
+}
+
+// toSearchPayload converts one core.SearchDelta into its wire shape.
+func toSearchPayload(delta core.SearchDelta) searchPayload {
+	return searchPayload{
+		ID:        delta.ID,
+		Seq:       delta.Seq,
+		Groups:    toSearchGroupDTOs(delta.Groups),
+		Total:     delta.Total,
+		Done:      delta.Done,
+		Streaming: delta.Streaming,
+		Truncated: delta.Truncated,
+		Error:     delta.Err,
+	}
 }
 
 // jobCorrelation is the minimal per-job data the stream hub needs to notice
@@ -558,26 +604,29 @@ func changedSinceLast(prev, next livePayload, newJobCount int) bool {
 	return !reflect.DeepEqual(prev.Detail, next.Detail)
 }
 
-// streamSubscriber is one open GET /api/stream connection's mailbox. ch and
-// tch each have capacity 1 and hold only the latest undelivered payload for
-// their own event (see sendLatest/sendLatestThroughput), so a slow client can
-// never block the shared broadcaster or build up a backlog of stale
-// intermediate states — it just skips straight to whatever is current once
-// it catches up. The two are deliberately independent channels rather than
-// one shared mailbox (issue #265): a single channel would force an ordinary
-// live-only change (Down ticking, no new sample) to carry along whatever
-// throughput delta was already queued, hand-carrying it forward exactly like
-// the trap this issue exists to fix, just one level up.
+// streamSubscriber is one open GET /api/stream connection's mailbox. Every
+// channel below has capacity 1 and holds only the latest undelivered payload
+// for its own event (see sendLatest/sendLatestThroughput/
+// sendLatestInvalidate/sendLatestSearch), so a slow client can never block the
+// shared broadcaster or build up a backlog of stale intermediate states — it
+// just skips straight to whatever is current once it catches up. They are
+// deliberately independent channels rather than one shared mailbox (issue
+// #265): a single channel would force an ordinary live-only change (Down
+// ticking, no new sample) to carry along whatever throughput delta, search
+// delta or invalidation was already queued, hand-carrying it forward exactly
+// like the trap this issue exists to fix, just one level up.
 type streamSubscriber struct {
 	ch           chan livePayload
 	throughputCh chan throughputPayload
-	// invalidateCh carries `event: invalidate` frames (issue #275). A third,
+	// invalidateCh carries `event: invalidate` frames (issue #275). Its own
 	// independent cap-1 channel rather than folding this into ch: an
 	// invalidation is idempotent (newest generation wins outright, no merge —
 	// see sendLatestInvalidate), unlike ch's per-job delta which must be
-	// unioned across a displaced send (mergeJobsDelta) and tch's samples
-	// which must be accumulated (sendLatestThroughput) — three different
-	// degrade-under-backpressure contracts, three channels.
+	// unioned across a displaced send (mergeJobsDelta) and throughputCh's
+	// samples which must be accumulated (sendLatestThroughput) — three
+	// different degrade-under-backpressure contracts, one channel per event.
+	// searchCh below reuses the accumulate contract rather than adding a
+	// fourth.
 	invalidateCh chan invalidatePayload
 	// wantThroughput is whether this connection asked for the throughput
 	// event (?throughput=1). false for every subscriber that never mentions
@@ -624,6 +673,34 @@ type streamSubscriber struct {
 	// get.
 	lastSeenGeneration uint64
 	lastInvalidateAt   time.Time
+	// searchID is the ?search=<id> scope (empty for none — issue #58).
+	// Never mutated after subscribe(), like jobID/jobIDs above.
+	searchID string
+	// searchCh carries `event: search` frames, cap 1 like ch/throughputCh
+	// above — see sendLatestSearch for why it ACCUMULATES across a displaced
+	// frame rather than discarding (mirrors sendLatestThroughput, not
+	// sendLatest).
+	searchCh chan searchPayload
+	// searchSeq is this subscriber's own cursor into its search session's
+	// group versions — the `since` argument to the next SearchDelta call.
+	searchSeq int
+	// searchDone is the Done flag last sent to this subscriber, so tick can
+	// detect the flip from false to true even on a tick with no changed
+	// groups (see changedSinceLast's analogous role for jobs/detail).
+	searchDone bool
+	// searchTruncated is the Truncated flag last sent to this subscriber, for
+	// exactly the same reason as searchDone — and it is not a theoretical
+	// case: once app.searchMaxResults is hit, every later result is DROPPED,
+	// so no group version ever changes again and the session's Seq freezes.
+	// Without this field the `truncated: true` flip would produce no frame at
+	// all until Done flipped, leaving a broad query showing a frozen count and
+	// no "showing the first 2000" notice for the rest of its run.
+	searchTruncated bool
+	// searchExpiredSent guards against sending more than one `expired: true`
+	// frame to a subscriber whose searchID never resolves (or stops
+	// resolving) — once sent, the connection should fall silent on this
+	// event rather than repeat it every tick.
+	searchExpiredSent bool
 }
 
 // streamHub is the shared broadcaster behind GET /api/stream: one ticking
@@ -638,6 +715,7 @@ type streamHub struct {
 	throughput          ThroughputFunc
 	transferBytes       TransferBytesFunc
 	jobDetail           JobDetailFunc
+	searchDelta         SearchDeltaFunc
 	failedRetryAfter    time.Duration
 	maxCandidates       int
 	tickInterval        time.Duration
@@ -704,13 +782,14 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, searchDelta SearchDeltaFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
 	return &streamHub{
 		jobs:                jobs,
 		liveTransfers:       liveTransfers,
 		throughput:          throughput,
 		transferBytes:       transferBytes,
 		jobDetail:           jobDetail,
+		searchDelta:         searchDelta,
 		failedRetryAfter:    failedRetryAfter,
 		maxCandidates:       maxCandidates,
 		tickInterval:        tickInterval,
@@ -744,6 +823,18 @@ func (h *streamHub) fetchThroughput(ctx context.Context) core.ThroughputSeries {
 		return core.ThroughputSeries{}
 	}
 	return series
+}
+
+// fetchSearchDelta calls searchDelta best-effort: a nil func (no search
+// backend wired) yields ok=false, exactly like SearchDeltaFunc's own
+// "session gone" contract, so callers need no separate nil check to tell the
+// two apart — either way the subscriber's next frame is the `expired: true`
+// notice.
+func (h *streamHub) fetchSearchDelta(id string, since int) (core.SearchDelta, bool) {
+	if h.searchDelta == nil {
+		return core.SearchDelta{}, false
+	}
+	return h.searchDelta(id, since)
 }
 
 // scopedJobIDs returns the ids used to bound the hub's per-job caches: every
@@ -1028,7 +1119,7 @@ func (h *streamHub) atCapacity() bool {
 // subscribe registers a new subscriber (jobID 0 for no ?job= detail scope,
 // jobIDs nil/empty for no ?jobs= list scope, wantThroughput for ?throughput=1
 // — issue #265) and starts the shared ticker if this is the first one.
-// Returns the subscriber's id (for unsubscribe), its three channels, and an
+// Returns the subscriber's id (for unsubscribe), its four channels, and an
 // immediate snapshot of each event computed synchronously against ctx, so
 // the connection's very first frames don't wait for the next tick —
 // including a synchronous correlation refresh, so a subscriber connecting
@@ -1040,7 +1131,13 @@ func (h *streamHub) atCapacity() bool {
 // wantThroughput's doc comment on streamSubscriber — but the initial
 // full-window conversion into initialThroughput is skipped for a subscriber
 // that never asked for it.
-func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool) (id uint64, ch chan livePayload, tch chan throughputPayload, ich chan invalidatePayload, initial livePayload, initialThroughput throughputPayload) {
+//
+// searchID ("" for no ?search= scope — issue #58) gets its own initial frame
+// the same way jobID/jobIDs do: a full delta from since=0 (or one
+// `expired: true` frame if the id is already unknown), computed synchronously
+// so a reconnect self-heals in one round trip rather than waiting out the
+// next tick.
+func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64]struct{}, wantThroughput bool, searchID string) (id uint64, ch chan livePayload, tch chan throughputPayload, ich chan invalidatePayload, sch chan searchPayload, initial livePayload, initialThroughput throughputPayload, initialSearch searchPayload) {
 	// jobID/jobIDs are passed explicitly: this subscriber is not in h.subs
 	// yet, and without them a freshly opened detail or list view would wait a
 	// whole correlationInterval for its first Detail/Jobs.
@@ -1066,9 +1163,17 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		wantThroughput: wantThroughput,
 		jobID:          jobID,
 		jobIDs:         jobIDs,
+		searchID:       searchID,
+		searchCh:       make(chan searchPayload, 1),
 		// lastInvalidateAt = now, NOT the zero time and NOT now.Add(-interval):
 		// the client's onopen fires invalidateQueries the instant the
 		// connection opens, so a fresh subscriber has just done its own GET.
+		// Since issue #58 that is true only of the opens with a gap behind
+		// them — the very first one and the browser's own automatic reconnect
+		// (see web/src/api/stream.tsx's onopen). The rest are the client
+		// deliberately tearing the connection down and rebuilding it with new
+		// ?job=/?search= params, missing nothing in between, so there is no
+		// gap for `now` to be too optimistic about either way.
 		// Treating connect as an invalidation is what makes the first
 		// server-sent `event: invalidate` land no sooner than
 		// t+invalidateInterval (issue #275, decision 3).
@@ -1097,6 +1202,18 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		}
 	}
 
+	if searchID != "" {
+		if delta, ok := h.fetchSearchDelta(searchID, 0); ok {
+			initialSearch = toSearchPayload(delta)
+			sub.searchSeq = delta.Seq
+			sub.searchDone = delta.Done
+			sub.searchTruncated = delta.Truncated
+		} else {
+			initialSearch = searchPayload{ID: searchID, Expired: true}
+			sub.searchExpiredSent = true
+		}
+	}
+
 	sub.last = livePayload{Detail: initial.Detail, Down: initial.Down, Up: initial.Up}
 	// Unconditional — see wantThroughput's doc comment on streamSubscriber.
 	if n := len(throughput.Download); n > 0 {
@@ -1116,7 +1233,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		h.cancel = cancel
 		go h.run(tickCtx)
 	}
-	return id, sub.ch, sub.throughputCh, sub.invalidateCh, initial, initialThroughput
+	return id, sub.ch, sub.throughputCh, sub.invalidateCh, sub.searchCh, initial, initialThroughput, initialSearch
 }
 
 // unsubscribe removes a subscriber and stops the shared ticker once none
@@ -1268,36 +1385,66 @@ func (h *streamHub) tick(ctx context.Context) {
 		// subscriber that never asked for it — see wantThroughput's doc
 		// comment on streamSubscriber for why fetchThroughput itself stays
 		// unconditional regardless.
-		if !sub.wantThroughput {
+		if sub.wantThroughput {
+			freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
+			freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
+			if len(freshDownload) > 0 || len(freshUpload) > 0 {
+				var tp throughputPayload
+				if len(freshDownload) > 0 {
+					tp.Download = toThroughputDTO(freshDownload)
+				}
+				if len(freshUpload) > 0 {
+					tp.Upload = toThroughputDTO(freshUpload)
+				}
+				sendLatestThroughput(sub.throughputCh, tp)
+				// Advanced from the core.ThroughputSample time.Time values
+				// already in hand (freshDownload/freshUpload), not by
+				// round-tripping through the formatted DTO: timeFormat has no
+				// fractional-second component, while real samples off a
+				// time.Ticker always carry one, so parsing the formatted
+				// string back would truncate the watermark and move it
+				// BACKWARDS relative to the sample just sent —
+				// newThroughputSince would then re-select that same sample
+				// forever, sending a duplicate frame every tick even when
+				// nothing new exists (issue #265 review).
+				if n := len(freshDownload); n > 0 {
+					sub.lastDownloadThroughputAt = freshDownload[n-1].At
+				}
+				if n := len(freshUpload); n > 0 {
+					sub.lastUploadThroughputAt = freshUpload[n-1].At
+				}
+			}
+		}
+
+		// The `event: search` frame (issue #58) is likewise independent of
+		// `live`/`throughput` above: it fires whenever this subscriber's
+		// search session has new group versions, its Done flag flipped or it
+		// became Truncated,
+		// via a plain in-memory map read (searchDelta), never a DB query —
+		// costs nothing extra at 1Hz x streamMaxSubscribers. Skipped
+		// outright for a subscriber with no ?search= scope.
+		if sub.searchID == "" {
 			continue
 		}
-		freshDownload := newThroughputSince(throughput.Download, sub.lastDownloadThroughputAt)
-		freshUpload := newThroughputSince(throughput.Upload, sub.lastUploadThroughputAt)
-		if len(freshDownload) == 0 && len(freshUpload) == 0 {
+		delta, ok := h.fetchSearchDelta(sub.searchID, sub.searchSeq)
+		if !ok {
+			// The session was evicted (or never existed) between this
+			// subscriber's last frame and now. Send the expired notice at
+			// most once — see searchExpiredSent's doc comment — then fall
+			// silent on this event for the rest of the connection.
+			if !sub.searchExpiredSent {
+				sendLatestSearch(sub.searchCh, searchPayload{ID: sub.searchID, Expired: true})
+				sub.searchExpiredSent = true
+			}
 			continue
 		}
-		var tp throughputPayload
-		if len(freshDownload) > 0 {
-			tp.Download = toThroughputDTO(freshDownload)
+		if len(delta.Groups) == 0 && delta.Done == sub.searchDone && delta.Truncated == sub.searchTruncated {
+			continue
 		}
-		if len(freshUpload) > 0 {
-			tp.Upload = toThroughputDTO(freshUpload)
-		}
-		sendLatestThroughput(sub.throughputCh, tp)
-		// Advanced from the core.ThroughputSample time.Time values already in
-		// hand (freshDownload/freshUpload), not by round-tripping through the
-		// formatted DTO: timeFormat has no fractional-second component, while
-		// real samples off a time.Ticker always carry one, so parsing the
-		// formatted string back would truncate the watermark and move it
-		// BACKWARDS relative to the sample just sent — newThroughputSince
-		// would then re-select that same sample forever, sending a duplicate
-		// frame every tick even when nothing new exists (issue #265 review).
-		if n := len(freshDownload); n > 0 {
-			sub.lastDownloadThroughputAt = freshDownload[n-1].At
-		}
-		if n := len(freshUpload); n > 0 {
-			sub.lastUploadThroughputAt = freshUpload[n-1].At
-		}
+		sub.searchSeq = delta.Seq
+		sub.searchDone = delta.Done
+		sub.searchTruncated = delta.Truncated
+		sendLatestSearch(sub.searchCh, toSearchPayload(delta))
 	}
 }
 
@@ -1441,14 +1588,91 @@ func sendLatestThroughput(tch chan throughputPayload, payload throughputPayload)
 	}
 }
 
+// mergeSearchGroups unions two ticks' worth of changed groups by group id,
+// the newer entry winning when both changed the same group — the same
+// "union, don't discard" shape mergeJobsDelta uses for job deltas.
+//
+// Deliberately UNCAPPED, unlike capThroughputSamples. The union is keyed by
+// group id, so it can never hold more groups than the session itself has
+// distinct (peer, releaseDir) pairs — and app.searchMaxResults already bounds
+// a session at 2000 accepted files, hence at most 2000 groups. That is the
+// stalled-reader bound throughput lacks (a throughput window grows by a
+// sample every second forever), so no second cap is needed here. A cap would
+// be actively harmful: the slice is sorted by group id, a sha256 prefix, so
+// truncating it drops an arbitrary subset — and because the subscriber's
+// searchSeq cursor has already advanced past those versions and the frontend
+// does not poll REST during a live search, a dropped group is never resent.
+// That is exactly the permanent hole this accumulate design exists to
+// prevent.
+func mergeSearchGroups(old, next []searchGroupDTO) []searchGroupDTO {
+	if len(old) == 0 {
+		return next
+	}
+	byID := make(map[string]searchGroupDTO, len(old)+len(next))
+	for _, g := range old {
+		byID[g.ID] = g
+	}
+	for _, g := range next {
+		byID[g.ID] = g // newer wins
+	}
+	merged := make([]searchGroupDTO, 0, len(byID))
+	for _, g := range byID {
+		merged = append(merged, g)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	return merged
+}
+
+// sendLatestSearch delivers payload to sch without ever blocking — the same
+// non-blocking drain-and-merge shape as sendLatest/sendLatestThroughput, but
+// like sendLatestThroughput (and UNLIKE sendLatest) it ACCUMULATES: a
+// displaced frame's Groups are unioned into the fresh ones (mergeSearchGroups,
+// newer wins per group id) rather than discarded outright, and Seq/Done/
+// Truncated/Error are folded forward rather than overwritten.
+//
+// This must mirror sendLatestThroughput, not sendLatest: a search delta is
+// append-only exactly like a throughput sample — the frontend does not poll
+// REST during a live search, so a dropped frame here would leave a permanent
+// hole in what the subscriber ever learns about that group, not something
+// self-healed by GET /api/search/{id} on the next visit (nothing re-polls
+// it). Folding forward is deliberate for every scalar field too: Seq keeps
+// the higher (newer) value; Done/Truncated are OR'd, since either one ever
+// having been true must not un-flip back to false by a later, smaller
+// delta superseding it; Error keeps whichever side is non-empty (a session
+// that failed stays failed).
+func sendLatestSearch(sch chan searchPayload, payload searchPayload) searchPayload {
+	for {
+		select {
+		case sch <- payload:
+			return payload
+		default:
+			select {
+			case old := <-sch:
+				payload.Groups = mergeSearchGroups(old.Groups, payload.Groups)
+				if old.Seq > payload.Seq {
+					payload.Seq = old.Seq
+				}
+				payload.Done = payload.Done || old.Done
+				payload.Truncated = payload.Truncated || old.Truncated
+				payload.Expired = payload.Expired || old.Expired
+				if payload.Error == "" {
+					payload.Error = old.Error
+				}
+			default:
+			}
+		}
+	}
+}
+
 // writeEvent writes one named SSE frame (`event: <name>`) and flushes it via
 // rc (see registerStream's write-deadline comment — the same
 // http.ResponseController clears both). Returns false on any write/flush
 // error, signaling the caller to give up on this connection. Generalised
 // from the single-purpose writeLiveEvent by issue #265, which introduced the
-// second named event (`throughput`) on this same connection — registerStream's
-// doc comment already promised the event name wasn't hardcoded, since #129's
-// `event: search` is expected to land here later too.
+// second named event (`throughput`) on this same connection —
+// registerStream's doc comment already promised the event name wasn't
+// hardcoded, and issue #275's `event: invalidate` and issue #58's
+// `event: search` both landed here afterwards without touching this function.
 func writeEvent(w http.ResponseWriter, rc *http.ResponseController, name string, v any) bool {
 	body, err := json.Marshal(v)
 	if err != nil {
@@ -1460,21 +1684,28 @@ func writeEvent(w http.ResponseWriter, rc *http.ResponseController, name string,
 	return rc.Flush() == nil
 }
 
+// searchSessionIDPattern matches app.newSearchSessionID's output: 16 bytes of
+// crypto/rand hex-encoded, i.e. exactly 32 lowercase hex characters. Used to
+// validate ?search= strictly enough that a malformed id is a 400 rather than
+// silently miss-scoping the connection, while a well-formed-but-unknown id
+// (a session that has since been evicted) is deliberately still accepted —
+// see registerStream's doc comment on that query param.
+var searchSessionIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
 // parseStreamJobIDs parses the ?jobs= comma-separated job-id list (issue
 // #258). An absent or empty parameter is not an error — it means the
 // connection carries no job-list scope, so it will simply never receive a
 // `jobs` frame (issue #268 — see this file's package comment). Every entry
 // must parse as a positive int64; duplicates are silently deduplicated (the
-// returned
-// set), but a non-numeric or non-positive entry (including a blank one, from
-// e.g. a stray comma) is a 400, and so is more than streamMaxJobScope
-// distinct ids — the same rationale streamMaxSubscribers has: an id array is
-// free for a client to send and expensive for the hub to serve. The cap is
-// enforced inside the loop, immediately after each insertion, rather than
-// once at the end against the fully-built map: a well-formed request up to
-// the server's header-size limit could otherwise force allocating and
-// populating a map with hundreds of thousands of entries before being
-// rejected.
+// returned set), but a non-numeric or non-positive entry (including a blank
+// one, from e.g. a stray comma) is a 400, and so is more than
+// streamMaxJobScope distinct ids — the same rationale streamMaxSubscribers
+// has: an id array is free for a client to send and expensive for the hub to
+// serve. The cap is enforced inside the loop, immediately after each
+// insertion, rather than once at the end against the fully-built map: a
+// well-formed request up to the server's header-size limit could otherwise
+// force allocating and populating a map with hundreds of thousands of entries
+// before being rejected.
 func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 	if raw == "" {
 		return nil, nil
@@ -1495,12 +1726,13 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 }
 
 // registerStream wires GET /api/stream: named SSE events of live,
-// in-memory-only data — `event: live` on every connection, plus
-// `event: throughput` (issue #265) for a subscriber that asks for it via
-// ?throughput=1. Event names are deliberately not hardcoded into a generic
-// "message" frame — issue #129's search-result stream is expected to land
-// as `event: search` on this same endpoint later, and named events let it do
-// so without touching anything here.
+// in-memory-only data — `event: live` and `event: invalidate` (issue #275) on
+// every connection, plus `event: throughput` (issue #265) for a subscriber
+// that asks for it via ?throughput=1, and `event: search` (issue #58) for a
+// subscriber that opts into one manual search session via ?search=<id>. Event
+// names are deliberately not hardcoded into a generic "message" frame, which
+// is what let every later event land here without touching the framing
+// itself.
 //
 // tickInterval/correlationInterval/heartbeatInterval/invalidateInterval are
 // parameters rather than reading the streamInterval/streamCorrelationInterval/
@@ -1508,7 +1740,7 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 // tests can use short durations instead of the real cadences; NewServer's
 // call site passes the real constants.
 func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval, invalidateInterval time.Duration) {
-	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.SearchDelta, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {
@@ -1537,6 +1769,19 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 				return
 			}
 			wantThroughput = true
+		}
+
+		// ?search= is an independent axis (issue #58): it composes freely
+		// with job/jobs/throughput, matching the same strictness as those —
+		// absent/empty means no search scope, a well-formed 32-hex-char id
+		// (see searchSessionIDPattern) is accepted regardless of whether it
+		// currently resolves to a live session (an unknown-but-well-formed
+		// id degrades to one `expired: true` frame, not a 400 — see
+		// searchPayload's doc comment), and anything else is a 400.
+		searchID := r.URL.Query().Get("search")
+		if searchID != "" && !searchSessionIDPattern.MatchString(searchID) {
+			http.Error(w, "invalid search id", http.StatusBadRequest)
+			return
 		}
 
 		if hub.atCapacity() {
@@ -1568,20 +1813,28 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 			return
 		}
 
-		id, ch, tch, ich, initial, initialThroughput := hub.subscribe(r.Context(), jobID, jobIDs, wantThroughput)
+		id, ch, tch, ich, sch, initial, initialThroughput, initialSearch := hub.subscribe(r.Context(), jobID, jobIDs, wantThroughput, searchID)
 		defer hub.unsubscribe(id)
 
-		// event: live is written ALWAYS, even for a throughput-only
+		// event: live is written ALWAYS, even for a throughput/search-only
 		// subscriber — it proves the connection opened and a failed first
 		// write detects a dead connection early. The initial
 		// event: throughput follows only when wantThroughput AND there is
 		// at least one sample to send; an empty initial window isn't worth
-		// a frame.
+		// a frame. The initial event: search follows whenever a search scope
+		// was requested at all, regardless of content, so a reconnect
+		// self-heals (Done/Total/Streaming, or the expired notice) in one
+		// round trip rather than waiting out the next tick.
 		if !writeEvent(w, rc, "live", initial) {
 			return
 		}
 		if wantThroughput && (len(initialThroughput.Download) > 0 || len(initialThroughput.Upload) > 0) {
 			if !writeEvent(w, rc, "throughput", initialThroughput) {
+				return
+			}
+		}
+		if searchID != "" {
+			if !writeEvent(w, rc, "search", initialSearch) {
 				return
 			}
 		}
@@ -1609,6 +1862,10 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 				}
 			case p := <-ich:
 				if !writeEvent(w, rc, "invalidate", p) {
+					return
+				}
+			case sp := <-sch:
+				if !writeEvent(w, rc, "search", sp) {
 					return
 				}
 			case <-heartbeat.C:

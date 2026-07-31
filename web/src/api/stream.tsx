@@ -2,12 +2,20 @@
 // internal/observ/stream.go for the server contract this consumes and
 // queries.ts's replaceLiveJobs/pickJobDetail/mergeThroughputSamples for how
 // the frame this writes is folded into what components read.
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
-import { mergeThroughputSamples, queryKeys } from './queries';
-import type { ChartsReport, LivePayload, ScopedLivePayload, ThroughputPayload, WireJob } from './types';
+import { mergeThroughputSamples, queryKeys, replaceSearchGroups } from './queries';
+import type {
+  ChartsReport,
+  LivePayload,
+  ScopedLivePayload,
+  SearchPayload,
+  SearchSession,
+  ThroughputPayload,
+  WireJob,
+} from './types';
 
 // Recognises a job detail route (/jobs/:id) from the current pathname.
 // StreamProvider is mounted above <Routes> (see App.tsx), not as a route
@@ -101,6 +109,36 @@ export function useThroughputStream(): void {
   }, [setCount]);
 }
 
+// Lets the Search route opt the shared SSE connection into `?search=<id>`
+// (issue #58) without owning the connection itself — mirrors
+// JobScopeSetterContext/ThroughputSetterContext above. Default no-op setter
+// covers tests that mount Search in isolation.
+const SearchScopeSetterContext = createContext<(id: string | undefined) => void>(() => {});
+
+/**
+ * Publishes `id` as the current manual-search scope for the SSE connection
+ * (issue #58), for as long as the calling component is mounted with a
+ * defined id. Call from Search.tsx once a search has actually been started
+ * (`id` is undefined in the idle state, before POST /api/search resolves) —
+ * unlike useJobScope's array, a search id is a stable string once it exists,
+ * not rebuilt fresh on every render, so no join-key dedupe trick is needed
+ * here.
+ *
+ * `?search=` is a fourth, independent axis alongside `?job=`/`?jobs=`/
+ * `?throughput=1`: it composes freely with all three rather than replacing
+ * any of them. It publishes once per search — when the POST resolves and
+ * Search.tsx has an id to pass — so it costs one connection reopen per
+ * search, the same known #267 cost useJobScope/useThroughputStream already
+ * carry, not a new pattern.
+ */
+export function useSearchStream(id: string | undefined): void {
+  const setScope = useContext(SearchScopeSetterContext);
+  useEffect(() => {
+    setScope(id);
+    return () => setScope(undefined);
+  }, [id, setScope]);
+}
+
 /**
  * One EventSource for the whole app, opened at `/api/stream` or
  * `/api/stream?job=<id>` on a job detail route — one connection per view,
@@ -147,11 +185,18 @@ export function useThroughputStream(): void {
  * livePayload entirely so a subscriber with no chart on screen never pays
  * for building or receiving it.
  *
- * The third and last named event on this connection — see
- * internal/observ/stream.go's package comment — is `event: invalidate`
- * (issue #275), which is not a fourth scope axis alongside the three above:
- * it carries no page data at all and every connection receives it,
- * unconditionally, whether or not it has a jobs-list scope. It exists so a
+ * A fourth, again fully independent axis is `?search=<id>` (issue #58),
+ * opted into via useSearchStream by the Search route once it has a session
+ * id to scope to. `event: search` frames are folded straight into
+ * queryKeys.search(id) — see the separate `search` listener below and
+ * queryKeys.search's doc comment in queries.ts for why that cache, unlike
+ * `live`, needs no read-time pick between a REST value and a streamed one.
+ *
+ * The last named event on this connection — see internal/observ/stream.go's
+ * package comment — is `event: invalidate` (issue #275), which is not a
+ * fifth scope axis alongside the four above: it carries no page data at all
+ * and every connection receives it, unconditionally, regardless of which of
+ * the other four scopes (if any) it was opened with. It exists so a
  * Jobs/Overview-style page can stop
  * polling GET /api/jobs on a fixed timer and instead refetch only when the
  * backend's own fingerprint of the jobs table says something worth
@@ -174,6 +219,14 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   // opt-in.
   const [throughputCount, setThroughputCount] = useState(0);
   const wantThroughput = throughputCount > 0;
+
+  // The `?search=<id>` axis (issue #58) — see useSearchStream's doc comment.
+  const [searchId, setSearchId] = useState<string | undefined>(undefined);
+
+  // False until this provider has had a connection open at least once, so
+  // `onopen` can tell a first connect apart from a deliberate reopen — see
+  // the invalidation there.
+  const hasConnectedRef = useRef(false);
 
   // Known cost, tracked as #267, not fixed here: mounting a scope-publishing
   // route (/jobs, or Overview) can open THREE connections in quick
@@ -215,6 +268,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     if (wantThroughput) {
       parts.push('throughput=1');
     }
+    if (searchId !== undefined) {
+      parts.push(`search=${searchId}`);
+    }
     const url = parts.length ? `/api/stream?${parts.join('&')}` : '/api/stream';
     const source = new EventSource(url);
 
@@ -239,9 +295,37 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       queryClient.setQueryData(queryKeys.live, null);
     };
 
+    // True once THIS EventSource has opened, so a second `onopen` on the same
+    // instance identifies the browser's own automatic reconnect (EventSource
+    // reuses the object; a deliberate reopen constructs a new one).
+    let reopened = false;
+
     source.onopen = () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.charts });
+      const autoReconnect = reopened;
+      reopened = true;
+      const firstEver = !hasConnectedRef.current;
+      hasConnectedRef.current = true;
+
+      // The jobs/charts invalidation is a *gap* repair: it exists so a
+      // connection that was down for an unknown length of time takes a fresh
+      // snapshot, exactly like a page load. Only two opens can have a gap
+      // behind them — the very first one (nothing was watching before it) and
+      // the browser's automatic reconnect after a drop.
+      //
+      // Every other open is this effect deliberately tearing the connection
+      // down and rebuilding it a few milliseconds later with different query
+      // params, with nothing missed in between. Issue #58 made that path
+      // common: the `?search=<id>` axis reopens on every new search, so three
+      // searches on /search used to mean three extra GET /api/charts (TopBar
+      // mounts useCharts on every route, so charts is always an active query
+      // and always genuinely refetches) for a view that renders no chart at
+      // all. jobDetail is exempt from the gating below because a reopen that
+      // changes the ?job= scope really is asking for data this connection has
+      // never carried.
+      if (firstEver || autoReconnect) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.charts });
+      }
       if (jobId !== undefined) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.jobDetail(jobId) });
       }
@@ -331,6 +415,22 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       });
     });
 
+    // `event: search` (issue #58): folds one manual search session's group
+    // delta straight into queryKeys.search(id) — unlike `live`/`throughput`
+    // above, there is no separate live-only cache to pick between at read
+    // time (see queryKeys.search's doc comment in queries.ts): the REST
+    // snapshot (useSearchSession/useStartSearch) and this stream write the
+    // exact same cache key, and replaceSearchGroups is what makes that
+    // safe — a frame for an id nothing has fetched yet, or a stale frame
+    // after the view has moved to a different search, is simply ignored
+    // rather than fabricating a session object to hold it.
+    source.addEventListener('search', (event) => {
+      const payload = JSON.parse((event as MessageEvent<string>).data) as SearchPayload;
+      queryClient.setQueryData<SearchSession>(queryKeys.search(payload.id), (prev) =>
+        replaceSearchGroups(prev, payload),
+      );
+    });
+
     // EventSource's error event fires both for a genuine failure and for
     // the moment just before its own automatic reconnect — either way there
     // is currently no live stream. Since the cleanup below deliberately no
@@ -361,7 +461,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       source.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- jobsScopeKey stands in for jobsScope, see above
-  }, [queryClient, jobId, jobsScopeKey, wantThroughput]);
+  }, [queryClient, jobId, jobsScopeKey, wantThroughput, searchId]);
 
   // Clears the live cache only when StreamProvider itself unmounts — as
   // opposed to the effect above, which reruns (closing and reopening the
@@ -381,7 +481,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   return (
     <JobScopeSetterContext.Provider value={setJobsScope}>
       <ThroughputSetterContext.Provider value={setThroughputCount}>
-        {children}
+        <SearchScopeSetterContext.Provider value={setSearchId}>
+          {children}
+        </SearchScopeSetterContext.Provider>
       </ThroughputSetterContext.Provider>
     </JobScopeSetterContext.Provider>
   );

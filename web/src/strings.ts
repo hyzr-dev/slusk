@@ -42,7 +42,11 @@ export const t = {
     },
     search: {
       title: 'Search',
-      subtitle: 'Query the Soulseek network directly and import straight into Lidarr',
+      // Deliberately does not promise Lidarr import: a manual job downloads
+      // end-to-end, but app.Jobs.Create's doc comment records that the
+      // subsequent import step misbehaves for a NULL lidarr_album_id (#59/#60).
+      // Restore the import wording only once that lands.
+      subtitle: 'Query the Soulseek network directly and download what you find',
     },
     health: {
       title: 'Health',
@@ -481,11 +485,88 @@ export const t = {
     queuePlace: (n: number) => `queue #${n}`,
     truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
   },
-  placeholder: {
-    searchTitle: 'SEARCH',
-    searchBody:
-      'Manual Soulseek search is not built yet. When it lands, results will group per peer and folder, and anything downloaded can be matched and imported into Lidarr.',
-    searchIssue: 'Tracked as issue #58.',
+  // Manual Soulseek search (issue #58). See docs/design/
+  // slskdarr-dashboard.dc.html lines 336-520 for the visual spec this
+  // follows — translated to English (that mock is Swedish; strings.ts is
+  // English throughout, unlike every other route in this file) and adapted
+  // onto the TUI restyle's component vocabulary (Panel/Chip/QueryNotice/
+  // EmptyState) rather than that mock's own markup.
+  search: {
+    queryPlaceholder: 'Search Soulseek — artist, album, track…',
+    // Visually hidden, but a real <label htmlFor> rather than relying on the
+    // placeholder: a placeholder-derived accessible name (HTML-AAM's last
+    // resort) disappears the moment the user types, which is exactly when a
+    // screen-reader user re-reads the field. WCAG 3.3.2.
+    queryLabel: 'Search query',
+    submit: 'Search',
+    idleTitle: 'Search Soulseek directly',
+    idleBody:
+      'Results are grouped per peer and folder. Anything you download here can be enqueued the same way an automatic job is.',
+    // Example query chips shown only in the idle state.
+    examples: ['Radiohead In Rainbows', 'Kind of Blue', 'Nirvana Nevermind'],
+    noHitsTitle: (query: string) => `No hits for "${query}"`,
+    noHitsBody: 'No peer on the network is sharing this right now. Try a different spelling, drop the year, or search on the artist alone.',
+    newSearch: 'New search',
+    // The results header's live counter. Composed as
+    // `${count}${suffix}` — see Search.tsx — rather than one template
+    // string, since streaming/complete/truncated are independent flags,
+    // not a fixed set of combinations.
+    resultsCount: (n: number) => `${n} results`,
+    streamingSuffix: 'streaming in…',
+    completeSuffix: 'search complete',
+    // Distinct from completeSuffix: the session was evicted server-side
+    // before it finished (see replaceSearchGroups' `expired` branch), so
+    // what is on screen is whatever had already arrived, not a finished
+    // search. "Search complete" here would be a lie.
+    expiredSuffix: 'session expired — results may be incomplete',
+    truncatedSuffix: 'showing first 2000',
+    askingPeers: 'Asking peers on the network…',
+    sortLabel: 'Sort',
+    sortOptions: {
+      best: 'Best match',
+      size: 'Size',
+      speed: 'Speed',
+      avail: 'Availability',
+    },
+    // Format chip row, derived from the distinct formats present in the
+    // current results (issue #129 lifts this derivation rather than
+    // forking it — see the exported helper in Search.tsx). An empty active
+    // set already means "all formats", so the row needs no explicit
+    // all-formats chip and therefore no string for one.
+    noFormatMatch: 'No results match the selected format filters.',
+    bestMatch: 'BEST MATCH',
+    freeSlot: 'Free slot',
+    // A peer with no free slot and nobody waiting: `queuePosition(0)` read
+    // as "Queue: 0", which looks like the good case next to freeSlot even
+    // though it is the opposite one. Both facts are true; only this phrasing
+    // makes them stop contradicting each other.
+    noFreeSlot: 'No free slot',
+    queuePosition: (n: number) => `Queue: ${n}`,
+    peerAndSpeed: (peer: string, speed: string) => `${peer} · ${speed}`,
+    trackCount: (n: number) => `${n} track${n === 1 ? '' : 's'}`,
+    // `trackCount` counts audio only, while the download buttons enqueue
+    // every file in the folder (covers, .nfo, .m3u) — so a card could read
+    // "10 tracks" beside "Download selected (13)" with nothing accounting
+    // for the other three. Rendered only when there is a difference.
+    extraFiles: (n: number) => `+${n} extra file${n === 1 ? '' : 's'}`,
+    // `parent` is the peer's parent DIRECTORY name (path.Base(path.Dir(folder))),
+    // never a resolved artist — a peer sharing /Music/Various Artists/In Rainbows/
+    // yields "Various Artists". Rendered with a trailing slash in the mono face
+    // so it reads as a path segment rather than the "Album — Artist" idiom, plus
+    // this hidden prefix and title for anyone who can't see that treatment.
+    folderLabel: 'Peer folder:',
+    folderTitle: (parent: string) => `Parent folder on the peer: ${parent}/ — not a resolved artist`,
+    downloadAlbum: 'Download album',
+    downloadSelected: (n: number) => `Download selected (${n})`,
+    queuedNotice: 'Queued for download.',
+    // Client-owned friendly text rather than the server's raw sentinel
+    // message (app.ErrRemoteFileBusy) — matches the rest of this file's
+    // convention of translating failure sentinels into UI copy (e.g.
+    // jobs.cancelFailed) rather than surfacing backend error strings.
+    busyNotice: "This peer's files are already claimed by another download in progress.",
+    downloadFailed: 'Could not start the download. Try again.',
+    startFailed: 'Search failed to start. Try again.',
+    busyRetry: 'Too many searches are already running — try again shortly.',
   },
   chat: {
     railHeading: 'PEERS',

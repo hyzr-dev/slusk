@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -628,5 +629,178 @@ func TestSearchStopsIncompleteSearchToHarvestPartial(t *testing.T) {
 	defer mu.Unlock()
 	if !stopped {
 		t.Fatal("client never asked slskd to stop the search (PUT /api/v0/searches/s1)")
+	}
+}
+
+// TestToCoreMapsAttributesIncludingJSONNull verifies result.toCore maps the
+// new nullable attribute fields (issue #58), and that JSON `null` for
+// sampleRate/bitDepth decodes as a no-op leaving the Go int fields at zero —
+// exactly core.SearchResult's "unknown" semantics, no pointer needed.
+func TestToCoreMapsAttributesIncludingJSONNull(t *testing.T) {
+	var r result
+	if err := json.Unmarshal([]byte(`{
+		"username":"bob","filename":"a.flac","size":1,"bitRate":320,
+		"length":245,"sampleRate":null,"bitDepth":null,"isVariableBitRate":true
+	}`), &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := r.toCore()
+	want := core.SearchResult{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Duration: 245, SampleRate: 0, BitDepth: 0, VariableBitRate: true,
+	}
+	if got != want {
+		t.Fatalf("toCore = %+v, want %+v", got, want)
+	}
+}
+
+// TestToCoreMapsAttributesAllPresent covers the non-null path for
+// length/sampleRate/bitDepth together.
+func TestToCoreMapsAttributesAllPresent(t *testing.T) {
+	r := result{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Length: 245, SampleRate: 44100, BitDepth: 16, IsVariableBitRate: false,
+	}
+	got := r.toCore()
+	want := core.SearchResult{
+		Username: "bob", Filename: "a.flac", Size: 1, BitRate: 320,
+		Duration: 245, SampleRate: 44100, BitDepth: 16, VariableBitRate: false,
+	}
+	if got != want {
+		t.Fatalf("toCore = %+v, want %+v", got, want)
+	}
+}
+
+// TestSearchStreamDelegatesToSearch pins the two properties SearchStream gets
+// for free by delegating to Search instead of re-implementing the POST → poll
+// → isComplete → harvest → delete sequence (issue #58 review):
+//
+//   - "inherits the empty-result retry": a first attempt that finishes with
+//     zero responses must be retried, exactly as Search documents. An
+//     independent SearchStream implementation without the retry reports "no
+//     hits" here, and the manual-search UI then tells the user nobody on the
+//     network is sharing the album — which is false.
+//   - "preserves delete-after-harvest ordering": the search is DELETEd only
+//     after its responses are in hand (the "affected 0 rows" race recorded on
+//     stopAndHarvest), and everything arrives as exactly one emit call, since
+//     slskd cannot stream (see SearchStreaming).
+func TestSearchStreamDelegatesToSearch(t *testing.T) {
+	tests := []struct {
+		name           string
+		emptyAttempts  int // how many search attempts return zero responses
+		wantBatches    int
+		wantPOSTCount  int
+		wantFilenames  []string
+		wantDeleteLast bool
+	}{
+		{
+			name:           "inherits the empty-result retry",
+			emptyAttempts:  1,
+			wantBatches:    1,
+			wantPOSTCount:  2,
+			wantFilenames:  []string{"a.flac"},
+			wantDeleteLast: true,
+		},
+		{
+			name:           "preserves delete-after-harvest ordering",
+			emptyAttempts:  0,
+			wantBatches:    1,
+			wantPOSTCount:  1,
+			wantFilenames:  []string{"a.flac"},
+			wantDeleteLast: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var seq []string
+			posts := 0
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				seq = append(seq, r.Method+" "+r.URL.Path)
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches" {
+					posts++
+				}
+				attempt := posts
+				mu.Unlock()
+
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v0/searches":
+					json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "InProgress", "isComplete": false})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1":
+					json.NewEncoder(w).Encode(map[string]any{"id": "s1", "state": "Completed", "isComplete": true})
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v0/searches/s1/responses":
+					if attempt <= tt.emptyAttempts {
+						w.Write([]byte(`[]`))
+						return
+					}
+					w.Write([]byte(`[{"username":"bob","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":1,"files":[{"filename":"a.flac","size":1,"bitRate":900,"isLocked":false}]}]`))
+				case r.Method == http.MethodDelete && r.URL.Path == "/api/v0/searches/s1":
+					w.WriteHeader(http.StatusNoContent)
+				}
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, "k")
+			c.pollInterval = 5 * time.Millisecond
+			c.searchBackoff = time.Millisecond
+
+			var batches [][]core.SearchResult
+			emit := func(batch []core.SearchResult) { batches = append(batches, batch) }
+			if err := c.SearchStream(context.Background(), "q", time.Second, emit); err != nil {
+				t.Fatalf("SearchStream: %v", err)
+			}
+
+			if len(batches) != tt.wantBatches {
+				t.Fatalf("emit called %d times, want %d (slskd delivers one batch at completion)", len(batches), tt.wantBatches)
+			}
+			var got []string
+			for _, b := range batches {
+				for _, r := range b {
+					got = append(got, r.Filename)
+				}
+			}
+			if !slices.Equal(got, tt.wantFilenames) {
+				t.Fatalf("emitted %v, want %v", got, tt.wantFilenames)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if posts != tt.wantPOSTCount {
+				t.Fatalf("POST /api/v0/searches happened %d times, want %d: %v", posts, tt.wantPOSTCount, seq)
+			}
+			if tt.wantDeleteLast {
+				// Checked per attempt, not across the whole sequence: a retry
+				// legitimately produces POST, harvest, DELETE, POST, harvest,
+				// DELETE, so a global "first delete after last harvest" test
+				// would be wrong. What must hold is that no attempt ever
+				// deletes its search before harvesting it.
+				harvested, deletes := false, 0
+				for _, s := range seq {
+					switch s {
+					case "POST /api/v0/searches":
+						harvested = false
+					case "GET /api/v0/searches/s1/responses":
+						harvested = true
+					case "DELETE /api/v0/searches/s1":
+						if !harvested {
+							t.Fatalf("delete happened before this attempt harvested its responses: %v", seq)
+						}
+						deletes++
+					}
+				}
+				if deletes == 0 {
+					t.Fatalf("search was never deleted: %v", seq)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchStreamingReportsFalseForSlskdBackend(t *testing.T) {
+	c := New("http://unused", "k")
+	if c.SearchStreaming() {
+		t.Fatal("slskd client must report SearchStreaming() == false")
 	}
 }

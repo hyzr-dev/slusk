@@ -31,15 +31,16 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/store"
 )
 
-// peerBackend combines the two port interfaces every peer-facing pipeline
-// module (plus app.Jobs' TransferCanceller) needs, so main can wire
-// a single value regardless of which backend (slskd or native soulseek) is
-// selected. Both embedded interfaces declare Cancel with an identical
-// signature; overlapping methods in embedded interfaces are legal since Go
-// 1.14.
+// peerBackend combines the three port interfaces every peer-facing pipeline
+// module (plus app.Jobs' TransferCanceller and app.Searches' streaming
+// search) needs, so main can wire a single value regardless of which backend
+// (slskd or native soulseek) is selected. pipeline.PeerSearcher and
+// app.PeerStreamSearcher both declare Search/SearchStream-adjacent methods;
+// overlapping methods in embedded interfaces are legal since Go 1.14.
 type peerBackend interface {
 	pipeline.PeerSearcher
 	pipeline.PeerNetwork
+	app.PeerStreamSearcher
 }
 
 type conversationPresenceClient interface {
@@ -333,6 +334,17 @@ func main() {
 		return st.Peers(ctx)
 	}
 	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
+	// searches backs manual Soulseek search (issue #58). Root is restartCtx,
+	// NOT a per-request context (see app.SearchesParams' doc comment) — every
+	// session goroutine must outlive the HTTP handler that created it.
+	// Timeout reuses cfg.Pipeline.SearchTimeout verbatim; no new config key is
+	// introduced for this feature.
+	searches := app.NewSearches(app.SearchesParams{
+		Peers:   peers,
+		Root:    restartCtx,
+		Timeout: cfg.Pipeline.SearchTimeout.Duration,
+		Logger:  logger.With("component", "search"),
+	})
 	// createJobFn converts observ's core.CandidateFile request shape into
 	// store.ManualJobFile: observ deliberately does not import internal/store,
 	// so the conversion happens here at the wiring boundary instead.
@@ -536,6 +548,9 @@ func main() {
 			return st.RecordOutgoingMessage(ctx, username, body, time.Now())
 		}
 	}
+	// The four Search* fields below take direct method values, not adapters:
+	// the search session shapes (core.SearchSession/SearchDelta) already live
+	// in internal/core, so no wiring-boundary conversion is needed (issue #58).
 	handler := observ.NewServer(observ.ServerDeps{
 		Registry:             reg,
 		Version:              version,
@@ -569,6 +584,10 @@ func main() {
 		RescanShares:         rescanSharesFn,
 		Uploads:              uploadsFn,
 		Throughput:           throughputFn,
+		StartSearch:          searches.Start,
+		SearchSnapshot:       searches.Snapshot,
+		SearchDelta:          searches.Delta,
+		StopSearch:           searches.Stop,
 		Conversations:        conversationsFn,
 		ConversationPresence: conversationPresenceForBackend(cfg.Pipeline.Backend, soulClient),
 		Thread:               threadFn,

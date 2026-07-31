@@ -730,3 +730,229 @@ func TestSearchResetsStaleServerWriteDeadline(t *testing.T) {
 		t.Fatalf("Search returned %v; want nil (a stale server write deadline must be reset before writing)", err)
 	}
 }
+
+// TestMapSearchResultAttributeSwitch covers every peer file-attribute code
+// mapSearchResult understands (issue #58): the preserved Bitrate branch, the
+// three new branches (Duration/SampleRate/BitDepth), VBR's nonzero-means-true
+// mapping, an absent attribute (zero value), an out-of-range value on a NEW
+// branch (leaves the field zero rather than discarding the file — unlike
+// Bitrate), and the unused code 3 being ignored.
+func TestMapSearchResultAttributeSwitch(t *testing.T) {
+	tests := []struct {
+		name       string
+		attributes []peer.Attribute
+		want       core.SearchResult
+	}{
+		{
+			name:       "no attributes",
+			attributes: nil,
+			want:       core.SearchResult{Username: "u", Filename: "f", Size: 1},
+		},
+		{
+			name: "all five known codes",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Duration, Value: 245},
+				{Code: peer.VBR, Value: 1},
+				{Code: peer.SampleRate, Value: 44100},
+				{Code: peer.BitDepth, Value: 16},
+			},
+			want: core.SearchResult{
+				Username: "u", Filename: "f", Size: 1,
+				BitRate: 320, Duration: 245, VariableBitRate: true,
+				SampleRate: 44100, BitDepth: 16,
+			},
+		},
+		{
+			name:       "VBR zero value maps to false",
+			attributes: []peer.Attribute{{Code: peer.VBR, Value: 0}},
+			want:       core.SearchResult{Username: "u", Filename: "f", Size: 1, VariableBitRate: false},
+		},
+		{
+			name:       "unused code 3 is ignored",
+			attributes: []peer.Attribute{{Code: 3, Value: 999}},
+			want:       core.SearchResult{Username: "u", Filename: "f", Size: 1},
+		},
+		{
+			name:       "unknown code beyond BitDepth is ignored",
+			attributes: []peer.Attribute{{Code: peer.FileAttributeType(99), Value: 999}},
+			want:       core.SearchResult{Username: "u", Filename: "f", Size: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := mapSearchResult("u", false, 0, 0, peer.File{Name: "f", Size: 1, Attributes: tt.attributes})
+			if !ok {
+				t.Fatal("mapSearchResult reported failure")
+			}
+			if got != tt.want {
+				t.Fatalf("mapSearchResult = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMapSearchResultOutOfRangeNewAttributeLeavesFieldZero verifies the
+// documented asymmetry: an out-of-range value on a NEW branch (Duration/
+// SampleRate/BitDepth) leaves that field at zero rather than discarding the
+// whole file, unlike the preserved Bitrate branch (see
+// TestSearchNumericChecksAndShutdownFailure's sibling coverage of Bitrate's
+// own out-of-range/failure path via checkedUint32ToInt).
+func TestMapSearchResultOutOfRangeNewAttributeLeavesFieldZero(t *testing.T) {
+	if uint64(^uint(0))>>32 != 0 {
+		t.Skip("out-of-range uint32->int only fails on 32-bit platforms")
+	}
+	got, ok := mapSearchResult("u", false, 0, 0, peer.File{
+		Name: "f", Size: 1,
+		Attributes: []peer.Attribute{{Code: peer.Duration, Value: math.MaxUint32}},
+	})
+	if !ok {
+		t.Fatal("mapSearchResult reported failure for an out-of-range NEW attribute; want the file kept with Duration left at zero")
+	}
+	if got.Duration != 0 {
+		t.Fatalf("Duration = %d, want 0", got.Duration)
+	}
+}
+
+// TestMapSearchResultFirstBitrateAttributeWins guards the regression the
+// attribute `switch` introduced when it replaced a loop that did
+// `bitrate = value; break` on the first peer.Bitrate attribute: without an
+// explicit first-wins guard, a switch inside the range loop has no way to stop
+// and the LAST Bitrate attribute silently wins instead.
+//
+// This is not cosmetic — BitRate feeds matcher.passesFloor, so which of two
+// reported bitrates is kept decides whether automation keeps the candidate.
+//
+// The second sub-case (a valid bitrate followed by an out-of-range one, which
+// must still be ACCEPTED with the first value, since the loop never reads the
+// second) can only be exercised where checkedUint32ToInt can actually fail —
+// on a 64-bit int every uint32 converts cleanly — hence the same 32-bit skip
+// TestMapSearchResultOutOfRangeNewAttributeLeavesFieldZero uses.
+func TestMapSearchResultFirstBitrateAttributeWins(t *testing.T) {
+	tests := []struct {
+		name        string
+		attributes  []peer.Attribute
+		want        core.SearchResult
+		only32Bit   bool
+		alsoAsserts string
+	}{
+		{
+			name: "two valid bitrates, the first wins",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: 128},
+			},
+			want: core.SearchResult{Username: "u", Filename: "f", Size: 1, BitRate: 320},
+		},
+		{
+			name: "later attributes are still read after the first bitrate",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: 128},
+				{Code: peer.Duration, Value: 245},
+				{Code: peer.SampleRate, Value: 44100},
+			},
+			want: core.SearchResult{
+				Username: "u", Filename: "f", Size: 1,
+				BitRate: 320, Duration: 245, SampleRate: 44100,
+			},
+		},
+		{
+			name: "valid bitrate then out-of-range one keeps the file",
+			attributes: []peer.Attribute{
+				{Code: peer.Bitrate, Value: 320},
+				{Code: peer.Bitrate, Value: math.MaxUint32},
+			},
+			want:      core.SearchResult{Username: "u", Filename: "f", Size: 1, BitRate: 320},
+			only32Bit: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.only32Bit && uint64(^uint(0))>>32 != 0 {
+				t.Skip("out-of-range uint32->int only fails on 32-bit platforms")
+			}
+			got, ok := mapSearchResult("u", false, 0, 0, peer.File{Name: "f", Size: 1, Attributes: tt.attributes})
+			if !ok {
+				t.Fatal("mapSearchResult discarded the file; want it accepted with the FIRST bitrate")
+			}
+			if got != tt.want {
+				t.Fatalf("mapSearchResult = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSearchStreamEmitsIncrementallyAndMatchesBlockingSearch verifies
+// SearchStream delivers results across multiple emit calls (proving the
+// batch/drain flush actually fires below searchStreamBatch) and that the
+// union of everything emitted is identical to what a blocking Search call
+// against the same peer traffic returns.
+func TestSearchStreamEmitsIncrementallyAndMatchesBlockingSearch(t *testing.T) {
+	c, conn, _ := startSearchClient(t)
+	requests := make(chan []byte, 1)
+	conn.writeFn = func(frame []byte) (int, error) { requests <- frame; return len(frame), nil }
+
+	s, remote := registerTestPSession(t, c, "streaming-peer")
+	s.wrote.Store(true)
+
+	var mu sync.Mutex
+	var emitted [][]core.SearchResult
+	emit := func(batch []core.SearchResult) {
+		mu.Lock()
+		defer mu.Unlock()
+		emitted = append(emitted, batch)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.SearchStream(context.Background(), "stream query", 150*time.Millisecond, emit)
+	}()
+
+	token, query := waitSearchRequest(t, requests)
+	if query != "stream query" {
+		t.Fatalf("query = %q", query)
+	}
+
+	writePeerResponse(t, remote, makeSearchResponse(token, "streaming-peer", []peer.File{
+		{Name: "Album\\01.flac", Size: 111, Extension: "flac", Attributes: []peer.Attribute{{Code: peer.Bitrate, Value: 900}}},
+	}))
+	writePeerResponse(t, remote, makeSearchResponse(token, "streaming-peer", []peer.File{
+		{Name: "Album\\02.flac", Size: 222, Extension: "flac"},
+	}))
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("SearchStream: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(emitted) < 2 {
+		t.Fatalf("emit was called %d times, want at least 2 (drained-flush below searchStreamBatch should fire per response)", len(emitted))
+	}
+	var all []core.SearchResult
+	for _, batch := range emitted {
+		all = append(all, batch...)
+	}
+	if len(all) != 2 {
+		t.Fatalf("total emitted results = %d, want 2: %+v", len(all), all)
+	}
+	byFilename := map[string]core.SearchResult{}
+	for _, r := range all {
+		byFilename[r.Filename] = r
+	}
+	if got := byFilename["Album\\01.flac"]; got.BitRate != 900 {
+		t.Fatalf("first result = %+v", got)
+	}
+	if _, ok := byFilename["Album\\02.flac"]; !ok {
+		t.Fatal("second result missing from emitted set")
+	}
+	assertNoActiveSearches(t, c)
+}
+
+func TestSearchStreamingReportsTrueForNativeBackend(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	if !c.SearchStreaming() {
+		t.Fatal("native soulseek client must report SearchStreaming() == true")
+	}
+}
