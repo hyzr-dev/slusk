@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/time/rate"
 
@@ -163,6 +164,18 @@ func (c *Client) get(ctx context.Context, reqURL, label string, out any) error {
 // the "&&" operator.
 const luceneSpecial = `+-&|!(){}[]^"~*?:\/`
 
+// isLuceneKeyword reports whether token is one of Lucene's boolean/range
+// operators when it stands alone. The keywords are case-sensitive in
+// Lucene's own grammar - a lowercase "not" is never an operator - so this
+// check must be exact-case, not case-insensitive.
+func isLuceneKeyword(token string) bool {
+	switch token {
+	case "AND", "OR", "NOT", "TO":
+		return true
+	}
+	return false
+}
+
 // escapeLucene backslash-escapes every Lucene metacharacter in s so it is
 // interpolated into a MusicBrainz query as a literal, never as an operator.
 // This matters because unescaped input is not a hard error - MusicBrainz's
@@ -170,14 +183,43 @@ const luceneSpecial = `+-&|!(){}[]^"~*?:\/`
 // is easy to miss: a folder name's brackets and parentheses silently turn a
 // targeted search into a query matching over a million release-groups that
 // still happens to rank correctly for the easy cases (issue #321).
+//
+// It also neutralises AND/OR/NOT/TO when a whitespace-delimited token is
+// exactly one of them: inside releasegroup:(...) those are parsed as boolean
+// operators, not literal words, so an album title like Garbage's "Not Your
+// Kind of People" loses its leading NOT to negation and the correct
+// release-group cannot be found at all (measured against the live API -
+// issue #321). Escaping the token's first rune is enough to stop the parser
+// recognising it as a keyword. A word that merely contains a keyword, such
+// as NOTHING or ANDROMEDA, is left untouched - only an exact, whole-token
+// match is neutralised.
 func escapeLucene(s string) string {
 	var b strings.Builder
-	for _, r := range s {
-		if strings.ContainsRune(luceneSpecial, r) {
+	var token []rune
+	flush := func() {
+		if len(token) == 0 {
+			return
+		}
+		if isLuceneKeyword(string(token)) {
 			b.WriteByte('\\')
 		}
-		b.WriteRune(r)
+		for _, r := range token {
+			if strings.ContainsRune(luceneSpecial, r) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		token = token[:0]
 	}
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			flush()
+			b.WriteRune(r)
+			continue
+		}
+		token = append(token, r)
+	}
+	flush()
 	return b.String()
 }
 
@@ -239,12 +281,24 @@ func releaseGroupSearchQuery(artist, album string, fuzzy bool) string {
 // artist to disambiguate, so callers should not treat a blank artist as
 // equivalent to a targeted search, only as a degraded one.
 //
+// album must not be blank: a blank album term builds releasegroup:(), which
+// MusicBrainz's Lucene parser rejects with a 400. Client does not guard
+// against this itself - internal/app.Identify.SearchReleaseGroups is the
+// only caller and already rejects a blank album with
+// ErrIdentifyQueryInvalid before reaching here.
+//
 // When the strict query returns zero hits, SearchReleaseGroups retries once
-// with a fuzzy album term (releasegroup:(<album>~)), which rescues typos
-// without broadening every other search's result set - the fuzzy retry only
-// fires on a miss, never as the default. The returned slice is capped at
-// searchReleaseGroupsLimit; total is MusicBrainz's reported match count from
-// whichever request produced the returned slice, which the caller must
+// with a fuzzy album term (releasegroup:(<album>~)) - the fuzzy retry only
+// fires on a miss, never as the default. "~" binds only to the last
+// whitespace-delimited term in the album, so this rescues a typo in that
+// term (e.g. "lightening" in "ride the lightening") but not one earlier in
+// the title; it is not a general typo-tolerant search. If the retry itself
+// fails, the strict leg's empty result is returned instead of the retry's
+// error: a legitimate zero-hit search is a normal outcome, not a failure, and
+// it must not be turned into ErrIdentifyUnavailable just because the
+// best-effort retry for it happened to error. The returned slice is capped
+// at searchReleaseGroupsLimit; total is MusicBrainz's reported match count
+// from whichever request produced the returned slice, which the caller must
 // compare against len(slice) to detect truncation - it is never inferred
 // from the slice alone.
 func (c *Client) SearchReleaseGroups(ctx context.Context, artist, album string) ([]core.MBReleaseGroup, int, error) {
@@ -253,7 +307,11 @@ func (c *Client) SearchReleaseGroups(ctx context.Context, artist, album string) 
 		return nil, 0, err
 	}
 	if total == 0 {
-		return c.searchReleaseGroups(ctx, artist, album, true)
+		fuzzyGroups, fuzzyTotal, fuzzyErr := c.searchReleaseGroups(ctx, artist, album, true)
+		if fuzzyErr != nil {
+			return groups, total, nil
+		}
+		return fuzzyGroups, fuzzyTotal, nil
 	}
 	return groups, total, nil
 }

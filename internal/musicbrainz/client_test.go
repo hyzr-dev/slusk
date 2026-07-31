@@ -56,6 +56,46 @@ func TestEscapeLuceneDirtyFolderName(t *testing.T) {
 	}
 }
 
+// TestEscapeLuceneNeutralisesKeywords covers issue #321's review finding:
+// AND/OR/NOT/TO are Lucene boolean/range operators when they stand alone as
+// a whitespace-delimited token, so releasegroup:(NOT YOUR KIND OF PEOPLE)
+// parsed "NOT" as negation and the correct release-group (Garbage's "Not
+// Your Kind of People") was absent from the results entirely - measured
+// against the live API. Lucene's keywords are case-sensitive, so a lowercase
+// "not" is already a literal and must be left untouched, and a word that
+// merely contains a keyword (NOTHING, ANDROMEDA, ORION) must not be mangled
+// - that regression is the one this fix could easily introduce.
+func TestEscapeLuceneNeutralisesKeywords(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"NOT Your Kind of People", `\NOT Your Kind of People`},
+		{"Rock AND Roll", `Rock \AND Roll`},
+		{"Dusk TO Dawn", `Dusk \TO Dawn`},
+		{"Either OR", `Either \OR`},
+		{"this is not a keyword", "this is not a keyword"},
+		{"NOTHING ANDROMEDA ORION", "NOTHING ANDROMEDA ORION"},
+	}
+	for _, c := range cases {
+		if got := escapeLucene(c.in); got != c.want {
+			t.Errorf("escapeLucene(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestReleaseGroupSearchQueryFuzzyWithMetacharacters covers the direct
+// query-builder combination issue #321's review flagged as untested: fuzzy
+// must append a bare "~" after the already-escaped album term, so "foo*"
+// becomes "foo\*~", never "foo\*\~" (escaping the appended "~" itself) or
+// "foo*~" (skipping the metacharacter escape).
+func TestReleaseGroupSearchQueryFuzzyWithMetacharacters(t *testing.T) {
+	got := releaseGroupSearchQuery("", "foo*", true)
+	want := `releasegroup:(foo\*~)`
+	if got != want {
+		t.Fatalf("releaseGroupSearchQuery = %q, want %q", got, want)
+	}
+}
+
 func TestSearchReleaseGroups(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +204,31 @@ func TestSearchReleaseGroupsRetriesFuzzyOnZeroHits(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "rg-1" || total != 1 {
 		t.Fatalf("unexpected: got=%+v total=%d", got, total)
+	}
+}
+
+// TestSearchReleaseGroupsFuzzyRetryFailureKeepsEmptyResult covers issue
+// #321's review finding: a strict query that legitimately returns zero hits
+// (a normal "not found") must not become ErrIdentifyUnavailable just because
+// the best-effort fuzzy retry for it errors. The strict leg already
+// succeeded, so its empty result is the honest answer.
+func TestSearchReleaseGroupsFuzzyRetryFailureKeepsEmptyResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("query"), "~") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(`{"count":0,"release-groups":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test@example.com")
+	got, total, err := c.SearchReleaseGroups(context.Background(), "Metallica", "ride the lightening")
+	if err != nil {
+		t.Fatalf("SearchReleaseGroups: %v", err)
+	}
+	if len(got) != 0 || total != 0 {
+		t.Fatalf("expected an empty result, got %+v total=%d", got, total)
 	}
 }
 
