@@ -22,37 +22,47 @@
     "59": {
       "number": 59,
       "kind": "feature",
-      "prodImpact": "none",
-      "impactEvidence": "Pure feature gap: manual downloads have no UI path to import at all yet (web/src/routes/Search.tsx:1-23 is still the #58 placeholder page), so nothing running in production can be exercised in a wrong way -- there is no existing behavior to regress.",
+      "prodImpact": "degraded",
+      "impactEvidence": "internal/app/jobs.go:138-141 documents the defect directly, and it is live in prod today since #155 (backend) and #58 (UI) are both merged to main. A manual job is created with LidarrAlbumID NULL/0 (internal/store/manual_jobs.go:35). Once its download completes it auto-advances to IMPORTING, where internal/pipeline/importing.go:310 and :422 call Music.AlbumStatus(ctx, 0); internal/lidarr/client.go:232-246 issues GET /api/v1/album/0, which Lidarr 404s, so AlbumStatus errors every tick. That drives escalateIfStuck (internal/pipeline/importing.go:359-377), which after StuckAfter fails the candidate and returns the job to SELECTING with no further candidates (internal/pipeline/selecting.go:181-196 — NextNewCandidate finds none since manual jobs skip Discovery), so it resets to WANTED and Discovery re-searches using garbage manual-job metadata (artist_name like \"Soulseek - Share\" per the issue's own #58 lab run) until MaxRetries burns out and the job FAILs terminally. Downloaded files are quarantined on terminal failure (internal/pipeline/selecting.go quarantineLeftovers), not silently destroyed, so this is wasted retry/search cycles and a manual download that can never actually import into Lidarr — not a permanent stall and not data loss.",
       "touches": [
+        "internal/app/jobs.go",
+        "internal/pipeline/importing.go",
+        "internal/pipeline/ports.go",
         "internal/store/manual_jobs.go",
-        "internal/observ/observ.go",
+        "internal/lidarr/client.go",
         "web/src/routes/Search.tsx",
-        "web/src/api/types.ts"
+        "web/src/routes/SearchResultCard.tsx"
       ],
       "frontend": true,
       "effort": "L",
       "reproCheck": null,
       "statedBlockers": [
-        58
+        331,
+        321,
+        155
       ],
-      "digest": "2815a16b2c799fa8643a22551d382200a3f5e0d179d5377a73197358b6a4d650"
+      "needsDecision": {
+        "architecture": true,
+        "configKey": false,
+        "migration": true
+      },
+      "concurrency": false,
+      "digest": "d24e5bd3291e84c9621e1701b877466dbc1fa9d439fbba6220630edfaa75af1b"
     },
     "63": {
       "number": 63,
       "kind": "feature",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request for a new setup wizard plus expanded per-dependency health checks; nothing in the running instance misbehaves without it. The existing health surface (internal/observ/observ.go:310-382, HealthyFunc/ModulesFunc feeding /healthz and /status) already works as designed today — this issue asks to add a setup view and richer checks on top of it, not fix a defect in it.",
+      "impactEvidence": "Onboarding/UX feature request, not a running-production defect. Also largely already shipped: web/src/routes/Setup.tsx:89-189 already implements the guided setup exactly as specced (Soulseek login test, Lidarr URL/API-key test, shared-folder count/index check, human-readable ErrorCard messages at Setup.tsx:81-87/148/163), landed via merged PRs #198/#201/#281 (git log web/src/routes/Setup.tsx). web/src/routes/Health.tsx:13-110 already renders per-module health with ready/not-ready dots and last-error tooltips. The only piece of #63 not yet done -- an ongoing per-DEPENDENCY (Lidarr/Soulseek/Shares) health indicator distinct from per-pipeline-module health -- was explicitly carved out into issue #200, whose body cites the exact gap: GET /status's moduleDetails is keyed by pipeline module name (wanted_sync, discovery, ...) not by dependency, see internal/observ/observ.go:544 and the comment already in web/src/routes/Health.tsx:24-27 referencing #200.",
       "touches": [
         "internal/observ/observ.go",
-        "internal/observ/server.go",
-        "web/src/pages/Setup.tsx"
+        "web/src/routes/Health.tsx"
       ],
       "frontend": true,
-      "effort": "L",
+      "effort": "S",
       "reproCheck": null,
       "statedBlockers": [],
-      "digest": "8a82ba956ac62d30f47765a134951f98a062f5d2ed88d26c621397a16b5c3d9c"
+      "digest": "69ede08c28b6328cea423870c082ee663393d39dc0980cfb8e04dffea7ca3958"
     },
     "69": {
       "number": 69,
@@ -86,18 +96,15 @@
     },
     "99": {
       "number": 99,
-      "kind": "bug",
+      "kind": "techdebt",
       "prodImpact": "none",
-      "impactEvidence": "internal/soulseek/downloads.go:967-980: a goroutine already watches ctx.Done() and closes handoff.conn to unblock the in-flight streamFile call, exactly the mechanism the issue asks for. This was fixed by commit a8f9804, merged via PR #147, already on main/this branch.",
-      "touches": [
-        "internal/soulseek/downloads.go"
-      ],
+      "impactEvidence": "Already fixed on main by commit a8f9804 (\"fix(soulseek): abort an in-flight streamFile on Cancel/Remove (#99)\", 2026-07-23). internal/soulseek/downloads.go:967-980 now plumbs ctx into runDownload and spawns a watcher goroutine that closes handoff.conn on ctx.Done() to unblock streamFile's blocking reads/writes; internal/soulseek/downloads.go:1002-1008 routes the resulting error through finishInterrupted (which at internal/soulseek/downloads.go:761-764 leaves an already-TransferCancelled state alone rather than resurrecting it); internal/soulseek/downloads.go:1018-1024 re-checks TransferCancelled before writing TransferCompleted. The issue's described defect (fd writing to an unlinked .part file, F-connection held open past Cancel) no longer exists in the code as it stands today.",
+      "touches": [],
       "frontend": false,
       "effort": "S",
-      "reproCheck": null,
+      "reproCheck": "Read internal/soulseek/downloads.go lines 940-1025: confirm ctx is passed to runDownload, the watcher goroutine closes handoff.conn on ctx.Done(), and finishInterrupted/the TransferCancelled guard are present — if so the issue is stale and should be closed, not implemented.",
       "statedBlockers": [],
-      "concurrency": true,
-      "digest": "4d6c40cb717e2577ff6efe67f1cd2d5126570c3f88f2139077ebc7ef020a417b"
+      "digest": "8546b2f63077f58e6d49dcf4f50333bc9450c90cb2b1f3e0624ffcb409c09d29"
     },
     "106": {
       "number": 106,
@@ -573,25 +580,19 @@
       "number": 279,
       "kind": "feature",
       "prodImpact": "none",
-      "impactEvidence": "No production impact from filing this request: current auth is unchanged, a shared bearer token / HTTP Basic check in internal/observ/security.go:21-49, applied via ProtectPrivateEndpoints (internal/observ/security.go:55-76). Adding real per-user login would be new functionality, not a fix to a defect in that path.",
+      "impactEvidence": "Pure feature request (empty body, comment just points at a design mockup) with no defect to have runtime impact. internal/observ/security.go:18-49 shows the app already gates every private endpoint behind a single shared bearer/HTTP-Basic token (TokenAuthenticator, constant-time compare) and it works correctly as designed today. Real per-user login would replace this with new functionality, not fix a bug.",
       "touches": [
         "internal/observ/security.go",
         "internal/observ/config.go",
-        "internal/config/config.go",
-        "internal/config/write.go",
+        "internal/observ/server.go",
         "web/src/routes/Settings.tsx",
-        "web/src/api/client.ts"
+        "web/src/api/types.ts"
       ],
       "frontend": true,
       "effort": "L",
       "reproCheck": null,
       "statedBlockers": [],
-      "needsDecision": {
-        "architecture": true,
-        "configKey": true,
-        "migration": true
-      },
-      "digest": "4c4c05755b6d84518c426dc8f5ff81b0e9dd7d96c104c0686cd7b1178ed61789"
+      "digest": "0c6bfe586f54ba7351e3ae1f00b7b288e1edd2d9b7a0f4ad9076985c8999d6fe"
     },
     "280": {
       "number": 280,
@@ -701,6 +702,183 @@
       "statedBlockers": [],
       "concurrency": false,
       "digest": "a407f3c0156105c122da4a896cbaa7c9dd7ee09bd864598e177981d774f81d6d"
+    },
+    "321": {
+      "number": 321,
+      "kind": "feature",
+      "prodImpact": "none",
+      "impactEvidence": "No MusicBrainz code exists anywhere in the repo (verified: internal/musicbrainz/ does not exist; grep for musicbrainz|mbid|foreignAlbumId across Go code is empty). This is greenfield feature work with nothing running in production to be affected; the referenced track-band logic it builds on (internal/pipeline/discovery.go:189-276, internal/pipeline/importing.go:303-327, internal/store/pipeline.go:565-573) is existing read-only context this issue does not modify.",
+      "touches": [
+        "internal/musicbrainz/client.go",
+        "internal/pipeline/discovery.go",
+        "internal/lidarr/client.go",
+        "internal/config/config.go",
+        "config.example.toml",
+        "web/src/routes/Search.tsx",
+        "web/src/routes/SearchResultCard.tsx",
+        "web/src/api/queries.ts",
+        "web/src/api/types.ts"
+      ],
+      "frontend": true,
+      "effort": "L",
+      "reproCheck": null,
+      "statedBlockers": [
+        58
+      ],
+      "digest": "94488b68e4721a8aac56cbbcd6cdb773f4db97d19eabd85a59d348ba98fd58a5"
+    },
+    "325": {
+      "number": 325,
+      "kind": "feature",
+      "prodImpact": "none",
+      "impactEvidence": "Pure feature request with no existing production defect: internal/soulseek/uploads.go's uploadManager keeps upload state only in memory (report()/complete() at internal/soulseek/uploads.go:182-233 and :280) and nothing persists it today, so there is no runtime misbehavior to point at — the running instance behaves exactly as designed now (uploads simply aren't recorded after completion). This proposes new capability, not a fix.",
+      "touches": [
+        "internal/soulseek/uploads.go",
+        "internal/soulseek/client.go",
+        "internal/store/migrations/0010_upload_history.sql",
+        "internal/store/uploads.go",
+        "internal/observ/uploads.go",
+        "internal/observ/server.go",
+        "cmd/slskdarr/soulseek.go",
+        "config.example.toml"
+      ],
+      "frontend": false,
+      "effort": "L",
+      "reproCheck": null,
+      "statedBlockers": [],
+      "digest": "3bdee92f01614df54bbf2c6848880ede061db7fa9c04c44ff1356c598a9c1378"
+    },
+    "326": {
+      "number": 326,
+      "kind": "feature",
+      "prodImpact": "none",
+      "impactEvidence": "Purely additive new UI (new component web/src/routes/UploadHistory.tsx, new hook in web/src/api/queries.ts) with no existing behavior changed; nothing in production is affected until this ships, and it cannot ship functionally before #325 adds GET /api/uploads/history.",
+      "touches": [
+        "web/src/routes/Shares.tsx",
+        "web/src/routes/UploadHistory.tsx",
+        "web/src/api/queries.ts",
+        "web/src/strings.ts",
+        "web/src/routes/Shares.module.css"
+      ],
+      "frontend": true,
+      "effort": "M",
+      "reproCheck": null,
+      "statedBlockers": [
+        325
+      ],
+      "concurrency": false,
+      "digest": "0b2f78fbdb877a3c539483d62591c11fd798b94e65b240883ea6d309315ead75"
+    },
+    "331": {
+      "number": 331,
+      "kind": "feature",
+      "prodImpact": "none",
+      "impactEvidence": "Feature request only; no production behavior regresses. Manual jobs today deliberately skip Lidarr import by design (internal/app/jobs.go:138-141 doc comment: \"Importing a manual job is out of scope ... Downloading still works end-to-end; only the subsequent Lidarr import step is affected\"). Nothing here is broken, it is unbuilt.",
+      "touches": [
+        "internal/lidarr/client.go",
+        "internal/app/jobs.go",
+        "internal/observ/observ.go",
+        "internal/store/pipeline.go",
+        "config.toml",
+        "config.example.toml",
+        "web/src/routes/Search.tsx",
+        "web/src/routes/SearchResultCard.tsx"
+      ],
+      "frontend": true,
+      "effort": "L",
+      "reproCheck": null,
+      "statedBlockers": [
+        321,
+        59
+      ],
+      "concurrency": false,
+      "needsDecision": {
+        "architecture": true,
+        "configKey": true,
+        "migration": false
+      },
+      "impactEvidence2": "n/a",
+      "digest": "05044fd840058548929fb741cbec9c354640d351e85a56ae7a77dfe3689a0da7"
+    },
+    "332": {
+      "number": 332,
+      "kind": "bug",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "web/src/routes/Overview.module.css:171 defines `.right { text-align: right; color: var(--dim); }` with no white-space rule, while the equivalent class in web/src/routes/Jobs.module.css:2 is `.right { text-align: right; white-space: nowrap; }`. The TRANSFERS panel's SIZE column is fixed at 84px via the grid-template-columns on web/src/routes/Overview.module.css:40, and is rendered through formatSize (web/src/format.ts:136-143), which produces strings like \"340.1 MB\" that overflow 84px, applied at web/src/routes/Overview.tsx:298 `<span role=\"cell\" className={styles.right}>{size}</span>`. Purely a visual row-height glitch in the dashboard; no data or state is affected.",
+      "touches": [
+        "web/src/routes/Overview.module.css",
+        "web/src/format.ts",
+        "web/src/routes/Overview.tsx"
+      ],
+      "frontend": true,
+      "effort": "S",
+      "reproCheck": "Open the Overview route and watch the TRANSFERS panel while a job's SIZE cell renders a value like \"340.1 MB\"; it wraps onto two lines and that row becomes taller than its neighbors.",
+      "statedBlockers": [],
+      "concurrency": false,
+      "digest": "3c540f004aab61a1fb780952de402000cedadd3f60614e9a9c1bc960183b1027"
+    },
+    "333": {
+      "number": 333,
+      "kind": "feature",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "web/src/format.ts:157-163 (formatAge caps at \"Xh Ym\", never rolls to days) consumed by web/src/routes/Overview.tsx:78-83 (finishedAge) and rendered at lines 337/377 with no title attribute. A job finished days ago just displays a large hour count (e.g. \"106h 21m\") instead of a wrong or misleading value - the data is correct, only its formatting is sub-optimal for large spans, and nothing else depends on this string. Pure display/UX defect, no data loss or functional breakage.",
+      "touches": [
+        "web/src/format.ts",
+        "web/src/routes/Overview.tsx",
+        "web/src/format.test.ts"
+      ],
+      "frontend": true,
+      "effort": "S",
+      "reproCheck": "Open Overview for a job whose updatedAt is more than a day in the past; the WHEN cell reads e.g. \"106h 21m\" instead of a day-scaled value, and hovering it shows no tooltip (no title attribute on web/src/routes/Overview.tsx:337 and :377).",
+      "statedBlockers": [],
+      "needsDecision": {
+        "architecture": false,
+        "configKey": false,
+        "migration": false
+      },
+      "concurrency": false,
+      "digest": "83557e74da666addf9d257b7da13f81aab48ce56282aee2eb0e13927aec5bafc"
+    },
+    "334": {
+      "number": 334,
+      "kind": "bug",
+      "prodImpact": "degraded",
+      "impactEvidence": "internal/pipeline/discovery.go:386-394 treats zero-survivor searches (raw zero results after one normalized-query retry OR every candidate filtered out) identically, funneling both into failOrBackoff(..., d.p.MaxRetries, ...) at internal/pipeline/discovery.go:393. internal/pipeline/backoff.go:49-58 increments job.Retries on every such call and calls MarkJobFailed once retries>=maxRetries (default 10, internal/config/config.go:162-163), after which the job sits FAILED for config.example.toml:62 failed_revive_after=720h (30 days) before automatic retry. Since the same query is shown to return 0-250 results within minutes (issue's own measurement data), a run of unlucky empty ticks marks a genuinely available album permanently failed and shelves it for a month - wasted work and a real drop in successful imports under real network conditions, not a display-only problem.",
+      "touches": [
+        "internal/pipeline/discovery.go",
+        "internal/pipeline/backoff.go",
+        "internal/pipeline/selecting.go",
+        "internal/config/config.go",
+        "config.example.toml"
+      ],
+      "frontend": false,
+      "effort": "M",
+      "reproCheck": "In testenv (./testenv/lab.sh up), pick a job that reaches FAILED via Discovery, then re-issue the same search manually against slskd/the native client shortly after - if it returns >0 results while the job is already FAILED and inside its failed_revive_after window, the noise-vs-terminal-failure conflation reproduces. Alternatively: `SELECT album_job, event, detail, created_at FROM job_events WHERE event IN ('search','job_failed') ORDER BY album_job, created_at` after a lab run and check whether jobs hit job_failed after only consecutive results=0 search events with no other evidence the album is truly absent.",
+      "statedBlockers": [],
+      "needsDecision": {
+        "architecture": true,
+        "configKey": true,
+        "migration": false
+      },
+      "concurrency": false,
+      "digest": "4d4211297ce2d08bee28c5738db1c72779b7d85cc62a397635c9922a17e9b3b3"
+    },
+    "335": {
+      "number": 335,
+      "kind": "bug",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "Verified by direct WCAG contrast computation: --text-dim (#758189) vs --btn (#14181b) = 4.47:1 and --bad (#c56164) vs --btn (#14181b) = 4.48:1, both just under the 4.5:1 AA text threshold (web/src/styles/tokens.css:20,33,43). --tick-queued (#2a2f34) vs --tick-off (#1d2125) = 1.20:1, well under the 3:1 non-text threshold required by WCAG 1.4.11 (web/src/styles/tokens.css:45-46), and these two tokens are the fill/track pair for every progress bar rendered by web/src/components/tui/Ticks.tsx:10 and web/src/components/tui/Ticks.module.css:9, wired into Overview, Jobs, JobDetail and UploadsPanel. All of this is a visual/legibility degradation only — text stays readable via other channels (icons/labels/position), no functionality breaks, no data loss, no outage risk. That keeps it at cosmetic rather than degraded, per the rubric's \"worst outcome the defect can produce\": worst case is a queued-vs-off tick barely distinguishable in a progress bar, not a broken feature.",
+      "touches": [
+        "web/src/styles/tokens.css",
+        "web/scripts/check-css-tokens.mjs"
+      ],
+      "frontend": true,
+      "effort": "M",
+      "reproCheck": "Compute WCAG contrast of --text-dim/--bad against --btn and of --tick-queued against --tick-off from web/src/styles/tokens.css hex values (e.g. via any contrast calculator) — currently 4.47:1, 4.48:1, and 1.20:1 respectively, all still failing their thresholds as of this checkout.",
+      "statedBlockers": [
+        212
+      ],
+      "digest": "deb6b9a972173264e9b54ec7db684aadfb07a88bf7b93d6a01dadbef8c29ce08"
     }
   },
   "waves": [
