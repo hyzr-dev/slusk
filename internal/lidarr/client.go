@@ -343,7 +343,7 @@ func (c *Client) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTr
 // found is false, err is nil when Lidarr answered with an empty result -  a
 // genuine "not in library". A non-nil err means the answer is unknown (Lidarr
 // unreachable or erroring), which callers must not treat as absence - see
-// core.LidarrAlbumStatus.
+// app.LidarrAlbumStatus.
 func (c *Client) AlbumByForeignID(ctx context.Context, foreignAlbumID string) (core.LidarrAlbum, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/album?foreignAlbumId=%s", c.baseURL, url.QueryEscape(foreignAlbumID)), nil)
@@ -372,39 +372,6 @@ func (c *Client) AlbumByForeignID(ctx context.Context, foreignAlbumID string) (c
 	}
 	a := raw[0]
 	return core.LidarrAlbum{ID: a.ID, ArtistID: a.ArtistID, Monitored: a.Monitored}, true, nil
-}
-
-// ArtistByMBID reports whether a MusicBrainz artist is in the user's Lidarr
-// library, keyed by Lidarr's mbId. Same found/err contract as
-// AlbumByForeignID: found=false, err=nil is a genuine absence; a non-nil err
-// means unknown.
-func (c *Client) ArtistByMBID(ctx context.Context, artistMBID string) (core.LidarrArtist, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/v1/artist?mbId=%s", c.baseURL, url.QueryEscape(artistMBID)), nil)
-	if err != nil {
-		return core.LidarrArtist{}, false, err
-	}
-	req.Header.Set("X-Api-Key", c.apiKey)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return core.LidarrArtist{}, false, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return core.LidarrArtist{}, false, fmt.Errorf("lidarr artist lookup: status %d", resp.StatusCode)
-	}
-	var raw []struct {
-		ID        int64 `json:"id"`
-		Monitored bool  `json:"monitored"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return core.LidarrArtist{}, false, err
-	}
-	if len(raw) == 0 {
-		return core.LidarrArtist{}, false, nil
-	}
-	a := raw[0]
-	return core.LidarrArtist{ID: a.ID, Monitored: a.Monitored}, true, nil
 }
 
 // ExecuteManualImport tells Lidarr to import the given items (move mode).

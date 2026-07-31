@@ -10,20 +10,20 @@ import (
 
 // fakeMusicBrainz is a MusicBrainzSearcher test double.
 type fakeMusicBrainz struct {
-	searchArtists func(ctx context.Context, query string) ([]core.MBArtist, error)
-	releaseGroups func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error)
-	releases      func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error)
+	searchArtists func(ctx context.Context, query string) ([]core.MBArtist, int, error)
+	releaseGroups func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error)
+	releases      func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error)
 }
 
-func (f *fakeMusicBrainz) SearchArtists(ctx context.Context, query string) ([]core.MBArtist, error) {
+func (f *fakeMusicBrainz) SearchArtists(ctx context.Context, query string) ([]core.MBArtist, int, error) {
 	return f.searchArtists(ctx, query)
 }
 
-func (f *fakeMusicBrainz) ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error) {
+func (f *fakeMusicBrainz) ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
 	return f.releaseGroups(ctx, artistMBID)
 }
 
-func (f *fakeMusicBrainz) Releases(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error) {
+func (f *fakeMusicBrainz) Releases(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error) {
 	return f.releases(ctx, releaseGroupMBID)
 }
 
@@ -38,85 +38,142 @@ func (f *fakeLidarrLookup) AlbumByForeignID(ctx context.Context, foreignAlbumID 
 
 func TestIdentifySearchArtistsValidatesQuery(t *testing.T) {
 	id := NewIdentify(IdentifyParams{MusicBrainz: &fakeMusicBrainz{}})
-	if _, err := id.SearchArtists(context.Background(), "   "); !errors.Is(err, ErrIdentifyQueryInvalid) {
+	if _, _, err := id.SearchArtists(context.Background(), "   "); !errors.Is(err, ErrIdentifyQueryInvalid) {
 		t.Fatalf("SearchArtists(blank) = %v, want ErrIdentifyQueryInvalid", err)
 	}
 }
 
 func TestIdentifySearchArtistsMapsBackendErrorToUnavailable(t *testing.T) {
-	mb := &fakeMusicBrainz{searchArtists: func(ctx context.Context, query string) ([]core.MBArtist, error) {
-		return nil, errors.New("boom")
+	mb := &fakeMusicBrainz{searchArtists: func(ctx context.Context, query string) ([]core.MBArtist, int, error) {
+		return nil, 0, errors.New("boom")
 	}}
 	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
-	if _, err := id.SearchArtists(context.Background(), "metallica"); !errors.Is(err, ErrIdentifyUnavailable) {
+	if _, _, err := id.SearchArtists(context.Background(), "metallica"); !errors.Is(err, ErrIdentifyUnavailable) {
 		t.Fatalf("SearchArtists = %v, want ErrIdentifyUnavailable", err)
 	}
 }
 
 func TestIdentifySearchArtistsSuccess(t *testing.T) {
 	want := []core.MBArtist{{ID: "a1", Name: "Metallica"}}
-	mb := &fakeMusicBrainz{searchArtists: func(ctx context.Context, query string) ([]core.MBArtist, error) {
+	mb := &fakeMusicBrainz{searchArtists: func(ctx context.Context, query string) ([]core.MBArtist, int, error) {
 		if query != "metallica" {
 			t.Errorf("query = %q", query)
 		}
-		return want, nil
+		return want, 1, nil
 	}}
 	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
-	got, err := id.SearchArtists(context.Background(), "metallica")
+	got, total, err := id.SearchArtists(context.Background(), "metallica")
 	if err != nil {
 		t.Fatalf("SearchArtists: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "a1" {
 		t.Fatalf("unexpected: %+v", got)
 	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+}
+
+// TestIdentifySearchArtistsSurfacesTotalPastCap covers issue #321's review
+// finding: when the backend's slice was capped, total must still report the
+// true match count so the caller can detect the truncation.
+func TestIdentifySearchArtistsSurfacesTotalPastCap(t *testing.T) {
+	mb := &fakeMusicBrainz{searchArtists: func(ctx context.Context, query string) ([]core.MBArtist, int, error) {
+		return []core.MBArtist{{ID: "a1"}}, 250, nil
+	}}
+	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
+	got, total, err := id.SearchArtists(context.Background(), "metallica")
+	if err != nil {
+		t.Fatalf("SearchArtists: %v", err)
+	}
+	if total != 250 || total == len(got) {
+		t.Fatalf("total = %d, want 250 (exceeding len(got)=%d)", total, len(got))
+	}
 }
 
 func TestIdentifyArtistAlbumsValidatesID(t *testing.T) {
 	id := NewIdentify(IdentifyParams{MusicBrainz: &fakeMusicBrainz{}})
-	if _, err := id.ArtistAlbums(context.Background(), ""); !errors.Is(err, ErrIdentifyQueryInvalid) {
+	if _, _, err := id.ArtistAlbums(context.Background(), ""); !errors.Is(err, ErrIdentifyQueryInvalid) {
 		t.Fatalf("ArtistAlbums(blank) = %v, want ErrIdentifyQueryInvalid", err)
 	}
 }
 
 func TestIdentifyArtistAlbumsMapsBackendErrorToUnavailable(t *testing.T) {
-	mb := &fakeMusicBrainz{releaseGroups: func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error) {
-		return nil, errors.New("boom")
+	mb := &fakeMusicBrainz{releaseGroups: func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
+		return nil, 0, errors.New("boom")
 	}}
 	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
-	if _, err := id.ArtistAlbums(context.Background(), "a1"); !errors.Is(err, ErrIdentifyUnavailable) {
+	if _, _, err := id.ArtistAlbums(context.Background(), "a1"); !errors.Is(err, ErrIdentifyUnavailable) {
 		t.Fatalf("ArtistAlbums = %v, want ErrIdentifyUnavailable", err)
+	}
+}
+
+// TestIdentifyArtistAlbumsSurfacesTotalPastCap covers issue #321's review
+// finding: when the backend's slice was capped, total must still report the
+// true match count so the caller can detect the truncation.
+func TestIdentifyArtistAlbumsSurfacesTotalPastCap(t *testing.T) {
+	mb := &fakeMusicBrainz{releaseGroups: func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
+		return []core.MBReleaseGroup{{ID: "rg1"}}, 150, nil
+	}}
+	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
+	got, total, err := id.ArtistAlbums(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("ArtistAlbums: %v", err)
+	}
+	if total != 150 || total == len(got) {
+		t.Fatalf("total = %d, want 150 (exceeding len(got)=%d)", total, len(got))
 	}
 }
 
 func TestIdentifyAlbumEditionsValidatesID(t *testing.T) {
 	id := NewIdentify(IdentifyParams{MusicBrainz: &fakeMusicBrainz{}})
-	if _, err := id.AlbumEditions(context.Background(), ""); !errors.Is(err, ErrIdentifyQueryInvalid) {
+	if _, _, err := id.AlbumEditions(context.Background(), ""); !errors.Is(err, ErrIdentifyQueryInvalid) {
 		t.Fatalf("AlbumEditions(blank) = %v, want ErrIdentifyQueryInvalid", err)
 	}
 }
 
 func TestIdentifyAlbumEditionsMapsBackendErrorToUnavailable(t *testing.T) {
-	mb := &fakeMusicBrainz{releases: func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error) {
-		return nil, errors.New("boom")
+	mb := &fakeMusicBrainz{releases: func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error) {
+		return nil, 0, errors.New("boom")
 	}}
 	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
-	if _, err := id.AlbumEditions(context.Background(), "rg1"); !errors.Is(err, ErrIdentifyUnavailable) {
+	if _, _, err := id.AlbumEditions(context.Background(), "rg1"); !errors.Is(err, ErrIdentifyUnavailable) {
 		t.Fatalf("AlbumEditions = %v, want ErrIdentifyUnavailable", err)
 	}
 }
 
 func TestIdentifyAlbumEditionsSuccess(t *testing.T) {
 	want := []core.MBRelease{{ID: "r1", TrackCount: 8, TrackCountKnown: true}}
-	mb := &fakeMusicBrainz{releases: func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error) {
-		return want, nil
+	mb := &fakeMusicBrainz{releases: func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error) {
+		return want, 1, nil
 	}}
 	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
-	got, err := id.AlbumEditions(context.Background(), "rg1")
+	got, total, err := id.AlbumEditions(context.Background(), "rg1")
 	if err != nil {
 		t.Fatalf("AlbumEditions: %v", err)
 	}
 	if len(got) != 1 || got[0].TrackCount != 8 {
 		t.Fatalf("unexpected: %+v", got)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+}
+
+// TestIdentifyAlbumEditionsSurfacesTotalPastCap covers issue #321's review
+// finding: when the backend's slice was capped, total must still report the
+// true match count so the caller can detect the truncation.
+func TestIdentifyAlbumEditionsSurfacesTotalPastCap(t *testing.T) {
+	mb := &fakeMusicBrainz{releases: func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error) {
+		return []core.MBRelease{{ID: "r1"}}, 60, nil
+	}}
+	id := NewIdentify(IdentifyParams{MusicBrainz: mb})
+	got, total, err := id.AlbumEditions(context.Background(), "rg1")
+	if err != nil {
+		t.Fatalf("AlbumEditions: %v", err)
+	}
+	if total != 60 || total == len(got) {
+		t.Fatalf("total = %d, want 60 (exceeding len(got)=%d)", total, len(got))
 	}
 }
 

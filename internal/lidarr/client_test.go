@@ -438,36 +438,3 @@ func TestAlbumByForeignID(t *testing.T) {
 		}
 	})
 }
-
-func TestArtistByMBID(t *testing.T) {
-	t.Run("found", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if got := r.URL.Query().Get("mbId"); got != "artist-1" {
-				t.Errorf("mbId = %q, want artist-1", got)
-			}
-			w.Write([]byte(`[{"id":9,"monitored":false}]`))
-		}))
-		defer srv.Close()
-		artist, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
-		if err != nil {
-			t.Fatalf("ArtistByMBID: %v", err)
-		}
-		if !found || artist.ID != 9 || artist.Monitored {
-			t.Fatalf("unexpected: found=%v artist=%+v", found, artist)
-		}
-	})
-
-	t.Run("not found", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(`[]`))
-		}))
-		defer srv.Close()
-		_, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
-		if err != nil {
-			t.Fatalf("ArtistByMBID: %v", err)
-		}
-		if found {
-			t.Fatal("expected found = false for an empty array")
-		}
-	})
-}

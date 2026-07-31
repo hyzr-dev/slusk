@@ -41,16 +41,16 @@ func TestIdentifyEndpointsNilDepsAnswer503(t *testing.T) {
 
 func TestIdentifyArtistsEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	artists := func(ctx context.Context, query string) ([]core.MBArtist, error) {
+	artists := func(ctx context.Context, query string) ([]core.MBArtist, int, error) {
 		switch query {
 		case "metallica":
-			return []core.MBArtist{{ID: "a1", Name: "Metallica", Score: 100}}, nil
+			return []core.MBArtist{{ID: "a1", Name: "Metallica", Score: 100}}, 1, nil
 		case "":
-			return nil, app.ErrIdentifyQueryInvalid
+			return nil, 0, app.ErrIdentifyQueryInvalid
 		case "down":
-			return nil, app.ErrIdentifyUnavailable
+			return nil, 0, app.ErrIdentifyUnavailable
 		default:
-			return nil, errBoom
+			return nil, 0, errBoom
 		}
 	}
 	h := newIdentifyTestHandler(reg, artists, nil, nil, nil)
@@ -61,11 +61,11 @@ func TestIdentifyArtistsEndpoint(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 		}
-		var got []mbArtistDTO
+		var got mbArtistSearchDTO
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 || got[0].ID != "a1" || got[0].Score != 100 {
+		if len(got.Artists) != 1 || got.Artists[0].ID != "a1" || got.Artists[0].Score != 100 || got.Total != 1 {
 			t.Fatalf("unexpected body: %+v", got)
 		}
 	})
@@ -97,11 +97,11 @@ func TestIdentifyArtistsEndpoint(t *testing.T) {
 
 func TestIdentifyArtistAlbumsEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	artistAlbums := func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error) {
+	artistAlbums := func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
 		if artistMBID != "a1" {
 			t.Errorf("mbid = %q, want a1", artistMBID)
 		}
-		return []core.MBReleaseGroup{{ID: "rg1", Title: "Ride the Lightning"}}, nil
+		return []core.MBReleaseGroup{{ID: "rg1", Title: "Ride the Lightning"}}, 1, nil
 	}
 	h := newIdentifyTestHandler(reg, nil, artistAlbums, nil, nil)
 
@@ -110,11 +110,11 @@ func TestIdentifyArtistAlbumsEndpoint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	var got []mbReleaseGroupDTO
+	var got mbReleaseGroupListDTO
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].ID != "rg1" {
+	if len(got.Albums) != 1 || got.Albums[0].ID != "rg1" || got.Total != 1 {
 		t.Fatalf("unexpected body: %+v", got)
 	}
 }
@@ -124,12 +124,12 @@ func TestIdentifyArtistAlbumsEndpoint(t *testing.T) {
 // never a min/max band.
 func TestIdentifyAlbumEditionsEndpointDoesNotCollapseToBand(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	albumEditions := func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error) {
+	albumEditions := func(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error) {
 		return []core.MBRelease{
 			{ID: "r1", TrackCount: 8, TrackCountKnown: true},
 			{ID: "r2", TrackCount: 97, TrackCountKnown: true},
 			{ID: "r3"},
-		}, nil
+		}, 3, nil
 	}
 	h := newIdentifyTestHandler(reg, nil, nil, albumEditions, nil)
 
@@ -138,31 +138,31 @@ func TestIdentifyAlbumEditionsEndpointDoesNotCollapseToBand(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	var got []mbReleaseDTO
+	var got mbReleaseListDTO
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected all 3 per-edition entries, got %d", len(got))
+	if len(got.Editions) != 3 {
+		t.Fatalf("expected all 3 per-edition entries, got %d", len(got.Editions))
 	}
-	if got[0].TrackCount != 8 || got[1].TrackCount != 97 {
-		t.Fatalf("editions must carry their own track counts, not a collapsed band: %+v", got)
+	if got.Editions[0].TrackCount != 8 || got.Editions[1].TrackCount != 97 {
+		t.Fatalf("editions must carry their own track counts, not a collapsed band: %+v", got.Editions)
 	}
-	if got[2].TrackCountKnown {
-		t.Fatalf("an edition with no media data must not be marked as a known track count: %+v", got[2])
+	if got.Editions[2].TrackCountKnown {
+		t.Fatalf("an edition with no media data must not be marked as a known track count: %+v", got.Editions[2])
 	}
 }
 
 func TestIdentifyAlbumLidarrStatusEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	albumLidarr := func(ctx context.Context, releaseGroupMBID string) (core.LidarrAlbumStatus, error) {
+	albumLidarr := func(ctx context.Context, releaseGroupMBID string) (app.LidarrAlbumStatus, error) {
 		switch releaseGroupMBID {
 		case "in-library":
-			return core.LidarrAlbumStatus{Known: true, InLibrary: true, AlbumID: 42}, nil
+			return app.LidarrAlbumStatus{Known: true, InLibrary: true, AlbumID: 42}, nil
 		case "unknown":
-			return core.LidarrAlbumStatus{Known: false}, nil
+			return app.LidarrAlbumStatus{Known: false}, nil
 		default:
-			return core.LidarrAlbumStatus{Known: true, InLibrary: false}, nil
+			return app.LidarrAlbumStatus{Known: true, InLibrary: false}, nil
 		}
 	}
 	h := newIdentifyTestHandler(reg, nil, nil, nil, albumLidarr)

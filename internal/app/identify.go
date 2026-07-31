@@ -30,17 +30,34 @@ var ErrIdentifyQueryInvalid = errors.New("identify query is required")
 var ErrIdentifyUnavailable = errors.New("musicbrainz is not available")
 
 // MusicBrainzSearcher is the slice of internal/musicbrainz.Client Identify
-// needs.
+// needs. Each method's int return is MusicBrainz's true match count, which
+// may exceed len(slice) when the result was capped - see
+// internal/musicbrainz.Client's per-method doc comments.
 type MusicBrainzSearcher interface {
-	SearchArtists(ctx context.Context, query string) ([]core.MBArtist, error)
-	ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error)
-	Releases(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error)
+	SearchArtists(ctx context.Context, query string) ([]core.MBArtist, int, error)
+	ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error)
+	Releases(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error)
 }
 
 // LidarrLibraryLookup is the slice of internal/lidarr.Client Identify needs
 // for the read-only Lidarr status row.
 type LidarrLibraryLookup interface {
 	AlbumByForeignID(ctx context.Context, foreignAlbumID string) (core.LidarrAlbum, bool, error)
+}
+
+// LidarrAlbumStatus is the read-only Lidarr library status for one
+// MusicBrainz release-group (issue #321's identify modal). Known is false
+// when Lidarr could not be reached or answered with an error - that must be
+// surfaced to the user as "unknown", never silently treated as absent (the
+// UI's MUSICBRAINZ UNAVAILABLE / LIDARR STATUS UNKNOWN distinction). It
+// lives here rather than in internal/core because it is constructed only by
+// Identify.AlbumLidarrStatus and consumed only by internal/observ - no
+// adapter maps a wire type to it.
+type LidarrAlbumStatus struct {
+	Known     bool
+	InLibrary bool
+	// AlbumID is Lidarr's internal album id, meaningful only when InLibrary.
+	AlbumID int64
 }
 
 // IdentifyParams configures NewIdentify.
@@ -69,70 +86,77 @@ func NewIdentify(p IdentifyParams) *Identify {
 }
 
 // SearchArtists searches MusicBrainz artists by free-text query, for GET
-// /api/identify/artists.
-func (id *Identify) SearchArtists(ctx context.Context, query string) ([]core.MBArtist, error) {
+// /api/identify/artists. total is MusicBrainz's true match count and may
+// exceed len(artists) when the result was capped - see
+// MusicBrainzSearcher.
+func (id *Identify) SearchArtists(ctx context.Context, query string) (artists []core.MBArtist, total int, err error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, ErrIdentifyQueryInvalid
+		return nil, 0, ErrIdentifyQueryInvalid
 	}
-	artists, err := id.mb.SearchArtists(ctx, query)
+	artists, total, err = id.mb.SearchArtists(ctx, query)
 	if err != nil {
 		id.logger.Warn("musicbrainz artist search failed", "err", err)
-		return nil, ErrIdentifyUnavailable
+		return nil, 0, ErrIdentifyUnavailable
 	}
-	return artists, nil
+	return artists, total, nil
 }
 
 // ArtistAlbums lists an artist's release-groups, for GET
-// /api/identify/artists/{mbid}/albums.
-func (id *Identify) ArtistAlbums(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, error) {
+// /api/identify/artists/{mbid}/albums. total is MusicBrainz's true match
+// count and may exceed len(groups) when the result was capped - see
+// MusicBrainzSearcher.
+func (id *Identify) ArtistAlbums(ctx context.Context, artistMBID string) (groups []core.MBReleaseGroup, total int, err error) {
 	artistMBID = strings.TrimSpace(artistMBID)
 	if artistMBID == "" {
-		return nil, ErrIdentifyQueryInvalid
+		return nil, 0, ErrIdentifyQueryInvalid
 	}
-	groups, err := id.mb.ReleaseGroups(ctx, artistMBID)
+	groups, total, err = id.mb.ReleaseGroups(ctx, artistMBID)
 	if err != nil {
 		id.logger.Warn("musicbrainz release-group lookup failed", "artistMBID", artistMBID, "err", err)
-		return nil, ErrIdentifyUnavailable
+		return nil, 0, ErrIdentifyUnavailable
 	}
-	return groups, nil
+	return groups, total, nil
 }
 
 // AlbumEditions lists a release-group's editions, each with its own
 // per-edition track count (see core.MBRelease), for GET
-// /api/identify/albums/{mbid}/editions.
-func (id *Identify) AlbumEditions(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, error) {
+// /api/identify/albums/{mbid}/editions. total is MusicBrainz's true match
+// count and may exceed len(releases) when the result was capped - see
+// MusicBrainzSearcher.
+func (id *Identify) AlbumEditions(ctx context.Context, releaseGroupMBID string) (releases []core.MBRelease, total int, err error) {
 	releaseGroupMBID = strings.TrimSpace(releaseGroupMBID)
 	if releaseGroupMBID == "" {
-		return nil, ErrIdentifyQueryInvalid
+		return nil, 0, ErrIdentifyQueryInvalid
 	}
-	releases, err := id.mb.Releases(ctx, releaseGroupMBID)
+	releases, total, err = id.mb.Releases(ctx, releaseGroupMBID)
 	if err != nil {
 		id.logger.Warn("musicbrainz release lookup failed", "releaseGroupMBID", releaseGroupMBID, "err", err)
-		return nil, ErrIdentifyUnavailable
+		return nil, 0, ErrIdentifyUnavailable
 	}
-	return releases, nil
+	return releases, total, nil
 }
 
 // AlbumLidarrStatus reports whether a release-group is already in the user's
 // Lidarr library, for GET /api/identify/albums/{mbid}/lidarr. Unlike the
 // MusicBrainz-backed methods above, a Lidarr transport failure is not mapped
-// to an error: the design ("Lidarr onåbar -> okänt", issue #321) treats
-// "Lidarr unreachable" as a normal, displayable outcome - core.LidarrAlbumStatus.Known
-// = false - not a request failure, so the UI can say LIDARR STATUS UNKNOWN
-// rather than 503ing the whole request.
-func (id *Identify) AlbumLidarrStatus(ctx context.Context, releaseGroupMBID string) (core.LidarrAlbumStatus, error) {
+// to an error: the design (issue #321 - an unreachable Lidarr is reported as
+// unknown, never as "not in library") treats "Lidarr unreachable" as a
+// normal, displayable outcome - LidarrAlbumStatus.Known = false - not a
+// request failure, so the UI can say LIDARR STATUS UNKNOWN rather than
+// 503ing the whole request.
+func (id *Identify) AlbumLidarrStatus(ctx context.Context, releaseGroupMBID string) (LidarrAlbumStatus, error) {
 	releaseGroupMBID = strings.TrimSpace(releaseGroupMBID)
 	if releaseGroupMBID == "" {
-		return core.LidarrAlbumStatus{}, ErrIdentifyQueryInvalid
+		return LidarrAlbumStatus{}, ErrIdentifyQueryInvalid
 	}
 	album, found, err := id.lidarr.AlbumByForeignID(ctx, releaseGroupMBID)
 	if err != nil {
 		id.logger.Warn("lidarr album lookup failed", "releaseGroupMBID", releaseGroupMBID, "err", err)
-		return core.LidarrAlbumStatus{Known: false}, nil
+		return LidarrAlbumStatus{Known: false}, nil
 	}
 	if !found {
-		return core.LidarrAlbumStatus{Known: true, InLibrary: false}, nil
+		return LidarrAlbumStatus{Known: true, InLibrary: false}, nil
 	}
-	return core.LidarrAlbumStatus{Known: true, InLibrary: true, AlbumID: album.ID}, nil
+	return LidarrAlbumStatus{Known: true, InLibrary: true, AlbumID: album.ID}, nil
 }

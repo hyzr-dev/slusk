@@ -43,31 +43,11 @@ type MBRelease struct {
 	TrackCountKnown bool
 }
 
-// LidarrAlbumStatus is the read-only Lidarr library status for one
-// MusicBrainz release-group (issue #321's identify modal). Known is false
-// when Lidarr could not be reached or answered with an error - that must be
-// surfaced to the user as "unknown", never silently treated as absent (the
-// UI's MUSICBRAINZ UNAVAILABLE / LIDARR STATUS UNKNOWN distinction).
-type LidarrAlbumStatus struct {
-	Known     bool
-	InLibrary bool
-	// AlbumID is Lidarr's internal album id, meaningful only when InLibrary.
-	AlbumID int64
-}
-
 // LidarrAlbum is the slice of a Lidarr library album internal/lidarr's
 // AlbumByForeignID reports, keyed by MusicBrainz release-group id
 // (foreignAlbumId in Lidarr's own API).
 type LidarrAlbum struct {
 	ID        int64
 	ArtistID  int64
-	Monitored bool
-}
-
-// LidarrArtist is the slice of a Lidarr library artist internal/lidarr's
-// ArtistByMBID reports, keyed by MusicBrainz artist id (mbId in Lidarr's own
-// API).
-type LidarrArtist struct {
-	ID        int64
 	Monitored bool
 }
