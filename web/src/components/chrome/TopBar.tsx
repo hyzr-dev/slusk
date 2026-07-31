@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLogout, useSession } from '../../api/auth';
 import { STATUS_INTERVAL, useCharts, useLiveData, useStatus } from '../../api/queries';
 import { formatAge, formatShortTime, formatSpeed } from '../../format';
 import { t } from '../../strings';
@@ -60,6 +61,8 @@ export default function TopBar() {
   const status = useStatus();
   const charts = useCharts();
   const live = useLiveData();
+  const session = useSession();
+  const logout = useLogout();
 
   // Resolve each direction independently: a frame can carry one newly-added
   // field while the other still falls back to REST during a rolling update.
@@ -108,6 +111,24 @@ export default function TopBar() {
       </div>
 
       <span className={styles.spacer} />
+
+      {/* Username is omitted, not rendered as an empty gap, when the request
+          authenticated via the machine bearer token rather than a session
+          cookie (`make dev` against a fresh lab DB) — see SessionResponse's
+          doc comment. The logout control itself still renders either way. */}
+      <div className={`${styles.cell} ${styles.account}`}>
+        {session.data?.username && (
+          <span className={styles.username}>{session.data.username}</span>
+        )}
+        <button
+          type="button"
+          className={styles.logoutButton}
+          onClick={() => logout.mutate()}
+          disabled={logout.isPending}
+        >
+          {t.auth.logout}
+        </button>
+      </div>
     </div>
   );
 }

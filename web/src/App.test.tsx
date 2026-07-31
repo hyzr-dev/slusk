@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { AuthGate } from './App';
 import Layout from './components/Layout';
 import Overview from './routes/Overview';
 import Jobs from './routes/Jobs';
@@ -12,8 +13,9 @@ import Shares from './routes/Shares';
 import Health from './routes/Health';
 import Settings from './routes/Settings';
 import Chat from './routes/Chat';
+import { authQueryKeys } from './api/auth';
 import { queryKeys } from './api/queries';
-import type { Conversation } from './api/types';
+import type { Conversation, SessionResponse } from './api/types';
 import { t } from './strings';
 
 // Renders the real route tree (mirroring App.tsx) at each path with a
@@ -155,5 +157,58 @@ describe('route tree', () => {
     // The badge digit is a second span inside the same <a>, so its accessible
     // name is "chat3", not "chat" — match by prefix rather than exact string.
     expect(screen.getByRole('link', { name: new RegExp(`^${t.nav.chat}`) })).toHaveTextContent('3');
+  });
+});
+
+// AuthGate (issue #279) sits above the route tree above — the two suites are
+// independent, so this one drives AuthGate directly with its own minimal
+// children rather than the real route tree.
+describe('AuthGate', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function renderGate(session?: SessionResponse) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    if (session) client.setQueryData(authQueryKeys.session, session);
+    return render(
+      <QueryClientProvider client={client}>
+        <AuthGate>
+          <div>protected content</div>
+        </AuthGate>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('renders nothing while the boot-time session check is in flight — no spinner, no flash of the login form', () => {
+    // Stubbed to never resolve, so the component stays in its initial
+    // isLoading state for the whole test.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const { container } = renderGate();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders the first-run setup card when no account exists yet', () => {
+    renderGate({ authenticated: false, username: null, setupRequired: true });
+    expect(screen.getByRole('heading', { name: t.auth.setupHeader })).toBeInTheDocument();
+    expect(screen.queryByText('protected content')).not.toBeInTheDocument();
+  });
+
+  // setupRequired wins even over an otherwise-authenticated request (a
+  // bearer token against a lab DB with zero users — see SessionResponse's
+  // doc comment): no account existing at all is a stronger fact than how
+  // this one request happened to authenticate.
+  it('prefers the setup card over a bearer-token-authenticated session with no account yet', () => {
+    renderGate({ authenticated: true, username: null, setupRequired: true });
+    expect(screen.getByRole('heading', { name: t.auth.setupHeader })).toBeInTheDocument();
+  });
+
+  it('renders the login card once an account exists but this request is unauthenticated', () => {
+    renderGate({ authenticated: false, username: null, setupRequired: false });
+    expect(screen.getByRole('heading', { name: t.auth.loginHeader })).toBeInTheDocument();
+    expect(screen.queryByText('protected content')).not.toBeInTheDocument();
+  });
+
+  it('renders the app once authenticated with an account already set up', () => {
+    renderGate({ authenticated: true, username: 'sam', setupRequired: false });
+    expect(screen.getByText('protected content')).toBeInTheDocument();
   });
 });

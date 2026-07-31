@@ -69,3 +69,18 @@ export async function apiPostJson<T>(path: string, body?: unknown): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
+// Like apiPostJson, but for the auth endpoints (setup/login, issue #279),
+// which answer 204 on success rather than a resource — see
+// internal/observ/auth.go's serveAuthCreate. A plain apiPostJson<void> would
+// still call res.json() on that empty body and throw.
+export async function apiPostJsonNoContent(path: string, body: unknown): Promise<void> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, `POST ${path} failed with ${res.status}`, await parseErrorBody(res));
+  }
+}

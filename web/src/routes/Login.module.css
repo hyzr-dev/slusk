@@ -1,0 +1,101 @@
+/* docs/design/slskdarr-login.dc.html, translated to real tokens (see the
+   file's own rootStyle: --panel/--btn below are exact hex matches for its
+   #0a0b0c/#14181b, everything else is mapped onto the closest step of the
+   token ladder in tokens.css rather than copied as a raw hex — see
+   Login.tsx's doc comment for the two fields the mock draws that this
+   deliberately drops. */
+.root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.brandRow { display: flex; align-items: baseline; gap: 10px; }
+.brandName { color: var(--fg); font-weight: 600; font-size: 15px; letter-spacing: 1.8px; }
+
+.subtitleRow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.pulse { width: 6px; height: 6px; background: var(--ok); animation: tui-pulse 1.8s infinite; }
+/* Mock's --faint, folded into --text-dim — see tokens.css's doc comment on
+   the ladder having three steps, not four. */
+.subtitle { font-size: 11px; color: var(--text-dim); letter-spacing: 0.4px; }
+
+.card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  width: 340px;
+  margin-top: 28px;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 17px;
+  border-bottom: 1px solid var(--line);
+}
+.dash { color: var(--text-dim); font-size: 11px; }
+/* Resets the browser's default <h1> styling so it reads exactly like the
+   plain label it replaces — Login.tsx's doc comment explains why this is a
+   real heading rather than SectionHeader's <h2>. */
+.cardTitle {
+  margin: 0;
+  font: inherit;
+  font-weight: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  letter-spacing: 0.3px;
+}
+
+.fields {
+  padding: 18px 17px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+/* text-dim now clears AA at every surface it lands on (see tokens.css's
+   ladder doc comment) — CLAUDE.md's "known gap" note names the ladder's
+   pre-#335 value, not this one. */
+.label { font-size: 9.5px; letter-spacing: 1.2px; color: var(--text-dim); }
+
+.inputBox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line2);
+  padding: 8px 10px;
+}
+.prompt { color: var(--dim); font-size: 12px; }
+.input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 12.5px;
+  letter-spacing: 0.3px;
+}
+.input::placeholder { color: var(--text-dim); }
+
+.warning { font-size: 11px; color: var(--text-dim); letter-spacing: 0.3px; line-height: 1.4; }
+.error { font-size: 11px; color: var(--bad); letter-spacing: 0.3px; }
+
+.actions { display: flex; align-items: center; padding: 17px; }
+.submit {
+  padding: 7px 14px;
+  border: 1px solid var(--dim);
+  background: var(--btn);
+  color: var(--fg);
+  font-size: 11px;
+  letter-spacing: 0.7px;
+  cursor: pointer;
+}
+.submit:disabled { cursor: default; opacity: 0.6; }
+
+.footer { font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.4px; margin-top: 18px; }
