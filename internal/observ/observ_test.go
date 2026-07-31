@@ -1648,6 +1648,24 @@ func TestSearchEndpointConflictWhenActive(t *testing.T) {
 	}
 }
 
+// TestSearchEndpointConflictWhenNotSearchable covers issue #347: a manual
+// job cannot be force-searched.
+func TestSearchEndpointConflictWhenNotSearchable(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	search := func(ctx context.Context, jobID int64) error { return app.ErrJobNotSearchable }
+	deps := testServerDeps(reg)
+	deps.SearchJob = search
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/1/search", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status code = %d, want 409", rec.Code)
+	}
+}
+
 func TestSearchEndpointStoreFailure(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	search := func(ctx context.Context, jobID int64) error {

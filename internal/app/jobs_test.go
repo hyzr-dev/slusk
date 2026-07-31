@@ -31,6 +31,8 @@ type fakeJobStore struct {
 	prepareFound     bool
 	retryErr         error
 	retryOK          bool
+	retryManualErr   error
+	retryManualOK    bool
 	createErr        error
 	createJob        core.AlbumJob
 	forceSearchErr   error
@@ -42,6 +44,7 @@ type fakeJobStore struct {
 	cancelJobID       int64
 	prepareCalled     bool
 	retryCalled       bool
+	retryManualCalled bool
 	forceSearchCalled bool
 	deleteCalled      bool
 	lookupIDs         []int64
@@ -90,6 +93,14 @@ func (f *fakeJobStore) RetryFailedJob(ctx context.Context, jobID int64, now time
 		return false, f.retryErr
 	}
 	return f.retryOK, nil
+}
+
+func (f *fakeJobStore) RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	f.retryManualCalled = true
+	if f.retryManualErr != nil {
+		return false, f.retryManualErr
+	}
+	return f.retryManualOK, nil
 }
 
 func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error) {
@@ -256,6 +267,48 @@ func TestJobsRetrySuccess(t *testing.T) {
 	}
 }
 
+// TestJobsRetryRoutesBySource covers issue #347: Retry must call
+// RetryManualJob (not RetryFailedJob) for a manual job, and vice versa for a
+// lidarr job, using the Source the initial JobWithTransfer lookup already
+// carries.
+func TestJobsRetryRoutesBySource(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		source core.JobSource
+	}{
+		{"manual", core.SourceManual},
+		{"lidarr", core.SourceLidarr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeJobStore{
+				jobs:          map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: tt.source}}},
+				retryOK:       true,
+				retryManualOK: true,
+			}
+			j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+			if err := j.Retry(context.Background(), 1); err != nil {
+				t.Fatalf("Retry() = %v, want nil", err)
+			}
+			if tt.source == core.SourceManual {
+				if !store.retryManualCalled {
+					t.Error("expected RetryManualJob called for a manual job")
+				}
+				if store.retryCalled {
+					t.Error("expected RetryFailedJob NOT called for a manual job")
+				}
+			} else {
+				if !store.retryCalled {
+					t.Error("expected RetryFailedJob called for a lidarr job")
+				}
+				if store.retryManualCalled {
+					t.Error("expected RetryManualJob NOT called for a lidarr job")
+				}
+			}
+		})
+	}
+}
+
 func TestJobsRetryLookupError(t *testing.T) {
 	store := &fakeJobStore{jobErr: errors.New("db down")}
 	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
@@ -376,6 +429,40 @@ func TestJobsForceSearchNotFound(t *testing.T) {
 	}
 	if store.forceSearchCalled {
 		t.Errorf("ForceSearchJob must not be called for a job that doesn't exist")
+	}
+}
+
+// TestJobsForceSearchManualJob covers issue #347: a manual job cannot be
+// force-searched (it has no lidarr_album_id to search for), and the rejection
+// must happen before the store call - store.ForceSearchJob has no source
+// guard of its own and would delete the candidate unconditionally.
+func TestJobsForceSearchManualJob(t *testing.T) {
+	store := &fakeJobStore{jobs: map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: core.SourceManual, State: core.StateFailed}}}}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); !errors.Is(err, ErrJobNotSearchable) {
+		t.Fatalf("ForceSearch() = %v, want ErrJobNotSearchable", err)
+	}
+	if store.forceSearchCalled {
+		t.Errorf("ForceSearchJob must not be called for a manual job")
+	}
+}
+
+// TestJobsForceSearchLidarrJobUnaffected guards the routing the other way: a
+// lidarr-sourced job's ForceSearch behaviour must be unchanged by the manual-
+// job guard above.
+func TestJobsForceSearchLidarrJobUnaffected(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:          map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: core.SourceLidarr, State: core.StateFailed}}},
+		forceSearchOK: true,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); err != nil {
+		t.Fatalf("ForceSearch() = %v, want nil", err)
+	}
+	if !store.forceSearchCalled {
+		t.Errorf("expected ForceSearchJob to have been called for a lidarr job")
 	}
 }
 

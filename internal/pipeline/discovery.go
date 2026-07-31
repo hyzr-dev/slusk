@@ -187,15 +187,44 @@ func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time
 // either caches the survivors and advances the job to SELECTING, or backs it
 // off (still WANTED) when nothing survives. completed reports whether the
 // search cycle ran to one of its two normal conclusions (backed off or
-// matched) rather than aborting early (album missing from the wanted
-// snapshot, an AlbumReleases error - checked before any Soulseek search is
-// issued, see below - or a search error) - Tick only records a search pass
-// when completed is true. matched is true only when the job
+// matched) rather than aborting early (a manual job reaching Discovery at
+// all, failed outright before any of the checks below - see the Source guard
+// above; the album missing from the wanted snapshot; an AlbumReleases error -
+// checked before any Soulseek search is issued, see below - or a search
+// error) - Tick only records a search pass when completed is true. matched
+// is true only when the job
 // actually advanced to SELECTING: InsertCandidates cached surviving
 // candidates AND AdvanceJobStateFrom confirms the job was still WANTED to
 // advance from (it can report advanced=false if the job concurrently left
 // WANTED, e.g. cancelled by WantedSync between RunnableJobsInState and here).
 func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.Time) (completed, matched bool, err error) {
+	if job.Source == core.SourceManual {
+		// A manual job (issue #155) reaching Discovery at all is a broken
+		// state: it is created ACTIVE, straight into DOWNLOADING, and never
+		// belongs in WANTED. Fail it outright rather than falling through to
+		// the wanted-snapshot lookup below - deliberately placed before that
+		// lookup, not folded into its own !ok branch, because issue #321 has
+		// reason to start setting lidarr_album_id on manual jobs, and then the
+		// snapshot lookup would *succeed* and Discovery would search and
+		// download someone else's files in the user's name. Guarding on
+		// Source closes that door in advance. This also self-heals the
+		// zombies already sitting in production WANTED since #58/#155
+		// shipped: no migration needed. Not immediately, though -
+		// RunnableJobsInState orders WANTED by release_date DESC and a
+		// manual job's release_date is always empty, so it sorts last; a
+		// zombie is only reached once the real backlog has left WANTED or
+		// backed off, not on the very next tick.
+		// completed=false, matched=false: this pass is not counted as a
+		// search (see Tick).
+		detail := "manual job reached Discovery, failing rather than searching"
+		d.log().Error(detail, "album_job", job.ID)
+		if err := d.p.Store.MarkJobFailed(ctx, job.ID, now); err != nil {
+			return false, false, err
+		}
+		d.recordEvent(ctx, job.ID, core.EventJobFailed, detail, now)
+		return false, false, nil
+	}
+
 	album, ok := d.p.WantedSource.Wanted()[job.LidarrAlbumID]
 	if !ok {
 		// The album is missing from the most recent wanted snapshot. Unlike the

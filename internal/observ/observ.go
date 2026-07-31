@@ -312,7 +312,8 @@ type RetryFunc func(ctx context.Context, jobID int64) error
 // (typically backed by app.Jobs.ForceSearch; see issue #159). Errors are
 // mapped to a status code by the POST /api/jobs/{id}/search handler:
 // errors.Is(err, app.ErrJobNotFound) -> 404, errors.Is(err, app.ErrJobActive)
-// -> 409, anything else -> 500.
+// -> 409, errors.Is(err, app.ErrJobNotSearchable) -> 409 (issue #347),
+// anything else -> 500.
 type SearchJobFunc func(ctx context.Context, jobID int64) error
 
 // DeleteJobFunc permanently removes one job and its children (typically
@@ -683,6 +684,8 @@ func NewServer(deps ServerDeps) http.Handler {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, app.ErrJobActive):
 			http.Error(w, "job is actively transferring", http.StatusConflict)
+		case errors.Is(err, app.ErrJobNotSearchable):
+			http.Error(w, "job is manual-sourced and cannot be force-searched", http.StatusConflict)
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

@@ -199,6 +199,106 @@ func TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection(t *testing.
 	}
 }
 
+// TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt covers issue
+// #347: a manual job's revived candidate reaching IMPORTING again must run
+// verify, not confirm. Before RetryManualJob cleared import_submitted_at, the
+// revived candidate still carried the stale timestamp from the failed prior
+// attempt; Tick would key straight into confirm, whose timeout is measured
+// from that stale value and is therefore already expired, instantly failing
+// the candidate back to SELECTING. Cleared, Tick correctly re-enters verify
+// and the import proceeds normally.
+func TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{1}},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob",
+		[]store.ManualJobFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if err := st.SetJobTrackBand(ctx, job.ID, 1, 1); err != nil {
+		t.Fatalf("SetJobTrackBand: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+
+	// Simulate a prior cycle that reached confirm and then timed out: stamp
+	// ImportSubmittedAt well outside ImportConfirmTimeout, then fail the
+	// candidate/job exactly as failUnconfirmed would.
+	stale := now.Add(-time.Hour)
+	if err := st.MarkImportSubmitted(ctx, cand.ID, stale); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "import not confirmed", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("FailCandidateAndAdvance: %v", err)
+	}
+	if err := st.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := st.RetryManualJob(ctx, job.ID, later)
+	if err != nil {
+		t.Fatalf("RetryManualJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected RetryManualJob to return true for a FAILED manual job")
+	}
+
+	// Drive the revived candidate back through DOWNLOADING to IMPORTING, the
+	// same shape seedImportingJob uses for a lidarr job.
+	activated, capFull, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, later)
+	if err != nil {
+		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
+	}
+	if !activated || capFull {
+		t.Fatalf("ActivateCandidateWithTransfers: activated=%v capFull=%v", activated, capFull)
+	}
+	transfers, err := st.TransfersForCandidate(ctx, cand.ID)
+	if err != nil {
+		t.Fatalf("TransfersForCandidate: %v", err)
+	}
+	for _, tr := range transfers {
+		if err := st.UpdateTransferProgress(ctx, tr.ID, core.TransferCompleted, tr.BytesTotal, tr.BytesTotal, later); err != nil {
+			t.Fatalf("UpdateTransferProgress: %v", err)
+		}
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateImporting, later); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	tick := later.Add(time.Minute)
+	m := NewImporting(p)
+	if err := m.Tick(ctx, tick); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(music.manualImportCalls) != 1 {
+		t.Fatalf("expected verify to run (ManualImportCandidates called once), got %d calls - a stale ImportSubmittedAt would have skipped straight to confirm", len(music.manualImportCalls))
+	}
+	if got := jobStateFor(t, st, job.ID); got != core.StateImporting {
+		t.Errorf("job state = %v, want still IMPORTING (verify submitted, awaiting confirm) - SELECTING would mean confirm ran and instantly timed out on the stale timestamp", got)
+	}
+	cand2, found2, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found2 {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found2)
+	}
+	if cand2.ImportSubmittedAt == nil {
+		t.Error("expected ImportSubmittedAt freshly set after this tick's successful verify")
+	} else if !cand2.ImportSubmittedAt.Equal(tick) {
+		t.Errorf("ImportSubmittedAt = %v, want %v (this tick's time, not the stale %v)", cand2.ImportSubmittedAt, tick, stale)
+	}
+}
+
 // TestImportingVerifyAllUnmatchedStillFailsCandidate: when no file at all has
 // a TrackID, the candidate fails to SELECTING exactly as before.
 func TestImportingVerifyAllUnmatchedStillFailsCandidate(t *testing.T) {
