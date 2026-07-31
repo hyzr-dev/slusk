@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { authQueryKeys } from '../../api/auth';
 import { queryKeys } from '../../api/queries';
-import type { StatusReport } from '../../api/types';
+import type { SessionResponse, StatusReport } from '../../api/types';
 import { formatSpeed } from '../../format';
 import { t } from '../../strings';
 import TopBar, { stalenessLabel } from './TopBar';
@@ -10,6 +11,12 @@ import TopBar, { stalenessLabel } from './TopBar';
 const STALE_AFTER = 10_000;
 
 afterEach(() => vi.unstubAllGlobals());
+
+const AUTHENTICATED_SESSION: SessionResponse = {
+  authenticated: true,
+  username: 'testuser',
+  setupRequired: false,
+};
 
 // Pure-function test, not wall-clock dependent: every argument is a plain
 // number supplied by the test, never Date.now().
@@ -47,6 +54,7 @@ describe('TopBar', () => {
       throughput: [],
       uploadThroughput: [],
     });
+    client.setQueryData(authQueryKeys.session, AUTHENTICATED_SESSION);
     return render(
       <QueryClientProvider client={client}>
         <TopBar />
@@ -78,6 +86,37 @@ describe('TopBar', () => {
     const { container } = renderTopBar({});
     expect(container.querySelector('[class*="brandVersion"]')).toBeNull();
   });
+
+  it('shows the logged-in username next to the logout control', () => {
+    renderTopBar({});
+    expect(screen.getByText('testuser')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.auth.logout })).toBeInTheDocument();
+  });
+
+  it('omits the username entirely for a bearer-token session, not as an empty gap', () => {
+    // The `make dev` case: the Vite proxy injects a bearer token, so the
+    // session reports authenticated:true with no username at all.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.status, {});
+    client.setQueryData(queryKeys.charts, {
+      passes: [],
+      completedByHour: [],
+      throughput: [],
+      uploadThroughput: [],
+    });
+    client.setQueryData(authQueryKeys.session, {
+      authenticated: true,
+      username: null,
+      setupRequired: false,
+    } satisfies SessionResponse);
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <TopBar />
+      </QueryClientProvider>,
+    );
+    expect(container.querySelector('[class*="username"]')).toBeNull();
+    expect(screen.getByRole('button', { name: t.auth.logout })).toBeInTheDocument();
+  });
 });
 
 // Each header direction independently prefers its SSE figure but survives the
@@ -89,6 +128,7 @@ describe('throughput speed sources', () => {
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(queryKeys.status, {});
+    client.setQueryData(authQueryKeys.session, AUTHENTICATED_SESSION);
     client.setQueryData(queryKeys.charts, {
       passes: [],
       completedByHour: [],

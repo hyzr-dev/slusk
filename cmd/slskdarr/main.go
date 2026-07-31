@@ -76,6 +76,11 @@ const (
 	// #157). At least twice a minute, so soulseek.throughputPendingCap never
 	// nears its cap under normal operation.
 	throughputRecorderInterval = 30 * time.Second
+	// sessionPrunerInterval is how often runSessionPruner deletes expired
+	// user_sessions rows (issue #279). Hourly is plenty — an unpruned expired
+	// row cannot authenticate anything (see SessionUser), so this is cleanup,
+	// not a security control.
+	sessionPrunerInterval = time.Hour
 )
 
 // ensureWritableDir verifies dir exists (creating it if needed) and is actually
@@ -334,6 +339,28 @@ func main() {
 		return st.Peers(ctx)
 	}
 	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
+	// authSvc backs form-based login (issue #279): account bootstrap,
+	// credential verification, and session lifecycle. See internal/app/auth.go.
+	authSvc := &app.Auth{Store: st}
+	setupRequiredFn := authSvc.SetupRequired
+	setupFn := authSvc.Setup
+	loginFn := authSvc.Login
+	logoutFn := authSvc.Logout
+	sessionUserFn := func(ctx context.Context, token string) (string, bool) {
+		user, found, err := authSvc.SessionUser(ctx, token)
+		if err != nil {
+			logger.Error("session lookup", "err", err)
+			return "", false
+		}
+		return user.Username, found
+	}
+	// sessionLookupFn adapts authSvc.SessionUser to the bool-only shape
+	// observ.TokenAuthenticator needs on every private request; it never
+	// needs the username itself, only whether the cookie is currently valid.
+	sessionLookupFn := func(r *http.Request, token string) bool {
+		_, found := sessionUserFn(r.Context(), token)
+		return found
+	}
 	// searches backs manual Soulseek search (issue #58). Root is restartCtx,
 	// NOT a per-request context (see app.SearchesParams' doc comment) — every
 	// session goroutine must outlive the HTTP handler that created it.
@@ -552,6 +579,18 @@ func main() {
 			return st.RecordOutgoingMessage(ctx, username, body, time.Now())
 		}
 	}
+	// tokenAuthenticator and sessionAuthenticator are two separate,
+	// single-purpose Authenticators (issue #279): the configured bearer/Basic
+	// token (may be unconfigured, see internal/config) and the session
+	// cookie (sessionLookupFn, always available since form login needs no
+	// config key) respectively. tokenAuthenticator alone is threaded into
+	// ServerDeps.TokenAuth (see its doc comment for why GET /api/auth/session
+	// needs the token-only view), while combinedAuthenticator - the AnyOf of
+	// both - is what actually wraps the whole handler via
+	// ProtectPrivateEndpoints below.
+	tokenAuthenticator := observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
+	sessionAuthenticator := observ.NewSessionAuthenticator(sessionLookupFn)
+	combinedAuthenticator := observ.AnyOf(tokenAuthenticator, sessionAuthenticator)
 	// The four Search* fields below take direct method values, not adapters:
 	// the search session shapes (core.SearchSession/SearchDelta) already live
 	// in internal/core, so no wiring-boundary conversion is needed (issue #58).
@@ -604,14 +643,22 @@ func main() {
 		// derived from, so a stream connection is torn down at the same
 		// point those are, rather than lingering until the client notices.
 		Shutdown: restartCtx.Done(),
+		// TokenAuth and the SetupRequired/SessionUser/Setup/Login/Logout
+		// funcs back GET /api/auth/session and POST /api/auth/{setup,login,
+		// logout} (issue #279). TokenAuth is deliberately tokenAuthenticator
+		// alone (not combinedAuthenticator, which ProtectPrivateEndpoints
+		// wraps the handler with below) - see ServerDeps.TokenAuth's doc
+		// comment.
+		TokenAuth:     tokenAuthenticator,
+		SetupRequired: setupRequiredFn,
+		SessionUser:   sessionUserFn,
+		Setup:         setupFn,
+		Login:         loginFn,
+		Logout:        logoutFn,
 	})
-	var authenticator observ.Authenticator
-	if cfg.Observ.AuthToken != "" {
-		authenticator = observ.NewTokenAuthenticator(cfg.Observ.AuthToken)
-	}
 	srv := &http.Server{
 		Addr:              cfg.Observ.ListenAddr,
-		Handler:           observ.ProtectPrivateEndpoints(handler, authenticator),
+		Handler:           observ.ProtectPrivateEndpoints(handler, combinedAuthenticator),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		ReadTimeout:       httpReadTimeout,
 		WriteTimeout:      httpWriteTimeout,
@@ -624,6 +671,12 @@ func main() {
 		os.Exit(1)
 	}
 	cancelStartup()
+
+	// runSessionPruner needs no join on shutdown (see its doc comment) so it
+	// is simply started here, on restartCtx like every other long-lived
+	// goroutine, rather than threaded through the soulDone/throughputDone
+	// join further down.
+	go runSessionPruner(restartCtx, authSvc, sessionPrunerInterval, logger)
 
 	var soulDone chan error
 	var throughputDone chan struct{}

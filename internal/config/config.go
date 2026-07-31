@@ -221,8 +221,11 @@ const observAuthTokenPlaceholder = "REPLACE_WITH_A_LONG_RANDOM_TOKEN"
 // ObservConfig is the observability configuration.
 type ObservConfig struct {
 	ListenAddr string `toml:"listen_addr"`
-	// AuthToken protects every UI, API, and metrics endpoint except /healthz
-	// and /readyz. It may be omitted only when ListenAddr is loopback-only.
+	// AuthToken is an OPTIONAL bearer/Basic credential for machine/API access
+	// (curl, Prometheus, the Vite dev proxy) alongside the browser's
+	// form-based session login (issue #279), which is mandatory and needs no
+	// config key. Blank disables machine access; it no longer makes a
+	// non-loopback listener unprotected.
 	AuthToken string `toml:"auth_token"`
 	// LogLevel is the minimum slog level emitted: "debug", "info" (default),
 	// "warn", or "error". Validate rejects any other non-empty value.
@@ -544,11 +547,14 @@ func (c Config) Validate() error {
 	if c.Observ.ListenAddr == "" {
 		problems = append(problems, "observ.listen_addr is required")
 	} else {
-		host, _, err := net.SplitHostPort(c.Observ.ListenAddr)
+		// A missing token no longer makes a non-loopback listener
+		// unprotected (issue #279): form-based session login is now
+		// mandatory browser-side auth regardless of this setting, so an
+		// empty token just means "no machine/API credential is accepted" -
+		// see internal/observ.TokenAuthenticator.
+		_, _, err := net.SplitHostPort(c.Observ.ListenAddr)
 		if err != nil {
 			problems = append(problems, "observ.listen_addr must be a valid host:port")
-		} else if c.Observ.AuthToken == "" && !isLoopbackHost(host) {
-			problems = append(problems, "observ.auth_token is required when observ.listen_addr is not loopback-only")
 		}
 		if c.Observ.AuthToken == observAuthTokenPlaceholder {
 			problems = append(problems, "observ.auth_token must be replaced with a generated token")
@@ -566,13 +572,4 @@ func (c Config) Validate() error {
 		return fmt.Errorf("invalid config: %s", strings.Join(problems, "; "))
 	}
 	return nil
-}
-
-func isLoopbackHost(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

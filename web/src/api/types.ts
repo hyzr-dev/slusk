@@ -475,6 +475,22 @@ export interface ApiErrorBody {
 }
 
 /**
+ * GET /api/auth/session — internal/observ/auth.go sessionResponse (issue
+ * #279). `username` is null both while unauthenticated and when the request
+ * carried the machine bearer token instead of a browser session cookie — see
+ * that file's doc comment on registerAuth (this is the `make dev` case: the
+ * Vite proxy injects a bearer token, so the dev server reports
+ * authenticated:true, username:null even against a lab DB with zero users).
+ * `setupRequired` is independent of `authenticated` — it reflects whether any
+ * account exists at all, not whether this particular request is one.
+ */
+export interface SessionResponse {
+  authenticated: boolean;
+  username: string | null;
+  setupRequired: boolean;
+}
+
+/**
  * POST /api/config/test/{lidarr,soulseek} — connectionTestResult. ok is true
  * when the dependency answered; error is a human-readable reason otherwise and
  * never contains secrets.

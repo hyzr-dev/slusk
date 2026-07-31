@@ -879,6 +879,38 @@ export const t = {
     savedRestarting: 'Saved — restarting…',
     saveFailed: 'Could not save the configuration. Please try again.',
   },
+  // The login/first-run card (issue #279) — see docs/design/slskdarr-login.dc.html
+  // and Login.tsx. It renders outside <Layout> (no nav, no top bar), before
+  // any account is known to exist, so it owns its own brand line rather than
+  // reusing `app.name`.
+  auth: {
+    brand: 'SLSKDARR',
+    loginSubtitle: 'sign in to continue',
+    // States plainly that this is a fresh install, not a returning user —
+    // deliberately not "welcome" copy.
+    setupSubtitle: 'first run — create the account that will manage this install',
+    // Candid, not reassuring: v1 has no reset flow (see CLAUDE.md's
+    // "never invent data" — the mock's "forgot password?" link is dropped
+    // rather than shipped pointing nowhere).
+    setupWarning: 'No password reset. Recovering access means deleting the user row from the database.',
+    loginHeader: 'Login',
+    setupHeader: 'Create account',
+    usernameLabel: 'USERNAME',
+    passwordLabel: 'PASSWORD',
+    confirmPasswordLabel: 'CONFIRM PASSWORD',
+    usernamePlaceholder: 'admin',
+    passwordPlaceholder: '••••••••',
+    signIn: '[↵] SIGN IN',
+    createAccount: '[↵] CREATE ACCOUNT',
+    submitting: 'working…',
+    usernameRequired: 'username and password required',
+    passwordTooShort: 'password must be at least 8 characters',
+    passwordTooLong: 'password must be 72 bytes or fewer',
+    passwordMismatch: 'passwords do not match',
+    genericError: 'something went wrong — try again',
+    footer: 'slskdarr · lidarr companion · self-hosted',
+    logout: 'log out',
+  },
 } as const;
 
 // `as const` narrows the maps below to literal-key object types, so indexing

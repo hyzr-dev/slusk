@@ -24,9 +24,27 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
 }
 
+// TestSPAShellAndAuthEndpointsRemainPublic pins the issue #279 inversion:
+// the dashboard shell and its client-side routes, plus every /api/auth/*
+// endpoint, must be reachable with no credentials so the login form itself
+// can load. See isPrivatePath (security.go).
+func TestSPAShellAndAuthEndpointsRemainPublic(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	for _, path := range []string{"/", "/jobs", "/api/auth/session"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code == http.StatusUnauthorized {
+				t.Fatalf("status = %d, want anything but 401 (this path must be public)", rec.Code)
+			}
+		})
+	}
+}
+
 func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser", "/api/messages/someuser/read"} {
+	for _, path := range []string{"/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser", "/api/messages/someuser/read"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()

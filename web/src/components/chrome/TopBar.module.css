@@ -29,6 +29,21 @@
 
 .spacer { flex: 1; }
 
+.account { border-right: none; }
+.username { color: var(--dim); }
+.logoutButton {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.logoutButton:hover:not(:disabled) { color: var(--fg); }
+.logoutButton:disabled { cursor: default; opacity: 0.6; }
+
 .value { color: var(--fg); }
 .quiet { color: var(--dim); }
 .bad { color: var(--bad); }
