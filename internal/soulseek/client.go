@@ -130,6 +130,11 @@ type Config struct {
 	// nowhere to put.
 	MessageSink MessageSink
 
+	// UploadSink, when non-nil, receives every finished upload so the history survives a
+	// restart (issue #325). Left nil, uploads are served exactly as before and simply
+	// leave no trace once the process exits.
+	UploadSink UploadSink
+
 	// ShareMetaCache, when non-nil, lets scanShares skip reopening an
 	// unchanged audio file's technical metadata across restarts (issue #197).
 	// Left nil, every mp3/flac is read on every scan, matching the client's

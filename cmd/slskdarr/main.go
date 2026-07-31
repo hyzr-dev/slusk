@@ -164,7 +164,7 @@ func main() {
 	if cfg.Soulseek.Enabled() {
 		sink := &messageSink{store: st, logger: logger}
 		shareCache := &shareMetaCache{store: st}
-		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, shareCache, logger)
+		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, &uploadSink{store: st}, shareCache, logger)
 	}
 
 	// Backend selection: config.Validate already guarantees soulClient != nil
@@ -529,6 +529,10 @@ func main() {
 	// sending requires a live client.
 	conversationsFn := st.Conversations
 	threadFn := st.Thread
+	// Same reasoning as Conversations/Thread, and deliberately outside the
+	// soulClient != nil block above: upload history is rows already written,
+	// not a live capability, so it stays readable with the native client off.
+	uploadHistoryFn := st.UploadHistory
 	markReadFn := func(ctx context.Context, username string) (int, error) {
 		n, err := st.MarkConversationRead(ctx, username, time.Now())
 		return int(n), err
@@ -583,6 +587,7 @@ func main() {
 		Shares:               sharesFn,
 		RescanShares:         rescanSharesFn,
 		Uploads:              uploadsFn,
+		UploadHistory:        uploadHistoryFn,
 		Throughput:           throughputFn,
 		StartSearch:          searches.Start,
 		SearchSnapshot:       searches.Snapshot,
