@@ -50,7 +50,7 @@
 
     <nav style="width:178px;flex:0 0 178px;border-right:1px solid var(--line);display:flex;flex-direction:column;padding:6px 0;">
       <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="3">
-        <div style="font-size:9.5px;color:#758189;letter-spacing:1.4px;padding:13px 15px 6px;">{{ g.label }}</div>
+        <div style="font-size:9.5px;color:#79858e;letter-spacing:1.4px;padding:13px 15px 6px;">{{ g.label }}</div>
         <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="3">
           <button onClick="{{ it.onClick }}" style="{{ it.style }}" style-hover="color:var(--fg);background:#0e1012;">
             <span style="{{ it.keyStyle }}">{{ it.key }}</span>
@@ -59,7 +59,7 @@
           </button>
         </sc-for>
       </sc-for>
-      <div style="margin-top:auto;padding:14px 15px;font-size:10px;color:#758189;line-height:1.9;letter-spacing:0.4px;">
+      <div style="margin-top:auto;padding:14px 15px;font-size:10px;color:#79858e;line-height:1.9;letter-spacing:0.4px;">
         <div>uptime: {{ uptime }}</div>
         <div>mem: {{ mem }}</div>
         <div>peers: {{ peers }}</div>
@@ -87,7 +87,7 @@
                 <span style="{{ c.valueStyle }}">{{ c.value }}</span>
                 <span style="font-size:11px;color:var(--faint);padding-bottom:3px;">{{ c.unit }}</span>
               </div>
-              <div style="font-size:10.5px;color:#758189;margin-top:10px;letter-spacing:0.3px;">{{ c.sub }}</div>
+              <div style="font-size:10.5px;color:#79858e;margin-top:10px;letter-spacing:0.3px;">{{ c.sub }}</div>
             </div>
           </sc-for>
         </div>
@@ -99,7 +99,7 @@
             <span style="flex:1;"></span>
             <span style="font-size:11px;color:var(--faint);letter-spacing:0.4px;">{{ activeCount }} active</span>
           </div>
-          <div style="display:grid;grid-template-columns:28px minmax(150px,2fr) minmax(76px,1fr) minmax(130px,1.4fr) 62px 84px;gap:10px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#758189;">
+          <div style="display:grid;grid-template-columns:28px minmax(150px,2fr) minmax(76px,1fr) minmax(130px,1.4fr) 62px 84px;gap:10px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#79858e;">
             <span>ST</span><span>ALBUM</span><span>PEER</span><span>PROGRESS</span><span style="text-align:right;">SPEED</span><span style="text-align:right;">SIZE</span>
           </div>
           <sc-for list="{{ activeRows }}" as="r" hint-placeholder-count="5">
@@ -108,7 +108,7 @@
               <span style="min-width:0;display:flex;align-items:baseline;gap:9px;">
                 <span style="flex:0 1 auto;min-width:0;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.title }}</span>
                 <span style="flex:0 2 auto;min-width:0;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.artist }}</span>
-                <span style="flex:0 0 auto;font-size:10px;color:#758189;letter-spacing:0.4px;">{{ r.format }}</span>
+                <span style="flex:0 0 auto;font-size:10px;color:#79858e;letter-spacing:0.4px;">{{ r.format }}</span>
               </span>
               <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.peer }}</span>
               <span style="display:flex;align-items:center;gap:9px;min-width:0;">
@@ -131,15 +131,15 @@
               <span style="flex:1;"></span>
               <span style="font-size:11px;color:var(--faint);">#{{ reconcileTotal }} · next T–{{ nextIn }}s</span>
             </div>
-            <div style="display:grid;grid-template-columns:56px 74px 1fr 58px;gap:12px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#758189;">
+            <div style="display:grid;grid-template-columns:56px 74px 1fr 58px;gap:12px;padding:9px 17px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.2px;color:#79858e;">
               <span>WHEN</span><span>PASS</span><span>RESULT</span><span style="text-align:right;">DUR</span>
             </div>
             <sc-for list="{{ passRows }}" as="p" hint-placeholder-count="7">
               <div style="display:grid;grid-template-columns:56px 74px 1fr 58px;gap:12px;padding:7px 17px;border-bottom:1px solid #131619;font-size:11.5px;align-items:center;">
-                <span style="color:#758189;">{{ p.time }}</span>
+                <span style="color:#79858e;">{{ p.time }}</span>
                 <span style="color:var(--faint);">#{{ p.id }}</span>
                 <span style="{{ p.matchStyle }}">{{ p.matchText }}</span>
-                <span style="text-align:right;color:#758189;">{{ p.dur }}</span>
+                <span style="text-align:right;color:#79858e;">{{ p.dur }}</span>
               </div>
             </sc-for>
           </section>
@@ -157,7 +157,7 @@
                   <span style="font-size:10px;letter-spacing:1.2px;color:var(--faint);">DOWN</span>
                   <span style="font-size:12.5px;color:var(--fg);">{{ dlSpeed }}</span>
                   <span style="flex:1;"></span>
-                  <span style="font-size:9.5px;color:#758189;letter-spacing:0.6px;">PEAK {{ peak }}</span>
+                  <span style="font-size:9.5px;color:#79858e;letter-spacing:0.6px;">PEAK {{ peak }}</span>
                 </div>
                 <div style="height:64px;margin-top:8px;">{{ throughputChart }}</div>
               </div>
@@ -166,11 +166,11 @@
                   <span style="font-size:10px;letter-spacing:1.2px;color:var(--faint);">UP</span>
                   <span style="font-size:12.5px;color:var(--dim);">{{ ulSpeed }}</span>
                   <span style="flex:1;"></span>
-                  <span style="font-size:9.5px;color:#758189;letter-spacing:0.6px;">PEAK {{ peakUp }}</span>
+                  <span style="font-size:9.5px;color:#79858e;letter-spacing:0.6px;">PEAK {{ peakUp }}</span>
                 </div>
                 <div style="height:64px;margin-top:8px;">{{ uploadChart }}</div>
               </div>
-              <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#758189;letter-spacing:0.8px;">
+              <div style="display:flex;justify-content:space-between;font-size:9.5px;color:#79858e;letter-spacing:0.8px;">
                 <span>−48s</span><span>NOW</span>
               </div>
             </div>
@@ -213,7 +213,7 @@
               <span style="flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg);">{{ j.album }}</span>
               <span style="flex:0 2 auto;min-width:0;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.artist }}</span>
               <span style="{{ j.srcStyle }}">{{ j.srcText }}</span>
-              <span style="flex:0 0 auto;font-size:10px;color:#758189;letter-spacing:0.4px;">{{ j.format }}</span>
+              <span style="flex:0 0 auto;font-size:10px;color:#79858e;letter-spacing:0.4px;">{{ j.format }}</span>
             </span>
             <span style="color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ j.peer }}</span>
             <span style="display:flex;align-items:center;gap:8px;min-width:0;">
@@ -235,19 +235,19 @@
                 <div>
                   <sc-for list="{{ j.meta }}" as="m" hint-placeholder-count="7">
                     <div style="display:flex;gap:10px;padding:2.5px 0;">
-                      <span style="color:#758189;">{{ m.glyph }}</span>
+                      <span style="color:#79858e;">{{ m.glyph }}</span>
                       <span style="color:var(--faint);width:104px;letter-spacing:0.4px;">{{ m.k }}</span>
                       <span style="{{ m.vStyle }}">{{ m.v }}</span>
                     </div>
                   </sc-for>
                 </div>
                 <div>
-                  <div style="color:#758189;font-size:9.5px;letter-spacing:1.3px;margin-bottom:8px;">FILES</div>
+                  <div style="color:#79858e;font-size:9.5px;letter-spacing:1.3px;margin-bottom:8px;">FILES</div>
                   <sc-for list="{{ j.files }}" as="f" hint-placeholder-count="5">
                     <div style="display:flex;gap:9px;padding:2.5px 0;">
                       <span style="{{ f.markStyle }}">{{ f.mark }}</span>
                       <span style="flex:1;min-width:0;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ f.name }}</span>
-                      <span style="color:#758189;">{{ f.size }}</span>
+                      <span style="color:#79858e;">{{ f.size }}</span>
                     </div>
                   </sc-for>
                 </div>
@@ -261,11 +261,11 @@
           </sc-if>
         </sc-for>
         <sc-if value="{{ jobsEmpty }}" hint-placeholder-val="{{ false }}">
-          <div style="padding:40px;text-align:center;color:#758189;font-size:11.5px;letter-spacing:1px;">── NO MATCHING JOBS ──</div>
+          <div style="padding:40px;text-align:center;color:#79858e;font-size:11.5px;letter-spacing:1px;">── NO MATCHING JOBS ──</div>
         </sc-if>
         <sc-if value="{{ showPager }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--line);">
-            <span style="font-size:10.5px;letter-spacing:0.8px;color:#758189;">{{ jobRange }}</span>
+            <span style="font-size:10.5px;letter-spacing:0.8px;color:#79858e;">{{ jobRange }}</span>
             <div style="display:flex;align-items:center;gap:5px;">
               <button onClick="{{ prevPage }}" style="{{ prevStyle }}">[,] PREV</button>
               <sc-for list="{{ pageBtns }}" as="p" hint-placeholder-count="3">
@@ -298,7 +298,7 @@
         <sc-if value="{{ sIdle }}" hint-placeholder-val="{{ true }}">
           <div style="padding:64px 20px;text-align:center;">
             <div style="font-size:11.5px;color:var(--faint);letter-spacing:1.4px;">AWAITING QUERY</div>
-            <div style="font-size:11.5px;color:#758189;margin-top:12px;max-width:430px;margin-left:auto;margin-right:auto;line-height:1.9;">Results group per peer and folder. Anything downloaded can be matched and imported to Lidarr.</div>
+            <div style="font-size:11.5px;color:#79858e;margin-top:12px;max-width:430px;margin-left:auto;margin-right:auto;line-height:1.9;">Results group per peer and folder. Anything downloaded can be matched and imported to Lidarr.</div>
             <div style="display:flex;gap:7px;justify-content:center;margin-top:20px;flex-wrap:wrap;">
               <sc-for list="{{ examples }}" as="e" hint-placeholder-count="3">
                 <button onClick="{{ e.onClick }}" style="border:1px solid var(--line2);background:transparent;color:var(--faint);font-size:11px;padding:6px 12px;cursor:pointer;letter-spacing:0.3px;" style-hover="border-color:var(--dim);color:var(--fg);">{{ e.label }}</button>
@@ -310,7 +310,7 @@
         <sc-if value="{{ sEmpty }}" hint-placeholder-val="{{ false }}">
           <div style="padding:58px 20px;text-align:center;">
             <div style="font-size:11.5px;color:var(--bad);letter-spacing:1.4px;">0 RESULTS</div>
-            <div style="font-size:11.5px;color:#758189;margin-top:11px;">No peer is sharing this right now — try a different spelling, or just the artist.</div>
+            <div style="font-size:11.5px;color:#79858e;margin-top:11px;">No peer is sharing this right now — try a different spelling, or just the artist.</div>
           </div>
         </sc-if>
 
@@ -319,7 +319,7 @@
             <span style="color:var(--faint);letter-spacing:0.6px;"><span style="color:var(--fg);">{{ sCount }}</span> RESULTS</span>
             <span style="{{ streamStyle }}">{{ streamText }}</span>
             <span style="flex:1;"></span>
-            <span style="color:#758189;letter-spacing:0.8px;">SORT</span>
+            <span style="color:#79858e;letter-spacing:0.8px;">SORT</span>
             <sc-for list="{{ sortChips }}" as="c" hint-placeholder-count="4">
               <button onClick="{{ c.onClick }}" style="{{ c.style }}">{{ c.label }}</button>
             </sc-for>
@@ -334,7 +334,7 @@
               <span style="min-width:0;display:flex;align-items:center;gap:8px;">
                 <span style="{{ r.caretStyle }}">{{ r.caret }}</span>
                 <span style="color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ r.title }}</span>
-                <span style="color:#758189;white-space:nowrap;">{{ r.meta }}</span>
+                <span style="color:#79858e;white-space:nowrap;">{{ r.meta }}</span>
               </span>
               <span style="display:flex;gap:7px;align-items:center;">
                 <span style="{{ r.fmtStyle }}">{{ r.format }}</span>
@@ -345,15 +345,15 @@
             </div>
             <sc-if value="{{ r.expanded }}" hint-placeholder-val="{{ false }}">
               <div style="background:#0b0c0e;border-bottom:1px solid var(--line);padding:13px 16px 14px 34px;font-size:11.5px;">
-                <div style="color:#758189;margin-bottom:9px;letter-spacing:0.4px;">{{ r.path }}</div>
+                <div style="color:#79858e;margin-bottom:9px;letter-spacing:0.4px;">{{ r.path }}</div>
                 <div style="max-height:190px;overflow-y:auto;">
                   <sc-for list="{{ r.tracks }}" as="t" hint-placeholder-count="6">
                     <label style="display:flex;align-items:center;gap:10px;padding:3px 0;cursor:pointer;" style-hover="color:var(--fg);">
                       <input type="checkbox" checked="{{ t.checked }}" onChange="{{ t.onToggle }}" style="width:12px;height:12px;accent-color:#c8ccd0;cursor:pointer;"/>
-                      <span style="color:#758189;width:22px;">{{ t.num }}</span>
+                      <span style="color:#79858e;width:22px;">{{ t.num }}</span>
                       <span style="flex:1;min-width:0;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ t.name }}</span>
-                      <span style="color:#758189;">{{ t.dur }}</span>
-                      <span style="color:#758189;width:58px;text-align:right;">{{ t.size }}</span>
+                      <span style="color:#79858e;">{{ t.dur }}</span>
+                      <span style="color:#79858e;width:58px;text-align:right;">{{ t.size }}</span>
                     </label>
                   </sc-for>
                 </div>
@@ -395,7 +395,7 @@
                   <span style="{{ t }}"></span>
                 </sc-for>
               </div>
-              <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:9.5px;color:#758189;letter-spacing:0.6px;">
+              <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:9.5px;color:#79858e;letter-spacing:0.6px;">
                 <span>−30m</span><span>{{ d.uptimePct }} UP</span><span>NOW</span>
               </div>
             </div>
@@ -411,7 +411,7 @@
                   <span style="{{ b }}"></span>
                 </sc-for>
               </div>
-              <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:9.5px;color:#758189;letter-spacing:0.6px;">
+              <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:9.5px;color:#79858e;letter-spacing:0.6px;">
                 <span>OLDEST</span><span>AVG {{ avgMatched }}</span><span>LATEST</span>
               </div>
             </div>
@@ -420,7 +420,7 @@
             <div style="{{ hdr }}"><span>COMPLETED</span><span style="flex:1;"></span><span style="color:var(--dim);">cumulative · 24h</span></div>
             <div style="padding:14px 16px 10px;">
               <div style="height:92px;">{{ completedChart }}</div>
-              <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:9.5px;color:#758189;letter-spacing:0.6px;">
+              <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:9.5px;color:#79858e;letter-spacing:0.6px;">
                 <span>−24h</span><span>+{{ completedDelta }} TODAY</span><span>NOW</span>
               </div>
             </div>
@@ -475,7 +475,7 @@
           </div>
         </sc-if>
 
-        <div style="display:grid;grid-template-columns:1fr 80px 90px 110px;gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#758189;">
+        <div style="display:grid;grid-template-columns:1fr 80px 90px 110px;gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#79858e;">
           <span>PATH</span><span style="text-align:right;">FILES</span><span style="text-align:right;">SIZE</span><span style="text-align:right;">INDEXED</span>
         </div>
         <sc-for list="{{ shareRows }}" as="sh" hint-placeholder-count="3">
@@ -508,7 +508,7 @@
           </div>
         </sc-for>
         <sc-if value="{{ noUploads }}" hint-placeholder-val="{{ false }}">
-          <div style="padding:34px;text-align:center;color:#758189;font-size:11.5px;letter-spacing:1px;">── NO ACTIVE UPLOADS ──</div>
+          <div style="padding:34px;text-align:center;color:#79858e;font-size:11.5px;letter-spacing:1px;">── NO ACTIVE UPLOADS ──</div>
         </sc-if>
         </section>
       </div>
@@ -650,7 +650,7 @@
     <sc-if value="{{ hasFlash }}" hint-placeholder-val="{{ false }}">
       <span style="padding:7px 13px;color:var(--ok);letter-spacing:0.4px;border-left:1px solid var(--line);">✓ {{ flash }}</span>
     </sc-if>
-    <span style="padding:7px 14px;color:#758189;letter-spacing:0.5px;border-left:1px solid var(--line);">{{ clock }}</span>
+    <span style="padding:7px 14px;color:#79858e;letter-spacing:0.5px;border-left:1px solid var(--line);">{{ clock }}</span>
   </div>
 </div>
 </x-dc>
@@ -961,7 +961,7 @@ class Component extends DCLogic {
   healthVals(C){
     const s=this.state;
     const upTicks=(downAt)=>{const a=[];for(let i=0;i<30;i++)a.push(downAt!==null&&i>=downAt&&i<downAt+3?0:1);
-      return a.map(v=>`flex:1 1 0;min-width:0;height:100%;background:${v?'#4f9e80':'#c56164'};opacity:${v?0.75:1};`);};
+      return a.map(v=>`flex:1 1 0;min-width:0;height:100%;background:${v?'#4f9e80':'#c86266'};opacity:${v?0.75:1};`);};
     const dep=(name,state,detail,downAt,uptimePct)=>({
       name,state:state.toUpperCase(),detail,uptimePct,
       dot:`color:${state==='connected'||state==='indexed'?'var(--ok)':(state==='degraded'?'var(--bad)':'var(--dim)')};font-size:9px;`,
@@ -1021,7 +1021,7 @@ class Component extends DCLogic {
         right:u.queued?'waiting for slot':Math.round(u.pct)+'% sent',
         pct:u.queued?'—':Math.round(u.pct)+'%',
         pctStyle:`font-size:11px;color:${u.queued?'var(--dim)':'#c8ccd0'};width:34px;text-align:right;`,
-        fill:this.fill(u.queued?100:u.pct,u.queued?'#2a2f34':'#c8ccd0',!u.queued)}))};
+        fill:this.fill(u.queued?100:u.pct,u.queued?'#606c77':'#c8ccd0',!u.queued)}))};
   }
 
   chatVals(){
@@ -1030,12 +1030,12 @@ class Component extends DCLogic {
     return {
       threads:s.chatThreads.map(x=>({peer:x.peer,onClick:this.selectThread(x.id),
         style:`display:flex;align-items:center;gap:9px;width:100%;padding:8px 14px;border:none;border-bottom:1px solid var(--line);background:${x.id===s.chatActiveId?'#111417':'transparent'};color:${x.id===s.chatActiveId?'var(--fg)':'var(--dim)'};font-size:11.5px;cursor:pointer;${x.id===s.chatActiveId?'box-shadow:inset 2px 0 0 var(--fg);':''}`,
-        dot:`color:${x.online?'var(--ok)':'#758189'};font-size:8px;`,
+        dot:`color:${x.online?'var(--ok)':'#79858e'};font-size:8px;`,
         unread:x.unread>0?String(x.unread):'',
         unreadStyle:`font-size:10px;color:var(--fg);`})),
       activePeer:t?t.peer.toUpperCase():'',
       activePeerState:t&&t.online?'ONLINE':'OFFLINE',
-      activePeerStateStyle:`font-size:10px;letter-spacing:0.8px;color:${t&&t.online?'var(--ok)':'#758189'};`,
+      activePeerStateStyle:`font-size:10px;letter-spacing:0.8px;color:${t&&t.online?'var(--ok)':'#79858e'};`,
       messages:t?t.msgs.map(m=>({name:'<'+(m.me?'you':t.peer)+'>',time:m.time,text:m.text,
         line:'display:flex;gap:9px;align-items:baseline;font-size:11.5px;line-height:1.85;padding:1px 0;',
         who:`flex:0 0 auto;color:${m.me?'var(--fg)':'var(--ok)'};`,
@@ -1083,8 +1083,8 @@ class Component extends DCLogic {
     const s=this.state, V=s.view;
     const accent=this.props.accent||'#e6e8ea';
 
-    const rootStyle={'--fg':'#e8eaec','--dim':'#7d868c','--faint':'#78828a','--line':'#191d20','--line2':'#252b30',
-      '--ok':'#4f9e80','--bad':'#c56164','--accent':accent,
+    const rootStyle={'--fg':'#e8eaec','--dim':'#97a2aa','--faint':'#79858e','--line':'#191d20','--line2':'#252b30',
+      '--ok':'#4f9e80','--bad':'#c86266','--accent':accent,
       display:'flex',flexDirection:'column',width:'100%',height:'100vh',background:'#08090a',
       fontFamily:"'IBM Plex Mono', ui-monospace, monospace",color:'#e8eaec',
       fontFeatureSettings:"'tnum' 1",fontVariantNumeric:'tabular-nums'};
@@ -1094,9 +1094,9 @@ class Component extends DCLogic {
 
     const navBtn=(v,key,label,badge,alert)=>({onClick:this.go(v),key,label,
       style:`display:flex;align-items:center;gap:10px;width:100%;padding:6px 15px;border:none;background:${V===v?'#111417':'transparent'};color:${V===v?'var(--fg)':'var(--dim)'};font-size:12px;cursor:pointer;${V===v?'box-shadow:inset 2px 0 0 var(--fg);':''}`,
-      keyStyle:`color:${V===v?'var(--fg)':'#758189'};font-size:10.5px;width:11px;`,
+      keyStyle:`color:${V===v?'var(--fg)':'#79858e'};font-size:10.5px;width:11px;`,
       badge:badge&&badge!=='0'?badge:'',
-      badgeStyle:`font-size:10px;color:${alert?'var(--bad)':(V===v?'var(--dim)':'#758189')};`});
+      badgeStyle:`font-size:10px;color:${alert?'var(--bad)':(V===v?'var(--dim)':'#79858e')};`});
     const navGroups=[
       {label:'MONITOR',items:[navBtn('overview','1','overview'),navBtn('jobs','2','jobs',String(C.active+C.queued+C.stalled)),navBtn('health','3','health',C.stalled+C.orphaned?String(C.stalled+C.orphaned):'',true)]},
       {label:'SOULSEEK',items:[navBtn('search','4','search'),navBtn('share','5','shares'),navBtn('chat','6','chat',String(s.chatThreads.reduce((a,t)=>a+t.unread,0)))]},
@@ -1128,13 +1128,13 @@ class Component extends DCLogic {
         speed:inQ?'—':this.spd(j.speedKBs),
         pct:Math.round(j.progress)+'%',
         pctStyle:`font-size:11px;color:${col};width:34px;text-align:right;`,
-        fill:this.fill(inQ?100:j.progress,inQ?'#2a2f34':col,j.status==='active'&&!inQ)};
+        fill:this.fill(inQ?100:j.progress,inQ?'#606c77':col,j.status==='active'&&!inQ)};
     });
 
     const passRows=s.passes.slice(0,7).map(p=>({
       id:p.id, time:p.min===0?'now':('-'+p.min+'m'), dur:p.dur,
       matchText:p.matched>0?(p.matched+' matched'):'no match',
-      matchStyle:`font-size:11px;color:${p.matched>0?'var(--fg)':'#758189'};`}));
+      matchStyle:`font-size:11px;color:${p.matched>0?'var(--fg)':'#79858e'};`}));
 
     // jobs
     let rows=s.jobs;
@@ -1168,9 +1168,9 @@ class Component extends DCLogic {
     rows=rows.slice(page*per,page*per+per);
 
     const arrow=(k)=>sk===k?(s.jobSort.dir>0?' ▲':' ▼'):'';
-    const headStyle=(k,right)=>`cursor:pointer;user-select:none;color:${sk===k?'var(--dim)':'#758189'};${right?'text-align:right;':''}`;
+    const headStyle=(k,right)=>`cursor:pointer;user-select:none;color:${sk===k?'var(--dim)':'#79858e'};${right?'text-align:right;':''}`;
     const head=(k,label,right)=>({label:label+arrow(k),onClick:this.setJobSort(k),style:headStyle(k,right)});
-    const plain=(label,right)=>({label,onClick:null,style:`color:#758189;${right?'text-align:right;':''}`});
+    const plain=(label,right)=>({label,onClick:null,style:`color:#79858e;${right?'text-align:right;':''}`});
     const jobHeads=[head('st','ST'),head('album','ALBUM'),head('peer','PEER'),plain('PROGRESS'),plain('SPEED',1),plain('ETA',1),plain('TRY',1)];
 
     const pgBase='padding:4px 9px;border:1px solid var(--line2);background:transparent;font-size:10.5px;letter-spacing:0.7px;cursor:pointer;font-family:inherit;';
@@ -1183,7 +1183,7 @@ class Component extends DCLogic {
     const navStyle=(dis)=>`${pgBase}color:${dis?'#3a4145':'var(--faint)'};cursor:${dis?'default':'pointer'};`;
 
     const gridCols='grid-template-columns:28px minmax(150px,2fr) minmax(72px,1fr) minmax(110px,1.3fr) 62px 44px 32px;';
-    const gridHead=`display:grid;${gridCols}gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#758189;`;
+    const gridHead=`display:grid;${gridCols}gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#79858e;`;
     const jobRows=rows.map(j=>{
       const m=this.meta(j.status); const inQ=j.status==='active'&&j.queuePos>0;
       const dl=j.status==='active'&&j.queuePos===0;
@@ -1193,15 +1193,15 @@ class Component extends DCLogic {
         onClick:this.toggleJob(j.id),
         rowStyle:`display:grid;${gridCols}gap:10px;padding:9px 16px;border-bottom:1px solid #131619;font-size:11.5px;align-items:center;cursor:pointer;background:${exp?'#0e1012':'transparent'};`,
         tag:`font-size:9.5px;letter-spacing:0.8px;color:${m.c};`, tagText:inQ?'QU':m.t,
-        caret:exp?'▾':'▸', caretStyle:'color:#758189;font-size:9px;',
+        caret:exp?'▾':'▸', caretStyle:'color:#79858e;font-size:9px;',
         srcText:j.source==='manual'?'●':'', srcStyle:'color:var(--dim);font-size:8px;',
         pct:inQ?('P'+j.queuePos):Math.round(j.progress)+'%',
         pctStyle:`font-size:11px;color:${col};width:34px;text-align:right;`,
-        fill:this.fill(inQ?100:j.progress,inQ?'#2a2f34':col,j.status==='active'&&!inQ),
+        fill:this.fill(inQ?100:j.progress,inQ?'#606c77':col,j.status==='active'&&!inQ),
         speed:dl?this.spd(j.speedKBs):'—',
         eta:(dl&&j.speedKBs>0)?(()=>{const sec=(j.sizeMB*1024*(1-j.progress/100))/(j.speedKBs*6);return sec>=60?Math.round(sec/60)+'m':Math.round(sec)+'s';})():'—',
         tries:j.retries>0?j.retries:'·',
-        tryStyle:`text-align:right;font-size:11px;color:${j.retries>0?'var(--dim)':'#758189'};`,
+        tryStyle:`text-align:right;font-size:11px;color:${j.retries>0?'var(--dim)':'#79858e'};`,
         expanded:exp, hasReason:!!j.reason,
         reasonStyle:`padding:8px 11px;margin-bottom:13px;border-left:2px solid ${m.c};background:#0e1012;color:${m.c};font-size:11.5px;`,
         meta:[
@@ -1213,14 +1213,14 @@ class Component extends DCLogic {
           {glyph:'├',k:'transferred',v:this.size(j.sizeMB*j.progress/100)+' / '+this.size(j.sizeMB),vStyle:'color:var(--dim);'},
           {glyph:'└',k:'job id',v:'#'+j.id,vStyle:'color:var(--faint);'}
         ],
-        files:j.files.map(f=>({...f,mark:f.done?'✓':'·',markStyle:`color:${f.done?'var(--ok)':'#758189'};width:9px;`})),
+        files:j.files.map(f=>({...f,mark:f.done?'✓':'·',markStyle:`color:${f.done?'var(--ok)':'#79858e'};width:9px;`})),
         retry:this.retry(j.id),cancel:this.cancel(j.id),remove:this.remove(j.id)};
     });
 
     const chip=(k,label)=>{const on=s.filter===k;return {label,onClick:this.setFilter(k),
       count:k==='all'?s.jobs.length:(C[k]||0),
       style:`display:flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid ${on?'var(--dim)':'var(--line2)'};background:${on?'#14181b':'transparent'};color:${on?'var(--fg)':'var(--faint)'};font-size:10.5px;letter-spacing:0.7px;cursor:pointer;`,
-      countStyle:`color:${on?'var(--dim)':'#758189'};`};};
+      countStyle:`color:${on?'var(--dim)':'#79858e'};`};};
     const jobChips=[chip('all','ALL'),chip('active','ACTIVE'),chip('queued','QUEUED'),chip('stalled','STALLED'),chip('failed','FAILED'),chip('orphaned','ORPHAN'),chip('done','DONE')];
 
     // search
@@ -1233,7 +1233,7 @@ class Component extends DCLogic {
     else res.sort((a,b)=>(b.free?1:0)-(a.free?1:0)||a.queue-b.queue);
 
     const resCols='grid-template-columns:30px 1fr 190px 118px 96px;';
-    const resHead=`display:grid;${resCols}gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#758189;`;
+    const resHead=`display:grid;${resCols}gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:9.5px;letter-spacing:1.3px;color:#79858e;`;
     const results=res.map((r,i)=>{
       const exp=s.sExpanded===r.id; const top=i===0&&s.sort==='best';
       const selCount=(()=>{const c=s.sel[r.id];if(c===undefined)return r.tracks;return Object.keys(c).filter(k=>c[k]).length;})();
@@ -1243,22 +1243,22 @@ class Component extends DCLogic {
       return {...r,
         onClick:this.toggleRes(r.id), expanded:exp,
         rowStyle:`display:grid;${resCols}gap:12px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:11.5px;align-items:center;cursor:pointer;background:${exp?'#0e1012':'transparent'};${top?'box-shadow:inset 2px 0 0 var(--fg);':''}`,
-        rank:top?'★':String(i+1), rankStyle:`font-size:10.5px;color:${top?'var(--fg)':'#758189'};`,
+        rank:top?'★':String(i+1), rankStyle:`font-size:10.5px;color:${top?'var(--fg)':'#79858e'};`,
         meta:`${r.tracks}t · ${this.size(r.sizeMB)} · ${r.bitrate}`,
         fmtStyle:`font-size:10px;letter-spacing:0.6px;padding:1px 6px;border:1px solid ${r.format==='FLAC'?'var(--ok)':'var(--line2)'};color:${r.format==='FLAC'?'var(--ok)':'var(--dim)'};`,
         compText:r.complete?'COMPLETE':'PARTIAL',
         compStyle:`font-size:10px;letter-spacing:0.6px;color:${r.complete?'var(--dim)':'var(--bad)'};`,
         availText:r.free?'FREE SLOT':('QUEUE '+r.queue),
         availStyle:`text-align:right;font-size:10.5px;letter-spacing:0.5px;color:${r.free?'var(--ok)':'var(--dim)'};`,
-        caret:exp?'▾':'▸', caretStyle:'color:#758189;font-size:9px;',
+        caret:exp?'▾':'▸', caretStyle:'color:#79858e;font-size:9px;',
         path:'\\\\'+r.peer+'\\'+r.artist+' - '+r.title, tracks, selCount,
         dlAlbum:this.enqueue(r.id,'album'), dlSel:this.enqueue(r.id,'sel'),
         importText:imported?'IMPORT: SKIPPED':'IMPORT: IN RAINBOWS · RADIOHEAD',
-        importStyle:`font-size:10.5px;letter-spacing:0.5px;color:${imported?'#758189':'var(--ok)'};`,
+        importStyle:`font-size:10.5px;letter-spacing:0.5px;color:${imported?'#79858e':'var(--ok)'};`,
         importAction:imported?'[i] LINK':'[i] SKIP', toggleImport:this.toggleImport(r.id)};
     });
     const sortChip=(k,l)=>{const on=s.sort===k;return {label:l,onClick:this.setSort(k),
-      style:`padding:3px 8px;border:1px solid ${on?'var(--dim)':'var(--line2)'};background:transparent;color:${on?'var(--fg)':'#758189'};font-size:10px;letter-spacing:0.6px;cursor:pointer;`};};
+      style:`padding:3px 8px;border:1px solid ${on?'var(--dim)':'var(--line2)'};background:transparent;color:${on?'var(--fg)':'#79858e'};font-size:10px;letter-spacing:0.6px;cursor:pointer;`};};
 
     const spin=['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'][s.spinIdx%10];
     const btnPrimary='padding:5px 11px;border:1px solid var(--dim);background:#14181b;color:var(--fg);font-size:10.5px;letter-spacing:0.7px;cursor:pointer;';
@@ -1286,7 +1286,7 @@ class Component extends DCLogic {
       uptime:'14d 06h', mem:'82 MB', peers:'214k',
       statCells, activeRows, activeCount:C.active, passRows, slotText:C.active+'/8', reconcileTotal:s.reconcileTotal,
       throughputChart:this.area(s.tp,'#c8ccd0'), peak:Math.max.apply(null,s.tp).toFixed(1),
-      uploadChart:this.area(up,'#7d868c'), peakUp:Math.max.apply(null,up).toFixed(1),
+      uploadChart:this.area(up,'#97a2aa'), peakUp:Math.max.apply(null,up).toFixed(1),
       jq:s.jq,onJq:this.onJq,jobChips,jobRows,jobsEmpty:jobRows.length===0,jobHeads,
       pageBtns,showPager:total>0,
       jobRange:total===0?'':`${page*per+1}–${Math.min(total,page*per+per)} of ${total}`,
@@ -1298,7 +1298,7 @@ class Component extends DCLogic {
       sCount:revealed.length, searching:s.searchState==='searching',
       spinner:s.searchState==='searching'?spin:'', spinStyle:`font-size:12px;color:var(--dim);width:12px;`,
       streamText:s.searchState==='searching'?'· streaming':'· complete',
-      streamStyle:`color:${s.searchState==='searching'?'var(--fg)':'#758189'};letter-spacing:0.5px;`,
+      streamStyle:`color:${s.searchState==='searching'?'var(--fg)':'#79858e'};letter-spacing:0.5px;`,
       examples:['radiohead in rainbows','aphex twin','bonobo migration'].map(x=>({label:x,onClick:this.ex(x)})),
       sortChips:[sortChip('best','BEST'),sortChip('size','SIZE'),sortChip('speed','SPEED'),sortChip('avail','AVAIL')],
       results,
