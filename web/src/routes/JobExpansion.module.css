@@ -10,7 +10,7 @@
 }
 .reasonTitle { font-weight: 600; }
 
-.placeholder { color: var(--faint); font-size: 11.5px; padding: 4px 0; }
+.placeholder { color: var(--text-dim); font-size: 11.5px; padding: 4px 0; }
 
 .columns {
   display: grid;
@@ -28,10 +28,10 @@
 .metaRows { display: flex; flex-direction: column; }
 .metaRow { display: flex; gap: 10px; padding: 2.5px 0; }
 .glyph { color: var(--text-dim); }
-.metaKey { color: var(--faint); width: 104px; letter-spacing: 0.4px; }
+.metaKey { color: var(--text-dim); width: 104px; letter-spacing: 0.4px; }
 .metaValue { color: var(--fg); }
 .metaValueDim { color: var(--dim); }
-.metaValueFaint { color: var(--faint); }
+.metaValueFaint { color: var(--text-dim); }
 
 .fileList { display: flex; flex-direction: column; font-family: var(--font-mono); }
 .fileRow { display: flex; align-items: center; gap: 9px; padding: 2.5px 0; }

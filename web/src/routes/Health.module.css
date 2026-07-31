@@ -31,7 +31,7 @@
 
 .depDetail {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--text-dim);
   margin-top: 9px;
   letter-spacing: 0.3px;
 }

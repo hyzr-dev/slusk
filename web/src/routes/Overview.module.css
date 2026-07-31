@@ -11,7 +11,7 @@
 .statLabel {
   font-size: 10px;
   letter-spacing: 1.3px;
-  color: var(--faint);
+  color: var(--text-dim);
   text-transform: uppercase;
 }
 
@@ -139,7 +139,7 @@
 .transferArtist {
   flex: 0 2 auto;
   min-width: 0;
-  color: var(--faint);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
