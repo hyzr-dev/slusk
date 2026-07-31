@@ -187,6 +187,46 @@ func TestCheckRelevance(t *testing.T) {
 			checkSource: true,
 			wantSource:  SourceDirectory,
 		},
+		{
+			// The narrowed fallback leaves one accepted hole: when the last
+			// segment really is noise-only, the parent is the only evidence
+			// there is, and for a self-titled album the parent satisfies
+			// dirCheck by construction. Pinned deliberately - this is the
+			// price of supporting multi-disc layouts at all, and it is far
+			// narrower than the unconditional OR it replaced. Widening the
+			// noise list makes this hole wider, which is one reason noise
+			// entries are not free (see normalize.go).
+			name:   "self-titled album with a noise-only last segment still reaches the parent",
+			artist: "The Absence",
+			title:  "The Absence",
+			files: []string{
+				`Music\The Absence\2020\01.flac`,
+				`Music\The Absence\2020\02.flac`,
+			},
+			wantMatch:   true,
+			checkSource: true,
+			wantSource:  SourceDirectory,
+		},
+		{
+			// stripTrailingBracketNoise is anchored at the end, so a LEADING
+			// label group still contributes tokens and costs precision:
+			// {metal, blade, the, absence} explains 2/4 = 0.50 < 0.60. This
+			// case is chosen because it discriminates - were the anchor
+			// dropped, the segment would reduce to {the, absence} and match.
+			// It is therefore a known false negative, accepted for now: the
+			// alternative is stripping bracket groups anywhere, which widens
+			// the forgiveness the gate depends on. Revisit with lab data.
+			name:   "a leading label group is not stripped and costs precision",
+			artist: "The Absence",
+			title:  "The Absence",
+			files: []string{
+				`Music\[Metal Blade] The Absence\01.flac`,
+				`Music\[Metal Blade] The Absence\02.flac`,
+			},
+			wantMatch:   false,
+			checkSource: true,
+			wantSource:  SourceDirectory,
+		},
 		// --- track title bracket stripping (finding 2) ---
 		{
 			// "(feat. Guest A)", "(Live)" and "(Remastered 2011)" are routine

@@ -86,6 +86,8 @@ type Discovery struct {
 	// wanted album on every tick forever; the first failure is surfaced at
 	// Warn (an operator should notice and investigate), every one after that
 	// only at Debug (the condition is already known, not new information).
+	// Cleared again on the next success, so the throttle covers one failure
+	// episode rather than the whole process lifetime.
 	warnedAlbumTracksFailure bool
 }
 
@@ -278,6 +280,10 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			logFn("album tracks failed, relevance gate degrades to directory check",
 				"album_job", job.ID, "err", err)
 		} else {
+			// Arm the Warn again: the throttle is per failure episode, not per
+			// process. Without this a transient blip permanently demotes every
+			// later outage - including an unrelated one weeks on - to Debug.
+			d.warnedAlbumTracksFailure = false
 			trackTitles = make([]string, len(tracks))
 			for i, tr := range tracks {
 				trackTitles[i] = tr.Title
@@ -330,7 +336,12 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			// matches the neighbouring rejection branches' pattern of logging
 			// structured values, not a copy of the message (see v.Source's
 			// doc comment).
-			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "source", v.Source)
+			// .String() explicitly: production wires slog's JSON handler, which
+			// marshals the int-typed RelevanceSource as a bare number and never
+			// consults Stringer. Tests use the text handler, which does - so
+			// dropping this reads correctly in every test and logs "source":2
+			// in the only place that matters.
+			d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "source", v.Source.String())
 			irrelevant++
 			continue
 		}

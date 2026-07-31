@@ -148,6 +148,11 @@ func TestTokens(t *testing.T) {
 			input: "Don’t Cry",
 			want:  []string{"dont", "cry"},
 		},
+		{
+			name:  "grave accent standing in for an apostrophe is elided too",
+			input: "Don`t Cry",
+			want:  []string{"dont", "cry"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
