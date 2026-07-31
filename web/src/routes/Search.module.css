@@ -35,11 +35,17 @@
 
 .input:focus { border-color: var(--dim); }
 
+/* transform belongs to the animation alone. Centring with top/bottom + margin
+   auto rather than translateY(-50%) is what keeps the two from sharing one
+   property: .askingPeers below resets the positioning, and a keyframe that
+   baked in the translate would then animate from none to -50% every cycle and
+   snap back — a spinner that visibly hops while it turns. */
 .spinner {
   position: absolute;
   right: 11px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 0;
+  bottom: 0;
+  margin: auto 0;
   width: 13px;
   height: 13px;
   border: 2px solid var(--line2);
@@ -49,7 +55,7 @@
 }
 
 @keyframes search-spin {
-  to { transform: translateY(-50%) rotate(360deg); }
+  to { transform: rotate(360deg); }
 }
 
 .submit {
@@ -167,4 +173,7 @@
   font-size: 11.5px;
 }
 
-.askingPeers .spinner { position: static; transform: none; }
+/* Static here: .askingPeers is a centred flex row, so the spinner aligns as a
+   flex child. Only the absolute positioning is undone — transform stays
+   untouched so the rotation keyframe still owns it. */
+.askingPeers .spinner { position: static; margin: 0; }
