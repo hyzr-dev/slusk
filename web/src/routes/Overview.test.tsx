@@ -462,6 +462,37 @@ describe('Overview', () => {
     expect(screen.getByText('41m')).toBeInTheDocument();
   });
 
+  // #333: once the age is day-scaled it can no longer answer "exactly when?",
+  // so the tooltip is the only route to the precise instant. jsdom cannot see
+  // a tooltip render, but it can hold the attribute to its contract.
+  it('carries the exact finish time as a title on the day-scaled WHEN cell', () => {
+    const finishedAt = new Date(Date.now() - (108 * 3600 + 23 * 60) * 1000).toISOString();
+    renderOverview(jobPage, charts, status, makeJobPage([
+      { ...baseJob, id: 92, title: 'Old Album', status: 'done', state: 'DONE', updatedAt: finishedAt },
+    ]));
+
+    const when = screen.getByText('4d');
+    expect(when).toBeInTheDocument();
+    // sv-SE shape, same as formatDateTime everywhere else. Asserting the shape
+    // rather than a literal keeps this from breaking under a runner TZ that
+    // rolls the date over, the way the format.test.ts date tests do.
+    expect(when).toHaveAttribute('title', expect.stringMatching(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/));
+  });
+
+  it('omits the title entirely when there is no usable timestamp', () => {
+    renderOverview(jobPage, charts, status, makeJobPage([
+      { ...baseJob, id: 93, title: 'No Stamp', status: 'done', state: 'DONE', updatedAt: '' },
+    ]));
+
+    // Scoped to this row's own WHEN cell: an em dash also renders in every
+    // SPEED cell, so an unscoped getByText('—') matches several elements.
+    const row = screen.getByText('No Stamp').closest('[role="row"]');
+    const when = row?.querySelector('[class*="finishedWhen"]');
+    // An em-dash tooltip on an em-dash value would be noise, not precision.
+    expect(when).toHaveTextContent('—');
+    expect(when).not.toHaveAttribute('title');
+  });
+
   it('shows a window-agnostic empty state when nothing finished recently', () => {
     renderOverview(jobPage, charts, status, makeJobPage([]));
     expect(screen.getByText(`── ${t.overview.noneFinished} ──`)).toBeInTheDocument();

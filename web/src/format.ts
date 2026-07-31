@@ -167,15 +167,26 @@ export function formatVirtualPath(path: string): string {
   return parts[parts.length - 1];
 }
 
-// How long ago something happened, for spots where the value is only ever
-// shown once it has grown large enough to matter (the top bar's staleness
-// warning). Deliberately coarse above a minute — nobody reads "312s".
+// How long ago something happened. Deliberately coarse, and coarser the older
+// the value gets — nobody reads "312s", and nobody reads "108h 23m" as "four
+// and a half days" either.
+//
+// Days carry no hour remainder ("4d", never "4d 12h") because at that scale
+// the hours change no decision: what the reader needs is "this is old". The
+// precision that drops out belongs in a title attribute next to the value —
+// Overview's WHEN cells do exactly that (issue #333).
+//
+// The top bar's staleness warning shares this and is unaffected in practice:
+// if staleness ever reaches days, the formatting is not the problem.
 export function formatAge(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  return `${Math.floor(seconds / 86400)}d`;
 }
 
 // A track's own measured length, mm:ss — distinct from formatEta (a duration

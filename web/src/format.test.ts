@@ -289,6 +289,25 @@ describe('formatAge', () => {
     expect(formatAge(3600)).toBe('1h');
     expect(formatAge(3600 + 4 * 60)).toBe('1h 4m');
   });
+
+  it('keeps hours right up to the day boundary', () => {
+    expect(formatAge(24 * 3600 - 60)).toBe('23h 59m');
+  });
+
+  // Days drop the hour remainder rather than reading "4d 12h". At this scale
+  // the hours change no decision — what the column conveys is "this is old" —
+  // and the exact instant is in the cell's title instead (issue #333).
+  it('switches to whole days at 24h and carries no remainder', () => {
+    expect(formatAge(24 * 3600)).toBe('1d');
+    expect(formatAge(24 * 3600 + 12 * 3600)).toBe('1d');
+    expect(formatAge(4 * 24 * 3600 + 23 * 3600)).toBe('4d');
+  });
+
+  // The value from the issue: 108h 23m was unreadable, and this is what it
+  // becomes.
+  it('renders the reported unreadable case as days', () => {
+    expect(formatAge(108 * 3600 + 23 * 60)).toBe('4d');
+  });
 });
 
 describe('compareFileNames', () => {
