@@ -24,6 +24,7 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 	"github.com/samuelenocsson/slskdarr/internal/lidarr"
 	"github.com/samuelenocsson/slskdarr/internal/matcher"
+	"github.com/samuelenocsson/slskdarr/internal/musicbrainz"
 	"github.com/samuelenocsson/slskdarr/internal/observ"
 	"github.com/samuelenocsson/slskdarr/internal/pipeline"
 	"github.com/samuelenocsson/slskdarr/internal/slskd"
@@ -372,6 +373,21 @@ func main() {
 		Timeout: cfg.Pipeline.SearchTimeout.Duration,
 		Logger:  logger.With("component", "search"),
 	})
+	// identify backs issue #321's identify modal: MusicBrainz artist/album
+	// lookups plus the read-only Lidarr library status. Left nil when
+	// [musicbrainz] is absent, mirroring soulClient - the /api/identify/*
+	// endpoints then answer 503 instead of panicking (see registerIdentify).
+	var identify *app.Identify
+	if cfg.MusicBrainz.Enabled() {
+		mbClient := musicbrainz.New(cfg.MusicBrainz.BaseURL, cfg.MusicBrainz.Contact,
+			musicbrainz.WithTimeout(cfg.MusicBrainz.Timeout.Duration),
+			musicbrainz.WithCacheTTL(cfg.MusicBrainz.CacheTTL.Duration))
+		identify = app.NewIdentify(app.IdentifyParams{
+			MusicBrainz: mbClient,
+			Lidarr:      lidarrClient,
+			Logger:      logger.With("component", "identify"),
+		})
+	}
 	// createJobFn converts observ's core.CandidateFile request shape into
 	// store.ManualJobFile: observ deliberately does not import internal/store,
 	// so the conversion happens here at the wiring boundary instead.
@@ -497,6 +513,20 @@ func main() {
 	var sharesFn observ.SharesFunc
 	var rescanSharesFn observ.RescanSharesFunc
 	var uploadsFn observ.UploadsFunc
+	// identify's four ServerDeps fields are left nil together when
+	// [musicbrainz] is absent (identify == nil), matching the nil-safe
+	// convention above: registerIdentify then answers 503 instead of
+	// dereferencing a nil *app.Identify.
+	var identifyArtistsFn observ.IdentifyArtistsFunc
+	var identifyArtistAlbumsFn observ.IdentifyArtistAlbumsFunc
+	var identifyAlbumEditionsFn observ.IdentifyAlbumEditionsFunc
+	var identifyAlbumLidarrStatusFn observ.IdentifyAlbumLidarrStatusFunc
+	if identify != nil {
+		identifyArtistsFn = identify.SearchArtists
+		identifyArtistAlbumsFn = identify.ArtistAlbums
+		identifyAlbumEditionsFn = identify.AlbumEditions
+		identifyAlbumLidarrStatusFn = identify.AlbumLidarrStatus
+	}
 	if soulClient != nil {
 		sharesFn = func() observ.ShareStatsReport {
 			report := soulClient.ShareReport()
@@ -595,48 +625,52 @@ func main() {
 	// the search session shapes (core.SearchSession/SearchDelta) already live
 	// in internal/core, so no wiring-boundary conversion is needed (issue #58).
 	handler := observ.NewServer(observ.ServerDeps{
-		Registry:             reg,
-		Version:              version,
-		Status:               statusFn,
-		Jobs:                 jobsFn,
-		PagedJobs:            pagedJobsFn,
-		FailureDetails:       failureDetailsFn,
-		Cancel:               jobs.Cancel,
-		Retry:                jobs.Retry,
-		SearchJob:            jobs.ForceSearch,
-		DeleteJob:            jobs.Delete,
-		CreateJob:            createJobFn,
-		JobDetail:            jobDetailFn,
-		JobView:              jobViewFn,
-		JobEvents:            jobEventsFn,
-		RecentEvents:         recentEventsFn,
-		Peers:                peersFn,
-		Live:                 liveFn,
-		Ready:                readyFn,
-		Modules:              modulesFn,
-		FailedRetryAfter:     cfg.Pipeline.FailedReviveAfter.Duration,
-		MaxCandidates:        cfg.Pipeline.MaxCandidatesPerAlbum,
-		Config:               configFn,
-		ConfigWriter:         configWriter,
-		Restart:              restartFn,
-		ConnectionTester:     connectionTester,
-		LiveTransfers:        liveTransfersFn,
-		TransferBytes:        st.TransferBytesByCandidate,
-		Charts:               chartsFn,
-		Shares:               sharesFn,
-		RescanShares:         rescanSharesFn,
-		Uploads:              uploadsFn,
-		UploadHistory:        uploadHistoryFn,
-		Throughput:           throughputFn,
-		StartSearch:          searches.Start,
-		SearchSnapshot:       searches.Snapshot,
-		SearchDelta:          searches.Delta,
-		StopSearch:           searches.Stop,
-		Conversations:        conversationsFn,
-		ConversationPresence: conversationPresenceForBackend(cfg.Pipeline.Backend, soulClient),
-		Thread:               threadFn,
-		Send:                 sendMessageFn,
-		MarkRead:             markReadFn,
+		Registry:                  reg,
+		Version:                   version,
+		Status:                    statusFn,
+		Jobs:                      jobsFn,
+		PagedJobs:                 pagedJobsFn,
+		FailureDetails:            failureDetailsFn,
+		Cancel:                    jobs.Cancel,
+		Retry:                     jobs.Retry,
+		SearchJob:                 jobs.ForceSearch,
+		DeleteJob:                 jobs.Delete,
+		CreateJob:                 createJobFn,
+		JobDetail:                 jobDetailFn,
+		JobView:                   jobViewFn,
+		JobEvents:                 jobEventsFn,
+		RecentEvents:              recentEventsFn,
+		Peers:                     peersFn,
+		Live:                      liveFn,
+		Ready:                     readyFn,
+		Modules:                   modulesFn,
+		FailedRetryAfter:          cfg.Pipeline.FailedReviveAfter.Duration,
+		MaxCandidates:             cfg.Pipeline.MaxCandidatesPerAlbum,
+		Config:                    configFn,
+		ConfigWriter:              configWriter,
+		Restart:                   restartFn,
+		ConnectionTester:          connectionTester,
+		LiveTransfers:             liveTransfersFn,
+		TransferBytes:             st.TransferBytesByCandidate,
+		Charts:                    chartsFn,
+		Shares:                    sharesFn,
+		RescanShares:              rescanSharesFn,
+		Uploads:                   uploadsFn,
+		UploadHistory:             uploadHistoryFn,
+		Throughput:                throughputFn,
+		StartSearch:               searches.Start,
+		SearchSnapshot:            searches.Snapshot,
+		SearchDelta:               searches.Delta,
+		StopSearch:                searches.Stop,
+		IdentifyArtists:           identifyArtistsFn,
+		IdentifyArtistAlbums:      identifyArtistAlbumsFn,
+		IdentifyAlbumEditions:     identifyAlbumEditionsFn,
+		IdentifyAlbumLidarrStatus: identifyAlbumLidarrStatusFn,
+		Conversations:             conversationsFn,
+		ConversationPresence:      conversationPresenceForBackend(cfg.Pipeline.Backend, soulClient),
+		Thread:                    threadFn,
+		Send:                      sendMessageFn,
+		MarkRead:                  markReadFn,
 		// Shutdown closes open GET /api/stream connections on graceful
 		// shutdown (issue #161); restartCtx is the same context every other
 		// long-lived goroutine below (soulCtx, the throughput recorder) is

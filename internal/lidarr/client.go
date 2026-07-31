@@ -333,6 +333,47 @@ func (c *Client) AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTr
 	return out, nil
 }
 
+// AlbumByForeignID reports whether a MusicBrainz release-group is in the
+// user's Lidarr library, keyed by Lidarr's foreignAlbumId - which is exactly
+// the release-group's MusicBrainz id (issue #321). /api/v1/album/lookup is
+// the wrong endpoint for this: it queries Lidarr's metadata server, not the
+// library, so it would report "found" for any album that exists anywhere in
+// MusicBrainz rather than only the ones the user has actually added.
+//
+// found is false, err is nil when Lidarr answered with an empty result -  a
+// genuine "not in library". A non-nil err means the answer is unknown (Lidarr
+// unreachable or erroring), which callers must not treat as absence - see
+// app.LidarrAlbumStatus.
+func (c *Client) AlbumByForeignID(ctx context.Context, foreignAlbumID string) (core.LidarrAlbum, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/api/v1/album?foreignAlbumId=%s", c.baseURL, url.QueryEscape(foreignAlbumID)), nil)
+	if err != nil {
+		return core.LidarrAlbum{}, false, err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return core.LidarrAlbum{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return core.LidarrAlbum{}, false, fmt.Errorf("lidarr album lookup: status %d", resp.StatusCode)
+	}
+	var raw []struct {
+		ID        int64 `json:"id"`
+		ArtistID  int64 `json:"artistId"`
+		Monitored bool  `json:"monitored"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return core.LidarrAlbum{}, false, err
+	}
+	if len(raw) == 0 {
+		return core.LidarrAlbum{}, false, nil
+	}
+	a := raw[0]
+	return core.LidarrAlbum{ID: a.ID, ArtistID: a.ArtistID, Monitored: a.Monitored}, true, nil
+}
+
 // ExecuteManualImport tells Lidarr to import the given items (move mode).
 func (c *Client) ExecuteManualImport(ctx context.Context, items []core.ImportItem) error {
 	files := make([]map[string]any, 0, len(items))

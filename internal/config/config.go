@@ -20,13 +20,14 @@ import (
 
 // Config is the entire application configuration. Every field maps to a TOML key.
 type Config struct {
-	Lidarr   LidarrConfig   `toml:"lidarr"`
-	Slskd    SlskdConfig    `toml:"slskd"`
-	Pipeline PipelineConfig `toml:"pipeline"`
-	Store    StoreConfig    `toml:"store"`
-	Observ   ObservConfig   `toml:"observ"`
-	Paths    PathsConfig    `toml:"paths"`
-	Soulseek SoulseekConfig `toml:"soulseek"`
+	Lidarr      LidarrConfig      `toml:"lidarr"`
+	Slskd       SlskdConfig       `toml:"slskd"`
+	Pipeline    PipelineConfig    `toml:"pipeline"`
+	Store       StoreConfig       `toml:"store"`
+	Observ      ObservConfig      `toml:"observ"`
+	Paths       PathsConfig       `toml:"paths"`
+	Soulseek    SoulseekConfig    `toml:"soulseek"`
+	MusicBrainz MusicBrainzConfig `toml:"musicbrainz"`
 }
 
 // LidarrConfig is the Lidarr music server integration configuration. There is
@@ -332,6 +333,56 @@ func (s *SoulseekConfig) applyDefaults() {
 	}
 }
 
+const defaultMusicBrainzBaseURL = "https://musicbrainz.org"
+const defaultMusicBrainzTimeout = 10 * time.Second
+const defaultMusicBrainzCacheTTL = time.Hour
+
+// MusicBrainzConfig enables identifying a Soulseek search result against
+// MusicBrainz (issue #321). The whole section is optional: a wholly absent
+// [musicbrainz] section, or one with every field blank, leaves it disabled -
+// the identify endpoints then answer "not enabled" rather than crashing the
+// process, which matters here more than for most sections since this key did
+// not exist before this PR and merging to main auto-deploys (see CLAUDE.md).
+type MusicBrainzConfig struct {
+	// BaseURL is the MusicBrainz web service root. Defaults to
+	// https://musicbrainz.org when the section is enabled and this is blank.
+	BaseURL string `toml:"base_url"`
+	// Contact identifies this application in the User-Agent MusicBrainz's
+	// usage policy requires (an email address or a URL) - required with no
+	// default, since sending an unidentified request risks the whole app's
+	// IP being blocked (see internal/musicbrainz.ErrNoContact).
+	Contact string `toml:"contact"`
+	// Timeout bounds a single HTTP request. Defaults to 10s.
+	Timeout Duration `toml:"timeout"`
+	// CacheTTL is how long a response is reused before it is fetched again.
+	// Defaults to 1h.
+	CacheTTL Duration `toml:"cache_ttl"`
+}
+
+// Enabled reports whether any field of the section was set, meaning the
+// identify feature should be wired up.
+func (m MusicBrainzConfig) Enabled() bool {
+	return m.BaseURL != "" || m.Contact != "" || m.Timeout.Duration != 0 || m.CacheTTL.Duration != 0
+}
+
+// applyDefaults fills BaseURL, Timeout and CacheTTL with their documented
+// defaults when the section is enabled and the field was left blank. Contact
+// has no default - see its doc comment - so Validate rejects it being blank.
+func (m *MusicBrainzConfig) applyDefaults() {
+	if !m.Enabled() {
+		return
+	}
+	if m.BaseURL == "" {
+		m.BaseURL = defaultMusicBrainzBaseURL
+	}
+	if m.Timeout.Duration == 0 {
+		m.Timeout.Duration = defaultMusicBrainzTimeout
+	}
+	if m.CacheTTL.Duration == 0 {
+		m.CacheTTL.Duration = defaultMusicBrainzCacheTTL
+	}
+}
+
 // Duration wraps time.Duration so TOML strings like "5m" decode directly.
 type Duration struct{ time.Duration }
 
@@ -375,6 +426,7 @@ func LoadBytes(data []byte) (Config, error) {
 	}
 	cfg.Pipeline.applyDefaults()
 	cfg.Soulseek.applyDefaults()
+	cfg.MusicBrainz.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -542,6 +594,17 @@ func (c Config) Validate() error {
 					paths[clean] = struct{}{}
 				}
 			}
+		}
+	}
+	if c.MusicBrainz.Enabled() {
+		if c.MusicBrainz.Contact == "" {
+			problems = append(problems, "musicbrainz.contact is required when the musicbrainz section is enabled")
+		}
+		if c.MusicBrainz.Timeout.Duration <= 0 {
+			problems = append(problems, "musicbrainz.timeout must be > 0")
+		}
+		if c.MusicBrainz.CacheTTL.Duration <= 0 {
+			problems = append(problems, "musicbrainz.cache_ttl must be > 0")
 		}
 	}
 	if c.Observ.ListenAddr == "" {

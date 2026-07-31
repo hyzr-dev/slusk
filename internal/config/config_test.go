@@ -604,3 +604,82 @@ func TestLoadUnknownBackendValueFails(t *testing.T) {
 		t.Errorf("error should name the invalid field: %v", err)
 	}
 }
+
+func TestLoadWithoutMusicBrainzSectionLeavesItDisabled(t *testing.T) {
+	cfg, err := Load("testdata/valid.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MusicBrainz.Enabled() {
+		t.Fatal("MusicBrainz.Enabled() = true, want false for a config with no [musicbrainz] section")
+	}
+}
+
+func TestLoadMusicBrainzValidAppliesDefaults(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := string(base) + "\n[musicbrainz]\ncontact = \"me@example.com\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MusicBrainz.Enabled() {
+		t.Fatal("MusicBrainz.Enabled() = false, want true")
+	}
+	if cfg.MusicBrainz.Contact != "me@example.com" {
+		t.Errorf("Contact = %q", cfg.MusicBrainz.Contact)
+	}
+	if cfg.MusicBrainz.BaseURL != "https://musicbrainz.org" {
+		t.Errorf("BaseURL = %q, want the default", cfg.MusicBrainz.BaseURL)
+	}
+	if cfg.MusicBrainz.Timeout.Duration != 10*time.Second {
+		t.Errorf("Timeout = %v, want the 10s default", cfg.MusicBrainz.Timeout.Duration)
+	}
+	if cfg.MusicBrainz.CacheTTL.Duration != time.Hour {
+		t.Errorf("CacheTTL = %v, want the 1h default", cfg.MusicBrainz.CacheTTL.Duration)
+	}
+}
+
+func TestLoadMusicBrainzWithoutContactFails(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := string(base) + "\n[musicbrainz]\nbase_url = \"https://musicbrainz.org\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for a [musicbrainz] section without a contact")
+	}
+	if !strings.Contains(err.Error(), "musicbrainz.contact") {
+		t.Errorf("error should name the missing field: %v", err)
+	}
+}
+
+func TestLoadMusicBrainzUnknownKeyFails(t *testing.T) {
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := string(base) + "\n[musicbrainz]\ncontact = \"me@example.com\"\nbogus = \"x\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for an unknown musicbrainz key")
+	}
+	if !strings.Contains(err.Error(), "unknown config keys") {
+		t.Errorf("error should report unknown keys: %v", err)
+	}
+}
