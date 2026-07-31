@@ -831,6 +831,68 @@ func TestDiscoveryRejectsIrrelevantCandidate(t *testing.T) {
 	}
 }
 
+// TestDiscoverySearchExcludedFailsJobImmediately confirms a
+// core.ErrSearchExcluded from the searcher (issue #319: the Soulseek server
+// told every peer to ignore this exact query) fails the job on the very first
+// hit rather than consuming the retry/backoff budget - retrying is pure waste
+// since the excluded-phrase list is stable across retries - and that the
+// error itself never escapes Tick (it is a routine, expected outcome, not a
+// module failure).
+func TestDiscoverySearchExcludedFailsJobImmediately(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	excludedErr := fmt.Errorf("%w: %q", core.ErrSearchExcluded, "artist album")
+	searcher := &fakeSearcher{searchErrForQuery: map[string]error{"Artist Album": excludedErr}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	p.MaxRetries = 50 // high on purpose: an excluded search must not touch this budget
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick should swallow the excluded-search error, got: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED immediately, got %+v", jobs)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var sawExcluded bool
+	for _, ev := range events {
+		if ev.Event == core.EventSearchExcluded {
+			sawExcluded = true
+			if !strings.Contains(ev.Detail, "Artist Album") || !strings.Contains(ev.Detail, "artist album") {
+				t.Errorf("search_excluded detail = %q, want it to name the query and the matched phrase", ev.Detail)
+			}
+		}
+	}
+	if !sawExcluded {
+		t.Errorf("expected a search_excluded event, got %+v", events)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 1 || passes[0].Matched != 0 {
+		t.Errorf("expected one unmatched search pass, got %+v", passes)
+	}
+}
+
 // TestDiscoveryAlbumTracksErrorDegradesToDirectoryCheck asserts an
 // AlbumTracks error DEGRADES the relevance gate to a directory-only check
 // rather than aborting discovery (unlike AlbumReleases, which is load-bearing

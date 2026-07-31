@@ -327,6 +327,67 @@ func TestSearchTimeoutCancellationFailuresAndNonpositiveTimeout(t *testing.T) {
 	})
 }
 
+// TestSearchExcludedPhraseRejectsWithoutWireSend confirms Search matches the
+// server's pushed excluded-phrase list using token-set semantics - case-
+// insensitive, order-independent, position-independent (issue #319's
+// empirically measured matching rule) - and, on a match, returns
+// core.ErrSearchExcluded without writing anything to the server. It also
+// covers the negative case (no covering phrase) and a case/order variant that
+// still matches.
+func TestSearchExcludedPhraseRejectsWithoutWireSend(t *testing.T) {
+	phrases := []string{"bob dylan"}
+
+	t.Run("matching query is rejected before any wire send", func(t *testing.T) {
+		c, conn, _ := startSearchClient(t)
+		c.excludedPhrases.Store(&phrases)
+
+		results, err := c.Search(context.Background(), "Bob Dylan Desire", time.Second)
+		if !errors.Is(err, core.ErrSearchExcluded) {
+			t.Fatalf("err = %v, want core.ErrSearchExcluded", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("results = %v, want none", results)
+		}
+		conn.mu.Lock()
+		writes := len(conn.writes)
+		conn.mu.Unlock()
+		if writes != 0 {
+			t.Fatalf("excluded query wrote %d frames, want 0", writes)
+		}
+		assertNoActiveSearches(t, c)
+	})
+
+	t.Run("case and order independent match is still rejected", func(t *testing.T) {
+		c, conn, _ := startSearchClient(t)
+		c.excludedPhrases.Store(&phrases)
+
+		if _, err := c.Search(context.Background(), "DESIRE dylan BOB", time.Second); !errors.Is(err, core.ErrSearchExcluded) {
+			t.Fatalf("err = %v, want core.ErrSearchExcluded", err)
+		}
+		conn.mu.Lock()
+		writes := len(conn.writes)
+		conn.mu.Unlock()
+		if writes != 0 {
+			t.Fatalf("excluded query wrote %d frames, want 0", writes)
+		}
+	})
+
+	t.Run("non-covering query is sent normally", func(t *testing.T) {
+		c, conn, _ := startSearchClient(t)
+		c.excludedPhrases.Store(&phrases)
+		requests := make(chan []byte, 1)
+		conn.writeFn = func(frame []byte) (int, error) { requests <- frame; return len(frame), nil }
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _, _ = c.Search(ctx, "Bob Desire", time.Second) }()
+		_, query := waitSearchRequest(t, requests)
+		if query != "Bob Desire" {
+			t.Fatalf("query = %q, want %q", query, "Bob Desire")
+		}
+	})
+}
+
 func TestConcurrentSearchesAreTokenIsolated(t *testing.T) {
 	c, conn, _ := startSearchClient(t)
 	requests := make(chan []byte, 2)

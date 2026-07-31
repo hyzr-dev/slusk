@@ -293,6 +293,14 @@ type Client struct {
 	sessionHooks sessionHooks
 	inboundSlots chan struct{}
 
+	// excludedPhrases holds the server's most recently pushed excluded-search-
+	// phrase list (code 160, re-sent on every login): well-behaved peers never
+	// answer a search whose terms cover one of these phrases, so Search checks
+	// against it before writing to the wire (see search.go). Server-global and
+	// re-pushed on every login, so it needs no server-generation coupling -
+	// same style as the shares snapshot below.
+	excludedPhrases atomic.Pointer[[]string]
+
 	// incoming carries received private messages from readLoop to
 	// runMessageWorker (see messages.go). It is deliberately not
 	// generation-scoped: a persisted message outlives the connection it
@@ -998,6 +1006,19 @@ func (c *Client) handleMessage(ctx context.Context, code server.Code, reader io.
 		}
 		if err := c.tree.handleServerEmbedded(c.currentServerGeneration(), *msg); err != nil {
 			return fmt.Errorf("handle embedded distributed message: %w", err)
+		}
+		return nil
+
+	case server.CodeExcludedSearchPhrases:
+		msg := &server.ExcludedSearchPhrases{}
+		if err := msg.Deserialize(reader); err != nil {
+			return fmt.Errorf("deserialize excluded search phrases: %w", err)
+		}
+		phrases := msg.Phrases
+		c.excludedPhrases.Store(&phrases)
+		if c.logger != nil {
+			c.logger.Info("received excluded search phrases", "count", len(phrases))
+			c.logger.Debug("excluded search phrases", "phrases", phrases)
 		}
 		return nil
 
