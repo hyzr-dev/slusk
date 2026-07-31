@@ -202,6 +202,89 @@ own transport types and `main.go` adapts between them.
 - `.dockerignore` must keep `web/node_modules/` excluded, or the host's darwin binaries
   overwrite the container's linux ones.
 
+## Design Context
+
+### Users
+
+Other self-hosters running slskdarr on their own hardware. They know Lidarr and
+Soulseek; they do not know slskdarr's internal state machine, and the interface must
+not assume they do — a state name that only makes sense if you have read
+`internal/pipeline` is a bug in the interface, not a gap in the user.
+
+They arrive when something is wrong. The dominant job is **active troubleshooting**:
+why is this job stuck, why did this album match the wrong release, why has nothing
+imported for an hour. Passive glance-at-it monitoring is a secondary use, so density
+and information scent beat calm reassurance — the screen should let someone chase a
+specific job to its cause without leaving the dashboard.
+
+### Brand Personality
+
+**Terminal with attitude.** Three words: *dense, candid, deliberate.*
+
+- Dense: a TUI's information-per-pixel, not an app's. Whitespace is earned, not default.
+- Candid: it reports what actually happened, including failure, in the same flat voice
+  it reports success. No reassuring euphemism, no invented certainty
+  (`interface-must-not-invent-data` — omit what the backend cannot supply).
+- Deliberate: personality is allowed — the pulsing LIVE dot, the tick flare on a
+  completed segment, an occasional dry line of copy — but every flourish must be
+  attached to a real state change. Motion that means nothing is noise.
+
+What it is *not*: a SaaS admin panel (cards, drop shadows, rounded pills, illustrated
+empty states), and not retro-CRT pastiche either (no scanlines, no phosphor glow). The
+idiom is a *modern* terminal — htop and k9s, not a VT220 emulator.
+
+### Aesthetic Direction
+
+**Dark only, permanently.** The palette *is* the design. Do not add
+`prefers-color-scheme` branches, do not build a light theme, do not add tokens whose
+only purpose is to make one possible later.
+
+- The visual spec is `docs/design/slskdarr-tui.dc.html` (plus the dashboard mock beside
+  it) and `docs/superpowers/specs/2026-07-25-tui-reskin-design.md`. Grep the local
+  files; they are the source of truth for spacing, weight and hue.
+- Every colour lives in `web/src/styles/tokens.css`. A raw hex in a `.module.css` is
+  invisible to anything that reasons about the palette — `npm test` runs
+  `scripts/check-css-tokens.mjs`, which fails the build on an undefined token, but it
+  cannot catch a hardcoded one. Name it or don't use it.
+- Colour is a scarce signal, not decoration. Status has no per-state hue: queued,
+  active and importing all render in `--fg`/`--dim`. Only `--ok` and `--bad` carry a
+  colour, which is exactly why they read at a glance.
+- The mock **recesses, never elevates** — nested content goes darker (`--panel-inset`),
+  not lighter. There are no shadows.
+- One typeface: IBM Plex Mono. Hierarchy comes from weight, size, letter-spacing and
+  the `--fg` → `--dim` → `--faint` → `--text-dim` ladder — never from a second family.
+
+### Accessibility
+
+Desktop-first, and honestly so. Mobile is not a priority: tables must not explode, but
+small screens are not optimised for. Keyboard operability is nice-to-have and welcome
+where it fits the terminal idiom, not a gate.
+
+WCAG AA contrast is the standing goal for text. **Known gap:** `--text-dim` (`#5f696f`)
+against `--bg` (`#08090a`) is 3.5:1 and fails AA for body text — it is used for
+column headers, timestamps and disabled glyphs in ~30 places. Treat that as debt to fix
+deliberately, not as licence to introduce more sub-AA pairs.
+
+`@media (prefers-reduced-motion: reduce)` already exists in `global.css`. Any new
+animation must be covered by it.
+
+### Design Principles
+
+1. **Density is the feature.** When in doubt, fit more on the screen, not less. A user
+   scanning for a stuck job should not have to scroll to compare two rows.
+2. **Colour is signal.** If a hue does not distinguish success from failure or draw the
+   eye to something actionable, it does not belong.
+3. **Never invent data.** An absent field beats a plausible fabrication. Omit, or say
+   plainly that it is unknown.
+4. **Motion earns its place.** Animate state changes, nothing else — and always honour
+   reduced-motion.
+5. **The mock is the spec, not a mandate to delete.** Match its visual language; never
+   remove shipped functionality merely because the mock does not draw it.
+6. **Layout bugs are invisible to the suite.** jsdom computes no layout and paints
+   nothing, so overflow, popover placement, contrast and tap-target size can never fail
+   a test. Render the change in a browser before calling it done — follow the
+   `verifying-ui-in-browser` skill.
+
 ## Style
 
 - Comments and identifiers in English. Doc comments explain *why* and what a caller

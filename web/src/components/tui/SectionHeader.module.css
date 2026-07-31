@@ -6,7 +6,7 @@
   border-bottom: 1px solid var(--line);
   font-size: 9.5px;
   letter-spacing: 1.4px;
-  color: var(--faint);
+  color: var(--text-dim);
 }
 
 .spacer { flex: 1; }
