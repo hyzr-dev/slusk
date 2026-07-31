@@ -874,6 +874,113 @@ func TestRetryFailedJobUnknownID(t *testing.T) {
 	}
 }
 
+// TestRetryManualJobRevivesCandidateToNew covers issue #347: unlike
+// RetryFailedJob, a manual job's retry must try the same peer again rather
+// than re-search, so its candidate is revived to NEW (not deleted) while its
+// stale FAILED/CANCELLED transfers are cleared, and the job lands in
+// SELECTING (not WANTED) so Selecting picks it straight back up.
+func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := s.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	if _, err := s.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("FailCandidateAndAdvance: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := s.RetryManualJob(ctx, job.ID, later)
+	if err != nil {
+		t.Fatalf("RetryManualJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected RetryManualJob to return true for a FAILED manual job")
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v err=%v", found, err)
+	}
+	if got := view.Job; got.State != core.StateSelecting || got.Retries != 0 || got.NotBefore != nil || got.FailedAt != nil {
+		t.Errorf("job after retry = state %q retries %d not_before %v failed_at %v", got.State, got.Retries, got.NotBefore, got.FailedAt)
+	}
+
+	cands, err := s.CandidatesForJob(ctx, job.ID)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("CandidatesForJob = %d (%v), want the original candidate revived, not deleted", len(cands), err)
+	}
+	if cands[0].ID != cand.ID {
+		t.Errorf("candidate id = %d, want the same original candidate %d", cands[0].ID, cand.ID)
+	}
+	if cands[0].State != core.CandidateNew {
+		t.Errorf("candidate state = %q, want NEW", cands[0].State)
+	}
+	if cands[0].Username != "peer_one" {
+		t.Errorf("candidate username = %q, want peer_one (the user's original choice)", cands[0].Username)
+	}
+
+	if trs, err := s.TransfersForCandidate(ctx, cand.ID); err != nil || len(trs) != 0 {
+		t.Fatalf("expected the stale transfer set cleared, got %d (%v)", len(trs), err)
+	}
+}
+
+// TestRetryManualJobNoopForLidarrJob guards the routing: RetryManualJob must
+// never touch a lidarr-sourced job even if it happens to be FAILED, or it
+// would silently skip the re-search a lidarr job actually needs.
+func TestRetryManualJobNoopForLidarrJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 50, now)
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	ok, err := s.RetryManualJob(ctx, job.ID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RetryManualJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryManualJob to return false for a lidarr-sourced job")
+	}
+}
+
+// TestRetryManualJobNoopWhenNotRetryable mirrors
+// TestRetryFailedJobNoopWhenNotFailed for the manual-job path: a job not in
+// FAILED/PARKED/ORPHANED must be left untouched.
+func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+
+	ok, err := s.RetryManualJob(ctx, job.ID, now)
+	if err != nil {
+		t.Fatalf("RetryManualJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryManualJob to return false for a still-DOWNLOADING job")
+	}
+}
+
 // TestForceSearchJobResetsAndReturnsToWanted covers issue #159's force-search
 // button: a FAILED job with backoff, failed_at, and stale candidates/transfers
 // is reset to a clean WANTED slate.

@@ -185,12 +185,33 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 	}
 	if !ok {
 		// No NEW candidate left to try: every cached candidate from the last
-		// search has already been activated and failed. This is a search-cycle
-		// failure like Discovery's empty-results case, so it goes through the
-		// same failOrBackoff path, but with resetToWanted=true: ResetJobToWanted
-		// wipes the (now-useless) candidate cache and its transfers and sends
-		// the job back to WANTED for a fresh search, rather than leaving it
-		// stuck in SELECTING with nothing left to try.
+		// search has already been activated and failed.
+		//
+		// A manual job (issue #155) never gets a re-search: the user picked one
+		// specific peer, often for a reason the protocol carries nowhere (a FLAC
+		// rip, a bitrate, a particular edition), and Discovery/#347 refuses to
+		// search on a manual job's behalf anyway. So this goes straight to
+		// MarkJobFailed instead of failOrBackoff, on the first failure -
+		// retries is never consumed. This is also path 2's fix: an IMPORTING ->
+		// SELECTING bounce from a manual job's import dying on
+		// Music.AlbumStatus(0) (#59) now ends here too, visibly FAILED instead
+		// of ticking in WANTED forever. Whoever solves #59 must know the state
+		// is already FAILED, not WANTED, by the time their fix runs.
+		if job.Source == core.SourceManual {
+			detail := "manual job candidate failed, not re-searching"
+			s.log().Info(detail, "album_job", job.ID)
+			if err := s.p.Store.MarkJobFailed(ctx, job.ID, now); err != nil {
+				return false, err
+			}
+			s.recordEvent(ctx, job.ID, core.EventJobFailed, detail, now)
+			s.quarantineLeftovers(ctx, job, now)
+			return true, nil
+		}
+		// A Lidarr-sourced job's search-cycle failure goes through the same
+		// failOrBackoff path as every other module, but with resetToWanted=true:
+		// ResetJobToWanted wipes the (now-useless) candidate cache and its
+		// transfers and sends the job back to WANTED for a fresh search, rather
+		// than leaving it stuck in SELECTING with nothing left to try.
 		detail := "candidates exhausted, re-searching"
 		s.log().Info(detail, "album_job", job.ID)
 		failed, err := failOrBackoff(ctx, s.p.Store, s.log(), job, s.p.MaxRetries, s.p.BackoffBase, s.p.BackoffCap, true, now)
@@ -204,7 +225,17 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		return true, nil
 	}
 
-	if now.Sub(cand.CreatedAt) > s.p.CandidateTTL {
+	// The Source guard exists for a manual job's retry (#347's RetryManualJob):
+	// a fresh manual job is created ACTIVE, straight into DOWNLOADING, so it
+	// never has a NEW candidate here - but a retried one does, and its
+	// candidate's created_at is by definition old, so a retry a day later
+	// (CandidateTTL defaults to 24h) would otherwise hit this branch. Staleness
+	// only matters because a fresh search is a better option than a stale
+	// candidate; a manual job has no fresh search to fall back to - the
+	// candidate is the user's explicit choice and the only thing to try. If the
+	// peer has gone offline, enqueuing it simply fails and the exhaustion
+	// branch above ends the job properly.
+	if job.Source != core.SourceManual && now.Sub(cand.CreatedAt) > s.p.CandidateTTL {
 		// The cached candidate is too old to trust: the peer may have gone
 		// offline or renamed/removed the shared files since the search ran.
 		// Discard the whole cache and re-search from scratch, same as

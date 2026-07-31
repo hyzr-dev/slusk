@@ -47,6 +47,7 @@ type JobStore interface {
 	CancelJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
+	RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	DeleteJob(ctx context.Context, jobID int64) (bool, error)
@@ -110,16 +111,24 @@ func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
 
 // Retry manually revives one FAILED, PARKED, or legacy ORPHANED job by id:
 // ErrJobNotFound if no such job exists, ErrJobNotRetryable if it exists but is
-// not currently retryable (the caller raced a state change).
+// not currently retryable (the caller raced a state change). A manual job
+// (issue #347) retries the same peer via RetryManualJob rather than
+// re-searching: the user picked that peer for a reason the protocol carries
+// nowhere, and the pipeline must never go hunting on a manual job's behalf.
 func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
-	_, found, err := j.Store.JobWithTransfer(ctx, jobID)
+	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return ErrJobNotFound
 	}
-	ok, err := j.Store.RetryFailedJob(ctx, jobID, time.Now())
+	var ok bool
+	if view.Job.Source == core.SourceManual {
+		ok, err = j.Store.RetryManualJob(ctx, jobID, time.Now())
+	} else {
+		ok, err = j.Store.RetryFailedJob(ctx, jobID, time.Now())
+	}
 	if err != nil {
 		return err
 	}

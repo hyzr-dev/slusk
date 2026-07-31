@@ -646,3 +646,157 @@ func TestSelectingExpiresStaleCache(t *testing.T) {
 		t.Errorf("expected nothing enqueued for an expired candidate, got %v", searcher.enqueued)
 	}
 }
+
+// TestSelectingManualJobExhaustionFailsOnFirstFailure covers issue #347: a
+// manual job's candidate failing must never send it back to WANTED for a
+// re-search - the user picked that peer deliberately. It reaches SELECTING
+// the same way production does: CreateManualJob straight into DOWNLOADING,
+// then FailCandidateAndAdvance bounces it to SELECTING with its only
+// candidate FAILED, exactly like a real transfer failure
+// (downloading.go:629) or import failure (importing.go:173,464) would.
+func TestSelectingManualJobExhaustionFailsOnFirstFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.MaxRetries = 3 // would NOT be terminal for a lidarr job at this retry count
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("FailCandidateAndAdvance: %v", err)
+	}
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED on first failure, got %+v (%v)", jobs, err)
+	}
+	if jobs[0].Retries != 0 {
+		t.Errorf("Retries = %d, want 0 (unconsumed - a manual job never backs off)", jobs[0].Retries)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	found = false
+	for _, e := range events {
+		if e.Event == core.EventJobFailed {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected EventJobFailed recorded, got %+v", events)
+	}
+
+	if wanted, err := st.RunnableJobsInState(ctx, core.StateWanted, now, 10); err != nil || len(wanted) != 0 {
+		t.Fatalf("expected job never resurrected to WANTED, got %+v (%v)", wanted, err)
+	}
+}
+
+// TestSelectingManualJobExhaustionQuarantinesLeftovers is the manual-job
+// counterpart to TestSelectingTerminalFailureQuarantinesLeftovers: the same
+// post-mortem must run on the manual-job terminal path too.
+func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	const leaf = "Leftover Manual Album"
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.CompleteDir = t.TempDir()
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", []store.ManualJobFile{
+		{Filename: `music\` + leaf + `\01.flac`, Size: 1},
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("FailCandidateAndAdvance: %v", err)
+	}
+
+	folder := filepath.Join(p.CompleteDir, leaf)
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "01.flac.part"), []byte("partial"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED, got %+v (%v)", jobs, err)
+	}
+	quarantined := filepath.Join(p.CompleteDir, quarantineDirName, leaf, "01.flac.part")
+	if _, err := os.Stat(quarantined); err != nil {
+		t.Errorf("expected leftovers quarantined for a manual job too, stat err = %v", err)
+	}
+}
+
+// TestSelectingManualJobIgnoresCandidateTTL covers #347's Change 2: a manual
+// job retried via RetryManualJob revives a candidate whose created_at is by
+// definition old (it dates back to the original manual job creation), which
+// would otherwise trip CandidateTTL. The candidate must still be tried, not
+// discarded for a re-search that does not exist for a manual job.
+func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
+	ctx := context.Background()
+	createdAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	now := createdAt.Add(25 * time.Hour) // past the 24h CandidateTTL below
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+	p.CandidateTTL = 24 * time.Hour
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, createdAt); err != nil {
+		t.Fatalf("FailCandidateAndAdvance: %v", err)
+	}
+	// Change 1 fails the job on this SELECTING tick (no NEW candidate left);
+	// only a FAILED job is retryable, matching the real dashboard flow.
+	if err := NewSelecting(p).Tick(ctx, createdAt); err != nil {
+		t.Fatalf("Tick (initial failure): %v", err)
+	}
+	ok, err := st.RetryManualJob(ctx, job.ID, createdAt)
+	if err != nil || !ok {
+		t.Fatalf("RetryManualJob: %v ok=%v", err, ok)
+	}
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected manual job activated despite an expired candidate, got %+v (%v)", jobs, err)
+	}
+	if len(searcher.enqueued) == 0 {
+		t.Errorf("expected the revived candidate enqueued, got none")
+	}
+}

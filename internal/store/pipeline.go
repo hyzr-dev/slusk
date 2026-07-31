@@ -218,6 +218,67 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 	return true, nil
 }
 
+// RetryManualJob manually revives one FAILED, PARKED, or legacy ORPHANED
+// manual job (issue #347) by retrying the same peer, rather than
+// RetryFailedJob's re-search: the user picked this candidate for a reason the
+// protocol carries nowhere (a FLAC rip, a bitrate, a particular edition), so a
+// manual job's retry must try that same peer again, not go hunting.
+//
+// Unlike RetryFailedJob it revives the job's candidates to NEW instead of
+// deleting them: the cached files JSON and username are the user's original
+// choice, and ActivateCandidateWithTransfers re-INSERTs the PENDING transfer
+// set from that same files JSON against that same username once Selecting
+// picks the job back up. Old transfers are still deleted - they are
+// FAILED/CANCELLED and must go both to avoid duplicates and to clear
+// idx_transfers_live_remote_owner.
+//
+// Returns false when the job is not a retryable manual job (wrong source,
+// wrong state, or does not exist) - the dashboard button raced a state
+// change, or was pointed at a lidarr-sourced job.
+//
+// One deliberate asymmetry from CreateManualJob: creation bypasses the
+// MaxActive cap since the user asked for it explicitly, but a retry goes
+// through Selecting like any other SELECTING job and therefore respects the
+// cap - it queues behind other work instead of activating immediately. That
+// is acceptable; it is not a bug to be worked around.
+func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		 WHERE id = $3 AND source = $4 AND state IN ($5, $6, $7)`,
+		string(core.StateSelecting), now, jobID, string(core.SourceManual),
+		string(core.StateFailed), string(core.StateParked), string(core.StateOrphaned))
+	if err != nil {
+		return false, fmt.Errorf("retry manual job: update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("retry manual job: rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
+		return false, fmt.Errorf("retry manual job: delete candidate transfers: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE candidates SET state = $1, updated_at = $2 WHERE album_job_id = $3`,
+		string(core.CandidateNew), now, jobID); err != nil {
+		return false, fmt.Errorf("retry manual job: revive candidates: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("retry manual job: commit: %w", err)
+	}
+	return true, nil
+}
+
 // ParkJobForCandidate atomically records a transfer's terminal state/progress
 // and marks its candidate's owning job PARKED (issue #158), but only if the job
 // is still DOWNLOADING. If another transition (for example WantedSync

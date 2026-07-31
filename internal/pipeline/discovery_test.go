@@ -1041,3 +1041,56 @@ func TestDiscoverySearchExcludedOnFallbackFailsJobImmediately(t *testing.T) {
 		t.Errorf("expected a search_excluded event, got %+v", events)
 	}
 }
+
+// TestDiscoverySkipsAndFailsManualJob covers issue #347's Change 4: a manual
+// job must never reach Peers.Search, whatever LidarrAlbumID it happens to
+// carry. It reaches WANTED here the same way a production zombie would (the
+// #58/#155 bug this self-heals): created straight into DOWNLOADING like any
+// manual job, then found stuck in WANTED - a state a manual job should never
+// be able to reach at all, which is exactly why Discovery must guard on
+// Source rather than assume LidarrAlbumID means "safe to search".
+func TestDiscoverySkipsAndFailsManualJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	music := &fakeMusic{}
+	searcher := &fakeSearcher{}
+	p, st := newDiscoveryParams(t, music, searcher, map[int64]core.WantedRelease{})
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateWanted, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(searcher.queries) != 0 {
+		t.Errorf("expected Peers.Search never called for a manual job, got queries %v", searcher.queries)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected manual job FAILED, got %+v (%v)", jobs, err)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Event == core.EventJobFailed {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected EventJobFailed recorded, got %+v", events)
+	}
+}
