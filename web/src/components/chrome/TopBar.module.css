@@ -12,7 +12,7 @@
   padding: 11px 16px;
   border-right: 1px solid var(--line);
   font-size: 11px;
-  color: var(--faint);
+  color: var(--text-dim);
   letter-spacing: 0.6px;
   white-space: nowrap;
 }
@@ -22,7 +22,7 @@
 
 /* The mock's second span in the brand cell — docs/design/slskdarr-tui.dc.html:32.
    .brand already aligns on the baseline with a 10px gap for exactly this. */
-.brandVersion { color: var(--faint); font-size: 10.5px; letter-spacing: 0.5px; }
+.brandVersion { color: var(--text-dim); font-size: 10.5px; letter-spacing: 0.5px; }
 
 .dot { width: 6px; height: 6px; background: var(--ok); animation: tui-pulse 1.8s infinite; }
 .dotStale { width: 6px; height: 6px; background: var(--bad); }

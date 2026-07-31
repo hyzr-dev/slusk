@@ -134,7 +134,7 @@
   border-bottom: 1px solid var(--line);
 }
 
-.resultsCount { font-size: 11.5px; color: var(--faint); }
+.resultsCount { font-size: 11.5px; color: var(--text-dim); }
 .resultsCountNumber { color: var(--fg); font-weight: 600; font-family: var(--font-mono); }
 .streamingNote { color: var(--ok); }
 .doneNote { color: var(--text-dim); }

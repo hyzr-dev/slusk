@@ -11,13 +11,29 @@
      own token distinct from --bg. */
   --panel: #0a0b0c;
 
-  --fg: #e8eaec;
-  --dim: #7d868c;
-  --faint: #78828a;
-  /* The quietest readable step. The mock uses this raw hex in ~30 places for
-     column headers, timestamps and disabled glyphs; it is named here rather
-     than repeated. */
-  --text-dim: #758189;
+  /* Text ladder — three steps, deliberately. The mock draws four (--dim,
+     --faint and --text-dim on top of --fg), but --dim and --faint have never
+     been more than 1.6 L* apart and #212 moved --text-dim to within 0.5 L* of
+     both. Three names for one perceptual step is a distinction the eye cannot
+     make, so --faint was retired here and its call sites folded into
+     --text-dim (#335).
+
+     Two rules govern these values, and check-css-tokens.mjs enforces both:
+
+       1. Floor — every text colour clears WCAG AA (4.5:1) against EVERY
+          surface it can land on, not just --bg. --btn is the strictest and is
+          what pins the bottom of the ladder at roughly L* 53.5.
+       2. Separation — adjacent steps differ by at least 8 L*. A contrast
+          check alone cannot see a collapsed ladder: the palette this replaced
+          passed AA on every token while rendering as two steps, not four.
+
+     L* here is CIE lightness, not the contrast ratio. Ratios answer "is this
+     legible against that"; they say nothing about whether two greys look
+     different from each other, which is the question a ladder exists to
+     answer. */
+  --fg: #e8eaec;      /* L* 92.6 — primary values, the figures you actually read */
+  --dim: #97a2aa;     /* L* 66.0 — secondary text */
+  --text-dim: #79858e; /* L* 54.9 — column headers, timestamps, disabled glyphs */
 
   --line: #191d20;
   --line2: #252b30;
@@ -30,7 +46,10 @@
   --line-inner: #131619;
 
   --ok: #4f9e80;
-  --bad: #c56164;
+  /* Raised again under #335. #212 cleared 4.5:1 against --bg but landed at
+     4.48 on --btn, and --bad is the one hue in the palette that must never be
+     the thing you failed to notice. */
+  --bad: #c86266;
   /* Fill color for progress ticks. Deliberately not --fg: a full bar of --fg
      next to --fg text has no contrast, and the mock draws bars one step down. */
   --bar: #c8ccd0;
@@ -42,8 +61,18 @@
   --nav-active: #111417;
   --btn: #14181b;
 
-  --tick-off: #1d2125;
-  --tick-queued: #2a2f34;
+  /* Progress ticks. Three states that must be mutually distinguishable, and
+     WCAG 1.4.11 asks 3:1 of meaningful non-text — the tick row is how you read
+     how far a job has got, so it qualifies.
+
+     --tick-queued used to sit 1.20:1 from --tick-off, which made queued and
+     not-started the same tick (#335). Separating two colours this dark by 3:1
+     forces the lighter one up to roughly L* 45; there is no quieter answer,
+     because the ratio is fixed by the maths and not by taste. --tick-off is
+     unchanged and stays near --bg on purpose: the unfilled remainder should
+     read as absence, and it still shows the bar's full extent. */
+  --tick-off: #1d2125;    /* L* 12.5 */
+  --tick-queued: #606c77; /* L* 45.0 — 3.01:1 on --tick-off, 3.33:1 under --bar */
 
   /* Browser chrome rather than content, so the mock has nothing to say about
      these. Named here anyway: a hex in global.css is invisible to any check
