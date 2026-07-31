@@ -143,6 +143,18 @@ log_level = "debug"
 
 [paths]
 slskd_complete_dir = "/music/slskd-downloads"
+
+# Identify-a-search-result against MusicBrainz (issue #321). Without this
+# section the /api/identify/* endpoints answer 503 and the modal can only ever
+# show its "unavailable" state, so the lab cannot exercise the feature at all.
+#
+# contact goes into the User-Agent MusicBrainz's usage policy requires. It is
+# the repo URL rather than an address, which the policy accepts and which stays
+# honest without putting anyone's mailbox in a generated file. The 1 req/s
+# limiter is the client's own, so the lab cannot get the shared IP blocked by
+# clicking around.
+[musicbrainz]
+contact = {toml_string(env.get("SLSKDARR_MUSICBRAINZ_CONTACT", "https://gitea.shcizo.se/shcizo/slskdarr"))}
 '''
     config += f'''
 [soulseek]

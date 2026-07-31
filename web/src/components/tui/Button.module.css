@@ -13,3 +13,9 @@
 .ghost:hover:not(:disabled) { border-color: var(--dim); color: var(--fg); }
 .danger { border: 1px solid rgba(197, 97, 100, 0.4); color: var(--bad); }
 .danger:hover:not(:disabled) { border-color: var(--bad); }
+
+/* The Identify & download trigger once that result has been identified
+   (issue #321, mock's identifyBtnStyle). --ok border/text rather than a
+   fifth free-standing colour — same "OK is the only positive hue" rule the
+   rest of the palette follows. */
+.identified { border: 1px solid var(--ok); color: var(--ok); }

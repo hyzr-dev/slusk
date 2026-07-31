@@ -26,7 +26,10 @@ import type {
   JobEvent,
   JobPage,
   JobPageParams,
+  LidarrMatch,
   MarkReadResult,
+  MusicBrainzEditionListResult,
+  MusicBrainzSearchResponse,
   Peer,
   PrivateMessage,
   ScopedLivePayload,
@@ -762,6 +765,45 @@ export function useCreateJob() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: queryKeys.jobs });
     },
+  });
+}
+
+// ---- MusicBrainz identify (issue #321) ----
+//
+// All three are plain GETs fired explicitly by IdentifyModal's own state
+// machine (search button, album pick, edition/Lidarr lookups once an album
+// is selected) rather than mounted queries — a `useQuery` with an `enabled`
+// flag would refetch on every remount/window-focus for a resource the brief
+// explicitly forbids polling or debouncing (the backend's identify cache has
+// no eviction, sized for explicit-only traffic). `useMutation` gives the
+// same isPending/isError bookkeeping the modal needs without any of that.
+
+// `album` is required (the endpoint 422s on a blank one); `artist` is
+// optional and, when present, narrows the combined MusicBrainz query rather
+// than resolving to a separate artist id first — see IdentifyModal's
+// searchMB for why this replaced an earlier two-call design.
+export function useIdentifySearch() {
+  return useMutation({
+    mutationFn: ({ artist, album }: { artist?: string; album: string }) => {
+      const params = new URLSearchParams();
+      if (artist) params.set('artist', artist);
+      params.set('album', album);
+      return apiGet<MusicBrainzSearchResponse>(`/api/identify/search?${params.toString()}`);
+    },
+  });
+}
+
+export function useIdentifyEditions() {
+  return useMutation({
+    mutationFn: (albumId: string) =>
+      apiGet<MusicBrainzEditionListResult>(`/api/identify/albums/${encodeURIComponent(albumId)}/editions`),
+  });
+}
+
+export function useIdentifyLidarr() {
+  return useMutation({
+    mutationFn: (albumId: string) =>
+      apiGet<LidarrMatch>(`/api/identify/albums/${encodeURIComponent(albumId)}/lidarr`),
   });
 }
 

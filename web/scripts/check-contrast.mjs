@@ -55,9 +55,11 @@ const NON_TEXT_PAIRS = [
   ['--bar', '--tick-off'],
 ];
 
-// Purely decorative: hairlines and scrollbar chrome. WCAG asks nothing of these
-// because losing them loses no information.
-const DECORATIVE = ['--line', '--line2', '--line-inner', '--scroll-thumb', '--scroll-thumb-hover'];
+// Purely decorative: hairlines, scrollbar chrome, and the modal scrim. WCAG
+// asks nothing of these because losing them loses no information — a scrim's
+// job is dimming the page behind it, not carrying text or a meaningful
+// non-text boundary either ratio bucket exists to protect.
+const DECORATIVE = ['--line', '--line2', '--line-inner', '--scroll-thumb', '--scroll-thumb-hover', '--scrim'];
 
 // Not colours at all.
 const NOT_A_COLOUR = ['--font-mono'];

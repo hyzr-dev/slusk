@@ -727,6 +727,86 @@ export interface CreateSearchRequest {
   query: string;
 }
 
+// ---- MusicBrainz identify (issue #321) ----
+
+/**
+ * GET /api/identify/search — internal/observ identify.go, one combined
+ * artist+release-group match. Replaces what was originally two endpoints
+ * (an artist search, then that artist's album list) — see the doc comment
+ * on IdentifyModal's searchMB for why the combined shape is the one that
+ * ships. `editionCount` is a genuine single-call field (the release-group
+ * search's own `count`), not a second per-row lookup — it fills the mock's
+ * EDITIONS column directly. `score` is MusicBrainz's own relevance score
+ * (0-100); results already arrive ranked by it, so the frontend never
+ * re-sorts.
+ *
+ * `artist`/`artistId` are `omitempty` on the Go DTO (mbSearchResultDTO) and
+ * genuinely absent — not empty strings — when a release-group's
+ * artist-credit is empty. Render their absence as absent (never a
+ * placeholder or "undefined"), per the project's "never invent data" rule —
+ * see IdentifyModal's suggestion row and its confirm() fallback.
+ */
+export interface MusicBrainzSearchResult {
+  id: string;
+  title: string;
+  artist?: string;
+  artistId?: string;
+  primaryType?: string;
+  secondaryTypes: string[];
+  firstReleaseDate?: string;
+  editionCount: number;
+  score: number;
+}
+
+/**
+ * GET /api/identify/search response. `album` is required server-side (a
+ * blank one 422s before any upstream call); `artist` is optional. `total`
+ * is the true relevance-ranked hit count and routinely far exceeds
+ * `results.length` (a query can rank hundreds of loosely-related releases) —
+ * this is NOT a paginated catalogue the way the albums/editions endpoints
+ * are, so IdentifyModal's truncation notice for this response reads
+ * "showing the best N matches" rather than "showing N of total".
+ */
+export interface MusicBrainzSearchResponse {
+  results: MusicBrainzSearchResult[];
+  total: number;
+}
+
+/**
+ * GET /api/identify/albums/{mbid}/editions — one release (a specific
+ * pressing/edition) belonging to a release-group. `trackCountKnown: false`
+ * means MusicBrainz has no track listing for this release — render that as
+ * unknown, never as a 0-track edition (see the brief's "never render it as
+ * 0" rule).
+ */
+export interface MusicBrainzEdition {
+  id: string;
+  title: string;
+  date?: string;
+  country?: string;
+  status?: string;
+  trackCount: number;
+  trackCountKnown: boolean;
+}
+
+/** GET /api/identify/albums/{mbid}/editions response. `total` is the true count; `editions` is capped at 100. */
+export interface MusicBrainzEditionListResult {
+  editions: MusicBrainzEdition[];
+  total: number;
+}
+
+/**
+ * GET /api/identify/albums/{mbid}/lidarr — whether Lidarr already knows this
+ * release-group. `known: false` means the check itself is unavailable
+ * (Lidarr unreachable), which is a distinct state from "known and not in the
+ * library" — see the three-way LIDARR STATUS copy this drives.
+ */
+export interface LidarrMatch {
+  known: boolean;
+  inLibrary: boolean;
+  albumId?: number;
+}
+
 /**
  * POST /api/jobs request body — internal/observ/observ.go createJobRequest
  * (issue #155). A manual job that downloads known files directly from one

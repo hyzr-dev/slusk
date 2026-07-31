@@ -30,6 +30,12 @@ interface Props {
   status?: CardStatus;
   onDownloadAlbum: () => void;
   onDownloadSelected: () => void;
+  // Issue #321: whether this result has already been through the Identify &
+  // download modal, which flips the trigger button's label/border (see the
+  // mock's identifyBtnLabel/identifyBtnStyle) without disabling it — clicking
+  // again reopens the modal so the user can re-identify.
+  identified: boolean;
+  onIdentify: () => void;
   // The #59 seam (issue #58 §13): Search.tsx does not pass this. A future
   // "Koppla till Lidarr" panel renders here, between the track expansion and
   // the actions row, with no markup or state added on this side until then.
@@ -76,6 +82,8 @@ export default function SearchResultCard({
   status,
   onDownloadAlbum,
   onDownloadSelected,
+  identified,
+  onIdentify,
   renderImportPanel,
 }: Props) {
   const expansionId = `search-expansion-${group.id}`;
@@ -160,6 +168,9 @@ export default function SearchResultCard({
           </Button>
           <Button variant="ghost" onClick={onDownloadSelected} disabled={queued || selectedFiles.size === 0}>
             {t.search.downloadSelected(selectedFiles.size)}
+          </Button>
+          <Button variant={identified ? 'identified' : 'ghost'} onClick={onIdentify}>
+            {identified ? t.search.identify.identified : t.search.identify.button}
           </Button>
           <span className={styles.folderPath} title={group.folder}>{group.folder}</span>
         </div>
