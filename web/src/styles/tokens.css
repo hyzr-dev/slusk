@@ -82,4 +82,12 @@
   --scroll-thumb-hover: #2c3237;
 
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* The Identify modal's overlay (issue #321, the codebase's first modal
+     scrim) — separation from the page comes from this plus --line2 alone,
+     never a shadow (CLAUDE.md's "recesses, never elevates"). Named rather
+     than left as a raw rgba() in IdentifyModal.module.css because
+     check-css-tokens.mjs only catches an undefined var() reference, never a
+     hardcoded value sitting right next to one. */
+  --scrim: rgba(4, 5, 6, 0.72);
 }

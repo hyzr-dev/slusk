@@ -579,12 +579,30 @@ export const t = {
       // below).
       button: 'Identify & download',
       identified: '✓ Identified',
+      // The dialog's own header label — deliberately its own entry rather
+      // than reusing `button`.toUpperCase(): the mock treats the trigger
+      // ("[m] IDENTIFY") and the panel title ("IDENTIFY & DOWNLOAD") as
+      // different strings, and reusing `button` here would silently retitle
+      // the dialog if the button's own copy ever changed. Rendered via
+      // .headerLabel, which — unlike .fieldLabel below — has no
+      // text-transform, so this one is typed in caps directly, matching the
+      // mock's own literal text.
+      dialogTitle: 'IDENTIFY & DOWNLOAD',
       dialogLabel: 'Identify and download',
       close: 'Close',
-      identifyingFolder: 'IDENTIFYING FOLDER',
+      // Sentence case in source, all rendered uppercase via .fieldLabel's
+      // text-transform (see IdentifyModal.module.css) — kept sentence case
+      // here rather than typed in caps because these strings also serve as
+      // the two inputs' accessible names, and a screen reader should not
+      // read a label as if it were being shouted.
+      identifyingFolder: 'Identifying folder',
       artistLabel: 'Artist (guessed — edit if wrong)',
       albumLabel: 'Album (guessed — edit if wrong)',
       searchButton: 'Search MusicBrainz',
+      // The endpoint 422s on a blank album, so the button is disabled rather
+      // than silently doing nothing when clicked (review item H) — this is
+      // its disabled-state reason, exposed via title/aria-describedby.
+      albumRequired: 'Enter an album to search.',
       searching: 'searching musicbrainz…',
       // Suggestions table column headers, matching the mock exactly —
       // EDITIONS is a genuine single-call field on the combined search
@@ -593,6 +611,12 @@ export const t = {
       colType: 'TYPE',
       colYear: 'YEAR',
       colEditions: 'EDITIONS',
+      // The suggestions table's own EDITIONS cell — the mock's short form
+      // ("3 eds.", "1 ed."), distinct from editionCount below (the full
+      // "3 editions" used in the "WILL BE RECORDED AS" summary once a row is
+      // picked). Same number, two different renderings, matching the mock's
+      // own m.editions vs selEditions split.
+      editionCountShort: (n: number) => `${n} ed${n === 1 ? '.' : 's.'}`,
       notIt: 'Not it? Edit the fields above and search again.',
       // The edition PICKER's truncation notice (MusicBrainzEditionListResult
       // is a genuinely paginated/capped list of one release-group's
@@ -610,10 +634,16 @@ export const t = {
       unavailableTitle: 'MUSICBRAINZ UNAVAILABLE',
       unavailableBody: 'Lookup service is down or rate-limited right now. You can still download this folder without identifying it.',
       retry: 'Retry',
-      willBeRecordedAs: 'WILL BE RECORDED AS',
-      // `n` is the edition COUNT for the selected album (from
-      // MusicBrainzEditionListResult.total), not the picker's own row —
-      // matches the mock's selEditions slot.
+      willBeRecordedAs: 'Will be recorded as',
+      // `n` is the SEARCH result's own editionCount (MusicBrainzSearchResult,
+      // GET /api/identify/search) — a single-call field that arrives with
+      // the row itself, NOT the editions picker's own total (from the
+      // separate, genuinely paginated GET /api/identify/albums/{id}/editions
+      // — see showingOf above). IdentifyModal.tsx's "WILL BE RECORDED AS"
+      // summary uses this one; the picker's own truncation notice uses the
+      // other. Mixing the two up is exactly the crossing the tests
+      // (IdentifyModal.test.tsx's "reaches the selected state…" case) exist
+      // to catch.
       editionCount: (n: number) => `${n} edition${n === 1 ? '' : 's'}`,
       // The edition picker (the one deliberate addition beyond the mock —
       // see the brief). The mock computes its verdict against a band across
@@ -621,18 +651,34 @@ export const t = {
       // (an 8-97 track spread once box sets share the group with the
       // album); picking one edition first is what makes its own "matches
       // THIS edition" copy below actually true.
-      editionPickerLabel: 'EDITION',
+      editionPickerLabel: 'Edition',
       editionUnknownTracks: 'tracks unknown',
-      verdictIncomplete: (have: number, want: number) => `INCOMPLETE — ${have} of ${want} present`,
+      verdictIncomplete: (have: number, want: number) => `INCOMPLETE — ${have} of ${want} tracks present`,
       verdictComplete: (n: number) => `COMPLETE — ${n} tracks matches this edition`,
       verdictMore: (have: number, want: number) =>
-        `${have} TRACKS FOUND — more than this edition (${want}); likely a different edition, or more than one release in the folder`,
-      verdictUnknown: 'COMPLETENESS UNKNOWN — this edition has no track listing',
+        `${have} TRACKS FOUND — more than this edition (${want} tracks); likely a different edition, or more than one release in the folder`,
+      // Two distinct strings rather than one shared across both cases (issue
+      // #321 review item B): "this edition has no track listing" asserts a
+      // referent that, in the noEdition case, does not exist — no edition is
+      // selected at all (an empty editions list, or a failed editions fetch;
+      // see IdentifyModal's computeVerdict and pickResult's catch). Naming
+      // an edition that isn't there is the same class of defect the
+      // canonical-artist fallback chain was fixed for.
+      verdictUnknownEdition: 'COMPLETENESS UNKNOWN — this edition has no track listing',
+      verdictNoEdition: 'COMPLETENESS UNKNOWN — no edition selected',
       lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
       lidarrNotInLibrary: "NOT IN LIDARR LIBRARY — download will succeed but won't be imported",
       lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
       back: '‹ Back',
       confirm: 'Confirm identification',
+      // Shown, and CONFIRM disabled, when MusicBrainz supplied no artist AND
+      // the user has also blanked the artist field (review item A). Posting
+      // `group.parent` — the peer's parent directory — here would be exactly
+      // the folder-name guess #321 exists to stop sending; the user is not
+      // blocked (closing the modal and using the card's own download
+      // buttons is always available), just not allowed to CONFIRM a
+      // fabricated identity.
+      noCanonicalArtist: 'Enter an artist above — MusicBrainz did not supply one for this release.',
     },
   },
   chat: {

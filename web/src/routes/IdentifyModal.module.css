@@ -5,7 +5,7 @@
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(4, 5, 6, 0.72);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -53,11 +53,16 @@
   overflow-y: auto;
 }
 
+/* Source strings are sentence case (they double as ARTIST/ALBUM's accessible
+   names — see strings.ts's comment on identifyingFolder) — this is what
+   gives every .fieldLabel the mock's uppercase look without shouting at a
+   screen reader. */
 .fieldLabel {
   font-size: 10px;
   letter-spacing: 1.1px;
   color: var(--text-dim);
   margin-bottom: 3px;
+  text-transform: uppercase;
 }
 
 .folderPath {
@@ -87,8 +92,11 @@
 .input:focus { border-color: var(--dim); }
 
 /* Primary/ghost Button already exists; the search button just needs the
-   full-width treatment the mock gives it. */
-.body > button { margin-top: 16px; width: 100%; padding: 9px; }
+   full-width treatment the mock gives it. A class rather than `.body >
+   button` (a positional selector coupled to exactly one child existing at
+   that position in the JSX — fragile the moment another element lands
+   there). */
+.fullWidthButton { margin-top: 16px; width: 100%; padding: 9px; }
 
 .centered {
   padding: 34px 0;
@@ -170,6 +178,11 @@
 .recordedAlbum { font-size: 14px; color: var(--fg); margin-top: 8px; }
 .recordedMeta { font-size: 11.5px; color: var(--dim); margin-top: 3px; }
 
+/* Shown, and CONFIRM disabled, when there is no honest canonical artist to
+   post (review item A) — --bad, since this is a blocking state the user
+   needs to resolve, not routine secondary text. */
+.noCanonicalArtist { margin-top: 8px; font-size: 11px; color: var(--bad); letter-spacing: 0.3px; line-height: 1.6; }
+
 .editionPicker { margin-top: 12px; }
 
 .select {
@@ -188,6 +201,6 @@
 .tone-ok { color: var(--ok); letter-spacing: 0.3px; line-height: 1.6; }
 .tone-bad { color: var(--bad); letter-spacing: 0.3px; line-height: 1.6; }
 .tone-dim { color: var(--dim); letter-spacing: 0.3px; line-height: 1.6; }
-.tone-faint { color: var(--text-dim); letter-spacing: 0.3px; line-height: 1.6; }
+.tone-quiet { color: var(--text-dim); letter-spacing: 0.3px; line-height: 1.6; }
 
 .actions { display: flex; gap: 8px; margin-top: 18px; }

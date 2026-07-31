@@ -177,12 +177,20 @@ describe('computeVerdict', () => {
 
   it('is unknown when the edition track count is unknown, and never shows 0', () => {
     const v = computeVerdict(10, edition({ trackCountKnown: false, trackCount: 0 }));
-    expect(v.tone).toBe('faint');
+    expect(v.tone).toBe('quiet');
     expect(v.text).not.toContain('0');
+    expect(v.text).toBe(t.search.identify.verdictUnknownEdition);
   });
 
-  it('is unknown when no edition is selected at all', () => {
-    expect(computeVerdict(10, undefined).tone).toBe('faint');
+  // Review item B: a DIFFERENT string from the one above — no edition is
+  // selected at all here (empty editions list, or a failed editions fetch),
+  // so "this edition has no track listing" would name a referent that
+  // isn't there.
+  it('is unknown, with different wording, when no edition is selected at all', () => {
+    const v = computeVerdict(10, undefined);
+    expect(v.tone).toBe('quiet');
+    expect(v.text).toBe(t.search.identify.verdictNoEdition);
+    expect(v.text).not.toBe(t.search.identify.verdictUnknownEdition);
   });
 });
 
@@ -191,9 +199,9 @@ describe('lidarrLine', () => {
     expect(lidarrLine({ known: true, inLibrary: true }).tone).toBe('ok');
   });
 
-  it('reads NOT IN LIBRARY (faint, not bad) when known but absent', () => {
+  it('reads NOT IN LIBRARY (quiet, not bad) when known but absent', () => {
     const line = lidarrLine({ known: true, inLibrary: false });
-    expect(line.tone).toBe('faint');
+    expect(line.tone).toBe('quiet');
     expect(line.text).toBe(t.search.identify.lidarrNotInLibrary);
   });
 
@@ -238,7 +246,7 @@ describe('IdentifyModal states', () => {
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
     expect(screen.getByText(t.search.identify.searching)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: /In Rainbows/ })).toBeInTheDocument());
-    expect(screen.getByText('60')).toBeInTheDocument();
+    expect(screen.getByText(t.search.identify.editionCountShort(60))).toBeInTheDocument();
     expect(screen.getByText(t.search.identify.showingBestOf(1))).toBeInTheDocument();
   });
 
@@ -313,6 +321,38 @@ describe('IdentifyModal states', () => {
     expect(screen.queryByText(/(^|\s)0 tracks/)).not.toBeInTheDocument();
   });
 
+  // Review item I: computeVerdict is unit-tested and the picker renders, but
+  // the WIRING between the two — the entire justification for adding a
+  // picker the mock does not draw — was untested until now.
+  it('recomputes the verdict when the user changes the edition picker selection (incomplete → complete)', async () => {
+    const search: MusicBrainzSearchResponse = { results: [searchResult()], total: 1 };
+    const editions: MusicBrainzEditionListResult = {
+      editions: [
+        edition({ id: 'e-incomplete', trackCount: 19, trackCountKnown: true, status: 'Deluxe' }),
+        edition({ id: 'e-complete', trackCount: 10, trackCountKnown: true, status: 'Official' }),
+      ],
+      total: 2,
+    };
+    stubFetch({
+      '/api/identify/search?': search,
+      '/api/identify/albums/al1/editions': editions,
+      '/api/identify/albums/al1/lidarr': { known: false, inLibrary: false },
+    });
+    renderModal(group()); // group()'s trackCount is 10
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+    await waitFor(() => screen.getByRole('button', { name: /In Rainbows/ }));
+    fireEvent.click(screen.getByRole('button', { name: /In Rainbows/ }));
+    await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
+
+    const select = screen.getByRole('combobox');
+    fireEvent.change(select, { target: { value: 'e-incomplete' } });
+    expect(screen.getByText(t.search.identify.verdictIncomplete(10, 19))).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'e-complete' } });
+    expect(screen.getByText(t.search.identify.verdictComplete(10))).toBeInTheDocument();
+    expect(screen.queryByText(t.search.identify.verdictIncomplete(10, 19))).not.toBeInTheDocument();
+  });
+
   it('confirms with the canonical MusicBrainz artist/album, not the folder guess', async () => {
     const search: MusicBrainzSearchResponse = { results: [searchResult()], total: 1 };
     stubFetch({
@@ -362,7 +402,43 @@ describe('IdentifyModal states', () => {
     expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation' });
   });
 
-  it('closes on Escape and on a scrim click, but not on a click inside the panel', () => {
+  // Review item A, the important one. When MusicBrainz supplies no artist
+  // AND the user has blanked the artist field, there is no honest canonical
+  // artist — the OLD code fell back to group.parent (the peer's parent
+  // directory) here, which is the exact folder-name guess #321 exists to
+  // stop posting. CONFIRM must be disabled, not silently post that guess.
+  it('disables CONFIRM and explains why when there is no honest canonical artist at all', async () => {
+    const search: MusicBrainzSearchResponse = {
+      results: [searchResult({ artist: undefined, artistId: undefined, title: 'Anonymous Compilation' })],
+      total: 1,
+    };
+    stubFetch({
+      '/api/identify/search?': search,
+      '/api/identify/albums/al1/editions': { editions: [], total: 0 },
+      '/api/identify/albums/al1/lidarr': { known: false, inLibrary: false },
+    });
+    const { onConfirm } = renderModal(group({ title: '[FLAC]', parent: 'Soulseek - Share' }));
+
+    // Blank the artist field explicitly — parseFolderGuess would otherwise
+    // have prefilled it from group.parent, which must NOT become the
+    // fallback either (that is precisely the bug this disables).
+    fireEvent.change(screen.getByRole('textbox', { name: t.search.identify.artistLabel }), { target: { value: '' } });
+    fireEvent.change(screen.getByRole('textbox', { name: t.search.identify.albumLabel }), { target: { value: 'Anonymous Compilation' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+    await waitFor(() => screen.getByRole('button', { name: /Anonymous Compilation/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Anonymous Compilation/ }));
+    await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
+
+    expect(screen.getByText(t.search.identify.noCanonicalArtist)).toBeInTheDocument();
+    expect(screen.queryByText(/Soulseek - Share/)).not.toBeInTheDocument();
+    const confirmButton = screen.getByRole('button', { name: t.search.identify.confirm });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(confirmButton);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('closes on Escape and on a scrim mousedown+click, but not on a click inside the panel', () => {
     const { onClose, container } = renderModal(group());
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -371,8 +447,24 @@ describe('IdentifyModal states', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
 
     const scrim = container.firstChild as HTMLElement;
+    fireEvent.mouseDown(scrim);
     fireEvent.click(scrim);
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  // Review item C. jsdom does not compute a real click's target the way a
+  // browser does (the nearest common ancestor of the mousedown and mouseup
+  // targets), so this drives the two DOM events the same way the browser
+  // itself would for that drag: mousedown fires on the actual element under
+  // the cursor (the input), and the resulting click fires on the scrim —
+  // exactly the sequence the reviewer probe-confirmed as a false close.
+  it('does not close when a mousedown starts inside the panel (e.g. selecting text) even if the click lands on the scrim', () => {
+    const { onClose, container } = renderModal(group());
+    const artistInput = screen.getByRole('textbox', { name: t.search.identify.artistLabel });
+    fireEvent.mouseDown(artistInput);
+    const scrim = container.firstChild as HTMLElement;
+    fireEvent.click(scrim);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('gives the dialog the right ARIA role and label', () => {

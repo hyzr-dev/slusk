@@ -7,7 +7,13 @@ import { t } from '../strings';
 import styles from './IdentifyModal.module.css';
 
 type IdentifyState = 'initial' | 'searching' | 'suggestions' | 'empty' | 'unavailable' | 'selected';
-type Tone = 'ok' | 'bad' | 'dim' | 'faint';
+// Not 'faint': --faint was retired in #335 and folded into --text-dim (see
+// tokens.css), and a union member spelled 'faint' would read to the next
+// person as a live token even though .tone-quiet below (styles[`tone-${t}`])
+// has always mapped it to the --text-dim token, not the retired one. 'quiet'
+// names what the tone IS (the least emphatic of the four) rather than a
+// token that no longer exists.
+type Tone = 'ok' | 'bad' | 'dim' | 'quiet';
 
 // Strips ONE trailing bracketed/parenthetical tag — "(2007)", "[FLAC]",
 // "{WEB}" — from the end of a folder title. Looped by parseFolderGuess so a
@@ -70,7 +76,14 @@ export function pickDefaultEdition(editions: MusicBrainzEdition[], folderTracks:
  * error — 'dim' tone, matching --dim rather than --bad.
  */
 export function computeVerdict(folderTracks: number, edition: MusicBrainzEdition | undefined): { text: string; tone: Tone } {
-  if (!edition || !edition.trackCountKnown) return { text: t.search.identify.verdictUnknown, tone: 'faint' };
+  // Two distinct "unknown" cases, not one shared string (review item B): no
+  // edition at all (an empty editions list, or a failed editions fetch —
+  // see pickResult's catch) is a different fact from an edition that DOES
+  // exist but whose track listing MusicBrainz itself doesn't have. The old
+  // shared wording ("this edition has no track listing") asserted a
+  // referent that, in the first case, is not there.
+  if (!edition) return { text: t.search.identify.verdictNoEdition, tone: 'quiet' };
+  if (!edition.trackCountKnown) return { text: t.search.identify.verdictUnknownEdition, tone: 'quiet' };
   if (folderTracks < edition.trackCount) return { text: t.search.identify.verdictIncomplete(folderTracks, edition.trackCount), tone: 'bad' };
   if (folderTracks > edition.trackCount) return { text: t.search.identify.verdictMore(folderTracks, edition.trackCount), tone: 'dim' };
   return { text: t.search.identify.verdictComplete(folderTracks), tone: 'ok' };
@@ -82,9 +95,9 @@ export function computeVerdict(folderTracks: number, edition: MusicBrainzEdition
  * different facts and the copy must not conflate them.
  */
 export function lidarrLine(match: LidarrMatch | undefined): { text: string; tone: Tone } {
-  if (!match || !match.known) return { text: t.search.identify.lidarrUnknown, tone: 'faint' };
+  if (!match || !match.known) return { text: t.search.identify.lidarrUnknown, tone: 'quiet' };
   if (match.inLibrary) return { text: t.search.identify.lidarrInLibrary, tone: 'ok' };
-  return { text: t.search.identify.lidarrNotInLibrary, tone: 'faint' };
+  return { text: t.search.identify.lidarrNotInLibrary, tone: 'quiet' };
 }
 
 function yearOf(date?: string): string {
@@ -126,6 +139,9 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  // See the scrim's onMouseDown/onClick below (review item C) for why this
+  // exists.
+  const scrimMouseDownOnBackground = useRef(false);
 
   // Focus management: capture whatever had focus before the modal opened (the
   // trigger button), move focus into the panel, and restore it on unmount.
@@ -196,7 +212,20 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // editions call leaves the picker empty (verdict reads COMPLETENESS
   // UNKNOWN); a failed Lidarr call reads exactly like `known: false`,
   // because to the user those are the same fact: "can't say".
+  //
+  // Guards a fast BACK-then-pick-another with `pickSeq`: react-query's
+  // MutationObserver only dedupes the HOOK's own `.data`/`.error` (it always
+  // tracks the latest `mutate()` call), which this function never reads —
+  // it consumes `mutateAsync`'s own returned Promise directly, and that
+  // Promise settles with its own call's real result regardless of any later
+  // call, with nothing built in to drop it. Two overlapping `pickResult`
+  // invocations could therefore resolve out of order and have the OLDER
+  // one's `setEditions`/`setLidarr` win, showing the wrong album's data.
+  // `pickSeq` makes this function's own state writes ignore a stale
+  // resolution instead.
+  const pickSeq = useRef(0);
   async function pickResult(picked: MusicBrainzSearchResult) {
+    const seq = ++pickSeq.current;
     setSelectedResult(picked);
     setEditions([]);
     setEditionsTotal(0);
@@ -207,6 +236,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     const editionsPromise = identifyEditions.mutateAsync(picked.id).catch(() => ({ editions: [], total: 0 }));
     const lidarrPromise = identifyLidarr.mutateAsync(picked.id).catch((): LidarrMatch => ({ known: false, inLibrary: false }));
     const [editionsResult, lidarrResult] = await Promise.all([editionsPromise, lidarrPromise]);
+    if (seq !== pickSeq.current) return; // superseded by a later pick
     setEditions(editionsResult.editions);
     setEditionsTotal(editionsResult.total);
     setSelectedEditionId(pickDefaultEdition(editionsResult.editions, group.trackCount)?.id);
@@ -219,17 +249,27 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // currently in the (user-editable, user-confirmed) artist field rather
   // than silently reusing the raw folder guess — that field starts as the
   // folder guess but the user may have corrected it before searching, so it
-  // is the more truthful of the two. group.parent is the last-resort
-  // fallback for the (unlikely) case that field is itself blank. Shared with
-  // the "WILL BE RECORDED AS" summary below so the modal never displays one
-  // artist and confirms a different one.
-  function canonicalArtistOf(result: MusicBrainzSearchResult): string {
-    return result.artist || artist.trim() || group.parent;
+  // is the more truthful of the two.
+  //
+  // Deliberately does NOT fall further back to `group.parent` (review item
+  // A). That was the ORIGINAL bug: the peer's parent directory
+  // (`Soulseek - Share`, `music/_emily/`, `Various Artists`) is the exact
+  // value #321 exists to stop posting, and it was reachable here with no
+  // "guessed" marker — the GUESSED-labelled inputs are hidden once a result
+  // is selected. Returns undefined instead, meaning "no honest canonical
+  // artist exists"; the render below disables CONFIRM and says so rather
+  // than inventing one. Shared with the "WILL BE RECORDED AS" summary so the
+  // modal never displays one artist and confirms a different one.
+  function canonicalArtistOf(result: MusicBrainzSearchResult): string | undefined {
+    const fromField = artist.trim();
+    return result.artist || (fromField ? fromField : undefined);
   }
 
   function confirm() {
     if (!selectedResult) return;
-    onConfirm({ artist: canonicalArtistOf(selectedResult), album: selectedResult.title });
+    const canonicalArtist = canonicalArtistOf(selectedResult);
+    if (!canonicalArtist) return;
+    onConfirm({ artist: canonicalArtist, album: selectedResult.title });
   }
 
   const selectedEdition = editions.find((e) => e.id === selectedEditionId);
@@ -239,9 +279,32 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // than the editions picker's "showing N of total" below.
   const resultsNotice = resultsTotal > results.length ? t.search.identify.showingBestOf(results.length) : undefined;
   const editionsNotice = editionsTotal > editions.length ? t.search.identify.showingOf(editions.length, editionsTotal) : undefined;
+  const canonicalArtist = selectedResult ? canonicalArtistOf(selectedResult) : undefined;
+  // Review item H: the endpoint 422s on a blank album, so the button is
+  // disabled rather than silently doing nothing when clicked.
+  const albumBlank = album.trim().length === 0;
 
   return (
-    <div className={styles.scrim} onClick={onClose}>
+    <div
+      className={styles.scrim}
+      // Review item C: mousedown, not click, decides whether the scrim
+      // closes the modal. A plain onClick on the scrim also fires for a
+      // drag that STARTS inside the panel (e.g. selecting text in the
+      // artist field) and ENDS on the scrim — the browser's `click` event
+      // targets the nearest common ancestor of the mousedown and mouseup
+      // targets, which is the scrim itself, and the panel's own
+      // onClick-stopPropagation below never sees that click at all because
+      // it never fired on the panel in the first place. Recording whether
+      // the MOUSEDOWN landed on the scrim background itself (not a
+      // descendant) is what distinguishes an actual scrim click from a drag
+      // that merely ends there.
+      onMouseDown={(e) => {
+        scrimMouseDownOnBackground.current = e.target === e.currentTarget;
+      }}
+      onClick={() => {
+        if (scrimMouseDownOnBackground.current) onClose();
+      }}
+    >
       <div
         ref={panelRef}
         className={styles.panel}
@@ -251,7 +314,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className={styles.header}>
-          <span className={styles.headerLabel}>{t.search.identify.button.toUpperCase()}</span>
+          <span className={styles.headerLabel}>{t.search.identify.dialogTitle}</span>
           <span className={styles.spacer} />
           <button ref={closeRef} type="button" className={styles.closeButton} aria-label={t.search.identify.close} onClick={onClose}>
             ✕
@@ -276,7 +339,15 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
           )}
 
           {state === 'initial' && (
-            <Button variant="primary" onClick={searchMB}>{t.search.identify.searchButton}</Button>
+            <Button
+              variant="primary"
+              className={styles.fullWidthButton}
+              onClick={searchMB}
+              disabled={albumBlank}
+              title={albumBlank ? t.search.identify.albumRequired : undefined}
+            >
+              {t.search.identify.searchButton}
+            </Button>
           )}
 
           {state === 'searching' && (
@@ -307,7 +378,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                       </span>
                       <span className={styles.suggestionType}>{(r.primaryType ?? '—').toUpperCase()}</span>
                       <span className={styles.suggestionYear}>{yearOf(r.firstReleaseDate)}</span>
-                      <span className={styles.suggestionEditions}>{r.editionCount}</span>
+                      <span className={styles.suggestionEditions}>{t.search.identify.editionCountShort(r.editionCount)}</span>
                     </button>
                   </li>
                 ))}
@@ -339,14 +410,27 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                 <div className={styles.fieldLabel}>{t.search.identify.willBeRecordedAs}</div>
                 <div className={styles.recordedAlbum}>{selectedResult.title}</div>
                 <div className={styles.recordedMeta}>
-                  {canonicalArtistOf(selectedResult)} · {(selectedResult.primaryType ?? '—').toUpperCase()} · {yearOf(selectedResult.firstReleaseDate)} ·{' '}
-                  {/* From the search result's own editionCount — already in
-                      hand from the same call that produced this row, unlike
-                      the picker below which needs the separate editions list
-                      for actual per-edition detail. */}
-                  {t.search.identify.editionCount(selectedResult.editionCount)}
+                  {/* canonicalArtist omitted entirely (never a placeholder)
+                      when there is no honest one to show — see
+                      canonicalArtistOf. editionCount is the search result's
+                      own field — already in hand from the same call that
+                      produced this row, unlike the picker below which needs
+                      the separate editions list for actual per-edition
+                      detail. */}
+                  {[
+                    canonicalArtist,
+                    (selectedResult.primaryType ?? '—').toUpperCase(),
+                    yearOf(selectedResult.firstReleaseDate),
+                    t.search.identify.editionCount(selectedResult.editionCount),
+                  ]
+                    .filter((part): part is string => Boolean(part))
+                    .join(' · ')}
                 </div>
               </div>
+
+              {!canonicalArtist && (
+                <div className={styles.noCanonicalArtist}>{t.search.identify.noCanonicalArtist}</div>
+              )}
 
               {editions.length > 0 && (
                 <div className={styles.editionPicker}>
@@ -387,7 +471,14 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
               <div className={styles.actions}>
                 <Button variant="ghost" onClick={() => setState('suggestions')}>{t.search.identify.back}</Button>
                 <span className={styles.spacer} />
-                <Button variant="primary" onClick={confirm}>{t.search.identify.confirm}</Button>
+                <Button
+                  variant="primary"
+                  onClick={confirm}
+                  disabled={!canonicalArtist}
+                  title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
+                >
+                  {t.search.identify.confirm}
+                </Button>
               </div>
             </>
           )}

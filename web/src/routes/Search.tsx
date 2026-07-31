@@ -150,6 +150,11 @@ export default function Search() {
     setSelections(new Map());
     setCardStatus(new Map());
     setActiveFormats(new Set());
+    // Review item K3: `identifiedIds` describes results of THIS search
+    // (group ids are per-session — a new search can reuse the same id
+    // space), so it is cleared alongside the other per-search state above
+    // rather than left to silently describe results that no longer exist.
+    setIdentifiedIds(new Set());
     startSearch.mutate(trimmed, {
       onSuccess: (started) => setSearchId(started.id),
       onError: (err) => {
@@ -221,6 +226,13 @@ export default function Search() {
     );
   }
 
+  // Deliberate, not an oversight (review item J): this always posts
+  // group.files, the WHOLE folder, even if the user unticked tracks in the
+  // card's own expansion. The Identify modal's completeness verdict
+  // (IdentifyModal's computeVerdict) reasons about the folder's FULL track
+  // count against the selected edition's — downloading only a hand-picked
+  // subset after confirming "COMPLETE" or "INCOMPLETE" against the whole
+  // folder would make that verdict a lie about what actually got queued.
   function confirmIdentify(group: SearchGroup, identity: { artist: string; album: string }) {
     setIdentifiedIds((prev) => new Set(prev).add(group.id));
     setIdentifyGroupId(null);
@@ -397,7 +409,13 @@ export default function Search() {
         // against nothing.
         if (!group) return null;
         return (
+          // key={identifyGroupId}: makes React remount the whole component
+          // (and so its internal state — search results, selected edition,
+          // artist/album field edits) on every new result rather than
+          // relying only on identifyGroupId passing through `null` between
+          // opens (review item K1) — structural isolation, not incidental.
           <IdentifyModal
+            key={identifyGroupId}
             group={group}
             onClose={() => setIdentifyGroupId(null)}
             onConfirm={(identity) => confirmIdentify(group, identity)}
