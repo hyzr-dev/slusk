@@ -2204,20 +2204,51 @@ func TestLatestFailureDetails(t *testing.T) {
 		}
 	})
 
-	t.Run("non-allowlisted event is never returned", func(t *testing.T) {
+	// The two subtests below pin the two-tier selection. They replace an
+	// earlier "non-allowlisted event is never returned" test, which asserted
+	// the allowlist was a hard filter: on a real database that hid the reason
+	// for most failed jobs, because the commonest failure (a search returning
+	// nothing) records only a 'search' event plus a detail-less job_failed.
+	t.Run("a lesser event is used when the job has no explanatory one", func(t *testing.T) {
 		job, err := s.UpsertWantedJob(ctx, 103, now)
 		if err != nil {
 			t.Fatalf("UpsertWantedJob: %v", err)
 		}
-		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "searched album", now); err != nil {
-			t.Fatalf("AddJobEvent: %v", err)
+		// Exactly what Discovery + backoff write for an album nobody shares.
+		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, `searched album, query="X", results=0 candidates=0`, now); err != nil {
+			t.Fatalf("AddJobEvent search: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobFailed, "", now.Add(time.Minute)); err != nil {
+			t.Fatalf("AddJobEvent job_failed: %v", err)
 		}
 		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
 		if err != nil {
 			t.Fatalf("LatestFailureDetails: %v", err)
 		}
-		if _, ok := got[job.ID]; ok {
-			t.Errorf("job with only a non-allowlisted event should be absent, got %q", got[job.ID])
+		want := `searched album, query="X", results=0 candidates=0`
+		if got[job.ID] != want {
+			t.Errorf("detail = %q, want %q", got[job.ID], want)
+		}
+	})
+
+	t.Run("an explanatory event outranks a newer lesser one", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 107, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventImportRejected, "lidarr said no", now); err != nil {
+			t.Fatalf("AddJobEvent import_rejected: %v", err)
+		}
+		// Newer, but merely a search summary: recency must not beat rank here.
+		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "searched album, results=3", now.Add(time.Hour)); err != nil {
+			t.Fatalf("AddJobEvent search: %v", err)
+		}
+		got, err := s.LatestFailureDetails(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestFailureDetails: %v", err)
+		}
+		if got[job.ID] != "lidarr said no" {
+			t.Errorf("detail = %q, want %q", got[job.ID], "lidarr said no")
 		}
 	})
 

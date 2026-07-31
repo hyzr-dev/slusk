@@ -697,16 +697,20 @@ func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int
 	return out, rows.Err()
 }
 
-// failureExplainingEvents is the allowlist of job_events kinds that actually
-// explain why a job failed. Without it, LatestFailureDetails would surface
-// whatever event happened to be written most recently for a job — e.g. a job
-// that died in discovery would show its 'search' summary under a column
-// labelled "reason", which has nothing to do with the failure. Built from the
-// core.Event* constants (not string literals) so a renamed constant fails to
-// compile rather than silently falling out of the allowlist. Declared as
-// []string directly (rather than []core.JobEventType converted on every
-// call) so LatestFailureDetails doesn't need to re-loop and re-allocate a
-// []string copy on every invocation.
+// failureExplainingEvents ranks job_events kinds that state a failure reason
+// outright above every other kind. It is a preference, NOT a filter — see
+// LatestFailureDetails for why it stopped being one.
+//
+// Built from the core.Event* constants (not string literals) so a renamed
+// constant fails to compile rather than silently dropping out of the ranking.
+// Declared as []string directly (rather than []core.JobEventType converted on
+// every call) so LatestFailureDetails doesn't re-allocate a copy per call.
+//
+// EventJobFailed earns its place on intent rather than on current behaviour:
+// the only writer is recordBackoffEvent (internal/pipeline/backoff.go), which
+// hardcodes an empty detail, so it can never satisfy the detail <> ” test
+// today. It stays listed so that giving it a real detail later needs no change
+// here — tracked separately as the "job_failed carries no detail" follow-up.
 var failureExplainingEvents = []string{
 	string(core.EventImportRejected),
 	string(core.EventAttemptFailed),
@@ -714,13 +718,28 @@ var failureExplainingEvents = []string{
 	string(core.EventJobFailed),
 }
 
-// LatestFailureDetails returns the newest failure-explaining job_events detail
-// for each of the given job ids, keyed by job id. It backs Overview's Failed
-// Imports panel (issue #310): a job's own fail_reason/status is not enough to
-// show a human a *reason*, since the audit trail — not the job row — is where
-// that text (often Lidarr's verbatim rejection message) actually lives. Jobs
-// with no matching event are simply absent from the map, not present with "".
-// An empty or nil jobIDs yields an empty, non-nil map.
+// LatestFailureDetails returns one explanatory job_events detail per given job
+// id, keyed by job id. It backs Overview's FAILED JOBS panel (issue #310): a
+// job's own fail_reason/status is not enough to show a human a *reason*, since
+// the audit trail — not the job row — is where that text (often Lidarr's
+// verbatim rejection message) actually lives. Jobs with no detailed event at
+// all are simply absent from the map, not present with "". An empty or nil
+// jobIDs yields an empty, non-nil map.
+//
+// Selection is two-tier: an event from failureExplainingEvents always wins,
+// even over a newer event of another kind, because a real rejection describes
+// the failure better than whatever the pipeline happened to log afterwards.
+// Only when a job has none does the newest detail of any kind get used.
+//
+// The fallback tier is not a nicety. #310 first shipped the allowlist as a
+// hard filter, and on a real database that left the reason column empty for
+// most rows: the dominant failure mode is a search that returns nothing, whose
+// only record is a 'search' event ("results=0 candidates=0") plus a detail-less
+// job_failed. 10 of 12 failed jobs in a lab run rendered an em dash while the
+// reason sat in the audit trail one event-kind away. Restricting the tiers to
+// a curated list of "runner-up" kinds was rejected as the same bet the
+// allowlist already lost — any kind the pipeline gains later would silently
+// fall out again.
 func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
 	out := make(map[int64]string, len(jobIDs))
 	if len(jobIDs) == 0 {
@@ -729,13 +748,17 @@ func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[i
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT ON (album_job_id) album_job_id, detail
 		FROM job_events
-		WHERE album_job_id = ANY($1) AND detail <> '' AND event = ANY($2)
+		WHERE album_job_id = ANY($1) AND detail <> ''
+		-- The event test is the first ORDER BY key, not a WHERE clause: it
+		-- ranks explanatory kinds above everything else while still leaving a
+		-- lesser event to be picked when a job has nothing better. Making it a
+		-- filter is what left most rows with no reason at all.
 		-- id DESC is load-bearing, not cosmetic: one pipeline pass shares a
 		-- single value of now across every recordEvent call it makes (see
 		-- internal/pipeline), so multiple job_events rows for the same job can
 		-- genuinely share created_at. Without the id tiebreak, DISTINCT ON
 		-- would pick an arbitrary one of them instead of the actual latest.
-		ORDER BY album_job_id, created_at DESC, id DESC`,
+		ORDER BY album_job_id, (event = ANY($2)) DESC, created_at DESC, id DESC`,
 		jobIDs, failureExplainingEvents)
 	if err != nil {
 		return nil, fmt.Errorf("latest failure details: %w", err)
