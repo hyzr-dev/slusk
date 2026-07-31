@@ -10,6 +10,7 @@ import Page from '../components/tui/Page';
 import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { t } from '../strings';
+import IdentifyModal from './IdentifyModal';
 import SearchResultCard, { type CardStatus } from './SearchResultCard';
 import styles from './Search.module.css';
 
@@ -91,6 +92,12 @@ export default function Search() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selections, setSelections] = useState<Map<string, Set<string>>>(new Map());
   const [cardStatus, setCardStatus] = useState<Map<string, CardStatus>>(new Map());
+  // Issue #321. `identifiedIds` only flips a card's button label/border —
+  // clicking IDENTIFIED again still reopens the modal (see
+  // SearchResultCard's onIdentify), so this is never read as "done, can't
+  // change".
+  const [identifiedIds, setIdentifiedIds] = useState<Set<string>>(new Set());
+  const [identifyGroupId, setIdentifyGroupId] = useState<string | null>(null);
 
   const startSearch = useStartSearch();
   const stopSearch = useStopSearch();
@@ -183,20 +190,23 @@ export default function Search() {
     });
   }
 
-  function download(group: SearchGroup, files: SearchFile[]) {
+  // `identity`, when given, overrides title/artist with the canonical
+  // MusicBrainz values the Identify modal resolved (issue #321) — the
+  // confirm handler below is the only caller that passes it.
+  function download(group: SearchGroup, files: SearchFile[], identity?: { artist: string; title: string }) {
     if (files.length === 0) return;
     createJob.mutate(
       {
-        title: group.title,
-        // Best-effort only: `parent` is the peer's parent DIRECTORY name, not
-        // a resolved artist (the Soulseek wire carries no artist field — issue
-        // #58 §4), so a peer sharing /Music/Various Artists/<album>/ makes the
-        // job's artist "Various Artists". Posted anyway because `artist` is
-        // what POST /api/jobs takes and a folder name is the best guess
-        // available here; issue #59 owns actually matching a manual download
-        // against Lidarr. The card labels it as a folder — see
+        title: identity?.title ?? group.title,
+        // Best-effort only absent an identity override: `parent` is the
+        // peer's parent DIRECTORY name, not a resolved artist (the Soulseek
+        // wire carries no artist field — issue #58 §4), so a peer sharing
+        // /Music/Various Artists/<album>/ makes the job's artist "Various
+        // Artists". Posted anyway because `artist` is what POST /api/jobs
+        // takes and a folder name is the best guess available without
+        // identifying it first; the card labels it as a folder — see
         // SearchResultCard's .parent — so the UI never claims otherwise.
-        artist: group.parent,
+        artist: identity?.artist ?? group.parent,
         peer: group.peer,
         files: files.map((f) => ({ filename: f.filename, size: f.size })),
       },
@@ -209,6 +219,12 @@ export default function Search() {
         },
       },
     );
+  }
+
+  function confirmIdentify(group: SearchGroup, identity: { artist: string; album: string }) {
+    setIdentifiedIds((prev) => new Set(prev).add(group.id));
+    setIdentifyGroupId(null);
+    download(group, group.files, { artist: identity.artist, title: identity.album });
   }
 
   // POST /api/search is in flight. `searchId` is still the PREVIOUS search's
@@ -348,6 +364,8 @@ export default function Search() {
                         const selected = selections.get(group.id) ?? allFilenames(group);
                         download(group, group.files.filter((f) => selected.has(f.filename)));
                       }}
+                      identified={identifiedIds.has(group.id)}
+                      onIdentify={() => setIdentifyGroupId(group.id)}
                     />
                   ))}
                 </ul>
@@ -371,6 +389,21 @@ export default function Search() {
           </>
         )}
       </Panel>
+
+      {identifyGroupId !== null && (() => {
+        const group = groups.find((g) => g.id === identifyGroupId);
+        // The group can vanish mid-modal only if the session itself is torn
+        // down (e.g. starting a new search) — closing rather than rendering
+        // against nothing.
+        if (!group) return null;
+        return (
+          <IdentifyModal
+            group={group}
+            onClose={() => setIdentifyGroupId(null)}
+            onConfirm={(identity) => confirmIdentify(group, identity)}
+          />
+        );
+      })()}
     </Page>
   );
 }

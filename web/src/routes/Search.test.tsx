@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WireSearchGroup, WireSearchSession } from '../api/types';
@@ -438,5 +438,56 @@ describe('downloading', () => {
     fireEvent.click(screen.getByRole('button', { name: t.search.downloadAlbum }));
 
     expect(await screen.findByText(t.search.busyNotice)).toBeInTheDocument();
+  });
+});
+
+// Deep coverage of the modal's own states lives in IdentifyModal.test.tsx;
+// this is the one seam that only exists at the Search.tsx level — the
+// trigger button, the modal actually mounting from a real card, and the
+// created job carrying the canonical MusicBrainz identity rather than the
+// folder guess (group.parent/group.title).
+describe('identify & download (issue #321)', () => {
+  it('opens the modal from the card, and posts the job with the canonical artist/album rather than the folder guess', async () => {
+    const group = wireGroup();
+    let jobsBody: unknown;
+    await renderWithResults([group], 1, (url, init) => {
+      if (url === '/api/identify/artists?query=Radiohead') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ artists: [{ id: 'a1', name: 'Radiohead', score: 100 }], total: 1 }), { status: 200 }),
+        );
+      }
+      if (url === '/api/identify/artists/a1/albums') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ albums: [{ id: 'al1', title: 'In Rainbows', primaryType: 'Album', secondaryTypes: [] }], total: 1 }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url === '/api/identify/albums/al1/editions') {
+        return Promise.resolve(new Response(JSON.stringify({ editions: [], total: 0 }), { status: 200 }));
+      }
+      if (url === '/api/identify/albums/al1/lidarr') {
+        return Promise.resolve(new Response(JSON.stringify({ known: false, inLibrary: false }), { status: 200 }));
+      }
+      if (url === '/api/jobs' && init?.method === 'POST') {
+        jobsBody = JSON.parse(init.body as string);
+        return Promise.resolve(new Response(JSON.stringify({ id: 43 }), { status: 201 }));
+      }
+      return undefined;
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.button }));
+    const dialog = screen.getByRole('dialog', { name: t.search.identify.dialogLabel });
+
+    fireEvent.click(within(dialog).getByRole('button', { name: t.search.identify.searchButton }));
+    await within(dialog).findByRole('button', { name: /In Rainbows/ });
+    fireEvent.click(within(dialog).getByRole('button', { name: /In Rainbows/ }));
+    await within(dialog).findByText(t.search.identify.willBeRecordedAs);
+    fireEvent.click(within(dialog).getByRole('button', { name: t.search.identify.confirm }));
+
+    await waitFor(() => expect(jobsBody).toMatchObject({ title: 'In Rainbows', artist: 'Radiohead' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: t.search.identify.identified })).toBeInTheDocument();
   });
 });

@@ -26,7 +26,11 @@ import type {
   JobEvent,
   JobPage,
   JobPageParams,
+  LidarrMatch,
   MarkReadResult,
+  MusicBrainzAlbumListResult,
+  MusicBrainzArtistSearchResult,
+  MusicBrainzEditionListResult,
   Peer,
   PrivateMessage,
   ScopedLivePayload,
@@ -762,6 +766,44 @@ export function useCreateJob() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: queryKeys.jobs });
     },
+  });
+}
+
+// ---- MusicBrainz identify (issue #321) ----
+//
+// All four are plain GETs fired explicitly by IdentifyModal's own state
+// machine (search button, album pick, edition/Lidarr lookups once an album
+// is selected) rather than mounted queries — a `useQuery` with an `enabled`
+// flag would refetch on every remount/window-focus for a resource the brief
+// explicitly forbids polling or debouncing (the backend's identify cache has
+// no eviction, sized for explicit-only traffic). `useMutation` gives the
+// same isPending/isError bookkeeping the modal needs without any of that.
+
+export function useIdentifyArtists() {
+  return useMutation({
+    mutationFn: (query: string) =>
+      apiGet<MusicBrainzArtistSearchResult>(`/api/identify/artists?query=${encodeURIComponent(query)}`),
+  });
+}
+
+export function useIdentifyAlbums() {
+  return useMutation({
+    mutationFn: (artistId: string) =>
+      apiGet<MusicBrainzAlbumListResult>(`/api/identify/artists/${encodeURIComponent(artistId)}/albums`),
+  });
+}
+
+export function useIdentifyEditions() {
+  return useMutation({
+    mutationFn: (albumId: string) =>
+      apiGet<MusicBrainzEditionListResult>(`/api/identify/albums/${encodeURIComponent(albumId)}/editions`),
+  });
+}
+
+export function useIdentifyLidarr() {
+  return useMutation({
+    mutationFn: (albumId: string) =>
+      apiGet<LidarrMatch>(`/api/identify/albums/${encodeURIComponent(albumId)}/lidarr`),
   });
 }
 

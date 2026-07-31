@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import styles from './Button.module.css';
 
 interface Props {
-  variant?: 'primary' | 'ghost' | 'danger';
+  variant?: 'primary' | 'ghost' | 'danger' | 'identified';
   onClick?: () => void;
   // Passed straight through to the <button>; used by the jobs list's
   // two-click delete confirm to disarm itself when focus leaves the button,

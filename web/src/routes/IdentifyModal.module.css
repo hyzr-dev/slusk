@@ -1,0 +1,190 @@
+/* First modal in this codebase (issue #321) — see the mock's identifyOpen
+   block, docs/design/slskdarr-tui.dc.html. Separation from the page comes
+   from the scrim and the border alone: CLAUDE.md's "recesses, never
+   elevates" rule means no shadow and no blur here, ever. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 5, 6, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 90;
+  padding: 24px;
+}
+
+.panel {
+  border: 1px solid var(--line2);
+  background: var(--panel-inset);
+  width: 520px;
+  max-width: 100%;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.headerLabel { font-size: 10px; letter-spacing: 1.6px; color: var(--text-dim); }
+
+.spacer { flex: 1; }
+
+.closeButton {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.closeButton:hover { color: var(--fg); }
+.closeButton:focus-visible { outline: 1px solid var(--fg); outline-offset: 1px; }
+
+.body {
+  padding: 16px 18px 18px;
+  overflow-y: auto;
+}
+
+.fieldLabel {
+  font-size: 10px;
+  letter-spacing: 1.1px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.folderPath {
+  font-size: 11px;
+  color: var(--dim);
+  word-break: break-all;
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.fields { display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px; }
+
+.field { display: flex; flex-direction: column; gap: 5px; }
+
+.field .fieldLabel { font-size: 9.5px; margin-bottom: 0; }
+
+.input {
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  color: var(--fg);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  outline: none;
+  font-family: inherit;
+}
+
+.input:focus { border-color: var(--dim); }
+
+/* Primary/ghost Button already exists; the search button just needs the
+   full-width treatment the mock gives it. */
+.body > button { margin-top: 16px; width: 100%; padding: 9px; }
+
+.centered {
+  padding: 34px 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 8px;
+  border: 2px solid var(--line2);
+  border-top-color: var(--ok);
+  border-radius: 50%;
+  vertical-align: -1.5px;
+  animation: identify-spin 0.7s linear infinite;
+}
+
+@keyframes identify-spin {
+  to { transform: rotate(360deg); }
+}
+
+.suggestions { margin-top: 16px; }
+
+.suggestionsHead {
+  display: grid;
+  grid-template-columns: 1.6fr 90px 55px;
+  gap: 10px;
+  padding: 0 10px 6px;
+  font-size: 9.5px;
+  letter-spacing: 1.1px;
+  color: var(--text-dim);
+}
+
+.suggestionsList { list-style: none; margin: 0; padding: 0; }
+
+.suggestionRow {
+  display: grid;
+  grid-template-columns: 1.6fr 90px 55px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-top: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.suggestionsList li:first-child .suggestionRow { border-top: 1px solid var(--line); }
+
+.suggestionRow:hover { border-color: var(--dim); background: var(--panel-hover); }
+.suggestionRow:focus-visible { outline: 1px solid var(--fg); outline-offset: -2px; }
+
+.suggestionText { min-width: 0; display: flex; flex-direction: column; }
+.suggestionAlbum { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.suggestionArtist { color: var(--dim); font-size: 10.5px; margin-top: 2px; }
+.suggestionType { color: var(--dim); font-size: 10.5px; letter-spacing: 0.4px; }
+.suggestionYear { color: var(--dim); font-size: 10.5px; }
+
+.truncationNotice { margin-top: 8px; font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.3px; }
+.notIt { margin-top: 12px; font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.3px; }
+
+.centeredBlock { padding: 26px 4px 6px; text-align: center; }
+.badTitle { font-size: 11.5px; color: var(--bad); letter-spacing: 1.2px; }
+.bodyText { font-size: 11.5px; color: var(--text-dim); margin-top: 10px; line-height: 1.8; }
+.centeredBlock button { margin-top: 14px; width: 100%; padding: 8px; }
+
+.recorded { border: 1px solid var(--line2); padding: 14px 15px; }
+.recordedAlbum { font-size: 14px; color: var(--fg); margin-top: 8px; }
+.recordedMeta { font-size: 11.5px; color: var(--dim); margin-top: 3px; }
+
+.editionPicker { margin-top: 12px; }
+
+.select {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 7px 9px;
+}
+
+.statusLines { margin-top: 12px; font-size: 11px; }
+.statusLines > div:last-child { margin-top: 8px; }
+
+.tone-ok { color: var(--ok); letter-spacing: 0.3px; line-height: 1.6; }
+.tone-bad { color: var(--bad); letter-spacing: 0.3px; line-height: 1.6; }
+.tone-dim { color: var(--dim); letter-spacing: 0.3px; line-height: 1.6; }
+.tone-faint { color: var(--text-dim); letter-spacing: 0.3px; line-height: 1.6; }
+
+.actions { display: flex; gap: 8px; margin-top: 18px; }

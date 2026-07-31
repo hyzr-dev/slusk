@@ -727,6 +727,82 @@ export interface CreateSearchRequest {
   query: string;
 }
 
+// ---- MusicBrainz identify (issue #321) ----
+
+/**
+ * GET /api/identify/artists — internal/observ identify.go artistDTO, one
+ * MusicBrainz artist search hit. `score` is MusicBrainz's own relevance
+ * score (0-100); the frontend never recomputes it, only picks the highest.
+ */
+export interface MusicBrainzArtist {
+  id: string;
+  name: string;
+  type?: string;
+  country?: string;
+  disambiguation?: string;
+  score: number;
+}
+
+/** GET /api/identify/artists response. `total` is the true match count; `artists` is capped at 25. */
+export interface MusicBrainzArtistSearchResult {
+  artists: MusicBrainzArtist[];
+  total: number;
+}
+
+/**
+ * GET /api/identify/artists/{mbid}/albums — one release-group belonging to
+ * the artist. `secondaryTypes` (Compilation, Live, Remix, …) is always an
+ * array, never absent, matching the Go DTO's own zero-value slice.
+ */
+export interface MusicBrainzAlbum {
+  id: string;
+  title: string;
+  firstReleaseDate?: string;
+  primaryType?: string;
+  secondaryTypes: string[];
+}
+
+/** GET /api/identify/artists/{mbid}/albums response. `total` is the true count; `albums` is capped at 100. */
+export interface MusicBrainzAlbumListResult {
+  albums: MusicBrainzAlbum[];
+  total: number;
+}
+
+/**
+ * GET /api/identify/albums/{mbid}/editions — one release (a specific
+ * pressing/edition) belonging to a release-group. `trackCountKnown: false`
+ * means MusicBrainz has no track listing for this release — render that as
+ * unknown, never as a 0-track edition (see the brief's "never render it as
+ * 0" rule).
+ */
+export interface MusicBrainzEdition {
+  id: string;
+  title: string;
+  date?: string;
+  country?: string;
+  status?: string;
+  trackCount: number;
+  trackCountKnown: boolean;
+}
+
+/** GET /api/identify/albums/{mbid}/editions response. `total` is the true count; `editions` is capped at 100. */
+export interface MusicBrainzEditionListResult {
+  editions: MusicBrainzEdition[];
+  total: number;
+}
+
+/**
+ * GET /api/identify/albums/{mbid}/lidarr — whether Lidarr already knows this
+ * release-group. `known: false` means the check itself is unavailable
+ * (Lidarr unreachable), which is a distinct state from "known and not in the
+ * library" — see the three-way LIDARR STATUS copy this drives.
+ */
+export interface LidarrMatch {
+  known: boolean;
+  inLibrary: boolean;
+  albumId?: number;
+}
+
 /**
  * POST /api/jobs request body — internal/observ/observ.go createJobRequest
  * (issue #155). A manual job that downloads known files directly from one

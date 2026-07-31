@@ -567,6 +567,67 @@ export const t = {
     downloadFailed: 'Could not start the download. Try again.',
     startFailed: 'Search failed to start. Try again.',
     busyRetry: 'Too many searches are already running — try again shortly.',
+    // The Identify & download modal (issue #321). Soulseek carries no
+    // metadata — a search result is only a peer's folder name — so this
+    // flow lets the user confirm the canonical MusicBrainz artist/album
+    // before the job is created, rather than posting the folder guess
+    // (group.parent/group.title) as if it were fact.
+    identify: {
+      // Trigger button in SearchResultCard's actions row. Deliberately does
+      // not say "import" — the app can enqueue a download but can never
+      // promise Lidarr will pick it up (see lidarrUnknown/lidarrNotInLibrary
+      // below).
+      button: 'Identify & download',
+      identified: '✓ Identified',
+      dialogLabel: 'Identify and download',
+      close: 'Close',
+      identifyingFolder: 'IDENTIFYING FOLDER',
+      artistLabel: 'Artist (guessed — edit if wrong)',
+      albumLabel: 'Album (guessed — edit if wrong)',
+      searchButton: 'Search MusicBrainz',
+      searching: 'searching musicbrainz…',
+      // Suggestions table column headers. No EDITIONS column: the backend
+      // has no per-row edition count without a separate rate-limited call
+      // per row (see the brief) — the count only exists once an album is
+      // selected, where selEditions below renders it.
+      colArtistAlbum: 'ARTIST / ALBUM',
+      colType: 'TYPE',
+      colYear: 'YEAR',
+      notIt: 'Not it? Edit the fields above and search again.',
+      // `shown`/`total` truncation notice, reused for the album suggestions
+      // list and the edition picker alike — both cap their arrays the same
+      // way (see MusicBrainzAlbumListResult/MusicBrainzEditionListResult).
+      showingOf: (shown: number, total: number) => `showing ${shown} of ${total}`,
+      noMatchesTitle: 'NO MATCHES',
+      noMatchesBody: 'MusicBrainz returned nothing for these terms. Edit the artist/album above and search again.',
+      searchAgain: 'Search again',
+      unavailableTitle: 'MUSICBRAINZ UNAVAILABLE',
+      unavailableBody: 'Lookup service is down or rate-limited right now. You can still download this folder without identifying it.',
+      retry: 'Retry',
+      willBeRecordedAs: 'WILL BE RECORDED AS',
+      // `n` is the edition COUNT for the selected album (from
+      // MusicBrainzEditionListResult.total), not the picker's own row —
+      // matches the mock's selEditions slot.
+      editionCount: (n: number) => `${n} edition${n === 1 ? '' : 's'}`,
+      // The edition picker (the one deliberate addition beyond the mock —
+      // see the brief). The mock computes its verdict against a band across
+      // every edition of the release-group, which real data makes useless
+      // (an 8-97 track spread once box sets share the group with the
+      // album); picking one edition first is what makes its own "matches
+      // THIS edition" copy below actually true.
+      editionPickerLabel: 'EDITION',
+      editionUnknownTracks: 'tracks unknown',
+      verdictIncomplete: (have: number, want: number) => `INCOMPLETE — ${have} of ${want} present`,
+      verdictComplete: (n: number) => `COMPLETE — ${n} tracks matches this edition`,
+      verdictMore: (have: number, want: number) =>
+        `${have} TRACKS FOUND — more than this edition (${want}); likely a different edition, or more than one release in the folder`,
+      verdictUnknown: 'COMPLETENESS UNKNOWN — this edition has no track listing',
+      lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
+      lidarrNotInLibrary: "NOT IN LIDARR LIBRARY — download will succeed but won't be imported",
+      lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
+      back: '‹ Back',
+      confirm: 'Confirm identification',
+    },
   },
   chat: {
     railHeading: 'PEERS',
