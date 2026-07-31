@@ -463,14 +463,12 @@ type ServerDeps struct {
 	SearchSnapshot SearchSnapshotFunc
 	SearchDelta    SearchDeltaFunc
 	StopSearch     StopSearchFunc
-	// IdentifyArtists, IdentifyArtistAlbums, IdentifyAlbumEditions and
-	// IdentifyAlbumLidarrStatus back the identify modal (issue #321): GET
-	// /api/identify/artists[/{mbid}/albums] and
+	// IdentifySearch, IdentifyAlbumEditions and IdentifyAlbumLidarrStatus back
+	// the identify modal (issue #321): GET /api/identify/search and
 	// /api/identify/albums/{mbid}/[editions|lidarr]. nil-safe, mirroring
-	// StartSearch/Shares - see registerIdentify. All four are nil together
+	// StartSearch/Shares - see registerIdentify. All three are nil together
 	// when the [musicbrainz] config section is absent.
-	IdentifyArtists           IdentifyArtistsFunc
-	IdentifyArtistAlbums      IdentifyArtistAlbumsFunc
+	IdentifySearch            IdentifySearchFunc
 	IdentifyAlbumEditions     IdentifyAlbumEditionsFunc
 	IdentifyAlbumLidarrStatus IdentifyAlbumLidarrStatusFunc
 	// Conversations and Thread back GET /api/messages and GET
@@ -831,7 +829,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerSearch(mux, deps.StartSearch, deps.SearchSnapshot, deps.StopSearch)
-	registerIdentify(mux, deps.IdentifyArtists, deps.IdentifyArtistAlbums, deps.IdentifyAlbumEditions, deps.IdentifyAlbumLidarrStatus)
+	registerIdentify(mux, deps.IdentifySearch, deps.IdentifyAlbumEditions, deps.IdentifyAlbumLidarrStatus)
 	registerUploads(mux, deps.Uploads, deps.UploadHistory)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval, streamInvalidateInterval)

@@ -12,10 +12,9 @@ import (
 	"github.com/samuelenocsson/slskdarr/internal/core"
 )
 
-func newIdentifyTestHandler(reg *prometheus.Registry, artists IdentifyArtistsFunc, artistAlbums IdentifyArtistAlbumsFunc, albumEditions IdentifyAlbumEditionsFunc, albumLidarr IdentifyAlbumLidarrStatusFunc) http.Handler {
+func newIdentifyTestHandler(reg *prometheus.Registry, search IdentifySearchFunc, albumEditions IdentifyAlbumEditionsFunc, albumLidarr IdentifyAlbumLidarrStatusFunc) http.Handler {
 	deps := testServerDeps(reg)
-	deps.IdentifyArtists = artists
-	deps.IdentifyArtistAlbums = artistAlbums
+	deps.IdentifySearch = search
 	deps.IdentifyAlbumEditions = albumEditions
 	deps.IdentifyAlbumLidarrStatus = albumLidarr
 	return NewServer(deps)
@@ -23,11 +22,10 @@ func newIdentifyTestHandler(reg *prometheus.Registry, artists IdentifyArtistsFun
 
 func TestIdentifyEndpointsNilDepsAnswer503(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	h := newIdentifyTestHandler(reg, nil, nil, nil, nil)
+	h := newIdentifyTestHandler(reg, nil, nil, nil)
 
 	for _, path := range []string{
-		"/api/identify/artists?query=metallica",
-		"/api/identify/artists/a1/albums",
+		"/api/identify/search?artist=metallica&album=ride+the+lightning",
 		"/api/identify/albums/rg1/editions",
 		"/api/identify/albums/rg1/lidarr",
 	} {
@@ -39,12 +37,15 @@ func TestIdentifyEndpointsNilDepsAnswer503(t *testing.T) {
 	}
 }
 
-func TestIdentifyArtistsEndpoint(t *testing.T) {
+func TestIdentifySearchEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	artists := func(ctx context.Context, query string) ([]core.MBArtist, int, error) {
-		switch query {
-		case "metallica":
-			return []core.MBArtist{{ID: "a1", Name: "Metallica", Score: 100}}, 1, nil
+	search := func(ctx context.Context, artist, album string) ([]core.MBReleaseGroup, int, error) {
+		switch album {
+		case "ride the lightning":
+			if artist != "metallica" {
+				t.Errorf("artist = %q, want metallica", artist)
+			}
+			return []core.MBReleaseGroup{{ID: "rg1", Title: "Ride the Lightning", ArtistName: "Metallica", ArtistID: "a1", EditionCount: 60, Score: 100}}, 1, nil
 		case "":
 			return nil, 0, app.ErrIdentifyQueryInvalid
 		case "down":
@@ -53,26 +54,27 @@ func TestIdentifyArtistsEndpoint(t *testing.T) {
 			return nil, 0, errBoom
 		}
 	}
-	h := newIdentifyTestHandler(reg, artists, nil, nil, nil)
+	h := newIdentifyTestHandler(reg, search, nil, nil)
 
 	t.Run("success", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/artists?query=metallica", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/search?artist=metallica&album=ride+the+lightning", nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 		}
-		var got mbArtistSearchDTO
+		var got mbSearchDTO
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Artists) != 1 || got.Artists[0].ID != "a1" || got.Artists[0].Score != 100 || got.Total != 1 {
+		if len(got.Results) != 1 || got.Results[0].ID != "rg1" || got.Results[0].Artist != "Metallica" ||
+			got.Results[0].ArtistID != "a1" || got.Results[0].EditionCount != 60 || got.Results[0].Score != 100 || got.Total != 1 {
 			t.Fatalf("unexpected body: %+v", got)
 		}
 	})
 
-	t.Run("blank query is 422", func(t *testing.T) {
+	t.Run("blank album is 422", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/artists", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/search?artist=metallica", nil))
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422", rec.Code)
 		}
@@ -80,7 +82,7 @@ func TestIdentifyArtistsEndpoint(t *testing.T) {
 
 	t.Run("musicbrainz unavailable is 503", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/artists?query=down", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/search?album=down", nil))
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503", rec.Code)
 		}
@@ -88,35 +90,11 @@ func TestIdentifyArtistsEndpoint(t *testing.T) {
 
 	t.Run("unmapped error is 500", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/artists?query=boom", nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/search?album=boom", nil))
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", rec.Code)
 		}
 	})
-}
-
-func TestIdentifyArtistAlbumsEndpoint(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	artistAlbums := func(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
-		if artistMBID != "a1" {
-			t.Errorf("mbid = %q, want a1", artistMBID)
-		}
-		return []core.MBReleaseGroup{{ID: "rg1", Title: "Ride the Lightning"}}, 1, nil
-	}
-	h := newIdentifyTestHandler(reg, nil, artistAlbums, nil, nil)
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/artists/a1/albums", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var got mbReleaseGroupListDTO
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Albums) != 1 || got.Albums[0].ID != "rg1" || got.Total != 1 {
-		t.Fatalf("unexpected body: %+v", got)
-	}
 }
 
 // TestIdentifyAlbumEditionsEndpointDoesNotCollapseToBand covers issue #321's
@@ -131,7 +109,7 @@ func TestIdentifyAlbumEditionsEndpointDoesNotCollapseToBand(t *testing.T) {
 			{ID: "r3"},
 		}, 3, nil
 	}
-	h := newIdentifyTestHandler(reg, nil, nil, albumEditions, nil)
+	h := newIdentifyTestHandler(reg, nil, albumEditions, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/identify/albums/rg1/editions", nil))
@@ -165,7 +143,7 @@ func TestIdentifyAlbumLidarrStatusEndpoint(t *testing.T) {
 			return app.LidarrAlbumStatus{Known: true, InLibrary: false}, nil
 		}
 	}
-	h := newIdentifyTestHandler(reg, nil, nil, nil, albumLidarr)
+	h := newIdentifyTestHandler(reg, nil, nil, albumLidarr)
 
 	t.Run("in library", func(t *testing.T) {
 		rec := httptest.NewRecorder()

@@ -513,17 +513,15 @@ func main() {
 	var sharesFn observ.SharesFunc
 	var rescanSharesFn observ.RescanSharesFunc
 	var uploadsFn observ.UploadsFunc
-	// identify's four ServerDeps fields are left nil together when
+	// identify's three ServerDeps fields are left nil together when
 	// [musicbrainz] is absent (identify == nil), matching the nil-safe
 	// convention above: registerIdentify then answers 503 instead of
 	// dereferencing a nil *app.Identify.
-	var identifyArtistsFn observ.IdentifyArtistsFunc
-	var identifyArtistAlbumsFn observ.IdentifyArtistAlbumsFunc
+	var identifySearchFn observ.IdentifySearchFunc
 	var identifyAlbumEditionsFn observ.IdentifyAlbumEditionsFunc
 	var identifyAlbumLidarrStatusFn observ.IdentifyAlbumLidarrStatusFunc
 	if identify != nil {
-		identifyArtistsFn = identify.SearchArtists
-		identifyArtistAlbumsFn = identify.ArtistAlbums
+		identifySearchFn = identify.SearchReleaseGroups
 		identifyAlbumEditionsFn = identify.AlbumEditions
 		identifyAlbumLidarrStatusFn = identify.AlbumLidarrStatus
 	}
@@ -662,8 +660,7 @@ func main() {
 		SearchSnapshot:            searches.Snapshot,
 		SearchDelta:               searches.Delta,
 		StopSearch:                searches.Stop,
-		IdentifyArtists:           identifyArtistsFn,
-		IdentifyArtistAlbums:      identifyArtistAlbumsFn,
+		IdentifySearch:            identifySearchFn,
 		IdentifyAlbumEditions:     identifyAlbumEditionsFn,
 		IdentifyAlbumLidarrStatus: identifyAlbumLidarrStatusFn,
 		Conversations:             conversationsFn,
