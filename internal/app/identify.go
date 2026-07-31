@@ -34,8 +34,7 @@ var ErrIdentifyUnavailable = errors.New("musicbrainz is not available")
 // may exceed len(slice) when the result was capped - see
 // internal/musicbrainz.Client's per-method doc comments.
 type MusicBrainzSearcher interface {
-	SearchArtists(ctx context.Context, query string) ([]core.MBArtist, int, error)
-	ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error)
+	SearchReleaseGroups(ctx context.Context, artist, album string) ([]core.MBReleaseGroup, int, error)
 	Releases(ctx context.Context, releaseGroupMBID string) ([]core.MBRelease, int, error)
 }
 
@@ -68,8 +67,9 @@ type IdentifyParams struct {
 }
 
 // Identify is the transport-neutral service backing issue #321's identify
-// modal: MusicBrainz artist/release-group/release lookups, plus the
-// read-only Lidarr library status for a chosen release-group.
+// modal: a combined MusicBrainz artist+album search, per-release-group
+// edition lookups, plus the read-only Lidarr library status for a chosen
+// release-group.
 type Identify struct {
 	mb     MusicBrainzSearcher
 	lidarr LidarrLibraryLookup
@@ -85,38 +85,27 @@ func NewIdentify(p IdentifyParams) *Identify {
 	return &Identify{mb: p.MusicBrainz, lidarr: p.Lidarr, logger: logger}
 }
 
-// SearchArtists searches MusicBrainz artists by free-text query, for GET
-// /api/identify/artists. total is MusicBrainz's true match count and may
-// exceed len(artists) when the result was capped - see
-// MusicBrainzSearcher.
-func (id *Identify) SearchArtists(ctx context.Context, query string) (artists []core.MBArtist, total int, err error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
+// SearchReleaseGroups runs a combined artist+album search against
+// MusicBrainz, for GET /api/identify/search - see
+// internal/musicbrainz.Client.SearchReleaseGroups for the query it builds
+// and the fuzzy retry it performs on a miss. artist may be blank (the
+// caller degrades to an album-only search); album may not - there is
+// nothing to search for otherwise, so a blank album is
+// ErrIdentifyQueryInvalid before any request is made. total is
+// MusicBrainz's true match count and may exceed len(results) when the
+// result was capped - see MusicBrainzSearcher.
+func (id *Identify) SearchReleaseGroups(ctx context.Context, artist, album string) (results []core.MBReleaseGroup, total int, err error) {
+	artist = strings.TrimSpace(artist)
+	album = strings.TrimSpace(album)
+	if album == "" {
 		return nil, 0, ErrIdentifyQueryInvalid
 	}
-	artists, total, err = id.mb.SearchArtists(ctx, query)
+	results, total, err = id.mb.SearchReleaseGroups(ctx, artist, album)
 	if err != nil {
-		id.logger.Warn("musicbrainz artist search failed", "err", err)
+		id.logger.Warn("musicbrainz release-group search failed", "err", err)
 		return nil, 0, ErrIdentifyUnavailable
 	}
-	return artists, total, nil
-}
-
-// ArtistAlbums lists an artist's release-groups, for GET
-// /api/identify/artists/{mbid}/albums. total is MusicBrainz's true match
-// count and may exceed len(groups) when the result was capped - see
-// MusicBrainzSearcher.
-func (id *Identify) ArtistAlbums(ctx context.Context, artistMBID string) (groups []core.MBReleaseGroup, total int, err error) {
-	artistMBID = strings.TrimSpace(artistMBID)
-	if artistMBID == "" {
-		return nil, 0, ErrIdentifyQueryInvalid
-	}
-	groups, total, err = id.mb.ReleaseGroups(ctx, artistMBID)
-	if err != nil {
-		id.logger.Warn("musicbrainz release-group lookup failed", "artistMBID", artistMBID, "err", err)
-		return nil, 0, ErrIdentifyUnavailable
-	}
-	return groups, total, nil
+	return results, total, nil
 }
 
 // AlbumEditions lists a release-group's editions, each with its own

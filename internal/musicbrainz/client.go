@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -37,11 +38,10 @@ const DefaultTimeout = 10 * time.Second
 // DefaultCacheTTL is how long a response is reused before it is fetched again.
 const DefaultCacheTTL = time.Hour
 
-// searchArtistsLimit and releaseGroupsLimit bound how many rows MusicBrainz
-// returns per call - generous enough for a human to scan in the identify
-// modal without paging, small enough to keep the response cheap.
-const searchArtistsLimit = 25
-const releaseGroupsLimit = 100
+// searchReleaseGroupsLimit bounds how many rows MusicBrainz returns per
+// call - generous enough for a human to scan in the identify modal without
+// paging, small enough to keep the response cheap.
+const searchReleaseGroupsLimit = 25
 
 // releasesLimit is fixed at MusicBrainz's page-size ceiling: Releases fetches
 // every edition of a release-group in one call, and 100 releases for a single
@@ -118,8 +118,8 @@ func (c *Client) userAgent() string {
 // body into out. A cache hit skips both the rate limiter and the network
 // call entirely - only an actual outgoing HTTP request needs to wait for a
 // token, per MusicBrainz's 1 req/s policy. label identifies the call in
-// error messages ("artist search", "release groups", "releases") - it must
-// never carry user input, unlike reqURL, which embeds the free-text query.
+// error messages ("release-group search", "releases") - it must never carry
+// user input, unlike reqURL, which embeds the free-text query.
 func (c *Client) get(ctx context.Context, reqURL, label string, out any) error {
 	if c.contact == "" {
 		return ErrNoContact
@@ -155,69 +155,127 @@ func (c *Client) get(ctx context.Context, reqURL, label string, out any) error {
 	return nil
 }
 
-// wireArtistSearch is GET /ws/2/artist's response shape.
-type wireArtistSearch struct {
-	Count   int `json:"count"`
-	Artists []struct {
-		ID             string `json:"id"`
-		Name           string `json:"name"`
-		Type           string `json:"type"`
-		Country        string `json:"country"`
-		Disambiguation string `json:"disambiguation"`
-		Score          int    `json:"score"`
-	} `json:"artists"`
+// luceneSpecial is every Lucene metacharacter MusicBrainz's query parser
+// treats specially: + - && || ! ( ) { } [ ] ^ " ~ * ? : \ /. Two of them,
+// && and ||, are two-character operators, but escaping each of their
+// constituent runes individually (every & and every |) is sufficient to
+// defuse them - a lone "\&" can never combine with a following "\&" to form
+// the "&&" operator.
+const luceneSpecial = `+-&|!(){}[]^"~*?:\/`
+
+// escapeLucene backslash-escapes every Lucene metacharacter in s so it is
+// interpolated into a MusicBrainz query as a literal, never as an operator.
+// This matters because unescaped input is not a hard error - MusicBrainz's
+// parser is tolerant of stray operators - which is exactly why skipping this
+// is easy to miss: a folder name's brackets and parentheses silently turn a
+// targeted search into a query matching over a million release-groups that
+// still happens to rank correctly for the easy cases (issue #321).
+func escapeLucene(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(luceneSpecial, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
-// SearchArtists searches MusicBrainz artists by free-text query. The
-// returned slice is capped at searchArtistsLimit; total is MusicBrainz's
-// reported match count, which the caller must compare against len(slice) to
-// detect truncation - it is never inferred from the slice alone.
-func (c *Client) SearchArtists(ctx context.Context, query string) ([]core.MBArtist, int, error) {
-	reqURL := fmt.Sprintf("%s/ws/2/artist?query=%s&fmt=json&limit=%d",
-		c.baseURL, url.QueryEscape(query), searchArtistsLimit)
-	var body wireArtistSearch
-	if err := c.get(ctx, reqURL, "artist search", &body); err != nil {
-		return nil, 0, err
-	}
-	out := make([]core.MBArtist, 0, len(body.Artists))
-	for _, a := range body.Artists {
-		out = append(out, core.MBArtist{
-			ID: a.ID, Name: a.Name, Type: a.Type,
-			Country: a.Country, Disambiguation: a.Disambiguation, Score: a.Score,
-		})
-	}
-	return out, body.Count, nil
-}
-
-// wireReleaseGroupSearch is GET /ws/2/release-group's response shape.
-type wireReleaseGroupSearch struct {
-	Count         int `json:"release-group-count"`
+// wireReleaseGroupQuery is GET /ws/2/release-group?query=...'s response
+// shape - MusicBrainz's Lucene search, distinct from the browse-by-artist
+// endpoint this replaces. Note the two "count" fields at different levels:
+// the top-level one is the search's total hit count, the per-hit one is that
+// release-group's own edition count (verified against the live API - issue
+// #321 - as exactly the number of releases internal/musicbrainz.Client's
+// Releases method would return for the same id).
+type wireReleaseGroupQuery struct {
+	Count         int `json:"count"`
 	ReleaseGroups []struct {
 		ID               string   `json:"id"`
 		Title            string   `json:"title"`
+		Score            int      `json:"score"`
+		Count            int      `json:"count"`
 		FirstReleaseDate string   `json:"first-release-date"`
 		PrimaryType      string   `json:"primary-type"`
 		SecondaryTypes   []string `json:"secondary-types"`
+		ArtistCredit     []struct {
+			Name   string `json:"name"`
+			Artist struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"artist"`
+		} `json:"artist-credit"`
 	} `json:"release-groups"`
 }
 
-// ReleaseGroups lists an artist's albums (release-groups of type "album").
-// The returned slice is capped at releaseGroupsLimit; total is
-// MusicBrainz's reported match count, which the caller must compare against
-// len(slice) to detect truncation - it is never inferred from the slice
-// alone.
-func (c *Client) ReleaseGroups(ctx context.Context, artistMBID string) ([]core.MBReleaseGroup, int, error) {
-	reqURL := fmt.Sprintf("%s/ws/2/release-group?artist=%s&type=album&fmt=json&limit=%d",
-		c.baseURL, url.QueryEscape(artistMBID), releaseGroupsLimit)
-	var body wireReleaseGroupSearch
-	if err := c.get(ctx, reqURL, "release groups", &body); err != nil {
+// releaseGroupSearchQuery builds the Lucene query string for
+// SearchReleaseGroups: artist:(<artist>) AND releasegroup:(<album>), or just
+// releasegroup:(<album>) when artist is blank. Both terms are escaped with
+// escapeLucene before interpolation; fuzzy appends "~" inside the album
+// term's parens, MusicBrainz's own syntax for a fuzzy-matched term.
+func releaseGroupSearchQuery(artist, album string, fuzzy bool) string {
+	albumTerm := escapeLucene(album)
+	if fuzzy {
+		albumTerm += "~"
+	}
+	query := fmt.Sprintf("releasegroup:(%s)", albumTerm)
+	if artist != "" {
+		query = fmt.Sprintf("artist:(%s) AND %s", escapeLucene(artist), query)
+	}
+	return query
+}
+
+// SearchReleaseGroups runs a single combined artist+album search against
+// MusicBrainz's release-group search endpoint (issue #321), replacing the
+// old two-step SearchArtists+ReleaseGroups flow: that flow could not supply
+// an edition count, and the obvious alternative - a release-group search
+// filtered only by arid: - comes back with every hit at score=100 in an
+// order that buries the canonical albums (Metallica's first 100 such
+// results contain neither "Ride the Lightning" nor "Master of Puppets").
+//
+// artist may be blank - the query then omits the artist:() clause entirely
+// - but an album-only search ranks poorly: MusicBrainz's own relevance
+// scoring does not reliably surface the right release-group without an
+// artist to disambiguate, so callers should not treat a blank artist as
+// equivalent to a targeted search, only as a degraded one.
+//
+// When the strict query returns zero hits, SearchReleaseGroups retries once
+// with a fuzzy album term (releasegroup:(<album>~)), which rescues typos
+// without broadening every other search's result set - the fuzzy retry only
+// fires on a miss, never as the default. The returned slice is capped at
+// searchReleaseGroupsLimit; total is MusicBrainz's reported match count from
+// whichever request produced the returned slice, which the caller must
+// compare against len(slice) to detect truncation - it is never inferred
+// from the slice alone.
+func (c *Client) SearchReleaseGroups(ctx context.Context, artist, album string) ([]core.MBReleaseGroup, int, error) {
+	groups, total, err := c.searchReleaseGroups(ctx, artist, album, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return c.searchReleaseGroups(ctx, artist, album, true)
+	}
+	return groups, total, nil
+}
+
+func (c *Client) searchReleaseGroups(ctx context.Context, artist, album string, fuzzy bool) ([]core.MBReleaseGroup, int, error) {
+	query := releaseGroupSearchQuery(artist, album, fuzzy)
+	reqURL := fmt.Sprintf("%s/ws/2/release-group?query=%s&fmt=json&limit=%d",
+		c.baseURL, url.QueryEscape(query), searchReleaseGroupsLimit)
+	var body wireReleaseGroupQuery
+	if err := c.get(ctx, reqURL, "release-group search", &body); err != nil {
 		return nil, 0, err
 	}
 	out := make([]core.MBReleaseGroup, 0, len(body.ReleaseGroups))
 	for _, rg := range body.ReleaseGroups {
+		var artistName, artistID string
+		if len(rg.ArtistCredit) > 0 {
+			artistName, artistID = rg.ArtistCredit[0].Name, rg.ArtistCredit[0].Artist.ID
+		}
 		out = append(out, core.MBReleaseGroup{
-			ID: rg.ID, Title: rg.Title, FirstReleaseDate: rg.FirstReleaseDate,
-			PrimaryType: rg.PrimaryType, SecondaryTypes: rg.SecondaryTypes,
+			ID: rg.ID, Title: rg.Title, ArtistName: artistName, ArtistID: artistID,
+			FirstReleaseDate: rg.FirstReleaseDate, PrimaryType: rg.PrimaryType,
+			SecondaryTypes: rg.SecondaryTypes, EditionCount: rg.Count, Score: rg.Score,
 		})
 	}
 	return out, body.Count, nil

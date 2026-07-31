@@ -1,27 +1,28 @@
 package core
 
-// MBArtist is one MusicBrainz artist search result (issue #321). Score is
-// MusicBrainz's own relevance score for the query, 0-100, passed through
-// verbatim so the frontend can order results the same way MusicBrainz does.
-type MBArtist struct {
-	ID             string
-	Name           string
-	Type           string
-	Country        string
-	Disambiguation string
-	Score          int
-}
-
-// MBReleaseGroup is one of an artist's albums (a MusicBrainz release-group).
-// Its ID is the value Lidarr calls foreignAlbumId - see internal/lidarr's
-// AlbumByForeignID, which looks a release-group up in the user's library by
-// this same id.
+// MBReleaseGroup is one release-group hit from MusicBrainz's combined
+// artist+album search (issue #321). Its ID is the value Lidarr calls
+// foreignAlbumId - see internal/lidarr's AlbumByForeignID, which looks a
+// release-group up in the user's library by this same id.
+//
+// ArtistName/ArtistID come from the hit's first artist-credit entry, so a
+// search result row can show and link its artist without a second lookup.
+// EditionCount is MusicBrainz's own "count" field on the hit - the number of
+// releases (editions) in the release-group, exactly what
+// internal/musicbrainz.Client.Releases would return the length of, without
+// paying for that second request. Score is MusicBrainz's own relevance
+// score for the query, 0-100, passed through verbatim so the frontend can
+// order results the same way MusicBrainz does.
 type MBReleaseGroup struct {
 	ID               string
 	Title            string
+	ArtistName       string
+	ArtistID         string
 	FirstReleaseDate string
 	PrimaryType      string
 	SecondaryTypes   []string
+	EditionCount     int
+	Score            int
 }
 
 // MBRelease is one edition of a release-group, carrying its own track count
