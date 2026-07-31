@@ -831,6 +831,68 @@ func TestDiscoveryRejectsIrrelevantCandidate(t *testing.T) {
 	}
 }
 
+// TestDiscoverySearchExcludedFailsJobImmediately confirms a
+// core.ErrSearchExcluded from the searcher (issue #319: the Soulseek server
+// told every peer to ignore this exact query) fails the job on the very first
+// hit rather than consuming the retry/backoff budget - retrying is pure waste
+// since the excluded-phrase list is stable across retries - and that the
+// error itself never escapes Tick (it is a routine, expected outcome, not a
+// module failure).
+func TestDiscoverySearchExcludedFailsJobImmediately(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	excludedErr := fmt.Errorf("%w: %q", core.ErrSearchExcluded, "artist album")
+	searcher := &fakeSearcher{searchErrForQuery: map[string]error{"Artist Album": excludedErr}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	p.MaxRetries = 50 // high on purpose: an excluded search must not touch this budget
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick should swallow the excluded-search error, got: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED immediately, got %+v", jobs)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var sawExcluded bool
+	for _, ev := range events {
+		if ev.Event == core.EventSearchExcluded {
+			sawExcluded = true
+			if !strings.Contains(ev.Detail, "Artist Album") || !strings.Contains(ev.Detail, "artist album") {
+				t.Errorf("search_excluded detail = %q, want it to name the query and the matched phrase", ev.Detail)
+			}
+		}
+	}
+	if !sawExcluded {
+		t.Errorf("expected a search_excluded event, got %+v", events)
+	}
+
+	passes, err := st.RecentSearchPasses(ctx, 10)
+	if err != nil {
+		t.Fatalf("RecentSearchPasses: %v", err)
+	}
+	if len(passes) != 1 || passes[0].Matched != 0 {
+		t.Errorf("expected one unmatched search pass, got %+v", passes)
+	}
+}
+
 // TestDiscoveryAlbumTracksErrorDegradesToDirectoryCheck asserts an
 // AlbumTracks error DEGRADES the relevance gate to a directory-only check
 // rather than aborting discovery (unlike AlbumReleases, which is load-bearing
@@ -905,5 +967,77 @@ func TestDiscoverySkipsAlbumTracksWhenSearchIsEmpty(t *testing.T) {
 
 	if music.albumTracksCalls != 0 {
 		t.Errorf("expected AlbumTracks not called on an empty search, got %d calls", music.albumTracksCalls)
+	}
+}
+
+// TestDiscoverySearchExcludedOnFallbackFailsJobImmediately confirms
+// core.ErrSearchExcluded is handled the same way when it comes back from the
+// *normalized fallback* search (issue #319) as when it comes back from the
+// primary one: the primary query returns zero raw results (not an error),
+// normalizeQuery strips its "(Deluxe Edition)" suffix into a different
+// fallback query, and that fallback search is the one the server excludes.
+// The job must still fail on the spot, without touching the retry budget,
+// and a search_excluded event must still be recorded.
+func TestDiscoverySearchExcludedOnFallbackFailsJobImmediately(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album (Deluxe Edition)", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	excludedErr := fmt.Errorf("%w: %q", core.ErrSearchExcluded, "artist album")
+	searcher := &fakeSearcher{
+		// Primary query "Artist Album (Deluxe Edition)" is absent from
+		// resultsForQuery/searchErrForQuery, so it falls through to the
+		// zero-value default `results` (nil) - a normal empty result, not an
+		// error - which is what triggers the normalized fallback below.
+		resultsForQuery:   map[string][]core.SearchResult{},
+		searchErrForQuery: map[string]error{"Artist Album": excludedErr},
+	}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	p.MaxRetries = 50 // high on purpose: an excluded search must not touch this budget
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick should swallow the excluded-search error, got: %v", err)
+	}
+
+	// Assert the fallback is what tripped the exclusion. The event detail cannot
+	// carry that on its own: the fallback query is a substring of the primary
+	// one, so a detail naming "Artist Album" would read the same either way.
+	if len(searcher.queries) != 2 {
+		t.Fatalf("expected the primary search then the normalized fallback, got %q", searcher.queries)
+	}
+	if searcher.queries[1] != "Artist Album" {
+		t.Fatalf("second search = %q, want the normalized fallback query", searcher.queries[1])
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job FAILED immediately, got %+v", jobs)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var sawExcluded bool
+	for _, ev := range events {
+		if ev.Event == core.EventSearchExcluded {
+			sawExcluded = true
+			if !strings.Contains(ev.Detail, "Artist Album") || !strings.Contains(ev.Detail, "artist album") {
+				t.Errorf("search_excluded detail = %q, want it to name the fallback query and the matched phrase", ev.Detail)
+			}
+		}
+	}
+	if !sawExcluded {
+		t.Errorf("expected a search_excluded event, got %+v", events)
 	}
 }

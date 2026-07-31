@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,6 +138,13 @@ func (c *Client) Search(ctx context.Context, query string, timeout time.Duration
 	}
 	if timeout <= 0 {
 		return nil, nil
+	}
+	if phrase, excluded := matchExcludedPhrase(query, c.excludedPhrases.Load()); excluded {
+		// Every well-behaved peer refuses to answer a search whose terms cover
+		// an excluded phrase, so nothing is gained by putting this on the wire
+		// (issue #319). Report it truthfully rather than silently returning an
+		// empty result set indistinguishable from "nobody has this".
+		return nil, fmt.Errorf("%w: %q", core.ErrSearchExcluded, phrase)
 	}
 	deadline := time.Now().Add(timeout)
 
@@ -340,4 +348,48 @@ func checkedUint32ToInt(value uint32) (int, bool) {
 
 func checkedNonnegativeInt(value int) (int, bool) {
 	return value, value >= 0
+}
+
+// matchExcludedPhrase reports whether query covers any phrase in phrases,
+// using the server's actual matching semantics (empirically measured for
+// issue #319): token-set containment, case-insensitive, order-independent and
+// position-independent - not substring or adjacency matching. A phrase
+// matches when every one of its tokens appears somewhere among the query's
+// tokens, regardless of order or what else the query contains. phrases may be
+// nil (nothing pushed yet, or an empty list), in which case nothing matches.
+func matchExcludedPhrase(query string, phrases *[]string) (phrase string, matched bool) {
+	if phrases == nil || len(*phrases) == 0 {
+		return "", false
+	}
+	queryTokens := tokenSet(query)
+	if len(queryTokens) == 0 {
+		return "", false
+	}
+	for _, p := range *phrases {
+		phraseTokens := strings.Fields(strings.ToLower(p))
+		if len(phraseTokens) == 0 {
+			continue
+		}
+		covered := true
+		for _, t := range phraseTokens {
+			if !queryTokens[t] {
+				covered = false
+				break
+			}
+		}
+		if covered {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// tokenSet lowercases and whitespace-splits s into a set of unique tokens.
+func tokenSet(s string) map[string]bool {
+	fields := strings.Fields(strings.ToLower(s))
+	set := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		set[f] = true
+	}
+	return set
 }

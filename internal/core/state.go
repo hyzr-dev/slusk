@@ -76,6 +76,7 @@ type JobEventType string
 const (
 	EventSearch            JobEventType = "search"
 	EventSearchFallback    JobEventType = "search_fallback"
+	EventSearchExcluded    JobEventType = "search_excluded"
 	EventCandidateSelected JobEventType = "candidate_selected"
 	EventCandidateRejected JobEventType = "candidate_rejected"
 	EventAttemptFailed     JobEventType = "attempt_failed"

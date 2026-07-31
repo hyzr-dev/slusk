@@ -122,3 +122,12 @@ type RemoteTransfer struct {
 // as not found — typically a routine outcome (e.g. the provider already
 // forgot a terminal transfer), not a real failure.
 var ErrRemoteNotFound = errors.New("remote resource not found")
+
+// ErrSearchExcluded is returned (wrapped) by a peer-to-peer provider adapter
+// when a search query covers a phrase the Soulseek server has told clients to
+// exclude (server code 160): well-behaved peers refuse to answer any search
+// whose terms cover an excluded phrase, so the query would return zero
+// results from every peer no matter how many times it is retried. Callers
+// should treat this as a permanent, non-retryable outcome for that query
+// rather than backing off and reissuing it.
+var ErrSearchExcluded = errors.New("search query covers a server-excluded phrase")

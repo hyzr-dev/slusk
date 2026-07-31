@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -146,6 +147,26 @@ func (d *Discovery) Tick(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// failExcludedSearch handles a search rejected by matchExcludedPhrase
+// (core.ErrSearchExcluded, issue #319): the Soulseek server has told every
+// well-behaved peer to ignore this exact query, so it is not "nobody has this
+// album" and it is not transient - retrying would burn the whole backoff
+// budget re-issuing a query that is doomed by construction. maxRetries=0
+// makes failOrBackoff fail the job on this first hit (job.Retries+1 is always
+// >= 0) instead of backing off. The search cycle still counts as completed
+// (it reached a normal conclusion, just an unmatched one), and the excluded-
+// search error is deliberately not returned to the caller: propagating it out
+// of Tick would misreport a routine, expected outcome as a module failure.
+func (d *Discovery) failExcludedSearch(ctx context.Context, job core.AlbumJob, query string, err error, now time.Time) (completed, matched bool, out error) {
+	detail := fmt.Sprintf("search excluded by server phrase list: query=%q: %v", query, err)
+	d.log().Info(detail, "album_job", job.ID, "query", query)
+	d.recordEvent(ctx, job.ID, core.EventSearchExcluded, detail, now)
+	if _, ferr := failOrBackoff(ctx, d.p.Store, d.log(), job, 0, d.p.BackoffBase, d.p.BackoffCap, false, now); ferr != nil {
+		return false, false, ferr
+	}
+	return true, false, nil
+}
+
 // recordSearchPass best-effort appends one row recording a completed
 // Discovery search cycle, for the Overview charts (issue #88). A write
 // failure must never block the pipeline, so it is logged at warn level and
@@ -219,6 +240,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	query := album.ArtistName + " " + album.Title
 	results, err := d.p.Peers.Search(ctx, query, d.p.SearchTimeout)
 	if err != nil {
+		if errors.Is(err, core.ErrSearchExcluded) {
+			return d.failExcludedSearch(ctx, job, query, err, now)
+		}
 		return false, false, err
 	}
 	if len(results) == 0 {
@@ -236,6 +260,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			d.recordEvent(ctx, job.ID, core.EventSearchFallback, fallbackDetail, now)
 			results, err = d.p.Peers.Search(ctx, fallback, d.p.SearchTimeout)
 			if err != nil {
+				if errors.Is(err, core.ErrSearchExcluded) {
+					return d.failExcludedSearch(ctx, job, fallback, err, now)
+				}
 				return false, false, err
 			}
 			query = fallback

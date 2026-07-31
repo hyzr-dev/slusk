@@ -9,6 +9,13 @@ describe('eventLabel', () => {
   it('falls back to the raw code for an unrecognised code', () => {
     expect(eventLabel('some_future_event')).toBe('some_future_event');
   });
+
+  // Asserted against the literal copy rather than t.event.search_excluded: the
+  // raw-code fallback means a missing entry degrades silently, so comparing the
+  // map to itself would still pass with the label gone (issue #319).
+  it('has a human label for the server-exclusion event', () => {
+    expect(eventLabel('search_excluded')).toBe('Search excluded by server');
+  });
 });
 
 describe('candidateStateLabel', () => {
