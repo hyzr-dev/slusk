@@ -449,6 +449,17 @@ func TestPagedJobsEndpointParsesInflightFinishedAndFacets(t *testing.T) {
 			suffix: "?filter=finished&sort=recent&dir=desc&pageSize=5&facets=0",
 			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 5, SkipFacets: true},
 		},
+		{
+			// Overview's FAILED JOBS panel (issue #310). This case exists
+			// because parsePagedJobsQuery keeps its own filter allowlist,
+			// separate from store.validateDashboardJobsQuery's: #310 added
+			// "failures" to the store's copy only, and every store and
+			// frontend test still passed while the real endpoint answered
+			// 400. Only a request that actually crosses the URL parser
+			// catches that, so every filter Overview sends needs a case here.
+			suffix: "?filter=failures&sort=recent&dir=desc&pageSize=8&facets=0",
+			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "failures", Source: "all", PageSize: 8, SkipFacets: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.suffix, func(t *testing.T) {

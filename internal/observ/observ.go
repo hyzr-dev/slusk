@@ -875,7 +875,14 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	if query.Sort == "recent" && query.Dir == "asc" {
 		return PagedJobsQuery{}, errors.New("dir=asc is not supported for sort=recent")
 	}
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished") {
+	// This list is a second, independent copy of the one in
+	// store.validateDashboardJobsQuery, and the two must be kept in step: the
+	// store's copy is never reached for a value rejected here, so a filter
+	// added there but not here is a 400 the store-level tests cannot see
+	// (issue #310 shipped exactly that until a lab run caught it).
+	// "failures" and "failed" are deliberately both present and deliberately
+	// different — see the case comments in store.dashboardJobsWhere.
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {
