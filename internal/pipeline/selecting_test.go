@@ -752,11 +752,12 @@ func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
 	}
 }
 
-// TestSelectingManualJobIgnoresCandidateTTL covers #347's Change 2: a manual
-// job retried via RetryManualJob revives a candidate whose created_at is by
-// definition old (it dates back to the original manual job creation), which
-// would otherwise trip CandidateTTL. The candidate must still be tried, not
-// discarded for a re-search that does not exist for a manual job.
+// TestSelectingManualJobIgnoresCandidateTTL covers the CandidateTTL bypass
+// (issue #347): a manual job retried via RetryManualJob revives a candidate
+// whose created_at is by definition old (it dates back to the original
+// manual job creation), which would otherwise trip CandidateTTL. The
+// candidate must still be tried, not discarded for a re-search that does not
+// exist for a manual job.
 func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	ctx := context.Background()
 	createdAt := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
@@ -778,8 +779,9 @@ func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, createdAt); err != nil {
 		t.Fatalf("FailCandidateAndAdvance: %v", err)
 	}
-	// Change 1 fails the job on this SELECTING tick (no NEW candidate left);
-	// only a FAILED job is retryable, matching the real dashboard flow.
+	// The manual-job exhaustion branch fails the job on this SELECTING tick
+	// (no NEW candidate left); only a FAILED job is retryable, matching the
+	// real dashboard flow.
 	if err := NewSelecting(p).Tick(ctx, createdAt); err != nil {
 		t.Fatalf("Tick (initial failure): %v", err)
 	}

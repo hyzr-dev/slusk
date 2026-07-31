@@ -182,6 +182,9 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 // Returns false when the job is not retryable (the dashboard button raced a
 // state change) or does not exist. Candidates/transfers must go with the reset
 // for the same ownership/FK and clean-slate reason as ResetJobToWanted.
+// A manual job goes through RetryManualJob instead (issue #347); this
+// function is deliberately not source-guarded, since the routing between the
+// two lives in app.Jobs.Retry, not here.
 func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -222,7 +225,12 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 // manual job (issue #347) by retrying the same peer, rather than
 // RetryFailedJob's re-search: the user picked this candidate for a reason the
 // protocol carries nowhere (a FLAC rip, a bitrate, a particular edition), so a
-// manual job's retry must try that same peer again, not go hunting.
+// manual job's retry must try that same peer again, not go hunting. FAILED is
+// the routine path (Discovery/Selecting failing a manual job outright, or a
+// candidate exhausted with none left to try); PARKED is a live one too - a
+// manual job is created straight into DOWNLOADING, and ParkJobForCandidate
+// parks any DOWNLOADING job whose transfer settles terminally. Legacy
+// ORPHANED is kept for parity with RetryFailedJob's allowlist.
 //
 // Unlike RetryFailedJob it revives the job's candidates to NEW instead of
 // deleting them: the cached files JSON and username are the user's original
@@ -234,7 +242,9 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 //
 // Returns false when the job is not a retryable manual job (wrong source,
 // wrong state, or does not exist) - the dashboard button raced a state
-// change, or was pointed at a lidarr-sourced job.
+// change, or was pointed at a lidarr-sourced job. Returns ErrRemoteFileBusy,
+// leaving the job untouched, if another live candidate already owns one of
+// the revived candidate's (peer, filename) pairs - see the pre-check below.
 //
 // One deliberate asymmetry from CreateManualJob: creation bypasses the
 // MaxActive cap since the user asked for it explicitly, but a retry goes
@@ -264,12 +274,58 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 		return false, nil
 	}
 
+	// Mirror CreateManualJob's ErrRemoteFileBusy guard: unlike creation, which
+	// discovers the conflict for free from the transfer INSERT's unique-
+	// violation, a retry does not re-insert transfers here - that happens
+	// later, in Selecting/ActivateCandidateWithTransfers - so without this
+	// pre-check a busy file would instead hit DeferSelectingJob and livelock
+	// the job in SELECTING forever: the TTL branch that used to eventually
+	// rescue it is bypassed for manual jobs (see selectJob's Source guard),
+	// and nothing else ever un-defers a candidate-specific skip. Checking here
+	// cannot see an activation racing in between this commit and Selecting's
+	// next tick, but it catches the common case (a second manual job already
+	// claiming the same peer+filename) up front instead of silently spinning.
+	var username string
+	var files []byte
+	if err := tx.QueryRowContext(ctx,
+		`SELECT username, files FROM candidates WHERE album_job_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		jobID).Scan(&username, &files); err != nil {
+		return false, fmt.Errorf("retry manual job: fetch candidate: %w", err)
+	}
+	var busy bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM transfers t
+		   JOIN candidates c ON c.id = t.candidate_id
+		   WHERE t.username = $1
+		     AND t.filename IN (SELECT f.value->>'filename' FROM jsonb_array_elements($2::jsonb) f)
+		     AND t.state IN ($3, $4, $5, $6)
+		     AND c.album_job_id <> $7
+		 )`,
+		username, string(files),
+		string(core.TransferPending), string(core.TransferQueued), string(core.TransferInProgress), string(core.TransferStalled),
+		jobID).Scan(&busy); err != nil {
+		return false, fmt.Errorf("retry manual job: check remote file ownership: %w", err)
+	}
+	if busy {
+		return false, ErrRemoteFileBusy
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID); err != nil {
 		return false, fmt.Errorf("retry manual job: delete candidate transfers: %w", err)
 	}
+	// fail_reason and import_submitted_at must be cleared too, not just state:
+	// RetryFailedJob gets this for free by deleting the candidate row outright,
+	// but a revive keeps it. A leftover fail_reason surfaces the previous
+	// attempt's failure on the dashboard while the retry is still in flight
+	// (JobWithTransfer, dashboard.go). A leftover import_submitted_at is worse:
+	// if the revived candidate reaches IMPORTING again, Importing.Tick keys
+	// verify-vs-confirm on it (importing.go) and a non-NULL timestamp skips
+	// straight to confirm, whose timeout is measured from the *stale* value and
+	// so has already expired - an instant failUnconfirmed.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE candidates SET state = $1, updated_at = $2 WHERE album_job_id = $3`,
+		`UPDATE candidates SET state = $1, fail_reason = '', import_submitted_at = NULL, updated_at = $2 WHERE album_job_id = $3`,
 		string(core.CandidateNew), now, jobID); err != nil {
 		return false, fmt.Errorf("retry manual job: revive candidates: %w", err)
 	}
@@ -641,6 +697,12 @@ func (s *Store) SetJobTrackBand(ctx context.Context, jobID int64, minTracks, max
 // valid from almost any non-active state (WANTED, SELECTING, FAILED, PARKED,
 // legacy ORPHANED, CANCELLED, ...). Returns false when the job is actively
 // transferring (the dashboard button raced a state change) or does not exist.
+//
+// Deliberately not source-guarded: a manual job is rejected upstream, in
+// app.Jobs.ForceSearch (issue #347), before this ever runs - resetting one to
+// WANTED with its candidate deleted would leave Discovery's Source guard to
+// fail it right back out, since a manual job has no lidarr_album_id to search
+// for. A caller reaching this function directly bypasses that check.
 func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

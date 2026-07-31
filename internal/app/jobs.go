@@ -36,6 +36,16 @@ var ErrRemoteFileBusy = errors.New("remote file already claimed by another live 
 // (and discard) an in-flight transfer or import.
 var ErrJobActive = errors.New("job is actively transferring")
 
+// ErrJobNotSearchable is returned by ForceSearch when the job exists but is
+// manual-sourced. A force-search cannot work on a manual job in any case -
+// its lidarr_album_id is NULL, so there is nothing for Discovery to search
+// for - and store.ForceSearchJob has no source guard of its own (it deletes
+// candidates unconditionally), so the rejection must happen here, before the
+// store call, or a manual job would be reset to WANTED with its candidate
+// gone and no way to search for a replacement, permanently failing on the
+// very next Discovery tick.
+var ErrJobNotSearchable = errors.New("job is manual-sourced and cannot be force-searched")
+
 // ErrJobImporting is returned by Delete when the job exists but is currently
 // IMPORTING. Mirrors store.ErrJobImporting so observ never needs to import
 // internal/store.
@@ -115,6 +125,9 @@ func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
 // (issue #347) retries the same peer via RetryManualJob rather than
 // re-searching: the user picked that peer for a reason the protocol carries
 // nowhere, and the pipeline must never go hunting on a manual job's behalf.
+// Returns ErrRemoteFileBusy if another live candidate already owns one of the
+// revived candidate's (peer, filename) pairs, the same error Create returns
+// for the same underlying conflict.
 func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {
@@ -128,6 +141,9 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 		ok, err = j.Store.RetryManualJob(ctx, jobID, time.Now())
 	} else {
 		ok, err = j.Store.RetryFailedJob(ctx, jobID, time.Now())
+	}
+	if errors.Is(err, store.ErrRemoteFileBusy) {
+		return ErrRemoteFileBusy
 	}
 	if err != nil {
 		return err
@@ -168,9 +184,11 @@ func (j *Jobs) Create(ctx context.Context, title, artistName, peer string, files
 
 // ForceSearch manually re-queues one job (issue #159) for an immediate
 // re-search, bypassing any current backoff: ErrJobNotFound if no such job
-// exists, ErrJobActive if it is currently DOWNLOADING or IMPORTING (either
-// found on the initial lookup, or discovered by the store's guard when the
-// caller raced a state change).
+// exists, ErrJobNotSearchable if it is manual-sourced (issue #347 - a manual
+// job has no lidarr_album_id to search for, and store.ForceSearchJob is not
+// source-guarded, so this must be rejected here), ErrJobActive if it is
+// currently DOWNLOADING or IMPORTING (either found on the initial lookup, or
+// discovered by the store's guard when the caller raced a state change).
 func (j *Jobs) ForceSearch(ctx context.Context, jobID int64) error {
 	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {
@@ -178,6 +196,9 @@ func (j *Jobs) ForceSearch(ctx context.Context, jobID int64) error {
 	}
 	if !found {
 		return ErrJobNotFound
+	}
+	if view.Job.Source == core.SourceManual {
+		return ErrJobNotSearchable
 	}
 	if view.Job.State == core.StateDownloading || view.Job.State == core.StateImporting {
 		return ErrJobActive

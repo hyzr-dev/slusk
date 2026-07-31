@@ -1042,7 +1042,8 @@ func TestDiscoverySearchExcludedOnFallbackFailsJobImmediately(t *testing.T) {
 	}
 }
 
-// TestDiscoverySkipsAndFailsManualJob covers issue #347's Change 4: a manual
+// TestDiscoverySkipsAndFailsManualJob covers the Discovery source guard (issue
+// #347): a manual
 // job must never reach Peers.Search, whatever LidarrAlbumID it happens to
 // carry. It reaches WANTED here the same way a production zombie would (the
 // #58/#155 bug this self-heals): created straight into DOWNLOADING like any

@@ -189,9 +189,9 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		//
 		// A manual job (issue #155) never gets a re-search: the user picked one
 		// specific peer, often for a reason the protocol carries nowhere (a FLAC
-		// rip, a bitrate, a particular edition), and Discovery/#347 refuses to
-		// search on a manual job's behalf anyway. So this goes straight to
-		// MarkJobFailed instead of failOrBackoff, on the first failure -
+		// rip, a bitrate, a particular edition), and Discovery (issue #347)
+		// refuses to search on a manual job's behalf anyway. So this goes
+		// straight to MarkJobFailed instead of failOrBackoff, on the first failure -
 		// retries is never consumed. This is also path 2's fix: an IMPORTING ->
 		// SELECTING bounce from a manual job's import dying on
 		// Music.AlbumStatus(0) (#59) now ends here too, visibly FAILED instead

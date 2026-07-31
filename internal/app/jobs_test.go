@@ -432,6 +432,40 @@ func TestJobsForceSearchNotFound(t *testing.T) {
 	}
 }
 
+// TestJobsForceSearchManualJob covers issue #347: a manual job cannot be
+// force-searched (it has no lidarr_album_id to search for), and the rejection
+// must happen before the store call - store.ForceSearchJob has no source
+// guard of its own and would delete the candidate unconditionally.
+func TestJobsForceSearchManualJob(t *testing.T) {
+	store := &fakeJobStore{jobs: map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: core.SourceManual, State: core.StateFailed}}}}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); !errors.Is(err, ErrJobNotSearchable) {
+		t.Fatalf("ForceSearch() = %v, want ErrJobNotSearchable", err)
+	}
+	if store.forceSearchCalled {
+		t.Errorf("ForceSearchJob must not be called for a manual job")
+	}
+}
+
+// TestJobsForceSearchLidarrJobUnaffected guards the routing the other way: a
+// lidarr-sourced job's ForceSearch behaviour must be unchanged by the manual-
+// job guard above.
+func TestJobsForceSearchLidarrJobUnaffected(t *testing.T) {
+	store := &fakeJobStore{
+		jobs:          map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: core.SourceLidarr, State: core.StateFailed}}},
+		forceSearchOK: true,
+	}
+	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+	if err := j.ForceSearch(context.Background(), 1); err != nil {
+		t.Fatalf("ForceSearch() = %v, want nil", err)
+	}
+	if !store.forceSearchCalled {
+		t.Errorf("expected ForceSearchJob to have been called for a lidarr job")
+	}
+}
+
 // TestJobsForceSearchActiveState covers the fast path: the initial lookup
 // already shows DOWNLOADING/IMPORTING, so the store is never called.
 func TestJobsForceSearchActiveState(t *testing.T) {

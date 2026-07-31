@@ -187,10 +187,12 @@ func (d *Discovery) recordSearchPass(ctx context.Context, matched bool, now time
 // either caches the survivors and advances the job to SELECTING, or backs it
 // off (still WANTED) when nothing survives. completed reports whether the
 // search cycle ran to one of its two normal conclusions (backed off or
-// matched) rather than aborting early (album missing from the wanted
-// snapshot, an AlbumReleases error - checked before any Soulseek search is
-// issued, see below - or a search error) - Tick only records a search pass
-// when completed is true. matched is true only when the job
+// matched) rather than aborting early (a manual job reaching Discovery at
+// all, failed outright before any of the checks below - see the Source guard
+// above; the album missing from the wanted snapshot; an AlbumReleases error -
+// checked before any Soulseek search is issued, see below - or a search
+// error) - Tick only records a search pass when completed is true. matched
+// is true only when the job
 // actually advanced to SELECTING: InsertCandidates cached surviving
 // candidates AND AdvanceJobStateFrom confirms the job was still WANTED to
 // advance from (it can report advanced=false if the job concurrently left
@@ -207,7 +209,11 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// download someone else's files in the user's name. Guarding on
 		// Source closes that door in advance. This also self-heals the
 		// zombies already sitting in production WANTED since #58/#155
-		// shipped: no migration needed, the next Discovery tick fails them.
+		// shipped: no migration needed. Not immediately, though -
+		// RunnableJobsInState orders WANTED by release_date DESC and a
+		// manual job's release_date is always empty, so it sorts last; a
+		// zombie is only reached once the real backlog has left WANTED or
+		// backed off, not on the very next tick.
 		// completed=false, matched=false: this pass is not counted as a
 		// search (see Tick).
 		detail := "manual job reached Discovery, failing rather than searching"
