@@ -67,21 +67,32 @@ export default function Login({ mode }: { mode: LoginMode }) {
       setClientError(t.auth.usernameRequired);
       return;
     }
-    if (trimmedUsername.length > MAX_USERNAME_BYTES) {
-      setClientError(t.auth.usernameRequired);
-      return;
-    }
-    if (byteLength(password) < MIN_PASSWORD_BYTES) {
-      setClientError(t.auth.passwordTooShort);
-      return;
-    }
-    if (byteLength(password) > MAX_PASSWORD_BYTES) {
-      setClientError(t.auth.passwordTooLong);
-      return;
-    }
-    if (mode === 'setup' && password !== confirmPassword) {
-      setClientError(t.auth.passwordMismatch);
-      return;
+    // Length and shape rules apply to setup ONLY. They are policy for a
+    // password being CREATED, and on the login form they would be three
+    // separate mistakes: they claim an existing credential is malformed when
+    // it is merely wrong, they hand an unauthenticated visitor the policy the
+    // server deliberately withholds by answering 401 identically for a wrong
+    // password and an unknown user, and — worst — they short-circuit before
+    // the request, so tightening a limit later would lock out every account
+    // created under the old one without the server ever being asked. There is
+    // no password reset to recover from that.
+    if (mode === 'setup') {
+      if (trimmedUsername.length > MAX_USERNAME_BYTES) {
+        setClientError(t.auth.usernameRequired);
+        return;
+      }
+      if (byteLength(password) < MIN_PASSWORD_BYTES) {
+        setClientError(t.auth.passwordTooShort);
+        return;
+      }
+      if (byteLength(password) > MAX_PASSWORD_BYTES) {
+        setClientError(t.auth.passwordTooLong);
+        return;
+      }
+      if (password !== confirmPassword) {
+        setClientError(t.auth.passwordMismatch);
+        return;
+      }
     }
     setClientError('');
     mutation.mutate({ username: trimmedUsername, password });
