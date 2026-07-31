@@ -1,7 +1,7 @@
 .notice {
   padding: 9px 16px;
   border-bottom: 1px solid var(--line);
-  color: var(--faint);
+  color: var(--text-dim);
   font-size: 11.5px;
 }
 
@@ -61,7 +61,7 @@
    notion of aria-expanded.
 
    The one deliberate deviation is the color: --fg rather than SectionHeader's
-   --faint. Elsewhere a section header labels content that is visible right
+   --text-dim. Elsewhere a section header labels content that is visible right
    below it, so the header can recede. Here the sections collapse, and a
    collapsed header IS the content — the reader has nothing else to go on when
    looking for the setting they came for. */
@@ -107,7 +107,7 @@
 
 .sectionHeaderRight { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 
-.chevron { font-size: 11px; color: var(--faint); }
+.chevron { font-size: 11px; color: var(--text-dim); }
 
 /* Content wrapper for an open section — carries the padding the group used
    to get from its own card chrome, since the header row is edge-to-edge. */
@@ -162,7 +162,7 @@
   padding: 0 4px;
   border: 1px solid var(--line2);
   background: none;
-  color: var(--faint);
+  color: var(--text-dim);
   font-size: 9.5px;
   line-height: 14px;
   cursor: pointer;
@@ -230,7 +230,7 @@
 
 .input:disabled,
 .select:disabled {
-  color: var(--faint);
+  color: var(--text-dim);
   cursor: default;
 }
 .input:not(:disabled) { cursor: text; }
@@ -291,7 +291,7 @@
 .testLabel { width: 220px; font-size: 11.5px; color: var(--fg); }
 
 .status { font-size: 11px; letter-spacing: 0.4px; }
-.untested { color: var(--faint); }
+.untested { color: var(--text-dim); }
 .testing { color: var(--dim); }
 .success { color: var(--ok); }
 .failure { color: var(--bad); }
