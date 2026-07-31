@@ -123,9 +123,13 @@ func registerAuth(mux *http.ServeMux, tokenAuth Authenticator, setupRequired Set
 	})
 
 	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
-		if !requireJSONBody(w, r) {
-			return
-		}
+		// Deliberately NOT gated by requireJSONBody, unlike setup/login: logout
+		// carries no body to inject credentials or a hijack-worthy side effect
+		// into - a forged cross-site POST here can only force a no-op logout
+		// (the worst outcome is the operator has to log back in), not create
+		// an account or take over a session the way a forged setup/login body
+		// could. web/src/api/client.ts's apiPost (used by useLogout) also sends
+		// no Content-Type at all, so requiring one here would break it.
 		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" && logout != nil {
 			// Best-effort: a store error here must not stop the client from
 			// clearing its own cookie below (logout is expected to always
@@ -141,9 +145,10 @@ func registerAuth(mux *http.ServeMux, tokenAuth Authenticator, setupRequired Set
 // application/json with 415, writing the error response itself; callers
 // should return immediately when it reports false.
 //
-// This is the actual CSRF defence for POST /api/auth/{setup,login,logout}
-// (see ProtectPrivateEndpoints' doc comment in security.go for why
-// SameSite=Strict alone is NOT sufficient): application/json is not a
+// This is the actual CSRF defence for POST /api/auth/{setup,login} (see
+// ProtectPrivateEndpoints' doc comment in security.go for why
+// SameSite=Strict alone is NOT sufficient, and registerAuth's logout handler
+// for why logout deliberately does NOT use this): application/json is not a
 // CORS-safelisted content type, so a cross-origin HTML form - which cannot
 // set an arbitrary Content-Type without triggering a preflight the browser
 // then refuses to send past - cannot reach these handlers with a body they
