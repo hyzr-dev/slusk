@@ -489,6 +489,11 @@ export const t = {
   // EmptyState) rather than that mock's own markup.
   search: {
     queryPlaceholder: 'Search Soulseek — artist, album, track…',
+    // Visually hidden, but a real <label htmlFor> rather than relying on the
+    // placeholder: a placeholder-derived accessible name (HTML-AAM's last
+    // resort) disappears the moment the user types, which is exactly when a
+    // screen-reader user re-reads the field. WCAG 3.3.2.
+    queryLabel: 'Search query',
     submit: 'Search',
     idleTitle: 'Search Soulseek directly',
     idleBody:
@@ -505,6 +510,11 @@ export const t = {
     resultsCount: (n: number) => `${n} results`,
     streamingSuffix: 'streaming in…',
     completeSuffix: 'search complete',
+    // Distinct from completeSuffix: the session was evicted server-side
+    // before it finished (see replaceSearchGroups' `expired` branch), so
+    // what is on screen is whatever had already arrived, not a finished
+    // search. "Search complete" here would be a lie.
+    expiredSuffix: 'session expired — results may be incomplete',
     truncatedSuffix: 'showing first 2000',
     askingPeers: 'Asking peers on the network…',
     sortLabel: 'Sort',
@@ -516,14 +526,32 @@ export const t = {
     },
     // Format chip row, derived from the distinct formats present in the
     // current results (issue #129 lifts this derivation rather than
-    // forking it — see the exported helper in Search.tsx).
-    allFormats: 'All formats',
+    // forking it — see the exported helper in Search.tsx). An empty active
+    // set already means "all formats", so the row needs no explicit
+    // all-formats chip and therefore no string for one.
     noFormatMatch: 'No results match the selected format filters.',
     bestMatch: 'BEST MATCH',
     freeSlot: 'Free slot',
+    // A peer with no free slot and nobody waiting: `queuePosition(0)` read
+    // as "Queue: 0", which looks like the good case next to freeSlot even
+    // though it is the opposite one. Both facts are true; only this phrasing
+    // makes them stop contradicting each other.
+    noFreeSlot: 'No free slot',
     queuePosition: (n: number) => `Queue: ${n}`,
     peerAndSpeed: (peer: string, speed: string) => `${peer} · ${speed}`,
     trackCount: (n: number) => `${n} track${n === 1 ? '' : 's'}`,
+    // `trackCount` counts audio only, while the download buttons enqueue
+    // every file in the folder (covers, .nfo, .m3u) — so a card could read
+    // "10 tracks" beside "Download selected (13)" with nothing accounting
+    // for the other three. Rendered only when there is a difference.
+    extraFiles: (n: number) => `+${n} extra file${n === 1 ? '' : 's'}`,
+    // `parent` is the peer's parent DIRECTORY name (path.Base(path.Dir(folder))),
+    // never a resolved artist — a peer sharing /Music/Various Artists/In Rainbows/
+    // yields "Various Artists". Rendered with a trailing slash in the mono face
+    // so it reads as a path segment rather than the "Album — Artist" idiom, plus
+    // this hidden prefix and title for anyone who can't see that treatment.
+    folderLabel: 'Peer folder:',
+    folderTitle: (parent: string) => `Parent folder on the peer: ${parent}/ — not a resolved artist`,
     downloadAlbum: 'Download album',
     downloadSelected: (n: number) => `Download selected (${n})`,
     queuedNotice: 'Queued for download.',
@@ -535,7 +563,6 @@ export const t = {
     downloadFailed: 'Could not start the download. Try again.',
     startFailed: 'Search failed to start. Try again.',
     busyRetry: 'Too many searches are already running — try again shortly.',
-    unavailable: 'Manual search is not available in this configuration.',
   },
   chat: {
     railHeading: 'PEERS',

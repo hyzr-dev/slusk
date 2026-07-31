@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import type { SearchGroup } from '../api/types';
 import { formatBitrateLabel, formatQualityLabel } from '../api/normalize';
 import Button from '../components/tui/Button';
-import { formatSize, formatSpeed, formatTrackDuration } from '../format';
+import { formatDuration, formatSize, formatSpeed, formatTrackDuration } from '../format';
 import { t } from '../strings';
 import styles from './SearchResultCard.module.css';
 
@@ -50,8 +50,18 @@ export function cardBadges(group: SearchGroup): string[] {
   return badges;
 }
 
+// The one-line stat strip under the badges. `trackCount` counts audio files
+// only while both download buttons enqueue the whole folder, so the extras are
+// named rather than left to contradict "Download selected (13)". The album
+// duration is rendered only when the server set it, which it does only when
+// EVERY file in the group reported one (searchGroupDTO's honesty gate) — an
+// unset value means unknown, never zero.
 function cardMeta(group: SearchGroup): string {
-  const parts = [t.search.trackCount(group.trackCount), formatSize(group.sizeBytes)];
+  const parts = [t.search.trackCount(group.trackCount)];
+  const extras = group.files.length - group.trackCount;
+  if (extras > 0) parts.push(t.search.extraFiles(extras));
+  if (group.durationSeconds !== undefined) parts.push(formatDuration(group.durationSeconds));
+  parts.push(formatSize(group.sizeBytes));
   return parts.join(' · ');
 }
 
@@ -79,15 +89,26 @@ export default function SearchResultCard({
           type="button"
           className={styles.header}
           aria-expanded={expanded}
-          aria-controls={expansionId}
+          // Only while the container it names actually exists: the expansion
+          // is unmounted when collapsed, and aria-controls pointing at a
+          // missing id is worse than no aria-controls at all.
+          aria-controls={expanded ? expansionId : undefined}
           onClick={onToggleExpand}
         >
           <span className={styles.titleBlock}>
             <span className={styles.titleRow}>
               <span className={styles.title}>{group.title}</span>
-              {/* The peer's parent folder name, not a resolved artist — that
-                  fact isn't on the Soulseek wire (issue #58 §4). */}
-              <span className={styles.parent}>{group.parent}</span>
+              {/* NOT the artist. This is the peer's parent DIRECTORY name;
+                  the artist is not on the Soulseek wire at all (issue #58
+                  §4). Rendered in the mono face with a trailing slash so it
+                  reads as a path segment rather than as the "Album — Artist"
+                  idiom the design's dim-text-after-title slot otherwise
+                  implies, with a hidden label and a title for anyone who
+                  can't see that treatment. See t.search.folderLabel. */}
+              <span className={styles.parent} title={t.search.folderTitle(group.parent)}>
+                <span className={styles.srOnly}>{t.search.folderLabel} </span>
+                {group.parent}/
+              </span>
             </span>
             <span className={styles.badgeRow}>
               {cardBadges(group).map((badge) => (
@@ -98,7 +119,11 @@ export default function SearchResultCard({
           </span>
           <span className={styles.availBlock}>
             <span className={group.freeUploadSlot ? styles.availOk : styles.availDim}>
-              {group.freeUploadSlot ? t.search.freeSlot : t.search.queuePosition(group.queueLength)}
+              {group.freeUploadSlot
+                ? t.search.freeSlot
+                : group.queueLength > 0
+                  ? t.search.queuePosition(group.queueLength)
+                  : t.search.noFreeSlot}
             </span>
             <span className={styles.peerSpeed}>{t.search.peerAndSpeed(group.peer, formatSpeed(group.uploadSpeed))}</span>
           </span>

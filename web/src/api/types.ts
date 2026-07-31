@@ -677,7 +677,31 @@ export interface WireSearchSession {
 // somewhere to go without touching every call site.
 export type SearchFile = WireSearchFile;
 export type SearchGroup = WireSearchGroup;
-export type SearchSession = WireSearchSession;
+
+/**
+ * The session as cached, which is the wire shape plus two client-owned fields
+ * the server neither sends nor could send — this is the divergence the aliases
+ * above were kept distinct for.
+ *
+ * `streamedAt` is the local clock reading of the last `event: search` frame
+ * folded into this object (see replaceSearchGroups). It exists so
+ * useSearchSession can arm its fallback poll on *silence* rather than on the
+ * SSE connection's nominal state: a connection that is open but delivering
+ * nothing is indistinguishable from a healthy one at the EventSource level,
+ * and it is the state the fallback exists for. Never compared against any
+ * server timestamp — it is a client clock reading and only ever differenced
+ * against Date.now().
+ *
+ * `expired` records that the server evicted the session before it finished.
+ * The wire says so exactly once, on the frame that reports it (SearchPayload's
+ * `expired`), and that frame also forces `done: true` — so without keeping the
+ * distinction here the view would call an evicted, partial session "search
+ * complete".
+ */
+export interface SearchSession extends WireSearchSession {
+  streamedAt?: number;
+  expired?: boolean;
+}
 
 /**
  * POST /api/search request body — internal/observ/search.go

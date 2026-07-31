@@ -47,7 +47,18 @@
 .titleRow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 
 .title { font-size: 13px; font-weight: 600; color: var(--fg); }
-.parent { font-size: 11px; color: var(--faint); }
+
+/* The mono face is doing semantic work here, not decoration: it is what makes
+   the trailing slash read as a path segment rather than as prose, and so what
+   stops `parent` (a peer directory name) being read as a resolved artist.
+   Matches .folderPath and .meta, the view's other two raw-path/stat cells. */
+.parent {
+  font-size: 11px;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .badgeRow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 

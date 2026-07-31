@@ -84,6 +84,24 @@ function TogglingScope() {
   );
 }
 
+// Mirrors how Search.tsx scopes the connection: each click publishes a new
+// session id, which reopens the connection exactly as starting a new search
+// does.
+function SearchPublisher({ id }: { id: string }) {
+  useSearchStream(id);
+  return null;
+}
+
+function TogglingSearch() {
+  const [n, setN] = useState(0);
+  return (
+    <>
+      <SearchPublisher id={`session-${n}`} />
+      <button onClick={() => setN((v) => v + 1)}>next search</button>
+    </>
+  );
+}
+
 describe('StreamProvider', () => {
   it('opens the unscoped endpoint outside a job route', () => {
     const queryClient = new QueryClient();
@@ -202,6 +220,63 @@ describe('StreamProvider', () => {
     expect(invalidatedKeys).toContainEqual(queryKeys.jobs);
     expect(invalidatedKeys).toContainEqual(queryKeys.charts);
     expect(invalidatedKeys).toContainEqual(queryKeys.jobDetail(1));
+  });
+
+  // The jobs/charts invalidation is a gap repair, so it belongs only to the
+  // two opens that can have a gap behind them: the first ever, and the
+  // browser's own reconnect (which reuses the same EventSource and fires
+  // onopen again on it). Issue #58 made the third kind common — the
+  // `?search=<id>` axis reopens on every new search, and each of those used
+  // to cost a GET /api/charts (TopBar mounts useCharts on every route, so
+  // charts is always an active query) for a view that renders no chart.
+  it('does not re-invalidate jobs and charts when a new search merely reopens the connection', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/search']}>
+          <StreamProvider>
+            <TogglingSearch />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // First connection open: this one does invalidate.
+    act(() => MockEventSource.instances.at(-1)!.onopen?.());
+
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+    const before = MockEventSource.instances.length;
+    act(() => screen.getByText('next search').click());
+    expect(MockEventSource.instances.length).toBeGreaterThan(before);
+
+    act(() => MockEventSource.instances.at(-1)!.onopen?.());
+
+    const keys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
+    expect(keys).not.toContainEqual(queryKeys.jobs);
+    expect(keys).not.toContainEqual(queryKeys.charts);
+  });
+
+  // The other half of the same contract: an actual drop-and-reconnect fires
+  // onopen a second time on the SAME instance, and that one must still take a
+  // fresh snapshot — it is the case the invalidation exists for.
+  it('invalidates jobs and charts again when the browser reconnects the same connection', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/search']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const source = MockEventSource.instances[0];
+    act(() => source.onopen?.());
+
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries');
+    act(() => source.onerror?.());
+    act(() => source.onopen?.());
+
+    const keys = invalidateSpy.mock.calls.map((c) => c[0]?.queryKey);
+    expect(keys).toContainEqual(queryKeys.jobs);
+    expect(keys).toContainEqual(queryKeys.charts);
   });
 
   it('writes a `live` frame into the live cache, scoped to the current job id', () => {

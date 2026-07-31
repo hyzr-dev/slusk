@@ -63,6 +63,18 @@ describe('idle state', () => {
     }
     expect(screen.queryByRole('list')).not.toBeInTheDocument();
   });
+
+  // The placeholder alone yields an accessible name only as HTML-AAM's last
+  // resort, and that name disappears the moment the user types — which is
+  // exactly when a screen-reader user re-reads the field (WCAG 3.3.2). The
+  // second assertion is the one that matters: it still holds with text in the
+  // box.
+  it('gives the query input an accessible name that survives typing', () => {
+    renderSearch();
+    const input = screen.getByRole('textbox', { name: t.search.queryLabel });
+    fireEvent.change(input, { target: { value: 'radiohead' } });
+    expect(screen.getByRole('textbox', { name: t.search.queryLabel })).toHaveValue('radiohead');
+  });
 });
 
 describe('starting a search and rendering results', () => {
@@ -83,8 +95,36 @@ describe('starting a search and rendering results', () => {
     fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
 
     expect(await screen.findByText('In Rainbows')).toBeInTheDocument();
-    expect(screen.getByText('Radiohead')).toBeInTheDocument();
     expect(screen.getByText(t.search.resultsCount(1))).toBeInTheDocument();
+  });
+
+  // `parent` is the peer's parent DIRECTORY name, never a resolved artist —
+  // a peer sharing /Music/Various Artists/In Rainbows/ would otherwise produce
+  // a card asserting the artist is "Various Artists". Rendered bare in the
+  // design's dim-text-after-title slot it reads as exactly the "Album —
+  // Artist" idiom every music UI uses, so the DOM has to say what it is: a
+  // hidden label for assistive tech, a trailing slash and the mono face for
+  // everyone else.
+  it('labels the parent folder as a folder rather than as an artist', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/search' && init?.method === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify(wireSession()), { status: 201 }));
+      }
+      if (/^\/api\/search\//.test(url)) {
+        return Promise.resolve(new Response(JSON.stringify(wireSession()), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    }));
+
+    renderSearch();
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'q' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+    await screen.findByText('In Rainbows');
+
+    // Never the bare artist-looking string on its own.
+    expect(screen.queryByText('Radiohead')).not.toBeInTheDocument();
+    expect(screen.getByText(t.search.folderLabel)).toBeInTheDocument();
+    expect(screen.getByTitle(t.search.folderTitle('Radiohead'))).toHaveTextContent('Radiohead/');
   });
 
   it('clicking an example chip runs that query immediately', async () => {
@@ -124,6 +164,74 @@ describe('no-hits state', () => {
 
     expect(await screen.findByText(t.search.noHitsTitle('nothing matches this'))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: t.search.newSearch })).toBeInTheDocument();
+  });
+});
+
+describe('searching state', () => {
+  // The state the "Asking peers on the network…" block was written for, and
+  // the one it could never reach: nested inside `showResults`, and so behind
+  // `groups.length > 0`, it could only appear once results had already
+  // arrived — never while a search was running with nothing back yet.
+  it('says it is working while a search is running with no results yet', async () => {
+    const open = wireSession({ groups: [], total: 0, done: false, streaming: true });
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/search' && init?.method === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify(open), { status: 201 }));
+      }
+      if (/^\/api\/search\//.test(url)) {
+        return Promise.resolve(new Response(JSON.stringify(open), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    }));
+
+    renderSearch();
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'obscure bootleg' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+
+    expect(await screen.findByText(t.search.askingPeers)).toBeInTheDocument();
+    // Not the no-hits state — the search has not finished, it just has
+    // nothing yet, and those are different claims.
+    expect(screen.queryByText(t.search.noHitsTitle('obscure bootleg'))).not.toBeInTheDocument();
+  });
+
+  // The gap between clicking Search and the 201 landing. `searchId` is still
+  // the PREVIOUS search's id for the whole of that window, so without an
+  // explicit guard the old results, their count and their header all stay on
+  // screen looking current, with only an aria-hidden spinner to say otherwise.
+  it('hides the previous search\'s results while the next start is in flight', async () => {
+    const first = wireSession({ groups: [wireGroup({ id: 'g-old', title: 'Old Release' })], total: 1, done: true });
+    // Held open, so the render is observed mid-POST rather than after it.
+    let releaseSecondPost: (() => void) | undefined;
+    const secondPosted = new Promise<void>((resolve) => { releaseSecondPost = resolve; });
+    let posts = 0;
+
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url === '/api/search' && init?.method === 'POST') {
+        posts += 1;
+        if (posts === 1) return Promise.resolve(new Response(JSON.stringify(first), { status: 201 }));
+        return secondPosted.then(() => new Response(JSON.stringify(wireSession({ id: 'second', groups: [], total: 0, done: false })), { status: 201 }));
+      }
+      if (/^\/api\/search\//.test(url)) {
+        return Promise.resolve(new Response(JSON.stringify(first), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    }));
+
+    renderSearch();
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+    expect(await screen.findByText('Old Release')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(t.search.queryPlaceholder), { target: { value: 'second' } });
+    fireEvent.click(screen.getByRole('button', { name: t.search.submit }));
+
+    // Mid-POST: the previous search's card and its result count are gone, and
+    // the view says it is working instead.
+    await waitFor(() => expect(screen.getByText(t.search.askingPeers)).toBeInTheDocument());
+    expect(screen.queryByText('Old Release')).not.toBeInTheDocument();
+    expect(screen.queryByText(t.search.resultsCount(1))).not.toBeInTheDocument();
+
+    releaseSecondPost?.();
   });
 });
 
@@ -194,7 +302,11 @@ describe('sorting and format chips', () => {
     const titles = () => screen.getAllByRole('button', { name: /Release/ }).map((el) => el.textContent);
     expect(titles()[0]).toContain('Small Release');
 
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'size' } });
+    // Queried by accessible name, not bare role: the select's only name comes
+    // from the <label htmlFor> beside it, and a bare getByRole('combobox')
+    // passes just as happily when that label is a plain <span> and a screen
+    // reader announces "combobox, Best match" with no idea what it controls.
+    fireEvent.change(screen.getByRole('combobox', { name: t.search.sortLabel }), { target: { value: 'size' } });
     await waitFor(() => expect(titles()[0]).toContain('Big Release'));
   });
 

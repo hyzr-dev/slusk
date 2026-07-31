@@ -8,6 +8,20 @@
 
 .inputWrap { position: relative; flex: 1; max-width: 480px; }
 
+/* Same recipe as SearchResultCard.module.css's .srOnly — reachable by a
+   screen reader, absent from the visual design. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .input {
   width: 100%;
   padding: 9px 32px 9px 12px;

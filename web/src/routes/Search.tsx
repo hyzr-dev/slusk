@@ -179,6 +179,14 @@ export default function Search() {
     createJob.mutate(
       {
         title: group.title,
+        // Best-effort only: `parent` is the peer's parent DIRECTORY name, not
+        // a resolved artist (the Soulseek wire carries no artist field — issue
+        // #58 §4), so a peer sharing /Music/Various Artists/<album>/ makes the
+        // job's artist "Various Artists". Posted anyway because `artist` is
+        // what POST /api/jobs takes and a folder name is the best guess
+        // available here; issue #59 owns actually matching a manual download
+        // against Lidarr. The card labels it as a folder — see
+        // SearchResultCard's .parent — so the UI never claims otherwise.
         artist: group.parent,
         peer: group.peer,
         files: files.map((f) => ({ filename: f.filename, size: f.size })),
@@ -194,17 +202,32 @@ export default function Search() {
     );
   }
 
-  const idle = searchId === undefined;
-  const noHits = !idle && hasData(phase) && !!session?.done && groups.length === 0;
-  const showResults = !idle && groups.length > 0;
-  const searching = !idle && !session?.done;
+  // POST /api/search is in flight. `searchId` is still the PREVIOUS search's
+  // id for the whole of that window (it only advances in the 201's onSuccess),
+  // so every state below has to exclude it explicitly: without that, clicking
+  // Search leaves the previous search's header, count and cards on screen,
+  // looking current, with nothing but an aria-hidden spinner to say otherwise.
+  const starting = startSearch.isPending;
+  const hasSession = !starting && searchId !== undefined;
+  const idle = searchId === undefined && !starting;
+  const noHits = hasSession && hasData(phase) && !!session?.done && groups.length === 0;
+  const showResults = hasSession && groups.length > 0;
+  // Deliberately not gated on having results: a search with nothing back yet
+  // is exactly the state that most needs to say it is working. Rendered
+  // outside the `showResults` block below for the same reason.
+  const searching = starting || (hasSession && !session?.done);
 
   return (
     <Page title={t.page.search.title} subtitle={t.page.search.subtitle}>
       <Panel>
         <form className={styles.searchBar} onSubmit={handleSubmit}>
           <div className={styles.inputWrap}>
+            {/* A real label, not just the placeholder: the placeholder-derived
+                accessible name vanishes the moment the user types. Visually
+                hidden because the design gives the field no room for one. */}
+            <label className={styles.srOnly} htmlFor="search-query">{t.search.queryLabel}</label>
             <input
+              id="search-query"
               className={styles.input}
               type="text"
               value={query}
@@ -234,7 +257,11 @@ export default function Search() {
 
         {!idle && (
           <>
-            <QueryNotice phase={phase} />
+            {/* Suppressed while a start is in flight: the query is either
+                disabled (first search — phase 'loading' with nothing actually
+                loading) or still holding the previous search's data, and the
+                searching block below is the honest signal for that window. */}
+            {!starting && <QueryNotice phase={phase} />}
 
             {noHits && (
               <div className={styles.noHits}>
@@ -256,12 +283,18 @@ export default function Search() {
                   <div className={styles.resultsCount}>
                     <span className={styles.resultsCountNumber}>{t.search.resultsCount(session.total)}</span>
                     {!session.done && session.streaming && <span className={styles.streamingNote}> · {t.search.streamingSuffix}</span>}
-                    {session.done && <span className={styles.doneNote}> · {t.search.completeSuffix}</span>}
+                    {session.done && (
+                      <span className={styles.doneNote}> · {session.expired ? t.search.expiredSuffix : t.search.completeSuffix}</span>
+                    )}
                     {session.truncated && <span className={styles.doneNote}> · {t.search.truncatedSuffix}</span>}
                   </div>
                   <div className={styles.controls}>
-                    <span className={styles.sortLabel}>{t.search.sortLabel}</span>
+                    {/* <label htmlFor>, not a bare <span>: this is the
+                        select's only accessible name, and it doubles as a
+                        click target for it. */}
+                    <label className={styles.sortLabel} htmlFor="search-sort">{t.search.sortLabel}</label>
                     <select
+                      id="search-sort"
                       className={styles.sortSelect}
                       value={sort}
                       onChange={(event) => setSort(event.target.value as SortKey)}
@@ -302,14 +335,20 @@ export default function Search() {
                 </ul>
 
                 {visibleGroups.length === 0 && <EmptyState message={t.search.noFormatMatch} />}
-
-                {searching && (
-                  <div className={styles.askingPeers}>
-                    <span aria-hidden className={styles.spinner} />
-                    {t.search.askingPeers}
-                  </div>
-                )}
               </>
+            )}
+
+            {/* Outside the `showResults` block on purpose. Nested inside it —
+                and so behind `groups.length > 0` — this could only ever appear
+                once results had already arrived, i.e. never in the state it
+                was written for: a search that is running with nothing back
+                yet. It is also the only feedback during `starting`, when the
+                previous search's results are deliberately hidden. */}
+            {searching && (
+              <div className={styles.askingPeers}>
+                <span aria-hidden className={styles.spinner} />
+                {t.search.askingPeers}
+              </div>
             )}
           </>
         )}

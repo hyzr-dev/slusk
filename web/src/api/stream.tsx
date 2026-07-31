@@ -2,7 +2,7 @@
 // internal/observ/stream.go for the server contract this consumes and
 // queries.ts's replaceLiveJobs/pickJobDetail/mergeThroughputSamples for how
 // the frame this writes is folded into what components read.
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
@@ -223,6 +223,11 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   // The `?search=<id>` axis (issue #58) — see useSearchStream's doc comment.
   const [searchId, setSearchId] = useState<string | undefined>(undefined);
 
+  // False until this provider has had a connection open at least once, so
+  // `onopen` can tell a first connect apart from a deliberate reopen — see
+  // the invalidation there.
+  const hasConnectedRef = useRef(false);
+
   // Known cost, tracked as #267, not fixed here: mounting a scope-publishing
   // route (/jobs, or Overview) can open THREE connections in quick
   // succession, not two — measured directly against Overview's own timing
@@ -290,9 +295,37 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       queryClient.setQueryData(queryKeys.live, null);
     };
 
+    // True once THIS EventSource has opened, so a second `onopen` on the same
+    // instance identifies the browser's own automatic reconnect (EventSource
+    // reuses the object; a deliberate reopen constructs a new one).
+    let reopened = false;
+
     source.onopen = () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.charts });
+      const autoReconnect = reopened;
+      reopened = true;
+      const firstEver = !hasConnectedRef.current;
+      hasConnectedRef.current = true;
+
+      // The jobs/charts invalidation is a *gap* repair: it exists so a
+      // connection that was down for an unknown length of time takes a fresh
+      // snapshot, exactly like a page load. Only two opens can have a gap
+      // behind them — the very first one (nothing was watching before it) and
+      // the browser's automatic reconnect after a drop.
+      //
+      // Every other open is this effect deliberately tearing the connection
+      // down and rebuilding it a few milliseconds later with different query
+      // params, with nothing missed in between. Issue #58 made that path
+      // common: the `?search=<id>` axis reopens on every new search, so three
+      // searches on /search used to mean three extra GET /api/charts (TopBar
+      // mounts useCharts on every route, so charts is always an active query
+      // and always genuinely refetches) for a view that renders no chart at
+      // all. jobDetail is exempt from the gating below because a reopen that
+      // changes the ?job= scope really is asking for data this connection has
+      // never carried.
+      if (firstEver || autoReconnect) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.jobs });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.charts });
+      }
       if (jobId !== undefined) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.jobDetail(jobId) });
       }
