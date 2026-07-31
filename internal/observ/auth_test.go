@@ -446,6 +446,10 @@ var registeredRoutes = []struct {
 	{method: "", path: "/api/messages/{username}", public: false},
 	{method: "", path: "/api/messages/{username}/read", public: false},
 	{method: "GET", path: "/api/stream", public: false},
+	{method: "GET", path: "/api/identify/artists", public: false},
+	{method: "GET", path: "/api/identify/artists/{mbid}/albums", public: false},
+	{method: "GET", path: "/api/identify/albums/{mbid}/editions", public: false},
+	{method: "GET", path: "/api/identify/albums/{mbid}/lidarr", public: false},
 	{method: "GET", path: "/api/auth/session", public: true},
 	{method: "POST", path: "/api/auth/setup", public: true},
 	{method: "POST", path: "/api/auth/login", public: true},
@@ -480,7 +484,11 @@ func TestEveryRegisteredRouteIsClassifiedAsIntended(t *testing.T) {
 			wantPattern = route.method + " " + route.path
 		}
 
-		probe := strings.ReplaceAll(strings.ReplaceAll(route.path, "{id}", "1"), "{username}", "someuser")
+		probe := strings.NewReplacer(
+			"{id}", "1",
+			"{username}", "someuser",
+			"{mbid}", "65f4f0c5-ef9e-490c-aee3-909e7ae6b2ab",
+		).Replace(route.path)
 		req := httptest.NewRequest(probeMethod, "http://example.com"+probe, nil)
 		_, gotPattern := mux.Handler(req)
 		if gotPattern != wantPattern {
