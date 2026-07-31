@@ -124,9 +124,10 @@ export function useThroughputStream(): void {
  * `jobsById` below, newest entry per id winning, rather than each frame
  * replacing the cache outright. Without this, a job that stops changing
  * while others keep ticking would fall out of the very next frame and
- * appear to revert to its last REST value until the next 15s poll (issue
+ * appear to revert to its last REST value until the next JOBS_INTERVAL poll
+ * (or, since issue #275, the next `event: invalidate` refetch) — issue
  * #258's fix-round bug: a finished download would flash back to
- * downloading). `jobsById` itself is always fresh per connection (reset at
+ * downloading. `jobsById` itself is always fresh per connection (reset at
  * the top of this effect), but the *cache* (queryKeys.live) is deliberately
  * NOT cleared just because this effect reruns to open a new connection —
  * see the effect body for why (issue #276).
@@ -146,9 +147,12 @@ export function useThroughputStream(): void {
  * livePayload entirely so a subscriber with no chart on screen never pays
  * for building or receiving it.
  *
- * A fourth event, `event: invalidate` (issue #275), carries no page data at
- * all — every connection receives it, unconditionally, whether or not it has
- * a jobs-list scope. It exists so a Jobs/Overview-style page can stop
+ * The third and last named event on this connection — see
+ * internal/observ/stream.go's package comment — is `event: invalidate`
+ * (issue #275), which is not a fourth scope axis alongside the three above:
+ * it carries no page data at all and every connection receives it,
+ * unconditionally, whether or not it has a jobs-list scope. It exists so a
+ * Jobs/Overview-style page can stop
  * polling GET /api/jobs on a fixed timer and instead refetch only when the
  * backend's own fingerprint of the jobs table says something worth
  * refetching happened — see the `invalidate` listener below and
@@ -303,10 +307,24 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     // deliberately NOT queryKeys.charts (its own independent poll; this
     // fingerprint says nothing about search passes) and NOT queryKeys.live
     // (the stream's own cache, not a REST query).
+    //
+    // Skipped entirely while `document.hidden`: `invalidateQueries` refetches
+    // an active query regardless of tab visibility, unlike `refetchInterval`
+    // (refetchIntervalInBackground defaults false), and this SSE connection
+    // stays open in a background tab. Without this guard, a parked tab would
+    // go from JOBS_INTERVAL's zero-poll idle profile to up to 4 refetches a
+    // minute — worse than the poll this feature replaced. useJobs's own
+    // refetchOnWindowFocus (queries.ts) is the other half of this contract:
+    // it's what makes returning to the tab refetch immediately rather than
+    // waiting out JOBS_INTERVAL's safety-net floor for the skipped signal.
     source.addEventListener('invalidate', () => {
-      // The payload (see InvalidatePayload) carries only a generation number,
-      // useful in a test to distinguish two invalidations — nothing here
-      // reads it. Any receipt of this event means "refetch", full stop.
+      if (document.hidden) return;
+      // The payload (internal/observ's invalidatePayload) carries only a
+      // generation number, useful in a test to distinguish two invalidations
+      // — nothing here reads it, so there is no corresponding frontend type
+      // (see the Go wire test plus stream.test.tsx's literal
+      // `{ generation: 3 }` for what pins the contract instead). Any receipt
+      // of this event means "refetch", full stop.
       void queryClient.invalidateQueries({
         queryKey: queryKeys.jobs,
         predicate: (q) => q.queryKey[1] === 'page',

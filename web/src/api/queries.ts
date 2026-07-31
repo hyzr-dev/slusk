@@ -49,18 +49,19 @@ import type {
 //     at all, so no fingerprint change and no invalidation ever fires for
 //     it — this poll is the ONLY thing that ever corrects it, which is why
 //     this constant can never become `false` as long as that panel exists.
-// 60000 (matching streamInvalidateInterval's own floor) rather than removed
-// entirely is deliberately conservative given those two gaps.
+// 60000 (four times streamInvalidateInterval's 15s floor, not equal to it)
+// rather than removed entirely is deliberately conservative given those two
+// gaps.
 const JOBS_INTERVAL = 60000;
 // Job detail deliberately keeps the old 3s cadence rather than following
 // JOBS_INTERVAL. The stream only carries a detail for the job its connection
 // was opened with (/api/stream?job=<id>, set on the /jobs/:id route), but
 // JobExpansion renders the same per-file transfers inline on the /jobs list,
 // where the connection is scoped to a page of ids and carries no detail at
-// all — REST is the only source there. Slowing this to 15s would make an
-// expanded row's file progress update 5x slower than before #161 — a
-// regression the stream does not compensate for on that route. The #161
-// design's poll-interval table changes `jobs`, not the detail query.
+// all — REST is the only source there. Slowing this to JOBS_INTERVAL (60s)
+// would make an expanded row's file progress update 20x slower than before
+// #161 — a regression the stream does not compensate for on that route. The
+// #161 design's poll-interval table changes `jobs`, not the detail query.
 //
 // This is the interval for the views the stream does *not* serve. On
 // /jobs/:id, where it does, useJobDetail switches the poll off entirely
@@ -174,8 +175,9 @@ export function useLiveData(): ScopedLivePayload | null | undefined {
 // An earlier version compared `updatedAt` instead. That measured the wrong
 // thing (issue #285): REST's updatedAt and the stream's updatedAt are read
 // from two independently-cached copies of the same DB row, with different
-// staleness windows (REST: up to 15s stale via React Query; stream: up to
-// 5s stale via the server's own correlation cache) — so the comparison
+// staleness windows (REST: up to 60s stale via React Query, JOBS_INTERVAL's
+// safety-net floor; stream: up to 5s stale via the server's own correlation
+// cache) — so the comparison
 // told you which cache last happened to read the DB, not which side's data
 // was actually fresher. A stale streamed row could therefore win forever
 // once its job left the live-matched set.
@@ -311,6 +313,17 @@ export function useJobs(params: JobPageParams) {
     queryKey: queryKeys.jobsPage(params),
     queryFn: () => apiGet<WireJobPage>(jobsPageUrl(params)).then(normalizeJobPage),
     refetchInterval: JOBS_INTERVAL,
+    // Overrides App.tsx's global refetchOnWindowFocus: false (issue #275).
+    // That global default exists so a background/blurred tab's failed or
+    // skipped poll never blanks the UI; it says nothing about a RETURNING
+    // tab. Since stream.tsx's `invalidate` listener now skips refetching
+    // entirely while `document.hidden` (to avoid costing a background tab
+    // requests an idle SSE connection previously cost zero of), a tab parked
+    // past a generation bump would otherwise wait out JOBS_INTERVAL's 60s
+    // safety-net floor before catching up. Refetching on focus closes that
+    // gap immediately, and this is scoped to just this query rather than
+    // flipping the global default, which every other view still relies on.
+    refetchOnWindowFocus: true,
   });
   const live = useLiveData();
   return { ...jobsQuery, data: replaceLiveJobPage(jobsQuery.data, live?.jobs) };

@@ -109,10 +109,16 @@ const streamRetryInterval = 5 * time.Second
 const streamHeartbeatInterval = 15 * time.Second
 
 // streamInvalidateInterval is the minimum gap between two `event: invalidate`
-// frames on one connection (issue #275). Deliberately equal to the
-// /api/jobs poll cadence it replaces, so this can never cost more requests
-// than the polling it removes — the win is that an idle system now fires
-// ZERO invalidations instead of one poll every 15s.
+// frames on one connection (issue #275). Deliberately equal to the original
+// /api/jobs poll cadence it replaces, so a foreground tab can never receive
+// more invalidations than the polling it removes would have cost requests —
+// the win is that an idle system now fires ZERO invalidations instead of one
+// poll every 15s. That ceiling argument covers a foreground tab; a
+// backgrounded one is handled separately (web/src/api/stream.tsx's
+// `invalidate` listener skips refetching entirely while `document.hidden`,
+// since `invalidateQueries` — unlike `refetchInterval` — ignores tab
+// visibility and would otherwise turn a previously request-free idle
+// background tab into one costing up to 4 requests/minute).
 const streamInvalidateInterval = 15 * time.Second
 
 // streamFetchTimeout bounds each tick's calls into deps.LiveTransfers,
@@ -237,8 +243,9 @@ func projectJobCorrelation(views []core.JobView) []jobCorrelation {
 // refreshCorrelation to notice when GET /api/jobs would return different
 // pages/facets/sort order for ANY subscriber, without keeping any per-job
 // state around to compare against — the fingerprint itself is the only
-// retained state, at a fixed ~32 bytes (padded) regardless of job count. That
-// is the direct answer to jobCorrelation's stated constraint (#161 review,
+// retained state, at a fixed 16 bytes (int + uint64, no padding) regardless
+// of job count. That is the direct answer to jobCorrelation's stated
+// constraint (#161 review,
 // #258, #268) about not retaining per-job state for the process lifetime.
 //
 // count is carried independently of sum so a shrinking set is caught even
@@ -687,7 +694,7 @@ type streamHub struct {
 	// elapses (see tick) — a dirty flag cleared by the first subscriber to
 	// see it would let a second subscriber, still inside ITS OWN window,
 	// silently miss the same change.
-	jobsFingerprint jobsFingerprint
+	lastFingerprint jobsFingerprint
 	hasFingerprint  bool
 	jobsGeneration  uint64
 
@@ -936,10 +943,10 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	h.matchedFiles = liveMatchedFileSet(corr, idx)
 	if !h.hasFingerprint {
 		h.hasFingerprint = true
-	} else if fp != h.jobsFingerprint {
+	} else if fp != h.lastFingerprint {
 		h.jobsGeneration++
 	}
-	h.jobsFingerprint = fp
+	h.lastFingerprint = fp
 	h.corrMu.Unlock()
 }
 

@@ -367,6 +367,38 @@ func TestComputeJobsFingerprintShrinkingSetChanges(t *testing.T) {
 	}
 }
 
+// TestComputeJobsFingerprintCountField proves the count field is actually
+// populated from len(views), independent of sum. Without this,
+// TestComputeJobsFingerprintShrinkingSetChanges alone is satisfied by sum's
+// own change and leaves a `count: 0` mutation undetected (issue #275 review):
+// the doc comment sells count as the guard against pathological wrapping-sum
+// cancellation, but nothing proved the field was ever assigned at all.
+func TestComputeJobsFingerprintCountField(t *testing.T) {
+	views := []core.JobView{
+		{Job: core.AlbumJob{ID: 1, Title: "A"}},
+		{Job: core.AlbumJob{ID: 2, Title: "B"}},
+		{Job: core.AlbumJob{ID: 3, Title: "C"}},
+	}
+	fp := computeJobsFingerprint(views)
+	if fp.count != len(views) {
+		t.Fatalf("count = %d, want %d", fp.count, len(views))
+	}
+}
+
+// TestComputeJobsFingerprintDuplicateHashesDoNotCancel is the direct test of
+// "wrapping addition, not XOR" (issue #275 review): two jobs whose per-job
+// hashes are identical (here, literally the same view twice) sum to a
+// nonzero value under wrapping addition (2h mod 2^64) but XOR to exactly
+// zero. TestComputeJobsFingerprintOrderIndependent cannot catch a XOR
+// regression — XOR is commutative too — so it needs this separate case.
+func TestComputeJobsFingerprintDuplicateHashesDoNotCancel(t *testing.T) {
+	v := core.JobView{Job: core.AlbumJob{ID: 1, Title: "A"}}
+	fp := computeJobsFingerprint([]core.JobView{v, v})
+	if fp.sum == 0 {
+		t.Fatalf("duplicate per-job hashes must not cancel to zero under wrapping addition (sum = 0 implies XOR combination): %+v", fp)
+	}
+}
+
 func TestChangedSinceLastTableCases(t *testing.T) {
 	detailA := &jobDetailDTO{Job: jobDTO{ID: 1}, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 10}}}}}
 	detailB := &jobDetailDTO{Job: jobDTO{ID: 1}, Attempts: []attemptDetailDTO{{ID: 1, Transfers: []transferDetailDTO{{Filename: "a.flac", BytesDone: 20}}}}}
@@ -951,25 +983,42 @@ func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
 }
 
 // TestStreamHubFreshSubscriberGetsNoImmediateInvalidate proves subscribe's
-// lastInvalidateAt = now (issue #275, decision 3): a subscriber's own connect
-// GET already reflects the current data, so a generation bump that happened
-// as part of that very connection's synchronous refresh must not also queue
-// a redundant `event: invalidate` moments later.
+// two initial values together (issue #275, decision 3): lastInvalidateAt =
+// now, so the client's own onopen refetch isn't immediately followed by a
+// redundant server-sent one, AND lastSeenGeneration = h.generationSnapshot()
+// (read AFTER subscribe's own synchronous refresh), so a subscriber that
+// connects when jobsGeneration is already > 0 doesn't treat that pre-existing
+// generation as unseen.
+//
+// An interval of time.Hour (the original version of this test) makes the
+// throttle condition (`now.Sub(lastInvalidateAt) >= invalidateInterval`)
+// false regardless of either initial value, which is why that version could
+// not actually fail under either mutation it claimed to guard: this uses a
+// short interval and ticks past it with the generation already primed to a
+// nonzero value BEFORE subscribing, so only a correctly-initialized
+// lastSeenGeneration keeps the subscriber silent once the window elapses.
 func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Hour)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 30*time.Millisecond)
 
-	// Prime the fingerprint before subscribe (hasFingerprint = true).
+	// Prime the fingerprint, then bump jobsGeneration to a nonzero value
+	// BEFORE subscribing, so a fresh subscriber sees a generation already in
+	// play rather than the zero value a first-ever refresh would leave.
 	hub.correlationTick(context.Background())
-
 	setTitle("B")
+	hub.correlationTick(context.Background())
+	if hub.generationSnapshot() != 1 {
+		t.Fatalf("jobsGeneration = %d, want 1 before subscribing", hub.generationSnapshot())
+	}
+
 	id, _, _, ich, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	defer hub.unsubscribe(id)
 
+	time.Sleep(40 * time.Millisecond) // past invalidateInterval
 	hub.tick(context.Background())
 	select {
 	case got := <-ich:
-		t.Fatalf("fresh subscriber must not receive an immediate invalidate, got %+v", got)
+		t.Fatalf("subscribe must have already caught up to jobsGeneration=1, so no invalidate should fire with no further change, got %+v", got)
 	default:
 	}
 }
@@ -1095,23 +1144,30 @@ func TestStreamHubInvalidateSentToSubscriberWithoutThroughput(t *testing.T) {
 }
 
 // TestStreamHubInvalidateThrottleIsPerSubscriber proves each subscriber's
-// throttle window is tracked independently: one connecting 20ms after
+// throttle window is tracked independently: one connecting 80ms after
 // another must not inherit the first's window and must fire on its own
 // schedule.
+//
+// Interval/offsets scaled 4x from an earlier version (50ms/20ms/35ms/20ms)
+// that left only 15ms of margin on its negative assertion (sub2 must not
+// have fired at ~35ms elapsed against a 50ms window) — routine scheduling
+// jitter on a loaded CI box could overshoot that and trip t.Fatalf. 200ms/
+// 80ms/140ms/80ms keeps the identical proportions (and thus the identical
+// property under test) with 60ms of margin, at a negligible wall-clock cost.
 func TestStreamHubInvalidateThrottleIsPerSubscriber(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
-	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 200*time.Millisecond)
 	id1, _, _, ich1, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	defer hub.unsubscribe(id1)
 
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
 	id2, _, _, ich2, _, _ := hub.subscribe(context.Background(), 0, nil, false)
 	defer hub.unsubscribe(id2)
 
 	setTitle("B")
 	hub.correlationTick(context.Background())
 
-	time.Sleep(35 * time.Millisecond) // sub1: ~55ms since connect, past window; sub2: ~35ms, still inside
+	time.Sleep(140 * time.Millisecond) // sub1: ~220ms since connect, past window; sub2: ~140ms, still inside
 	hub.tick(context.Background())
 	select {
 	case got := <-ich1:
@@ -1127,7 +1183,7 @@ func TestStreamHubInvalidateThrottleIsPerSubscriber(t *testing.T) {
 	default:
 	}
 
-	time.Sleep(20 * time.Millisecond) // sub2: now past its own window
+	time.Sleep(80 * time.Millisecond) // sub2: now past its own window
 	hub.tick(context.Background())
 	select {
 	case got := <-ich2:

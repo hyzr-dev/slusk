@@ -692,18 +692,6 @@ export interface ThroughputPayload {
 }
 
 /**
- * GET /api/stream's `event: invalidate` JSON body — internal/observ/
- * stream.go invalidatePayload (issue #275). Carries NO page data of any
- * kind: generation is a monotonic counter, useful only to prove in a test
- * that two invalidations are distinct, never as a value to render. The
- * client's only correct reaction to receiving this event is a refetch of
- * GET /api/jobs — see the `invalidate` listener in api/stream.tsx.
- */
-export interface InvalidatePayload {
-  generation: number;
-}
-
-/**
  * The cached shape of queryKeys.live: a LivePayload plus which job id (if
  * any) the connection was scoped to when this frame arrived. Checked before
  * `detail` is applied so a JobDetail page never adopts a stale previous
