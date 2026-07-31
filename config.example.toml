@@ -106,17 +106,21 @@ known_user = 1.0
 dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
 
 [observ]
-# /healthz and /readyz are public liveness and readiness probes. The dashboard,
-# JSON API, /status, and /metrics require this token. A token is mandatory
-# whenever the listener is not loopback-only. Generate one, for example, with:
+# /healthz, /readyz, the dashboard shell, and /api/auth/* are public. Every
+# other UI, API, and metrics request needs EITHER a valid browser session
+# (created by logging in through the dashboard - the first visit prompts to
+# create an account) OR this token. auth_token is now OPTIONAL: it exists for
+# machine/API access alongside the browser login (curl, Prometheus scraping,
+# the Vite dev proxy in `make dev`), not as the only way in. Leave it blank
+# to disable machine access entirely. Generate one, for example, with:
 #   openssl rand -hex 32
 # API and Prometheus clients send: Authorization: Bearer <token>
-# Browsers use HTTP Basic auth with any username and this token as the password.
+# Non-browser Basic-auth clients use any username and this token as the password.
 # Keep the token out of URLs and logs, and terminate TLS at a trusted reverse
 # proxy before exposing the listener beyond a trusted private network. The
 # proxy must preserve Host, discard any client X-Forwarded-Proto header, and
-# set exactly one trusted X-Forwarded-Proto value (http or https).
-# Set this to a generated token before using the non-loopback listener below.
+# set exactly one trusted X-Forwarded-Proto value (http or https) - this also
+# controls whether the session cookie is marked Secure.
 auth_token = ""
 listen_addr = "0.0.0.0:9090"
 # Minimum log level: "debug", "info" (default), "warn", or "error". Use "debug"

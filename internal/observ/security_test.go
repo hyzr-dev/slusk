@@ -21,12 +21,30 @@ func newSecuredTestHandler(t *testing.T, cancel CancelFunc) http.Handler {
 		deps.Cancel = cancel
 	}
 	h := NewServer(deps)
-	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
+	return ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
+}
+
+// TestSPAShellAndAuthEndpointsRemainPublic pins the issue #279 inversion:
+// the dashboard shell and its client-side routes, plus every /api/auth/*
+// endpoint, must be reachable with no credentials so the login form itself
+// can load. See isPrivatePath (security.go).
+func TestSPAShellAndAuthEndpointsRemainPublic(t *testing.T) {
+	h := newSecuredTestHandler(t, nil)
+	for _, path := range []string{"/", "/jobs", "/api/auth/session"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code == http.StatusUnauthorized {
+				t.Fatalf("status = %d, want anything but 401 (this path must be public)", rec.Code)
+			}
+		})
+	}
 }
 
 func TestPrivateEndpointsRequireAuthentication(t *testing.T) {
 	h := newSecuredTestHandler(t, nil)
-	for _, path := range []string{"/", "/jobs", "/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser", "/api/messages/someuser/read"} {
+	for _, path := range []string{"/status", "/api/jobs", "/metrics", "/api/messages", "/api/messages/someuser", "/api/messages/someuser/read"} {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			rec := httptest.NewRecorder()
@@ -221,7 +239,7 @@ func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 	deps := testServerDeps(reg)
 	deps.DeleteJob = del
 	h := NewServer(deps)
-	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
 
 	tests := []struct {
 		name       string
@@ -285,7 +303,7 @@ func TestMarkReadAuthenticationAndSameOriginProtection(t *testing.T) {
 	deps := testServerDeps(reg)
 	deps.MarkRead = markRead
 	h := NewServer(deps)
-	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken))
+	h = ProtectPrivateEndpoints(h, NewTokenAuthenticator(testAuthToken, nil))
 
 	tests := []struct {
 		name       string
