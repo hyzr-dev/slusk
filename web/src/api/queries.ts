@@ -5,7 +5,14 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, apiDelete, apiGet, apiPost, apiPostJson } from './client';
-import { normalizeJob, normalizeJobDetail, normalizeJobPage, normalizeStatusReport } from './normalize';
+import {
+  normalizeJob,
+  normalizeJobDetail,
+  normalizeJobPage,
+  normalizeSearchGroup,
+  normalizeSearchSession,
+  normalizeStatusReport,
+} from './normalize';
 import type {
   AppConfig,
   ChartsReport,
@@ -13,6 +20,7 @@ import type {
   ConfigUpdateResult,
   ConnectionTestResult,
   Conversation,
+  CreateJobRequest,
   Job,
   JobDetail,
   JobEvent,
@@ -22,6 +30,8 @@ import type {
   Peer,
   PrivateMessage,
   ScopedLivePayload,
+  SearchPayload,
+  SearchSession,
   ShareRescanResult,
   SharesReport,
   ThreadPage,
@@ -30,6 +40,7 @@ import type {
   WireJob,
   WireJobDetail,
   WireJobPage,
+  WireSearchSession,
   WireStatusReport,
 } from './types';
 
@@ -98,6 +109,14 @@ const THREAD_INTERVAL = 3000;
 // set unpins before the next `event: invalidate`-triggered refetch (or
 // JOBS_INTERVAL's safety-net poll) would have corrected it anyway.
 const LIVE_JOB_FRESH_MS = 10000;
+// Fallback poll for a manual search session (issue #58), used only while the
+// SSE connection isn't the one keeping it current: a batching backend
+// (streaming === false, i.e. slskd — see core.SearchSession's doc comment)
+// never gets incremental frames at all, and a genuinely dead connection
+// (queryKeys.live === null — the shared EventSource errored) can't deliver
+// them either. Matches JOB_DETAIL_INTERVAL's cadence: a search view is
+// actively watched, unlike JOBS_INTERVAL's idle-safety-net profile.
+const SEARCH_POLL_INTERVAL = 3000;
 
 export const queryKeys = {
   jobs: ['jobs'] as const,
@@ -135,6 +154,15 @@ export const queryKeys = {
   // new scope, see issue #276. null rather than undefined because
   // setQueryData ignores undefined; see the comment there).
   live: ['live'] as const,
+  // One manual search session (issue #58). Written by two independent
+  // sources sharing this same key — useSearchSession's queryFn (the REST
+  // snapshot, and the fallback poll's re-fetch of it) and api/stream.tsx's
+  // `search` listener (incremental group deltas, folded in by
+  // replaceSearchGroups) — unlike queryKeys.live, there is no separate
+  // live-only cache to pick between at read time: both writers produce the
+  // same SearchSession shape, so the stream's writes are ordinary
+  // setQueryData patches onto the REST-seeded object, not a parallel source.
+  search: (id: string) => ['search', id] as const,
 };
 
 // Reads the SSE stream's latest frame (see api/stream.tsx's StreamProvider)
@@ -275,6 +303,41 @@ export function mergeThroughputSamples(existing: ThroughputSample[], incoming: T
   const deduped = incoming.filter((s) => !seen.has(s.at));
   if (deduped.length === 0) return existing;
   return [...existing, ...deduped].slice(-THROUGHPUT_CAP);
+}
+
+// Folds one `event: search` frame into the cached session for its id
+// (mirrors replaceLiveJobs' by-id merge, but patches a single session object
+// in place rather than picking between two independent caches — see
+// queryKeys.search's doc comment for why that's safe here). `prev` is either
+// the REST snapshot useSearchSession/useStartSearch already cached, or an
+// earlier frame already folded in — both share the same SearchSession shape,
+// so this is always a legitimate base to patch onto. A frame for a
+// different id than `prev` (a stale frame arriving after the view has moved
+// to a new search — the connection reopens on every new search, but a frame
+// already in flight when it does could still land) is ignored outright, and
+// so is a frame arriving before anything has been fetched yet (`prev`
+// undefined) — the imminent REST response will carry the same information.
+export function replaceSearchGroups(prev: SearchSession | undefined, frame: SearchPayload): SearchSession | undefined {
+  if (!prev || prev.id !== frame.id) return prev;
+  if (frame.expired) {
+    // The session was evicted server-side between subscribing and this
+    // frame (or a reconnect landed on an id that has since finished and
+    // aged out) — no more `search` frames will ever arrive for this id.
+    // Mark it done so the view stops rendering a "searching…" state, but
+    // keep whatever groups are already cached rather than blanking them.
+    return prev.done ? prev : { ...prev, done: true };
+  }
+  const byId = new Map(prev.groups.map((g) => [g.id, g]));
+  for (const g of frame.groups ?? []) byId.set(g.id, normalizeSearchGroup(g));
+  return {
+    ...prev,
+    groups: Array.from(byId.values()),
+    total: frame.total,
+    done: frame.done,
+    streaming: frame.streaming,
+    truncated: frame.truncated ?? prev.truncated,
+    error: frame.error || prev.error,
+  };
 }
 
 export const JOBS_PAGE_SIZE = 12;
@@ -520,6 +583,78 @@ export function useDeleteJob(id: number) {
       void qc.invalidateQueries({ queryKey: queryKeys.jobs });
       qc.removeQueries({ queryKey: queryKeys.jobDetail(id) });
       qc.removeQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+// Reads a manual search session (issue #58): id is undefined before a search
+// has been started (Search.tsx's idle state), which the query stays disabled
+// for rather than firing a request against a nonsense URL.
+//
+// refetchInterval is a fallback, not the primary freshness mechanism — see
+// SEARCH_POLL_INTERVAL's doc comment. While the session is still open
+// (!done) on a genuinely streaming backend with a live connection, incoming
+// `event: search` frames (folded in by api/stream.tsx via
+// replaceSearchGroups, straight onto this same cache key) are what actually
+// keep it current; this poll only takes over once that stops being true.
+export function useSearchSession(id: string | undefined) {
+  const live = useLiveData();
+  const key = id ?? '';
+  return useQuery({
+    queryKey: queryKeys.search(key),
+    queryFn: () => apiGet<WireSearchSession>(`/api/search/${key}`).then(normalizeSearchSession),
+    enabled: id !== undefined,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.done) return false;
+      if (data.streaming && live !== null) return false;
+      return SEARCH_POLL_INTERVAL;
+    },
+  });
+}
+
+// Starts a new manual search session. Seeds queryKeys.search(id) with the
+// 201 body directly on success — byte-identical in shape to what GET
+// /api/search/{id} would return (see WireSearchSession's doc comment) — so
+// the caller can render the first frame of results without a second round
+// trip, and so useSearchStream/useSearchSession have something to patch onto
+// the instant the id is published.
+export function useStartSearch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (query: string) => apiPostJson<WireSearchSession>('/api/search', { query }).then(normalizeSearchSession),
+    onSuccess: (session) => {
+      qc.setQueryData(queryKeys.search(session.id), session);
+    },
+  });
+}
+
+// Cancels a search session server-side (releasing its reserved Soulseek
+// token early — see internal/app/search.go's Stop). Removes the cache entry
+// outright rather than invalidating it: once stopped, GET /api/search/{id}
+// answers 404, so there is nothing left to refetch.
+export function useStopSearch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiDelete(`/api/search/${id}`),
+    onSuccess: (_void, id) => {
+      qc.removeQueries({ queryKey: queryKeys.search(id) });
+    },
+  });
+}
+
+// The first frontend consumer of POST /api/jobs (issue #58's "Download
+// album"/"Download selected" actions; #155 shipped the endpoint itself with
+// none). Invalidates queryKeys.jobs so the next visit to /jobs shows the new
+// job — the search view itself doesn't render a job list, so there's nothing
+// more specific to patch here (see Search.tsx's local "queued" card state
+// for the immediate feedback instead).
+export function useCreateJob() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateJobRequest) => apiPostJson<WireJob>('/api/jobs', body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: queryKeys.jobs });
     },
   });
 }

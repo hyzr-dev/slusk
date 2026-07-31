@@ -1,0 +1,155 @@
+.item { list-style: none; }
+
+.card {
+  position: relative;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+/* The best-match band's accent border, mapped onto --ok — the site's one
+   existing "positive" semantic colour (see JobExpansion's .markDone) — since
+   tokens.css carries no separate --accent (the mock this view follows,
+   docs/design/slskdarr-dashboard.dc.html, predates the 27 July TUI restyle
+   and uses its own accent green that is visually close to --ok). */
+.best { border-color: var(--ok); }
+
+.bestBadge {
+  position: absolute;
+  top: -1px;
+  right: 14px;
+  padding: 2px 8px;
+  background: var(--ok);
+  color: var(--bg);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 13px 15px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.header:hover { background: var(--panel-hover); }
+.header:focus-visible { outline: 1px solid var(--fg); outline-offset: -2px; }
+
+.titleBlock { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 7px; }
+
+.titleRow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+.title { font-size: 13px; font-weight: 600; color: var(--fg); }
+.parent { font-size: 11px; color: var(--faint); }
+
+.badgeRow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.badge {
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+  padding: 1px 5px;
+  border: 1px solid var(--line2);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.meta { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); margin-left: 2px; }
+
+.availBlock {
+  flex: 0 0 auto;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.availOk { color: var(--ok); font-size: 11px; white-space: nowrap; }
+.availDim { color: var(--dim); font-size: 11px; white-space: nowrap; }
+
+.peerSpeed { font-size: 11px; color: var(--faint); font-family: var(--font-mono); white-space: nowrap; }
+
+.chevron { color: var(--text-dim); font-size: 13px; flex: 0 0 auto; }
+
+.expansion {
+  border-top: 1px solid var(--line-inner);
+  padding: 10px 15px;
+  background: var(--panel-inset);
+}
+
+.fileList {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 230px;
+  overflow-y: auto;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.fileRow:hover { background: var(--panel-hover); }
+
+.fileNum { width: 22px; text-align: right; color: var(--text-dim); font-size: 10.5px; }
+
+.fileName {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fileDur { color: var(--text-dim); font-size: 10.5px; }
+.fileSize { color: var(--faint); font-size: 10.5px; width: 60px; text-align: right; }
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 15px;
+  border-top: 1px solid var(--line-inner);
+}
+
+.folderPath {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notice { padding: 7px 15px; color: var(--ok); font-size: 11px; border-top: 1px solid var(--line-inner); }
+.error { padding: 7px 15px; color: var(--bad); font-size: 11px; border-top: 1px solid var(--line-inner); }

@@ -603,6 +603,105 @@ export interface MarkReadResult {
   marked: number;
 }
 
+// ---- Manual search (issue #58) ----
+
+/**
+ * internal/observ/search.go searchFileDTO — one file within a search group.
+ * `filename` is the full peer-syntax path — exactly what POST /api/jobs
+ * requires to enqueue it — while `name` is its display basename. Every
+ * optional attribute mirrors the Go DTO's `omitempty`: absent means the peer
+ * sent no such attribute (see core.SearchResult's doc comment), so the
+ * honest type here is `number | undefined`, never a misleading zero.
+ */
+export interface WireSearchFile {
+  filename: string;
+  name: string;
+  size: number;
+  bitrate?: number;
+  durationSeconds?: number;
+  sampleRate?: number;
+  bitDepth?: number;
+  variableBitRate?: boolean;
+}
+
+/**
+ * internal/observ/search.go searchGroupDTO — one release folder offered by
+ * one peer, grouped server-side by (username, ReleaseDir) so this grouping
+ * logic never has to be reimplemented in TypeScript (issue #58 §4/§5).
+ * `parent` is the peer's parent folder name, not a resolved artist — that
+ * fact isn't on the Soulseek wire at all, see the same section.
+ */
+export interface WireSearchGroup {
+  id: string;
+  peer: string;
+  folder: string;
+  title: string;
+  parent: string;
+  trackCount: number;
+  sizeBytes: number;
+  durationSeconds?: number;
+  format?: string;
+  bitrate?: number;
+  sampleRate?: number;
+  bitDepth?: number;
+  variableBitRate?: boolean;
+  freeUploadSlot: boolean;
+  queueLength: number;
+  uploadSpeed: number;
+  score: number;
+  files: WireSearchFile[];
+}
+
+/**
+ * internal/observ/search.go searchSessionDTO — served at POST /api/search
+ * (201) and GET /api/search/{id} (200), byte-identical in shape between the
+ * two so the frontend needs exactly one normalizer for both transports.
+ */
+export interface WireSearchSession {
+  id: string;
+  query: string;
+  startedAt: string;
+  done: boolean;
+  streaming: boolean;
+  truncated?: boolean;
+  error?: string;
+  total: number;
+  groups: WireSearchGroup[];
+}
+
+// Normalized shapes. Identical to their Wire counterparts today — unlike Job,
+// this DTO has no orphaned/parked-style enum drift to correct — but kept as
+// distinct aliases (rather than reusing the Wire types directly) so
+// api/queries.ts and the Search route read the same "normalized" vocabulary
+// every other resource in this file uses, and a future divergence has
+// somewhere to go without touching every call site.
+export type SearchFile = WireSearchFile;
+export type SearchGroup = WireSearchGroup;
+export type SearchSession = WireSearchSession;
+
+/**
+ * POST /api/search request body — internal/observ/search.go
+ * createSearchRequest.
+ */
+export interface CreateSearchRequest {
+  query: string;
+}
+
+/**
+ * POST /api/jobs request body — internal/observ/observ.go createJobRequest
+ * (issue #155). A manual job that downloads known files directly from one
+ * peer, bypassing Discovery/Selecting entirely. Title/artist are optional
+ * free-text display fields; peer and at least one file are required. The
+ * 201 response is a plain jobDTO — the same shape GET /api/jobs already
+ * returns per row — so it reuses WireJob rather than a new type.
+ */
+export interface CreateJobRequest {
+  title: string;
+  artist: string;
+  peer: string;
+  files: { filename: string; size: number }[];
+}
+
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
 export interface SearchPass {
   startedAt: string;
@@ -713,4 +812,34 @@ export interface ThroughputPayload {
  */
 export interface ScopedLivePayload extends LivePayload {
   scopeJobId?: number;
+}
+
+/**
+ * GET /api/stream's `event: search` JSON body — internal/observ/stream.go
+ * searchPayload (issue #58). Sent only to a connection opened with
+ * `?search=<id>` (see useSearchStream in api/stream.tsx). `groups` carries
+ * only whole groups that changed since this subscriber's previous frame —
+ * never a file-level diff, so the (username, ReleaseDir) grouping stays
+ * server-side (see WireSearchGroup's doc comment) — omitted (not empty) when
+ * nothing changed, matching the Go side's `json:"groups,omitempty"`. `seq`
+ * is bookkeeping for the server's own per-subscriber cursor; the frontend
+ * never reads it back.
+ *
+ * `expired` is set, with every other field at its zero value except `id`,
+ * when the requested session id is well-formed but no longer known — evicted
+ * between the POST and this connection, or a reconnect landing on a session
+ * that has since finished and aged out. It is deliberately not carried as an
+ * HTTP error: a stale-but-well-formed id is a routine outcome, not a
+ * malformed request.
+ */
+export interface SearchPayload {
+  id: string;
+  seq: number;
+  groups?: WireSearchGroup[];
+  total: number;
+  done: boolean;
+  streaming: boolean;
+  truncated?: boolean;
+  expired?: boolean;
+  error?: string;
 }

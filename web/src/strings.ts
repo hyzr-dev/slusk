@@ -481,11 +481,61 @@ export const t = {
     queuePlace: (n: number) => `queue #${n}`,
     truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
   },
-  placeholder: {
-    searchTitle: 'SEARCH',
-    searchBody:
-      'Manual Soulseek search is not built yet. When it lands, results will group per peer and folder, and anything downloaded can be matched and imported into Lidarr.',
-    searchIssue: 'Tracked as issue #58.',
+  // Manual Soulseek search (issue #58). See docs/design/
+  // slskdarr-dashboard.dc.html lines 336-520 for the visual spec this
+  // follows — translated to English (that mock is Swedish; strings.ts is
+  // English throughout, unlike every other route in this file) and adapted
+  // onto the TUI restyle's component vocabulary (Panel/Chip/QueryNotice/
+  // EmptyState) rather than that mock's own markup.
+  search: {
+    queryPlaceholder: 'Search Soulseek — artist, album, track…',
+    submit: 'Search',
+    idleTitle: 'Search Soulseek directly',
+    idleBody:
+      'Results are grouped per peer and folder. Anything you download here can be enqueued the same way an automatic job is.',
+    // Example query chips shown only in the idle state.
+    examples: ['Radiohead In Rainbows', 'Kind of Blue', 'Nirvana Nevermind'],
+    noHitsTitle: (query: string) => `No hits for "${query}"`,
+    noHitsBody: 'No peer on the network is sharing this right now. Try a different spelling, drop the year, or search on the artist alone.',
+    newSearch: 'New search',
+    // The results header's live counter. Composed as
+    // `${count}${suffix}` — see Search.tsx — rather than one template
+    // string, since streaming/complete/truncated are independent flags,
+    // not a fixed set of combinations.
+    resultsCount: (n: number) => `${n} results`,
+    streamingSuffix: 'streaming in…',
+    completeSuffix: 'search complete',
+    truncatedSuffix: 'showing first 2000',
+    askingPeers: 'Asking peers on the network…',
+    sortLabel: 'Sort',
+    sortOptions: {
+      best: 'Best match',
+      size: 'Size',
+      speed: 'Speed',
+      avail: 'Availability',
+    },
+    // Format chip row, derived from the distinct formats present in the
+    // current results (issue #129 lifts this derivation rather than
+    // forking it — see the exported helper in Search.tsx).
+    allFormats: 'All formats',
+    noFormatMatch: 'No results match the selected format filters.',
+    bestMatch: 'BEST MATCH',
+    freeSlot: 'Free slot',
+    queuePosition: (n: number) => `Queue: ${n}`,
+    peerAndSpeed: (peer: string, speed: string) => `${peer} · ${speed}`,
+    trackCount: (n: number) => `${n} track${n === 1 ? '' : 's'}`,
+    downloadAlbum: 'Download album',
+    downloadSelected: (n: number) => `Download selected (${n})`,
+    queuedNotice: 'Queued for download.',
+    // Client-owned friendly text rather than the server's raw sentinel
+    // message (app.ErrRemoteFileBusy) — matches the rest of this file's
+    // convention of translating failure sentinels into UI copy (e.g.
+    // jobs.cancelFailed) rather than surfacing backend error strings.
+    busyNotice: "This peer's files are already claimed by another download in progress.",
+    downloadFailed: 'Could not start the download. Try again.',
+    startFailed: 'Search failed to start. Try again.',
+    busyRetry: 'Too many searches are already running — try again shortly.',
+    unavailable: 'Manual search is not available in this configuration.',
   },
   chat: {
     railHeading: 'PEERS',

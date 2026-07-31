@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_JOB_PAGE_PARAMS, queryKeys } from './queries';
-import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope, useThroughputStream } from './stream';
+import { JOBS_CACHE_LIMIT, StreamProvider, useJobScope, useSearchStream, useThroughputStream } from './stream';
+import type { SearchSession } from './types';
 
 // EventSource does not exist in jsdom — this mock captures every instance
 // ever constructed (StreamProvider.tsx creates a new one per route change)
@@ -803,5 +804,127 @@ describe('StreamProvider', () => {
     const last = MockEventSource.instances[MockEventSource.instances.length - 1];
     expect(last.url).toBe('/api/stream?jobs=1,2,3&throughput=1');
     expect(last.closed).toBe(false);
+  });
+
+  // Mirrors ThroughputPublisher above, but for the manual-search opt-in
+  // (issue #58).
+  function SearchPublisher({ id }: { id: string | undefined }) {
+    useSearchStream(id);
+    return null;
+  }
+
+  it('adds ?search=<id> once a child calls useSearchStream with a defined id', () => {
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>
+            <SearchPublisher id="deadbeefdeadbeefdeadbeefdeadbeef" />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    expect(MockEventSource.instances[1].url).toBe('/api/stream?search=deadbeefdeadbeefdeadbeefdeadbeef');
+  });
+
+  it('composes ?search= with ?jobs= and ?throughput=1, and the bare endpoint is unaffected when unused', () => {
+    // The existing bare-/api/stream assertion (first test in this file)
+    // already pins that a connection with none of the four scopes still
+    // opens plain; this test is the composition side: all four axes at once.
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/jobs']}>
+          <StreamProvider>
+            <ScopePublisher ids={[1, 2]} />
+            <ThroughputPublisher />
+            <SearchPublisher id="deadbeefdeadbeefdeadbeefdeadbeef" />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const last = MockEventSource.instances[MockEventSource.instances.length - 1];
+    expect(last.closed).toBe(false);
+    expect(last.url).toBe('/api/stream?jobs=1,2&throughput=1&search=deadbeefdeadbeefdeadbeefdeadbeef');
+  });
+
+  it('reopens the connection when the published search id changes, and drops the param once unmounted', () => {
+    const queryClient = new QueryClient();
+    function Toggle() {
+      const [id, setId] = useState<string | undefined>('deadbeefdeadbeefdeadbeefdeadbeef');
+      return (
+        <>
+          <SearchPublisher id={id} />
+          <button onClick={() => setId('beefdeadbeefdeadbeefdeadbeefdead')}>swap</button>
+          <button onClick={() => setId(undefined)}>clear</button>
+        </>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>
+            <Toggle />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(MockEventSource.instances[MockEventSource.instances.length - 1].url).toBe(
+      '/api/stream?search=deadbeefdeadbeefdeadbeefdeadbeef',
+    );
+
+    act(() => screen.getByText('swap').click());
+    expect(MockEventSource.instances[MockEventSource.instances.length - 1].url).toBe(
+      '/api/stream?search=beefdeadbeefdeadbeefdeadbeefdead',
+    );
+
+    act(() => screen.getByText('clear').click());
+    expect(MockEventSource.instances[MockEventSource.instances.length - 1].url).toBe('/api/stream');
+  });
+
+  it('folds a `search` frame into queryKeys.search(id), merging groups by id rather than replacing the session', () => {
+    const queryClient = new QueryClient();
+    const id = 'deadbeefdeadbeefdeadbeefdeadbeef';
+    queryClient.setQueryData<SearchSession>(queryKeys.search(id), {
+      id,
+      query: 'in rainbows',
+      startedAt: '2026-01-01T00:00:00Z',
+      done: false,
+      streaming: true,
+      total: 1,
+      groups: [{
+        id: 'g1', peer: 'lars', folder: 'f', title: 'In Rainbows', parent: 'Radiohead',
+        trackCount: 10, sizeBytes: 100, freeUploadSlot: true, queueLength: 0, uploadSpeed: 1000,
+        score: 0.5, files: [],
+      }],
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>
+            <SearchPublisher id={id} />
+          </StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    act(() => MockEventSource.instances[MockEventSource.instances.length - 1].emit('search', {
+      id,
+      seq: 1,
+      total: 2,
+      done: false,
+      streaming: true,
+      groups: [{
+        id: 'g2', peer: 'other', folder: 'f2', title: 'Kid A', parent: 'Radiohead',
+        trackCount: 8, sizeBytes: 200, freeUploadSlot: false, queueLength: 3, uploadSpeed: 500,
+        score: 0.4, files: [],
+      }],
+    }));
+
+    const session = queryClient.getQueryData<SearchSession>(queryKeys.search(id));
+    expect(session?.total).toBe(2);
+    expect(session?.groups.map((g) => g.id)).toEqual(['g1', 'g2']);
   });
 });
