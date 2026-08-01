@@ -926,6 +926,14 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateCancelled, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
+	// Seed an empty-search streak (issue #334) on the now-CANCELLED job:
+	// UpsertWantedJob's CANCELLED-reentry clean-slate reset must wipe it
+	// too. InsertCandidates above already zeroes empty_searches on a
+	// successful search, so this has to happen after it to actually
+	// exercise the reset under test.
+	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
 
 	// Album back on the wanted list: UpsertWantedJob must re-enter it.
 	reentered, err := s.UpsertWantedJob(ctx, 700, now.Add(time.Minute))
@@ -937,6 +945,9 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	}
 	if reentered.Retries != 0 {
 		t.Errorf("re-entered job retries = %d, want 0", reentered.Retries)
+	}
+	if reentered.EmptySearches != 0 {
+		t.Errorf("re-entered job empty_searches = %d, want 0", reentered.EmptySearches)
 	}
 	if reentered.NotBefore != nil {
 		t.Errorf("re-entered job not_before = %v, want nil", reentered.NotBefore)

@@ -8,4 +8,4 @@
 -- pure network noise, stranding it for `failed_revive_after` (30 days by
 -- default). `empty_searches` tracks consecutive no-raw-results cycles on its
 -- own backoff curve and never fails the job by itself.
-ALTER TABLE album_jobs ADD COLUMN empty_searches BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS empty_searches BIGINT NOT NULL DEFAULT 0;

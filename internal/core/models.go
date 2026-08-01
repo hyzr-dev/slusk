@@ -26,13 +26,10 @@ type AlbumJob struct {
 	Retries int
 	// EmptySearches counts consecutive search cycles where the Soulseek
 	// network returned no raw results at all — nothing to filter, peers
-	// simply did not answer. A single empty search means little: the same
-	// unchanged query has been observed to return 0, 6, 10, 1, 250 and 56
-	// responses within minutes of each other, and some queries return zero
-	// every time for reasons the server's disclosed exclusion list does not
-	// explain. It is therefore tracked and backed off separately from
-	// Retries and never fails the job on its own. Reset to 0 when a search
-	// yields any raw results.
+	// simply did not answer. A single empty search means little (see
+	// migration 0012's comment for the measurement backing that claim), so
+	// it is tracked and backed off separately from Retries and never fails
+	// the job on its own. Reset to 0 when a search yields any raw results.
 	EmptySearches int
 	// NotBefore hides the job from every pipeline module until it passes.
 	// Backoff lives here as data — there is no COOLDOWN state.

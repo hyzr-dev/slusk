@@ -297,7 +297,9 @@ func TestDiscoveryEmptySearchNeverFailsJobEvenAtHighStreak(t *testing.T) {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 	// Pre-set an empty_searches count far beyond MaxRetries: if the empty
-	// path ever consulted MaxRetries it would fail the job here.
+	// path ever consulted MaxRetries it would fail the job here. The
+	// zero time.Time is fine as notBefore - only empty_searches is under
+	// test here, and Tick below overwrites not_before with a real value.
 	if err := st.SetJobEmptySearchBackoff(ctx, job.ID, 50, time.Time{}, now); err != nil {
 		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
 	}

@@ -25,39 +25,39 @@ func TestDropTokenQuery(t *testing.T) {
 			want:    "Bob Desire",
 		},
 		{
-			name:    "attempt 2 drops the only album token, artist tokens rotate through first",
+			name:    "attempt wraps around modulo the artist-token count, never reaching the album token",
 			artist:  "Bob Dylan",
 			album:   "Desire",
 			attempt: 2,
-			want:    "Bob Dylan",
+			want:    "Dylan Desire", // 2 % 2 artist tokens == 0, same as attempt 0
 		},
 		{
-			name:    "attempt wraps around modulo total droppable positions",
+			name:    "attempt 3 continues the artist-token rotation",
 			artist:  "Bob Dylan",
 			album:   "Desire",
 			attempt: 3,
-			want:    "Dylan Desire", // same as attempt 0
+			want:    "Bob Desire", // 3 % 2 == 1, same as attempt 1
 		},
 		{
-			name:    "large attempt wraps around",
+			name:    "large attempt wraps around within the artist tokens",
 			artist:  "Bob Dylan",
 			album:   "Desire",
 			attempt: 100,
-			want:    "Bob Desire", // 100 % 3 == 1, same as attempt 1
+			want:    "Dylan Desire", // 100 % 2 == 0, same as attempt 0
 		},
 		{
-			name:    "negative attempt does not panic and wraps around",
+			name:    "negative attempt violates the documented precondition and returns empty",
 			artist:  "Bob Dylan",
 			album:   "Desire",
 			attempt: -1,
-			want:    "Bob Dylan", // -1 % 3 == -1 -> +3 == 2, same as attempt 2
+			want:    "",
 		},
 		{
-			name:    "large negative attempt wraps around",
+			name:    "large negative attempt also returns empty",
 			artist:  "Bob Dylan",
 			album:   "Desire",
 			attempt: -4,
-			want:    "Bob Dylan", // -4 % 3 == -1 -> +3 == 2, same as attempt 2
+			want:    "",
 		},
 		{
 			name:    "album tokens carry more weight, artist dropped first across multi-word albums",
@@ -65,6 +65,20 @@ func TestDropTokenQuery(t *testing.T) {
 			album:   "Blood on the Tracks",
 			attempt: 0,
 			want:    "Dylan Blood on the Tracks",
+		},
+		{
+			name:    "single-token artist, attempt 0 drops the only artist token",
+			artist:  "Prince",
+			album:   "Purple Rain",
+			attempt: 0,
+			want:    "Purple Rain",
+		},
+		{
+			name:    "single-token artist wraps to the same result on every attempt",
+			artist:  "Prince",
+			album:   "Purple Rain",
+			attempt: 1,
+			want:    "Purple Rain", // 1 % 1 artist token == 0, same as attempt 0
 		},
 		{
 			name:    "two total tokens is below the guardrail, no rewrite possible",
@@ -84,6 +98,13 @@ func TestDropTokenQuery(t *testing.T) {
 			name:    "empty artist and album",
 			artist:  "",
 			album:   "",
+			attempt: 0,
+			want:    "",
+		},
+		{
+			name:    "no artist tokens at all, only album tokens - nothing droppable",
+			artist:  "",
+			album:   "Bob Dylan Desire",
 			attempt: 0,
 			want:    "",
 		},
@@ -110,12 +131,5 @@ func TestDropTokenQuery(t *testing.T) {
 				t.Errorf("DropTokenQuery(%q, %q, %d) = %q, want %q", c.artist, c.album, c.attempt, got, c.want)
 			}
 		})
-	}
-}
-
-func TestDropTokenQueryNeverPanics(t *testing.T) {
-	attempts := []int{-1000, -3, -2, -1, 0, 1, 2, 3, 1000}
-	for _, a := range attempts {
-		DropTokenQuery("Bob Dylan", "Desire", a)
 	}
 }

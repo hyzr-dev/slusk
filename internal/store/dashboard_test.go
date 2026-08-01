@@ -742,6 +742,15 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
+	// Seed an empty-search streak on the now-FAILED job (issue #334): a
+	// manual retry must wipe it, or a job revived by the dashboard's Retry
+	// button would carry a stale streak straight into the token-drop
+	// rewrite instead of starting clean (see rewrite.go). SetJobBackoff
+	// above already zeroes empty_searches, so this has to happen after it
+	// to actually exercise RetryFailedJob's own reset.
+	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 7, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryFailedJob(ctx, job.ID, later)
@@ -762,6 +771,9 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	}
 	if got.Retries != 0 {
 		t.Errorf("Retries = %d, want 0", got.Retries)
+	}
+	if got.EmptySearches != 0 {
+		t.Errorf("EmptySearches = %d, want 0", got.EmptySearches)
 	}
 	if got.NotBefore != nil {
 		t.Errorf("NotBefore = %v, want nil", got.NotBefore)
@@ -899,6 +911,11 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
+	// Seed an empty-search streak (issue #334): RetryManualJob's clean-slate
+	// reset must wipe it too.
+	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 5, now, now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryManualJob(ctx, job.ID, later)
@@ -915,6 +932,9 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	}
 	if got := view.Job; got.State != core.StateSelecting || got.Retries != 0 || got.NotBefore != nil || got.FailedAt != nil {
 		t.Errorf("job after retry = state %q retries %d not_before %v failed_at %v", got.State, got.Retries, got.NotBefore, got.FailedAt)
+	}
+	if got := view.Job; got.EmptySearches != 0 {
+		t.Errorf("EmptySearches = %d, want 0", got.EmptySearches)
 	}
 
 	cands, err := s.CandidatesForJob(ctx, job.ID)
@@ -1181,6 +1201,13 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
+	// Seed an empty-search streak on the now-FAILED job (issue #334):
+	// force-search must wipe it too, same reasoning as
+	// TestRetryFailedJobRevivesFailedJob. SetJobBackoff above already
+	// zeroes empty_searches, so this has to happen after it.
+	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 9, now.Add(time.Hour), now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
 
 	later := now.Add(time.Minute)
 	ok, err := s.ForceSearchJob(ctx, job.ID, later)
@@ -1201,6 +1228,9 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	}
 	if got.Retries != 0 {
 		t.Errorf("Retries = %d, want 0", got.Retries)
+	}
+	if got.EmptySearches != 0 {
+		t.Errorf("EmptySearches = %d, want 0", got.EmptySearches)
 	}
 	if got.NotBefore != nil {
 		t.Errorf("NotBefore = %v, want nil", got.NotBefore)

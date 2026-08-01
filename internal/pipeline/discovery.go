@@ -315,9 +315,14 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		// no-raw-results cycles (job.EmptySearches) to suspect it is one of
 		// the queries the network silently filters (issue #334) rather than
 		// one more instance of ordinary search noise. Try one more search
-		// with a single artist/album token dropped - deterministically
-		// rotated by attempt so a job stuck here tries a different token
-		// each cycle instead of repeating the same doomed rewrite.
+		// with a single artist token dropped - deterministically rotated by
+		// attempt, derived from EmptySearches, so a run of raw-empty cycles
+		// tries a different token each time instead of repeating the same
+		// doomed rewrite. That only holds while every cycle stays raw-empty:
+		// a rewrite that returns raw results but no surviving candidate goes
+		// through SetJobBackoff below, which resets EmptySearches to 0, so
+		// the next rewrite attempt starts over at attempt 0 rather than
+		// continuing the rotation.
 		if len(results) == 0 && job.EmptySearches >= emptySearchRewriteThreshold {
 			attempt := job.EmptySearches - emptySearchRewriteThreshold
 			if rewrite := matcher.DropTokenQuery(album.ArtistName, album.Title, attempt); rewrite != "" && rewrite != query {
@@ -456,10 +461,9 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			// normalized-query and (if eligible) token-dropped fallbacks
 			// above - not "peers answered but every candidate was rejected",
 			// which is the branch below. A single empty search is weak
-			// evidence (issue #334): the same unchanged query has been
-			// observed to return 0, 6, 10, 1, 250, 56 responses within
-			// minutes of each other. So this does NOT touch the retry
-			// budget and NEVER fails the job - it backs off on its own
+			// evidence (issue #334, see migration 0012's comment for the
+			// measurement behind that claim). So this does NOT touch the
+			// retry budget and NEVER fails the job - it backs off on its own
 			// empty_searches curve and stays WANTED forever, retried at
 			// backoff_cap intervals, which is the deliberate answer for a
 			// genuinely unanswerable query rather than a fabricated
