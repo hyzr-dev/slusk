@@ -21,6 +21,11 @@ type Tone = 'ok' | 'bad' | 'dim' | 'quiet';
 // them, not just the last.
 const TRAILING_TAG_RE = /\s*[[({][^[\](){}]*[\])}]\s*$/;
 
+// Matches a bare 4-digit year and nothing else — the left side of a
+// "YYYY - Album" folder name, never an artist. Deliberately strict: no
+// 2-digit years, no "1980s". See parseFolderGuess's #355 note.
+const YEAR_RE = /^\d{4}$/;
+
 /**
  * Best-effort artist/album split for the Identify modal's two editable
  * inputs (issue #321) — never trusted as final data, just a starting point
@@ -35,6 +40,15 @@ const TRAILING_TAG_RE = /\s*[[({][^[\](){}]*[\])}]\s*$/;
  * Search.tsx's `download`). It's an equally bad guess in that case, but here
  * it is only ever a prefilled, editable, explicitly-labelled-GUESSED
  * starting point, never the value actually sent to the server.
+ *
+ * The other common peer layout is "Artist/YYYY - Album" (#355): the left
+ * side of the dash is a bare 4-digit year, not an artist. When that happens
+ * `group.parent` — the same already-trusted-as-a-guess prior used above —
+ * is preferred over the year, even if the parent itself looks unhelpful
+ * ("Soulseek - Share"); it is still no worse a guess than a year, and it is
+ * only ever a prefilled, editable, explicitly-labelled-GUESSED value. If
+ * there is no parent to fall back on, the year is kept rather than left
+ * blank — still editable, still labelled, and no worse than before.
  */
 export function parseFolderGuess(group: SearchGroup): { artist: string; album: string } {
   let stripped = group.title.trim();
@@ -45,7 +59,12 @@ export function parseFolderGuess(group: SearchGroup): { artist: string; album: s
   }
   const dashIdx = stripped.indexOf(' - ');
   if (dashIdx > 0) {
-    return { artist: stripped.slice(0, dashIdx).trim(), album: stripped.slice(dashIdx + 3).trim() };
+    const candidateArtist = stripped.slice(0, dashIdx).trim();
+    const album = stripped.slice(dashIdx + 3).trim();
+    if (YEAR_RE.test(candidateArtist) && group.parent.trim()) {
+      return { artist: group.parent, album };
+    }
+    return { artist: candidateArtist, album };
   }
   return { artist: group.parent, album: stripped || group.title.trim() };
 }

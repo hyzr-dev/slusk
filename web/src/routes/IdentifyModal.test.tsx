@@ -130,6 +130,37 @@ describe('parseFolderGuess', () => {
       album: 'Kind of Blue',
     });
   });
+
+  // #355: "Artist/YYYY - Album" is a common peer layout too, and the naive
+  // dash split mistook the year for the artist. The parent directory is
+  // preferred over a bare 4-digit year, same as the no-separator fallback.
+  it('prefers the parent directory over a leading year (Artist/YYYY - Album)', () => {
+    expect(parseFolderGuess(group({ title: '1984 - Ride The Lightning', parent: 'Metallica' }))).toEqual({
+      artist: 'Metallica',
+      album: 'Ride The Lightning',
+    });
+  });
+
+  it('prefers the parent directory over a leading year, tags and all', () => {
+    expect(parseFolderGuess(group({ title: '1994 - Dummy [FLAC 16/44]', parent: 'Portishead' }))).toEqual({
+      artist: 'Portishead',
+      album: 'Dummy',
+    });
+  });
+
+  it('keeps the year as artist when there is no parent to fall back on', () => {
+    expect(parseFolderGuess(group({ title: '1984 - Ride The Lightning', parent: '' }))).toEqual({
+      artist: '1984',
+      album: 'Ride The Lightning',
+    });
+  });
+
+  it('uses the parent even when it looks unhelpful, same as the no-separator case', () => {
+    expect(parseFolderGuess(group({ title: '1984 - Ride The Lightning', parent: 'Soulseek - Share' }))).toEqual({
+      artist: 'Soulseek - Share',
+      album: 'Ride The Lightning',
+    });
+  });
 });
 
 describe('pickDefaultEdition', () => {
