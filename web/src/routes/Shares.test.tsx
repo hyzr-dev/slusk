@@ -38,14 +38,16 @@ function makeUploadsReport(overrides: Partial<UploadsReport> = {}): UploadsRepor
   };
 }
 
-// UploadsPanel mounts whenever Shares reaches its main (enabled) return, so
-// every test that seeds an enabled SharesReport would otherwise let its
-// useUploads() query attempt a real, unstubbed fetch. Seeding a disabled
-// UploadsReport here by default keeps every existing test free of that
-// network I/O; tests that actually exercise UploadsPanel override it below.
+// UploadsPanel and UploadHistory both mount whenever Shares reaches its main
+// (enabled) return, so every test that seeds an enabled SharesReport would
+// otherwise let their queries attempt a real, unstubbed fetch. Seeding a
+// disabled UploadsReport and an empty, exhausted history page here by
+// default keeps every existing test free of that network I/O; tests that
+// actually exercise UploadsPanel or UploadHistory override these below.
 function newClient() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   client.setQueryData(queryKeys.uploads, makeUploadsReport());
+  client.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
   return client;
 }
 
@@ -86,11 +88,14 @@ describe('query state', () => {
   });
 
   it('keeps showing the folder grid, plus a stale notice, when a refetch fails', async () => {
+    // UploadHistory also refetches its seeded page in the background and
+    // fails the same way, so more than one stale notice can be on screen —
+    // this asserts at least one, not exactly one.
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
-    expect(await screen.findByText(t.query.stale)).toBeInTheDocument();
+    expect((await screen.findAllByText(t.query.stale)).length).toBeGreaterThan(0);
     expect(screen.getByText('/music/library')).toBeInTheDocument();
   });
 });
@@ -422,7 +427,9 @@ describe('uploads panel', () => {
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
     expect(screen.getByText(t.uploads.panelTitle)).toBeInTheDocument();
-    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+    // UploadHistory's own unstubbed fetch never resolves either, so more
+    // than one loading notice can be on screen — this asserts at least one.
+    expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
   });
 
   it('shows the panel with a failed line when the uploads fetch never succeeds', async () => {
@@ -438,7 +445,25 @@ describe('uploads panel', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderShares(client);
     expect(await screen.findByText(t.uploads.panelTitle)).toBeInTheDocument();
-    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    // UploadHistory's own unstubbed fetch fails the same way, so more than
+    // one failed notice can be on screen — this asserts at least one.
+    expect((await screen.findAllByText(t.query.failed)).length).toBeGreaterThan(0);
+  });
+});
+
+describe('upload history panel', () => {
+  it('renders the history panel title below the uploads panel when shares are enabled', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.getByText(t.uploads.historyTitle)).toBeInTheDocument();
+  });
+
+  it('does not render when native Soulseek sharing is disabled', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ enabled: false, folders: [] }));
+    renderShares(client);
+    expect(screen.queryByText(t.uploads.historyTitle)).not.toBeInTheDocument();
   });
 });
 

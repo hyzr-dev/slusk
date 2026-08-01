@@ -10,6 +10,7 @@ import SectionHeader from '../components/tui/SectionHeader';
 import { formatDateTime, formatSize } from '../format';
 import { t } from '../strings';
 import styles from './Shares.module.css';
+import UploadHistory from './UploadHistory';
 import UploadsPanel from './UploadsPanel';
 
 // The header's INDEXED reading turns --bad once the last scan is at least
@@ -159,6 +160,7 @@ export default function Shares() {
       </Panel>
 
       <UploadsPanel />
+      <UploadHistory />
     </Page>
   );
 }
