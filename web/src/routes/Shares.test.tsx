@@ -61,6 +61,18 @@ function renderShares(client: QueryClient) {
   );
 }
 
+// Resolves the <Panel> that owns a given SectionHeader label, so an
+// assertion can be scoped to one of the (possibly several) stacked panels on
+// this page rather than matching any QueryNotice on screen — see Panel.tsx
+// and SectionHeader.tsx: the label renders as an <h2> inside the panel's own
+// wrapping div.
+function panelFor(label: string): HTMLElement {
+  const heading = screen.getByText(label);
+  const panel = heading.closest('[class*="panel"]');
+  if (!panel) throw new Error(`no panel ancestor found for label "${label}"`);
+  return panel as HTMLElement;
+}
+
 describe('loading state', () => {
   it('renders only a loading placeholder before data arrives', () => {
     // <Page>'s own <h1> renders even before the query settles (#281), so it
@@ -89,13 +101,17 @@ describe('query state', () => {
 
   it('keeps showing the folder grid, plus a stale notice, when a refetch fails', async () => {
     // UploadHistory also refetches its seeded page in the background and
-    // fails the same way, so more than one stale notice can be on screen —
-    // this asserts at least one, not exactly one.
+    // fails the same way, so more than one stale notice can land on screen —
+    // this test is about Shares' own report going stale specifically, so it
+    // scopes to the one QueryNotice that sits outside every <Panel> (Shares'
+    // own is rendered directly under <Page>, not inside one).
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
-    expect((await screen.findAllByText(t.query.stale)).length).toBeGreaterThan(0);
+    const notices = await screen.findAllByText(t.query.stale);
+    const pageLevelNotice = notices.find((n) => !n.closest('[class*="panel"]'));
+    expect(pageLevelNotice).toBeInTheDocument();
     expect(screen.getByText('/music/library')).toBeInTheDocument();
   });
 });
@@ -428,8 +444,9 @@ describe('uploads panel', () => {
     renderShares(client);
     expect(screen.getByText(t.uploads.panelTitle)).toBeInTheDocument();
     // UploadHistory's own unstubbed fetch never resolves either, so more
-    // than one loading notice can be on screen — this asserts at least one.
-    expect(screen.getAllByText(t.query.loading).length).toBeGreaterThan(0);
+    // than one loading notice can be on screen — this regression (#201) is
+    // specifically about the uploads panel, so scope to it.
+    expect(within(panelFor(t.uploads.panelTitle)).getByText(t.query.loading)).toBeInTheDocument();
   });
 
   it('shows the panel with a failed line when the uploads fetch never succeeds', async () => {
@@ -446,8 +463,9 @@ describe('uploads panel', () => {
     renderShares(client);
     expect(await screen.findByText(t.uploads.panelTitle)).toBeInTheDocument();
     // UploadHistory's own unstubbed fetch fails the same way, so more than
-    // one failed notice can be on screen — this asserts at least one.
-    expect((await screen.findAllByText(t.query.failed)).length).toBeGreaterThan(0);
+    // one failed notice can be on screen — this regression (#201) is
+    // specifically about the uploads panel, so scope to it.
+    expect(await within(panelFor(t.uploads.panelTitle)).findByText(t.query.failed)).toBeInTheDocument();
   });
 });
 

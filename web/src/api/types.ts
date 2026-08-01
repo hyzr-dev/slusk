@@ -610,7 +610,9 @@ export interface UploadHistoryEntry {
  * uploadHistoryResponse. Newest-first (id DESC); `hasMore` is computed by
  * over-fetching one row, so it is exact rather than a guess. Unlike
  * UploadsReport this carries no `enabled` flag: the history is a fact in the
- * database, readable after the native backend is switched off.
+ * database, readable after the native backend is switched off — though
+ * Shares.tsx currently mounts <UploadHistory /> only inside its `data.enabled`
+ * branch, so that survival is not yet surfaced in the UI.
  */
 export interface UploadHistoryPage {
   uploads: UploadHistoryEntry[];

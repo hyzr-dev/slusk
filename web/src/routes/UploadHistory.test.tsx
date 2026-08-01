@@ -52,6 +52,7 @@ function renderHistory(client: QueryClient) {
 describe('UploadHistory rows', () => {
   it('renders a completed row with leaf filename, full path title, peer, timestamp, size and speed', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [makeEntry()], hasMore: false }]);
     renderHistory(client);
 
@@ -68,6 +69,7 @@ describe('UploadHistory rows', () => {
 describe('UploadHistory query states', () => {
   it('shows the empty state, and no load-older button, for an exhausted empty page', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [], hasMore: false }]);
     renderHistory(client);
     expect(screen.getByText(new RegExp(t.uploads.historyEmpty))).toBeInTheDocument();
@@ -85,6 +87,7 @@ describe('UploadHistory query states', () => {
 describe('UploadHistory load older', () => {
   it('does not render when hasMore is false', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [makeEntry()], hasMore: false }]);
     renderHistory(client);
     expect(screen.queryByText(t.uploads.historyLoadOlder)).not.toBeInTheDocument();
@@ -92,6 +95,7 @@ describe('UploadHistory load older', () => {
 
   it('renders when hasMore is true with a non-empty page', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [makeEntry()], hasMore: true }]);
     renderHistory(client);
     expect(screen.getByText(t.uploads.historyLoadOlder)).toBeInTheDocument();
@@ -99,16 +103,23 @@ describe('UploadHistory load older', () => {
 
   it('does not arm the button when an empty page still claims hasMore', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [], hasMore: true }]);
     renderHistory(client);
     expect(screen.queryByText(t.uploads.historyLoadOlder)).not.toBeInTheDocument();
   });
 
+  // The seeded page carries two rows (ids 12 and 8, newest-first) specifically
+  // so this test can tell "the previous page's FIRST row id" apart from "the
+  // previous page's LAST row id" — with a single row those two are the same
+  // value and the test cannot pin the cursor choice at all.
   it('pages backwards on click, using the previous page\'s last row id as the cursor', async () => {
     const client = newClient();
-    seedHistory(client, [{ uploads: [makeEntry({ id: 12 })], hasMore: true }]);
+    seedHistory(client, [
+      { uploads: [makeEntry({ id: 12 }), makeEntry({ id: 8, filename: 'second.flac' })], hasMore: true },
+    ]);
     const fetchMock = vi.fn((url: string) => {
-      expect(url).toBe('/api/uploads/history?before=12');
+      expect(url).toBe('/api/uploads/history?before=8');
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -121,13 +132,14 @@ describe('UploadHistory load older', () => {
 
     fireEvent.click(screen.getByText(t.uploads.historyLoadOlder));
     await waitFor(() => expect(screen.getByText('older.flac')).toBeInTheDocument());
-    expect(fetchMock).toHaveBeenCalledWith('/api/uploads/history?before=12');
+    expect(fetchMock).toHaveBeenCalledWith('/api/uploads/history?before=8');
   });
 });
 
 describe('UploadHistory transferred column', () => {
   it('shows a dash for a rejected row and never a zero measurement', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [
       {
         uploads: [
@@ -144,6 +156,7 @@ describe('UploadHistory transferred column', () => {
 
   it('shows sent-of-total for an aborted row', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [
       {
         uploads: [makeEntry({ status: 'aborted', bytesSent: 10 * 1024 * 1024, size: 40 * 1024 * 1024 })],
@@ -158,6 +171,7 @@ describe('UploadHistory transferred column', () => {
 describe('UploadHistory detail line', () => {
   it('renders detail only when set', () => {
     const client = newClient();
+    stubFetchIndefinitely();
     seedHistory(client, [
       {
         uploads: [
@@ -167,14 +181,27 @@ describe('UploadHistory detail line', () => {
         hasMore: false,
       },
     ]);
-    renderHistory(client);
+    const { container } = renderHistory(client);
     expect(screen.getByText('file unavailable')).toBeInTheDocument();
+    // Asserting only that the text is present would survive an unconditional
+    // `<div className={styles.historyDetail}>{e.detail}</div>` too — an empty
+    // string renders no text node either way. Pin the node's absence itself:
+    // exactly one of the two rows may have a `.historyDetail` element at all.
+    expect(container.querySelectorAll('[class*="historyDetail"]')).toHaveLength(1);
   });
 });
 
 describe('UploadHistory row identity', () => {
-  it('renders duplicate (username, filename) rows differing only by id', () => {
+  // Two entries share (username, filename) but have distinct ids. React only
+  // warns about "two children with the same key" when the *keys themselves*
+  // collide — since id is unique here, key={e.id} produces no warning, while
+  // key={`${e.username}-${e.filename}`} would collide and warn. That makes
+  // the console.error spy an honest pin of the id-as-key decision: swapping
+  // the key back to the composite string flips this from silent to warning.
+  it('keys rows by id rather than by (username, filename), so React never warns about a duplicate key', () => {
     const client = newClient();
+    stubFetchIndefinitely();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     seedHistory(client, [
       {
         uploads: [
@@ -186,5 +213,10 @@ describe('UploadHistory row identity', () => {
     ]);
     renderHistory(client);
     expect(screen.getAllByText('same.flac')).toHaveLength(2);
+    const sameKeyWarning = consoleError.mock.calls.some((args) =>
+      args.some((a) => typeof a === 'string' && a.includes('same key')),
+    );
+    expect(sameKeyWarning).toBe(false);
+    consoleError.mockRestore();
   });
 });

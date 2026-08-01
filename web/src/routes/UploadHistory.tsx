@@ -46,8 +46,9 @@ function transferred(e: UploadHistoryEntry): string {
 
 // A separate component rather than inline JSX in Shares, for the same reason
 // UploadsPanel is one: a hook cannot be conditional, so calling
-// useUploadHistory() at the top of Shares would keep the query mounted in the
-// `!data.enabled` early-return branch above it.
+// useUploadHistory() at the top of Shares would fire it even in the
+// `!data.enabled` early-return branch above it — one wasted request per
+// Shares mount rather than a poll, since this query has no refetchInterval.
 export default function UploadHistory() {
   const historyQuery = useUploadHistory();
   const phase = queryPhase(historyQuery);
@@ -65,19 +66,28 @@ export default function UploadHistory() {
             <span className={styles.uploadFile} title={e.filename}>{formatVirtualPath(e.filename)}</span>
           </div>
           <div className={styles.historyMeta}>
-            <span>{t.uploads.toPeerPrefix} <span className={styles.mono}>{e.username}</span></span>
+            <span>
+              {t.uploads.toPeerPrefix} <span className={styles.mono}>{e.username}</span>
+            </span>
             <span>{formatDateTime(e.finishedAt)}</span>
             <span>{transferred(e)}</span>
-            {/* formatSpeed already answers '—' for 0, which is what a rejected
-                row's avgBytesPerSecond is; no guard needed here. */}
-            <span>{formatSpeed(e.avgBytesPerSecond)}</span>
+            <span>
+              {/* formatSpeed already answers '—' for 0, which is what a
+                  rejected row's avgBytesPerSecond is; no guard needed here. */}
+              {formatSpeed(e.avgBytesPerSecond)}
+            </span>
           </div>
           {e.detail && <div className={styles.historyDetail}>{e.detail}</div>}
         </div>
       ))}
       {historyQuery.hasNextPage && (
         <div className={styles.historyFooter}>
-          <Button type="button" variant="ghost" onClick={() => void historyQuery.fetchNextPage()} disabled={historyQuery.isFetchingNextPage}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => void historyQuery.fetchNextPage()}
+            disabled={historyQuery.isFetchingNextPage}
+          >
             {t.uploads.historyLoadOlder}
           </Button>
         </div>

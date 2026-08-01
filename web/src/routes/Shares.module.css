@@ -218,11 +218,3 @@
   padding: 9px 16px;
   border-top: 1px solid var(--line);
 }
-
-@media (max-width: 640px) {
-  .historyRow,
-  .historyFooter {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
-}
