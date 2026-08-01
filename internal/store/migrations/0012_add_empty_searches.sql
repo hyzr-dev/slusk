@@ -1,0 +1,11 @@
+-- A search cycle that returns zero raw results from the Soulseek network is not
+-- evidence the album itself is unfindable: the same unchanged query has been
+-- observed to return 0, 6, 10, 1, 250 and 56 responses within five minutes of
+-- each other, and some queries return zero every single time for reasons the
+-- server's disclosed exclusion list does not explain. Counting those cycles
+-- against `retries` (which is meant for "peers answered, every candidate was
+-- rejected by filtering") would exhaust the retry budget and FAIL the job on
+-- pure network noise, stranding it for `failed_revive_after` (30 days by
+-- default). `empty_searches` tracks consecutive no-raw-results cycles on its
+-- own backoff curve and never fails the job by itself.
+ALTER TABLE album_jobs ADD COLUMN empty_searches BIGINT NOT NULL DEFAULT 0;

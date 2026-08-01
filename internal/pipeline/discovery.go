@@ -29,7 +29,8 @@ type DiscoveryStore interface {
 	// tick searches for (see RunnableJobsInState's doc comment for ordering).
 	RunnableJobsInState(ctx context.Context, state core.AlbumJobState, now time.Time, limit int) ([]core.AlbumJob, error)
 	// InsertCandidates caches a job's surviving ranked candidates and resets
-	// its search cycle (retries=0, not_before=NULL) in the same transaction.
+	// its search cycle (retries=0, empty_searches=0, not_before=NULL) in the
+	// same transaction.
 	InsertCandidates(ctx context.Context, jobID int64, cands []store.NewCandidate, now time.Time) error
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// ReliabilityFor batch-looks-up known peer reliability history for a set
@@ -41,7 +42,20 @@ type DiscoveryStore interface {
 	// RecordSearchPass appends one row recording a completed Discovery search
 	// cycle, for the Overview charts (see Tick's best-effort recording).
 	RecordSearchPass(ctx context.Context, p core.SearchPass) error
+	// SetJobEmptySearchBackoff records a search cycle where the Soulseek
+	// network returned no raw results at all: it bumps empty_searches and
+	// hides the job until notBefore, without touching retries or state (see
+	// searchJob's len(results)==0 handling - this never fails the job).
+	SetJobEmptySearchBackoff(ctx context.Context, jobID int64, emptySearches int, notBefore time.Time, now time.Time) error
 }
+
+// emptySearchRewriteThreshold is how many consecutive no-raw-results cycles
+// (job.EmptySearches) a job must accumulate before searchJob tries
+// matcher.DropTokenQuery as a second fallback, on top of the existing
+// normalized-query fallback. Below the threshold a run of zeros is treated
+// as ordinary network noise (see the migration's comment); at or above it,
+// a persistently blocked query is worth the extra search.
+const emptySearchRewriteThreshold = 2
 
 // DiscoveryMetrics receives discovery metrics. A nil sink is a no-op, so
 // Discovery never depends on the observ package directly (same pattern as
@@ -296,6 +310,30 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			}
 			query = fallback
 		}
+
+		// Still nothing, and this job has racked up enough consecutive
+		// no-raw-results cycles (job.EmptySearches) to suspect it is one of
+		// the queries the network silently filters (issue #334) rather than
+		// one more instance of ordinary search noise. Try one more search
+		// with a single artist/album token dropped - deterministically
+		// rotated by attempt so a job stuck here tries a different token
+		// each cycle instead of repeating the same doomed rewrite.
+		if len(results) == 0 && job.EmptySearches >= emptySearchRewriteThreshold {
+			attempt := job.EmptySearches - emptySearchRewriteThreshold
+			if rewrite := matcher.DropTokenQuery(album.ArtistName, album.Title, attempt); rewrite != "" && rewrite != query {
+				rewriteDetail := fmt.Sprintf("search still empty after %d empty cycles, trying token-dropped query %q", job.EmptySearches, rewrite)
+				d.log().Info(rewriteDetail, "album_job", job.ID, "query", rewrite)
+				d.recordEvent(ctx, job.ID, core.EventSearchFallback, rewriteDetail, now)
+				results, err = d.p.Peers.Search(ctx, rewrite, d.p.SearchTimeout)
+				if err != nil {
+					if errors.Is(err, core.ErrSearchExcluded) {
+						return d.failExcludedSearch(ctx, job, rewrite, err, now)
+					}
+					return false, false, err
+				}
+				query = rewrite
+			}
+		}
 	}
 
 	rel, err := d.p.Store.ReliabilityFor(ctx, job.ArtistID, uniqueUsernames(results))
@@ -413,6 +451,28 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	}
 
 	if len(survivors) == 0 {
+		if len(results) == 0 {
+			// The network answered nothing at all this cycle, even after the
+			// normalized-query and (if eligible) token-dropped fallbacks
+			// above - not "peers answered but every candidate was rejected",
+			// which is the branch below. A single empty search is weak
+			// evidence (issue #334): the same unchanged query has been
+			// observed to return 0, 6, 10, 1, 250, 56 responses within
+			// minutes of each other. So this does NOT touch the retry
+			// budget and NEVER fails the job - it backs off on its own
+			// empty_searches curve and stays WANTED forever, retried at
+			// backoff_cap intervals, which is the deliberate answer for a
+			// genuinely unanswerable query rather than a fabricated
+			// terminal state.
+			empty := job.EmptySearches + 1
+			notBefore := now.Add(nextBackoff(empty, d.p.BackoffBase, d.p.BackoffCap))
+			d.log().Info("no raw results, backing off empty-search streak without touching retries",
+				"album_job", job.ID, "empty_searches", empty)
+			if err := d.p.Store.SetJobEmptySearchBackoff(ctx, job.ID, empty, notBefore, now); err != nil {
+				return false, false, err
+			}
+			return true, false, nil
+		}
 		// The EventSearch event recorded above already carries this cycle's
 		// empty outcome (results/candidates counts); nothing further to record.
 		d.log().Info("no viable candidates, backing off", "album_job", job.ID)
