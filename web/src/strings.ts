@@ -666,8 +666,14 @@ export const t = {
       // canonical-artist fallback chain was fixed for.
       verdictUnknownEdition: 'COMPLETENESS UNKNOWN — this edition has no track listing',
       verdictNoEdition: 'COMPLETENESS UNKNOWN — no edition selected',
+      // The three outcomes of the single Lidarr status line (see
+      // IdentifyModal's lidarrLine). #331 briefly rendered artist and album
+      // status as two separate lines, which said the same thing twice — an
+      // absent artist implies an absent album. These name which of the three
+      // real situations holds, and each states the import consequence once.
       lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
-      lidarrNotInLibrary: "NOT IN LIDARR LIBRARY — download will succeed but won't be imported",
+      lidarrAlbumMissing: "ALBUM NOT IN LIDARR — download won't be imported",
+      lidarrArtistAndAlbumMissing: "ARTIST & ALBUM NOT IN LIDARR — download won't be imported",
       lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
       back: '‹ Back',
       confirm: 'Confirm identification',
@@ -679,6 +685,77 @@ export const t = {
       // buttons is always available), just not allowed to CONFIRM a
       // fabricated identity.
       noCanonicalArtist: 'Enter an artist above — MusicBrainz did not supply one for this release.',
+
+      // ---- Lidarr add-artist flow (issue #331) ----
+      //
+      // Shown below the status line when the picked search
+      // result carries no artistId at all (release-group with an empty
+      // artist-credit) — case 3 of the brief. Never invents an artist to
+      // resolve one; see canonicalArtistOf's own comment on the same rule.
+      noArtistId: "MusicBrainz did not supply an artist ID for this release, so it can't be added to Lidarr. You can still download it without importing.",
+      // The two paths offered when the album is confirmed NOT in the
+      // library and both artist/album lookups succeeded (case 2). Neither
+      // is the default action — both render as equal buttons, per the
+      // brief's "download anyway is legitimate and must not be hidden".
+      // Same wording as addSubmit below ("&", not "and") — this button and
+      // that one name the same action (open the form vs. submit it), and two
+      // spellings for one action read as sloppy rather than deliberate.
+      addToLidarr: 'Add to Lidarr & download',
+      downloadAnyway: 'Download anyway',
+      addOptionsLoading: 'loading lidarr options…',
+      addOptionsFailed: "Could not load Lidarr's root folders and profiles.",
+      // Shown alongside Retry when the add-options fetch fails, so the user
+      // can still get back to the two-path choice (and "download anyway")
+      // instead of being stuck with no way out but closing the modal.
+      addOptionsFailedBack: 'Cancel',
+      rootFolderLabel: 'Root folder',
+      rootFolderInaccessible: 'inaccessible',
+      // Shown instead of the form when Lidarr's add-options returned no
+      // accessible root folder, or no quality/metadata profile at all — the
+      // add form has nothing usable to submit, so it isn't rendered pretending
+      // otherwise. "Download anyway" stays reachable via Cancel below.
+      noAccessibleRootFolder: 'No accessible root folder is configured in Lidarr — check its settings there.',
+      noUsableProfiles: 'No quality or metadata profile is configured in Lidarr — check its settings there.',
+      qualityProfileLabel: 'Quality profile',
+      metadataProfileLabel: 'Metadata profile',
+      monitorLabel: 'Monitor',
+      monitorAlbum: 'Just this album',
+      monitorAll: 'Entire discography',
+      // Shown only when "Entire discography" is selected — a plain warning,
+      // not hidden in a tooltip, since it changes Lidarr's behaviour beyond
+      // this one release.
+      monitorAllWarning: 'Lidarr will begin searching for everything this artist has released.',
+      addSubmit: 'Add to Lidarr & download',
+      addCancel: 'Cancel',
+      addSubmitting: 'adding to lidarr…',
+      // Definite failure — every POST /api/lidarr/artists status except 502
+      // means the add genuinely did not happen. Contrast addUncertain below.
+      addArtistFailed: 'Could not add the artist to Lidarr. Try again, or download without importing.',
+      // The 502 { code: "addUncertain" } case: the request may or may not
+      // have created the artist server-side. Deliberately does not say
+      // "failed" — that would be inventing certainty the response doesn't
+      // have. A retry is safe (Lidarr's add is idempotent on the MBID), so
+      // it's offered as the next step rather than only "check Lidarr".
+      addUncertain:
+        'Could not confirm whether the artist was added to Lidarr — it may have succeeded. Check Lidarr, or try again; retrying is safe.',
+      // Per-albumMonitorState copy (see AddLidarrArtistResult). None of these
+      // are failures — the artist was created — so each states plainly what
+      // is and is not known, never inventing a cause it can't confirm.
+      albumMonitorNotVisibleYet: "Lidarr hadn't finished refreshing the artist yet, so this album isn't monitored.",
+      albumMonitorReverted: "Lidarr's own refresh reset the album's monitoring after the add — it didn't stick.",
+      albumMonitorUnknown: 'Could not confirm whether the album is now monitored. Check Lidarr directly.',
+      // Shown alongside an albumMonitorState line whenever the ARTIST itself
+      // isn't monitored — a separate fact from the album's own state (issue
+      // #331 review): this is the real state after a retry of an add that had
+      // silently landed, where Lidarr already knows the artist but never
+      // monitored it.
+      artistNotMonitored: 'The artist is in Lidarr but not monitored, so Lidarr will not act on this.',
+      // Trailing sentence for the partial-success notice, shared by every
+      // non-fully-monitored outcome (issue #331 review, requires an explicit
+      // Continue click rather than proceeding silently, so the user actually
+      // sees it before the modal closes).
+      addPartialProceeds: 'The download will proceed anyway.',
+      continue: 'Continue',
     },
   },
   chat: {

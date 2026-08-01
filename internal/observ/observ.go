@@ -471,6 +471,13 @@ type ServerDeps struct {
 	IdentifySearch            IdentifySearchFunc
 	IdentifyAlbumEditions     IdentifyAlbumEditionsFunc
 	IdentifyAlbumLidarrStatus IdentifyAlbumLidarrStatusFunc
+	// LidarrArtistStatus, LidarrAddOptions and LidarrAddArtist back issue
+	// #331's "add to Lidarr" flow: GET /api/lidarr/artists/{mbid}, GET
+	// /api/lidarr/add-options and POST /api/lidarr/artists. nil-safe,
+	// mirroring IdentifySearch - see registerLidarrLibrary.
+	LidarrArtistStatus LidarrArtistStatusFunc
+	LidarrAddOptions   LidarrAddOptionsFunc
+	LidarrAddArtist    LidarrAddArtistFunc
 	// Conversations and Thread back GET /api/messages and GET
 	// /api/messages/{username} (issue #183). Unlike Shares/RescanShares these
 	// are wired unconditionally — message history stays readable even when
@@ -830,6 +837,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerSearch(mux, deps.StartSearch, deps.SearchSnapshot, deps.StopSearch)
 	registerIdentify(mux, deps.IdentifySearch, deps.IdentifyAlbumEditions, deps.IdentifyAlbumLidarrStatus)
+	registerLidarrLibrary(mux, deps.LidarrArtistStatus, deps.LidarrAddOptions, deps.LidarrAddArtist)
 	registerUploads(mux, deps.Uploads, deps.UploadHistory)
 	registerMessages(mux, deps.Conversations, deps.ConversationPresence, deps.Thread, deps.Send, deps.MarkRead)
 	registerStream(mux, deps, streamInterval, streamCorrelationInterval, streamHeartbeatInterval, streamInvalidateInterval)

@@ -422,11 +422,17 @@ type configUpdateRequest struct {
 }
 
 // errorResponse is the JSON error shape for every non-2xx /api/config
-// response. FieldErrors is populated only for a 422 validation failure, keyed
-// by a dotted JSON path (e.g. "pipeline.maxActive",
-// "soulseek.sharedFolders[0].name") into the request body.
+// response, and is reused by every other JSON endpoint's error body.
+// FieldErrors is populated only for a 422 validation failure, keyed by a
+// dotted JSON path (e.g. "pipeline.maxActive",
+// "soulseek.sharedFolders[0].name") into the request body. Code is a stable
+// machine-readable identifier for the small set of errors a caller needs to
+// branch on programmatically rather than just display - currently only
+// POST /api/lidarr/artists' "addUncertain" (issue #331 backend review), via
+// writeConfigErrorWithCode; every other error leaves it empty.
 type errorResponse struct {
 	Error       string            `json:"error"`
+	Code        string            `json:"code,omitempty"`
 	FieldErrors map[string]string `json:"fieldErrors,omitempty"`
 }
 
@@ -434,6 +440,14 @@ func writeConfigError(w http.ResponseWriter, status int, message string, fieldEr
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{Error: message, FieldErrors: fieldErrors})
+}
+
+// writeConfigErrorWithCode is writeConfigError plus a machine-readable code -
+// see errorResponse's doc comment.
+func writeConfigErrorWithCode(w http.ResponseWriter, status int, message, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(errorResponse{Error: message, Code: code})
 }
 
 func serveConfigPost(w http.ResponseWriter, r *http.Request, writer ConfigWriter, restart func()) {

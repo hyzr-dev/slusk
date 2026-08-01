@@ -209,7 +209,11 @@
 }
 
 .statusLines { margin-top: 12px; font-size: 11px; }
-.statusLines > div:last-child { margin-top: 8px; }
+/* Was `:last-child` only, which happened to work for exactly two lines
+   (verdict + Lidarr status) but collapsed once #331 added a variable number
+   more (artist status, the noArtistId note) — `div + div` gives every line
+   after the first the same gap regardless of count. */
+.statusLines > div + div { margin-top: 8px; }
 
 .tone-ok { color: var(--ok); letter-spacing: 0.3px; line-height: 1.6; }
 .tone-bad { color: var(--bad); letter-spacing: 0.3px; line-height: 1.6; }
@@ -217,3 +221,40 @@
 .tone-quiet { color: var(--text-dim); letter-spacing: 0.3px; line-height: 1.6; }
 
 .actions { display: flex; gap: 8px; margin-top: 18px; }
+
+/* The "add to Lidarr" form (issue #331) — root folder/quality/metadata
+   selects plus the monitor choice, reusing .field/.fieldLabel/.select from
+   above rather than introducing a parallel set of form styles. */
+/* The .tone-* classes carry colour but deliberately no font-size, because
+   inside .statusLines they inherit its 11px. In here they had nothing to
+   inherit from and rendered at the dialog's base size — visibly larger than
+   every control around them. Every control below sets its own size
+   (.select 12px, .fieldLabel 9.5px, .radioRow 11.5px), so sizing the
+   container only reaches the .tone-* notes, which is exactly the intent. */
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 11px;
+}
+
+.radioRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--fg);
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+/* Browsers default an unstyled radio's checked state to system blue, which
+   is not one of this project's tokens (CLAUDE.md: "a raw hex in a .module.css
+   is invisible to anything that reasons about the palette" — accent-color
+   is the same hazard one level up, an un-tokened colour the check script
+   cannot see). --fg keeps it inside the terminal's monochrome ladder rather
+   than spending the scarce --ok/--bad signal on a routine form control. */
+.radioRow input[type='radio'] { accent-color: var(--fg); }
+
+.radioRow:first-of-type { margin-top: 4px; }

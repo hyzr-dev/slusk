@@ -388,6 +388,15 @@ func main() {
 			Logger:      logger.With("component", "identify"),
 		})
 	}
+	// lidarrLibrary backs issue #331's "add to Lidarr" flow. Unlike identify
+	// it is wired unconditionally: cfg.Lidarr is a required section (see
+	// config.Validate), so lidarrClient always exists - the nil-safe
+	// ServerDeps fields exist for testability, not because this can be absent
+	// in a real deployment.
+	lidarrLibrary := app.NewLidarrLibrary(app.LidarrLibraryParams{
+		Lidarr: lidarrClient,
+		Logger: logger.With("component", "lidarr-library"),
+	})
 	// createJobFn converts observ's core.CandidateFile request shape into
 	// store.ManualJobFile: observ deliberately does not import internal/store,
 	// so the conversion happens here at the wiring boundary instead.
@@ -525,6 +534,9 @@ func main() {
 		identifyAlbumEditionsFn = identify.AlbumEditions
 		identifyAlbumLidarrStatusFn = identify.AlbumLidarrStatus
 	}
+	lidarrArtistStatusFn := observ.LidarrArtistStatusFunc(lidarrLibrary.ArtistStatus)
+	lidarrAddOptionsFn := observ.LidarrAddOptionsFunc(lidarrLibrary.AddOptions)
+	lidarrAddArtistFn := observ.LidarrAddArtistFunc(lidarrLibrary.AddArtistAndMonitor)
 	if soulClient != nil {
 		sharesFn = func() observ.ShareStatsReport {
 			report := soulClient.ShareReport()
@@ -663,6 +675,9 @@ func main() {
 		IdentifySearch:            identifySearchFn,
 		IdentifyAlbumEditions:     identifyAlbumEditionsFn,
 		IdentifyAlbumLidarrStatus: identifyAlbumLidarrStatusFn,
+		LidarrArtistStatus:        lidarrArtistStatusFn,
+		LidarrAddOptions:          lidarrAddOptionsFn,
+		LidarrAddArtist:           lidarrAddArtistFn,
 		Conversations:             conversationsFn,
 		ConversationPresence:      conversationPresenceForBackend(cfg.Pipeline.Backend, soulClient),
 		Thread:                    threadFn,

@@ -3,6 +3,7 @@ package lidarr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -437,4 +438,389 @@ func TestAlbumByForeignID(t *testing.T) {
 			t.Fatal("found must be false alongside an error")
 		}
 	})
+}
+
+func TestArtistByMBID(t *testing.T) {
+	t.Run("found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("mbId"); got != "artist-1" {
+				t.Errorf("mbId = %q, want artist-1", got)
+			}
+			w.Write([]byte(`[{"id":9,"foreignArtistId":"artist-1","artistName":"Aphex Twin","monitored":true}]`))
+		}))
+		defer srv.Close()
+		artist, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
+		if err != nil {
+			t.Fatalf("ArtistByMBID: %v", err)
+		}
+		if !found || artist.ID != 9 || artist.ForeignArtistID != "artist-1" || artist.Name != "Aphex Twin" || !artist.Monitored {
+			t.Fatalf("unexpected: found=%v artist=%+v", found, artist)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`[]`))
+		}))
+		defer srv.Close()
+		_, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
+		if err != nil {
+			t.Fatalf("ArtistByMBID: %v", err)
+		}
+		if found {
+			t.Fatal("expected found = false for an empty array")
+		}
+	})
+
+	t.Run("unreachable is an error, not an absence", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+		_, found, err := New(srv.URL, "k").ArtistByMBID(context.Background(), "artist-1")
+		if err == nil {
+			t.Fatal("expected an error for a non-2xx response")
+		}
+		if found {
+			t.Fatal("found must be false alongside an error")
+		}
+	})
+}
+
+func TestRootFolders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"id":1,"path":"/music/library","accessible":true,"freeSpace":123,"defaultQualityProfileId":2,"defaultMetadataProfileId":1}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").RootFolders(context.Background())
+	if err != nil {
+		t.Fatalf("RootFolders: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != 1 || got[0].Path != "/music/library" || !got[0].Accessible ||
+		got[0].FreeSpace != 123 || got[0].DefaultQualityProfileID != 2 || got[0].DefaultMetadataProfileID != 1 {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestQualityProfiles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/qualityprofile" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Write([]byte(`[{"id":1,"name":"Any"},{"id":2,"name":"Lossless"}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").QualityProfiles(context.Background())
+	if err != nil {
+		t.Fatalf("QualityProfiles: %v", err)
+	}
+	if len(got) != 2 || got[1].Name != "Lossless" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestMetadataProfiles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/metadataprofile" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Write([]byte(`[{"id":1,"name":"Standard"}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").MetadataProfiles(context.Background())
+	if err != nil {
+		t.Fatalf("MetadataProfiles: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "Standard" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestAddArtist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/artist" {
+			t.Errorf("method/path = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		if body["monitorNewItems"] != "none" {
+			t.Errorf("monitorNewItems = %v, want none", body["monitorNewItems"])
+		}
+		addOptions, ok := body["addOptions"].(map[string]any)
+		if !ok {
+			t.Errorf("addOptions missing or wrong type: %v", body["addOptions"])
+		}
+		if addOptions["monitor"] != "none" {
+			t.Errorf("addOptions.monitor = %v, want none", addOptions["monitor"])
+		}
+		if addOptions["searchForMissingAlbums"] != false {
+			t.Errorf("addOptions.searchForMissingAlbums = %v, want false", addOptions["searchForMissingAlbums"])
+		}
+		if body["foreignArtistId"] != "artist-1" || body["artistName"] != "Aphex Twin" ||
+			body["qualityProfileId"] != float64(2) || body["metadataProfileId"] != float64(1) ||
+			body["rootFolderPath"] != "/music/library" {
+			t.Errorf("unexpected request body: %+v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":9,"foreignArtistId":"artist-1","artistName":"Aphex Twin","monitored":false}`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").AddArtist(context.Background(), core.AddArtistRequest{
+		ForeignArtistID: "artist-1", ArtistName: "Aphex Twin",
+		QualityProfileID: 2, MetadataProfileID: 1, RootFolderPath: "/music/library",
+	})
+	if err != nil {
+		t.Fatalf("AddArtist: %v", err)
+	}
+	if got.ID != 9 || got.ForeignArtistID != "artist-1" || got.Name != "Aphex Twin" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestAddArtistNon201IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "k").AddArtist(context.Background(), core.AddArtistRequest{ForeignArtistID: "artist-1"})
+	if err == nil {
+		t.Fatal("expected an error for a non-201 response")
+	}
+}
+
+// TestAddArtistTimeoutButArtistWasCreatedIsSuccess covers the live-probe
+// finding in .lidarr-endpoints-verified.md: POST /artist can exceed the
+// client's timeout while still creating the artist server-side. AddArtist
+// must re-check ArtistByMBID and report success, not a transport error.
+func TestAddArtistTimeoutButArtistWasCreatedIsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/artist":
+			time.Sleep(150 * time.Millisecond) // outlast the client's short timeout below
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":9,"foreignArtistId":"artist-1","artistName":"Aphex Twin","monitored":false}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/artist":
+			w.Write([]byte(`[{"id":9,"foreignArtistId":"artist-1","artistName":"Aphex Twin","monitored":false}]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k", WithAddArtistTimeout(20*time.Millisecond))
+	got, err := c.AddArtist(context.Background(), core.AddArtistRequest{ForeignArtistID: "artist-1", ArtistName: "Aphex Twin"})
+	if err != nil {
+		t.Fatalf("AddArtist should recover via the re-check, got error: %v", err)
+	}
+	if got.ID != 9 || got.ForeignArtistID != "artist-1" || got.Name != "Aphex Twin" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+// TestAddArtistTimeoutAndArtistGenuinelyAbsentIsError covers the other side
+// of the same re-check: when the create really did fail, a clean re-check
+// showing the artist absent must be reported as a definite error, not as
+// ErrAddArtistUncertain.
+func TestAddArtistTimeoutAndArtistGenuinelyAbsentIsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/artist":
+			time.Sleep(150 * time.Millisecond)
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":9}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/artist":
+			w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k", WithAddArtistTimeout(20*time.Millisecond), WithAddArtistRecheck(2, time.Millisecond))
+	_, err := c.AddArtist(context.Background(), core.AddArtistRequest{ForeignArtistID: "artist-1"})
+	if err == nil {
+		t.Fatal("expected an error when the create times out and the re-check finds no artist")
+	}
+	if errors.Is(err, ErrAddArtistUncertain) {
+		t.Fatalf("a clean re-check showing absence must not be reported as uncertain, got %v", err)
+	}
+}
+
+// TestAddArtistTimeoutAndRecheckFailsIsUncertain covers the third outcome:
+// the create fails at the transport level AND the re-check itself fails, so
+// the true state is unknown. The caller must be able to tell this apart from
+// a definite failure via errors.Is(err, ErrAddArtistUncertain).
+func TestAddArtistTimeoutAndRecheckFailsIsUncertain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			time.Sleep(150 * time.Millisecond)
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id":9}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "k", WithAddArtistTimeout(20*time.Millisecond), WithAddArtistRecheck(2, time.Millisecond))
+	_, err := c.AddArtist(context.Background(), core.AddArtistRequest{ForeignArtistID: "artist-1"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrAddArtistUncertain) {
+		t.Fatalf("expected ErrAddArtistUncertain, got %v", err)
+	}
+}
+
+// TestAddArtistRecheckSurvivesCancelledContext covers the second bug in the
+// same recovery path: in production the context passed to AddArtist is the
+// inbound request's, which is already cancelled by the time a transport
+// error occurs if the browser gave up first - exactly when the re-check is
+// needed most. The re-check must run against context.WithoutCancel, not ctx
+// itself, or it is useless in the one case it exists for.
+func TestAddArtistRecheckSurvivesCancelledContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/artist" {
+			w.Write([]byte(`[{"id":9,"foreignArtistId":"artist-1","artistName":"Aphex Twin","monitored":false}]`))
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before AddArtist is even called
+
+	c := New(srv.URL, "k", WithAddArtistRecheck(2, time.Millisecond))
+	got, err := c.AddArtist(ctx, core.AddArtistRequest{ForeignArtistID: "artist-1"})
+	if err != nil {
+		t.Fatalf("AddArtist should recover via the re-check even though ctx was already cancelled, got error: %v", err)
+	}
+	if got.ID != 9 {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestSetArtistMonitored(t *testing.T) {
+	var putBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path != "/api/v1/artist/9" {
+				t.Fatalf("GET path = %q", r.URL.Path)
+			}
+			w.Write([]byte(`{"id":9,"artistName":"Aphex Twin","monitored":false,"someOtherField":"keep-me"}`))
+		case http.MethodPut:
+			if r.URL.Path != "/api/v1/artist/9" {
+				t.Fatalf("PUT path = %q", r.URL.Path)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&putBody); err != nil {
+				t.Fatalf("decode PUT body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+	if err := New(srv.URL, "k").SetArtistMonitored(context.Background(), 9, true); err != nil {
+		t.Fatalf("SetArtistMonitored: %v", err)
+	}
+	if putBody["monitored"] != true {
+		t.Errorf("PUT monitored = %v, want true", putBody["monitored"])
+	}
+	if putBody["someOtherField"] != "keep-me" {
+		t.Errorf("PUT body dropped an unrelated field: %+v", putBody)
+	}
+}
+
+func TestMonitorAlbums(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/album/monitor" {
+			t.Fatalf("method/path = %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			AlbumIDs  []int64 `json:"albumIds"`
+			Monitored bool    `json:"monitored"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(body.AlbumIDs) != 2 || body.AlbumIDs[0] != 1 || body.AlbumIDs[1] != 2 || !body.Monitored {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	if err := New(srv.URL, "k").MonitorAlbums(context.Background(), []int64{1, 2}, true); err != nil {
+		t.Fatalf("MonitorAlbums: %v", err)
+	}
+}
+
+func TestRunningCommands(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/command" {
+			t.Errorf("path = %q, want /api/v1/command", r.URL.Path)
+		}
+		w.Write([]byte(`[{"name":"RefreshArtist","status":"started"},{"name":"RescanFolders","status":"queued"}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").RunningCommands(context.Background())
+	if err != nil {
+		t.Fatalf("RunningCommands: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "RefreshArtist" || got[0].Status != "started" ||
+		got[1].Name != "RescanFolders" || got[1].Status != "queued" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+// TestRunningCommandsParsesArtistIDs covers the PR lab finding
+// (.lidarr-endpoints-verified.md): a RefreshArtist triggered by our own add
+// carries body.artistIds, which app.LidarrLibrary.waitForIdle needs to scope
+// its wait to the artist actually being added rather than the whole
+// instance's activity.
+func TestRunningCommandsParsesArtistIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[
+			{"name":"RefreshArtist","status":"started","body":{"artistIds":[28],"isNewArtist":true}},
+			{"name":"RescanFolders","status":"queued","body":{}}
+		]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").RunningCommands(context.Background())
+	if err != nil {
+		t.Fatalf("RunningCommands: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("unexpected: %+v", got)
+	}
+	if len(got[0].ArtistIDs) != 1 || got[0].ArtistIDs[0] != 28 {
+		t.Fatalf("got[0].ArtistIDs = %v, want [28]", got[0].ArtistIDs)
+	}
+	if len(got[1].ArtistIDs) != 0 {
+		t.Fatalf("got[1].ArtistIDs = %v, want empty (no body.artistIds -> unscoped)", got[1].ArtistIDs)
+	}
+}
+
+func TestAlbumsByArtist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("artistId"); got != "9" {
+			t.Errorf("artistId = %q, want 9", got)
+		}
+		w.Write([]byte(`[{"id":1,"artistId":9,"monitored":false},{"id":2,"artistId":9,"monitored":false}]`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "k").AlbumsByArtist(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("AlbumsByArtist: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("unexpected: %+v", got)
+	}
 }
