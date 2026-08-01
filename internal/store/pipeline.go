@@ -687,22 +687,6 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	return j, nil
 }
 
-// SetJobLidarrAlbumID caches the Lidarr album id Importing resolved from a
-// manual job's AlbumMBID (issue #59, lidarr.Client.AlbumByForeignID), so
-// every later verify/confirm tick on this job can use lidarr_album_id
-// directly instead of re-resolving the MBID every time. Like SetJobTrackBand
-// this is a metadata cache write, so updated_at is deliberately not bumped -
-// caching the resolved id must not reset escalateIfStuck's StuckAfter clock.
-func (s *Store) SetJobLidarrAlbumID(ctx context.Context, jobID, albumID int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`,
-		albumID, jobID)
-	if err != nil {
-		return fmt.Errorf("set job lidarr album id: %w", err)
-	}
-	return nil
-}
-
 // SetJobTrackBand caches the album's valid track-count band (min/max across
 // all Lidarr releases) on the job, written by Discovery once per search. Like
 // BackfillJobMetadataIfEmpty this is a metadata cache write, so updated_at is

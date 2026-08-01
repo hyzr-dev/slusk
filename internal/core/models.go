@@ -51,10 +51,13 @@ type AlbumJob struct {
 	// AlbumMBID is the MusicBrainz release-group id a manual job was
 	// identified against (issue #59), or "" if the user never identified it.
 	// It is the wire-stable identity a manual job carries in place of
-	// LidarrAlbumID: LidarrAlbumID stays 0 for a manual job until Importing
-	// resolves AlbumMBID via lidarr.Client.AlbumByForeignID and caches the
-	// result with Store.SetJobLidarrAlbumID. A Lidarr-sourced job never sets
-	// this - it already has a real LidarrAlbumID from WantedSync.
+	// LidarrAlbumID, which stays 0 for a manual job for the job's whole life.
+	// Importing resolves AlbumMBID through lidarr.Client.AlbumByForeignID on
+	// every tick and deliberately never writes the answer back: a non-NULL
+	// lidarr_album_id is precisely what marks a job as WantedSync's to
+	// cancel and revive (see the resolve comment in pipeline.Importing.Tick).
+	// A Lidarr-sourced job never sets this - it already has a real
+	// LidarrAlbumID from WantedSync.
 	AlbumMBID string
 	// Year, Tracks and Format are candidate metadata captured at the
 	// SELECTING -> DOWNLOADING transition (ActivateCandidateWithTransfers),

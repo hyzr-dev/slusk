@@ -36,9 +36,10 @@ interface Props {
   // again reopens the modal so the user can re-identify.
   identified: boolean;
   onIdentify: () => void;
-  // The #59 seam (issue #58 §13): Search.tsx does not pass this. A future
-  // "Koppla till Lidarr" panel renders here, between the track expansion and
-  // the actions row, with no markup or state added on this side until then.
+  // Unused: issue #59 shipped identification through IdentifyModal instead of
+  // a panel rendered here, and Search.tsx has never passed this prop. Left in
+  // place rather than removed — deleting shipped surface is a separate call,
+  // not this comment's to make.
   renderImportPanel?: (group: SearchGroup) => ReactNode;
 }
 

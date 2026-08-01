@@ -7,13 +7,18 @@
 // IMPORTING job's status as 'active' (Tag derived the IM tag separately from
 // `state`), a drift between the SQL and Go copies of this rule that this
 // value removes the need for. 'notImported' (issue #59) is the terminal
-// state of a manual job created without an albumMbid — it downloaded
-// successfully and deliberately was never handed to Lidarr, which is neither
-// a success nor a failure and must not read as either (see Tag's TONE).
+// state of a manual job that finished downloading with no Lidarr album to
+// import into — it downloaded successfully and was never handed to Lidarr,
+// which is neither a success nor a failure and must not read as either (see
+// Tag's TONE).
 export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked' | 'notImported';
+// NOT_IMPORTED is terminal. JobActions.TERMINAL_STATES must list it: the
+// store's cancel path rewrites a job's state unconditionally, so hiding the
+// Cancel button is the only thing stopping a terminal job from being
+// rewritten to CANCELLED.
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED' | 'NOT_IMPORTED';
 export type WireJobStatus = JobStatus | 'orphaned';
 export type WireJobState = JobState | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';

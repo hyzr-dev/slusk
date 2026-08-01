@@ -160,10 +160,14 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 // albumMBID is the MusicBrainz release-group id the caller identified the
 // download against (the Identify flow), or "" if they chose not to. Once the
 // download completes, Importing resolves it to a real Lidarr album via
-// AlbumByForeignID and imports normally (issue #59). A job created with no
-// albumMBID - or whose identified release group turns out not to be in
-// Lidarr's library - advances straight to the terminal core.StateNotImported
-// instead: the files are left on disk, and Importing is never reached.
+// AlbumByForeignID and imports normally (issue #59).
+//
+// Both ways of ending up with no album to import into reach the same terminal
+// core.StateNotImported with the downloaded files left on disk, but by
+// different routes: with no albumMBID at all, Downloading routes the job
+// there the moment its transfers finish and Importing is never reached; with
+// an albumMBID that Lidarr's library does not know, the job does reach
+// Importing, whose resolve step routes it once the lookup comes back empty.
 func (j *Jobs) Create(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile) (core.JobView, error) {
 	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, albumMBID, files, time.Now())
 	if errors.Is(err, store.ErrRemoteFileBusy) {

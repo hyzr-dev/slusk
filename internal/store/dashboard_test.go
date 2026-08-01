@@ -2466,7 +2466,8 @@ func TestListDashboardJobsNotImportedStatus(t *testing.T) {
 		t.Errorf("status = %q, want %q", page.Jobs[0].Status, "notImported")
 	}
 	if page.Facets.Status.All != 1 {
-		t.Errorf("facets.status.all = %d, want 1 (a NOT_IMPORTED job still counts under ALL)", page.Facets.Status.All)
+		t.Errorf("facets.status.all = %d, want 1 (a NOT_IMPORTED job still counts under ALL, "+
+			"even though it has no facet or filter of its own yet — #368)", page.Facets.Status.All)
 	}
 }
 

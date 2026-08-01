@@ -38,9 +38,10 @@ type ManualJobFile struct {
 // albumMBID is the MusicBrainz release-group id the user identified the
 // download against, or "" if they chose not to. It is the wire's only album
 // identity for a manual job (see core.AlbumJob.AlbumMBID) - lidarr_album_id
-// is deliberately left NULL here and is filled in later, once the download
-// completes, by Importing resolving albumMBID via AlbumByForeignID and
-// writing it back with SetJobLidarrAlbumID (issue #59).
+// stays NULL for the job's whole life. Importing resolves albumMBID through
+// AlbumByForeignID on each tick and never writes the answer back, which is
+// what keeps the invariant above ("WantedSync never touches it") true even
+// after a manual job has been matched to a real Lidarr album (issue #59).
 //
 // Returns ErrRemoteFileBusy if another live candidate already owns a (peer,
 // filename) pair among files.

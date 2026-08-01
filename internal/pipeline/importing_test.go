@@ -185,6 +185,48 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 	}
 }
 
+// TestImportingIncompleteCoverageKeepsManualJobFiles is the same rejection as
+// the test above, on a manual job (issue #59) — and the folder must survive it.
+//
+// This is the commonest way a manual download gets rejected: the user picked
+// some tracks of a larger album, so the coverage gate refuses a partial
+// import. For a Lidarr-sourced job deleting the folder is right (another
+// candidate is coming, the files are slskdarr's own failed attempt). A manual
+// job has no next candidate, and the files are the thing the user explicitly
+// asked for — deleting them turns "Lidarr declined to import this" into
+// silent data loss.
+func TestImportingIncompleteCoverageKeepsManualJobFiles(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
+		},
+		albumTotal:            2, // the user took 1 track of a 2-track release
+		albumByForeignID:      core.LidarrAlbum{ID: 900, ArtistID: 7},
+		albumByForeignIDFound: true,
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
+	jobID, _ := seedImportingManualJob(t, st, "bob", mbid, []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Fatalf("a manual job's downloaded files must never be deleted, got %+v", peers.deletedFolders)
+	}
+	if len(music.executedItems) != 0 {
+		t.Errorf("ExecuteManualImport must not run on an incomplete candidate, got %+v", music.executedItems)
+	}
+	ev := lastJobEvent(t, st, jobID)
+	if ev.Event != core.EventImportRejected {
+		t.Errorf("last event = %v, want %v — the user still needs to be told why", ev.Event, core.EventImportRejected)
+	}
+}
+
 // TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection: Lidarr
 // stamps "Has unmatched tracks" on every file in a non-bijective folder,
 // including files that individually matched a track. Files with TrackIDs must
@@ -986,9 +1028,18 @@ func TestImportingStuckEscalationSurvivesCooldown(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestImportingResolvesManualAlbumAndProceedsToVerify covers the found path:
-// AlbumByForeignID resolves a real Lidarr album, the resolved id is cached
-// via SetJobLidarrAlbumID, and verify runs normally afterward (proven by
-// ManualImportCandidates actually being called and the import executing).
+// AlbumByForeignID resolves a real Lidarr album and verify runs normally
+// afterward (proven by ManualImportCandidates actually being called and the
+// import executing), while album_jobs.lidarr_album_id stays NULL.
+//
+// That last assertion is the load-bearing one. Persisting the resolved id is
+// the obvious optimisation and is exactly what must not happen: SyncWantedJobs'
+// revive and re-enter predicates match on lidarr_album_id with no source
+// filter, so a manual job carrying one would be revived to WANTED with its
+// candidate rows deleted — and RetryManualJob reports a job with no candidate
+// row as not retryable, so the user's Retry button would be dead forever.
+// Hardening those predicates so they do not depend on this invariant at all
+// is tracked as #369; until then, this test is the guard.
 func TestImportingResolvesManualAlbumAndProceedsToVerify(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -1024,8 +1075,12 @@ func TestImportingResolvesManualAlbumAndProceedsToVerify(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
 	}
-	if view.Job.LidarrAlbumID != 900 {
-		t.Errorf("LidarrAlbumID = %d, want 900 (cached via SetJobLidarrAlbumID)", view.Job.LidarrAlbumID)
+	if view.Job.LidarrAlbumID != 0 {
+		t.Errorf("LidarrAlbumID = %d, want 0 — the resolved id must never be written back, "+
+			"or SyncWantedJobs will treat this manual job as one of its own", view.Job.LidarrAlbumID)
+	}
+	if view.Job.AlbumMBID != mbid {
+		t.Errorf("AlbumMBID = %q, want %q (the identity is what persists, not the resolved id)", view.Job.AlbumMBID, mbid)
 	}
 }
 

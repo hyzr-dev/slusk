@@ -72,6 +72,12 @@ type DownloadingStore interface {
 	// AdvanceJobStateFrom conditionally transitions a job (DOWNLOADING→IMPORTING
 	// on success; the candidate stays ACTIVE for the Importing module).
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// SucceedCandidateAndAdvance atomically marks the candidate SUCCEEDED and
+	// advances the job in one tx. Used only for DOWNLOADING→NOT_IMPORTED
+	// (issue #59): unlike the →IMPORTING path above, that destination is
+	// terminal, so the candidate has to be terminalized here rather than left
+	// ACTIVE for a module that will never pick the job up.
+	SucceedCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// RecordAttemptOutcome writes a candidate's terminal success/fail outcome to
 	// the peer reliability tables (best-effort).
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
@@ -638,10 +644,16 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 		// terminal NOT_IMPORTED instead - the files are the deliverable, so
 		// no cleanup runs here (contrast the anyFailed branch above, which
 		// does clean up a genuinely failed download).
+		//
+		// The candidate is SUCCEEDED and the peer credited: it delivered every
+		// file asked of it, and NOT_IMPORTED is terminal, so leaving the
+		// candidate ACTIVE would strand it in ActiveCandidate and make the job
+		// detail view show an attempt still in progress on a finished job.
 		notImportedDetail := "download complete, no album identified - leaving files in place"
 		d.log().Info(notImportedDetail, "album_job", job.ID)
 		d.recordEvent(ctx, job.ID, core.EventNotImported, notImportedDetail, now)
-		if _, err := d.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateNotImported, now); err != nil {
+		d.recordOutcome(ctx, job, cand.Username, true, now)
+		if _, err := d.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateDownloading, core.StateNotImported, now); err != nil {
 			d.log().Error("advance to not imported failed", "album_job", job.ID, "err", err)
 		}
 		return true, nil
