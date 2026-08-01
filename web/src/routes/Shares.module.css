@@ -178,3 +178,43 @@
   color: var(--dim);
   border-top: 1px solid var(--line);
 }
+
+/* Finished rows sit one rule quieter than .uploadRow's: the live panel above
+   is where the eye should land first. */
+.historyRow {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line-inner);
+}
+
+/* Four fields where .uploadSub carries two, so space-between would strand
+   them at the edges. flex-wrap is the whole narrow-screen answer and needs no
+   breakpoint: the line breaks onto a second row at whatever width it stops
+   fitting (#215 — eleven views clip instead, and clipped content is
+   unreachable rather than merely ugly). Deliberately no overflow:hidden here.
+   The filename above keeps .uploadFile's ellipsis, which is not the same bug:
+   its title attribute carries the full path. */
+.historyMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+}
+
+/* Diagnostics, not content: one step below the meta line's prominence and
+   allowed to wrap freely. */
+.historyDetail {
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+}
+
+.historyFooter {
+  display: flex;
+  justify-content: flex-end;
+  padding: 9px 16px;
+  border-top: 1px solid var(--line);
+}

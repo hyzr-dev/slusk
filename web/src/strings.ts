@@ -484,6 +484,16 @@ export const t = {
     toPeerPrefix: 'to',
     queuePlace: (n: number) => `queue #${n}`,
     truncated: (n: number) => `${n} more queued upload${n === 1 ? '' : 's'} not shown.`,
+    historyTitle: 'UPLOAD HISTORY',
+    historyEmpty: 'No finished uploads yet. Completed, aborted and rejected transfers are recorded here.',
+    // Words rather than the two-letter t.tag codes: this list has the width,
+    // and a code needs a glossary the user does not have.
+    historyStatus: {
+      completed: 'COMPLETED',
+      aborted: 'ABORTED',
+      rejected: 'REJECTED',
+    } as const,
+    historyLoadOlder: 'Load older',
   },
   // Manual Soulseek search (issue #58). See docs/design/
   // slskdarr-dashboard.dc.html lines 336-520 for the visual spec this

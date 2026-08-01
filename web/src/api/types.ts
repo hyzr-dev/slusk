@@ -578,6 +578,47 @@ export interface UploadsReport {
   uploads: UploadEntry[];
 }
 
+/**
+ * internal/core/uploads.go UploadStatus — how one upload to a peer ended.
+ * 'rejected' means nothing was ever streamed (the peer asked for a file we
+ * would not or could not serve), which is why a rejected row's bytesSent and
+ * avgBytesPerSecond are 0 as a true measurement rather than a missing one.
+ */
+export type UploadHistoryStatus = 'completed' | 'aborted' | 'rejected';
+
+/**
+ * internal/observ/uploads.go uploadHistoryDTO — one finished upload.
+ * `filename` is the backslash-separated virtual share path (see
+ * formatVirtualPath); `detail` is a short fixed reason string, never a raw
+ * error, and is empty when there is nothing to say.
+ */
+export interface UploadHistoryEntry {
+  id: number;
+  username: string;
+  filename: string;
+  size: number;
+  bytesSent: number;
+  avgBytesPerSecond: number;
+  status: UploadHistoryStatus;
+  detail: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+/**
+ * GET /api/uploads/history — internal/observ/uploads.go
+ * uploadHistoryResponse. Newest-first (id DESC); `hasMore` is computed by
+ * over-fetching one row, so it is exact rather than a guess. Unlike
+ * UploadsReport this carries no `enabled` flag: the history is a fact in the
+ * database, readable after the native backend is switched off — though
+ * Shares.tsx currently mounts <UploadHistory /> only inside its `data.enabled`
+ * branch, so that survival is not yet surfaced in the UI.
+ */
+export interface UploadHistoryPage {
+  uploads: UploadHistoryEntry[];
+  hasMore: boolean;
+}
+
 /** internal/observ/messages.go messageDTO direction field. */
 export type MessageDirection = 'IN' | 'OUT';
 

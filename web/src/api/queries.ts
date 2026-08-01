@@ -43,6 +43,7 @@ import type {
   SharesReport,
   ThreadPage,
   ThroughputSample,
+  UploadHistoryPage,
   UploadsReport,
   WireJob,
   WireJobDetail,
@@ -157,6 +158,11 @@ export const queryKeys = {
   charts: ['charts'] as const,
   shares: ['shares'] as const,
   uploads: ['uploads'] as const,
+  // Deliberately not nested under `uploads` — see useUploadHistory: a
+  // future invalidateQueries({ queryKey: queryKeys.uploads }) from the
+  // live-uploads poll has no business discarding paged history the user has
+  // already scrolled through.
+  uploadHistory: ['uploadHistory'] as const,
   jobDetail: (id: number) => ['jobs', id, 'detail'] as const,
   jobEvents: (id: number) => ['jobs', id, 'events'] as const,
   // Deliberately not nested under `conversations` — see useMarkConversationRead:
@@ -618,6 +624,34 @@ export function useUploads() {
     queryKey: queryKeys.uploads,
     queryFn: () => apiGet<UploadsReport>('/api/uploads'),
     refetchInterval: UPLOADS_INTERVAL,
+  });
+}
+
+/**
+ * Finished uploads, newest-first, one page at a time (issue #326).
+ *
+ * Modelled on useThread and carrying the same two traps. initialPageParam 0
+ * means "no before= cursor" (beforeID 0 server-side); every later page's param
+ * is the previous page's OLDEST row id, i.e. its LAST element, since the API
+ * serves each page newest-first. getNextPageParam returns undefined once the
+ * server says hasMore is false, or once a page comes back empty despite
+ * claiming hasMore — without that second condition the button stays armed and
+ * every press re-requests the same empty page forever.
+ *
+ * Deliberately no refetchInterval, unlike useUploads' 3s: history changes only
+ * when a transfer ends, a finished upload is not urgent, and polling would
+ * re-fetch every page the user has loaded on every tick. Fresh rows arrive
+ * when the view remounts or when the user pages further back.
+ */
+export function useUploadHistory() {
+  return useInfiniteQuery({
+    queryKey: queryKeys.uploadHistory,
+    queryFn: ({ pageParam }) => apiGet<UploadHistoryPage>(`/api/uploads/history?before=${pageParam}`),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) =>
+      lastPage.hasMore && lastPage.uploads.length > 0
+        ? lastPage.uploads[lastPage.uploads.length - 1].id
+        : undefined,
   });
 }
 

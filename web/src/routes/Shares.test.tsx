@@ -38,14 +38,16 @@ function makeUploadsReport(overrides: Partial<UploadsReport> = {}): UploadsRepor
   };
 }
 
-// UploadsPanel mounts whenever Shares reaches its main (enabled) return, so
-// every test that seeds an enabled SharesReport would otherwise let its
-// useUploads() query attempt a real, unstubbed fetch. Seeding a disabled
-// UploadsReport here by default keeps every existing test free of that
-// network I/O; tests that actually exercise UploadsPanel override it below.
+// UploadsPanel and UploadHistory both mount whenever Shares reaches its main
+// (enabled) return, so every test that seeds an enabled SharesReport would
+// otherwise let their queries attempt a real, unstubbed fetch. Seeding a
+// disabled UploadsReport and an empty, exhausted history page here by
+// default keeps every existing test free of that network I/O; tests that
+// actually exercise UploadsPanel or UploadHistory override these below.
 function newClient() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   client.setQueryData(queryKeys.uploads, makeUploadsReport());
+  client.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
   return client;
 }
 
@@ -57,6 +59,18 @@ function renderShares(client: QueryClient) {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+// Resolves the <Panel> that owns a given SectionHeader label, so an
+// assertion can be scoped to one of the (possibly several) stacked panels on
+// this page rather than matching any QueryNotice on screen — see Panel.tsx
+// and SectionHeader.tsx: the label renders as an <h2> inside the panel's own
+// wrapping div.
+function panelFor(label: string): HTMLElement {
+  const heading = screen.getByText(label);
+  const panel = heading.closest('[class*="panel"]');
+  if (!panel) throw new Error(`no panel ancestor found for label "${label}"`);
+  return panel as HTMLElement;
 }
 
 describe('loading state', () => {
@@ -86,11 +100,18 @@ describe('query state', () => {
   });
 
   it('keeps showing the folder grid, plus a stale notice, when a refetch fails', async () => {
+    // UploadHistory also refetches its seeded page in the background and
+    // fails the same way, so more than one stale notice can land on screen —
+    // this test is about Shares' own report going stale specifically, so it
+    // scopes to the one QueryNotice that sits outside every <Panel> (Shares'
+    // own is rendered directly under <Page>, not inside one).
     vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('boom'))));
     const client = newClient();
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
-    expect(await screen.findByText(t.query.stale)).toBeInTheDocument();
+    const notices = await screen.findAllByText(t.query.stale);
+    const pageLevelNotice = notices.find((n) => !n.closest('[class*="panel"]'));
+    expect(pageLevelNotice).toBeInTheDocument();
     expect(screen.getByText('/music/library')).toBeInTheDocument();
   });
 });
@@ -422,7 +443,10 @@ describe('uploads panel', () => {
     client.setQueryData(queryKeys.shares, makeReport());
     renderShares(client);
     expect(screen.getByText(t.uploads.panelTitle)).toBeInTheDocument();
-    expect(screen.getByText(t.query.loading)).toBeInTheDocument();
+    // UploadHistory's own unstubbed fetch never resolves either, so more
+    // than one loading notice can be on screen — this regression (#201) is
+    // specifically about the uploads panel, so scope to it.
+    expect(within(panelFor(t.uploads.panelTitle)).getByText(t.query.loading)).toBeInTheDocument();
   });
 
   it('shows the panel with a failed line when the uploads fetch never succeeds', async () => {
@@ -438,7 +462,26 @@ describe('uploads panel', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     renderShares(client);
     expect(await screen.findByText(t.uploads.panelTitle)).toBeInTheDocument();
-    expect(await screen.findByText(t.query.failed)).toBeInTheDocument();
+    // UploadHistory's own unstubbed fetch fails the same way, so more than
+    // one failed notice can be on screen — this regression (#201) is
+    // specifically about the uploads panel, so scope to it.
+    expect(await within(panelFor(t.uploads.panelTitle)).findByText(t.query.failed)).toBeInTheDocument();
+  });
+});
+
+describe('upload history panel', () => {
+  it('renders the history panel title below the uploads panel when shares are enabled', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.getByText(t.uploads.historyTitle)).toBeInTheDocument();
+  });
+
+  it('does not render when native Soulseek sharing is disabled', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ enabled: false, folders: [] }));
+    renderShares(client);
+    expect(screen.queryByText(t.uploads.historyTitle)).not.toBeInTheDocument();
   });
 });
 
