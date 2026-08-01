@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { UploadHistoryEntry, UploadHistoryPage } from '../api/types';
@@ -49,8 +49,17 @@ function renderHistory(client: QueryClient) {
   );
 }
 
+// Finds the caret toggle button for a row by its accessible name — both the
+// "show" and "hide" labels are valid names depending on expanded state, so
+// this tries both rather than hardcoding one.
+function caretFor(filename: string): HTMLElement {
+  const row = screen.getByText(filename).closest('[role="row"]');
+  if (!row) throw new Error(`no row found for ${filename}`);
+  return within(row as HTMLElement).getByRole('button');
+}
+
 describe('UploadHistory rows', () => {
-  it('renders a completed row with leaf filename, full path title, peer, timestamp, size and speed', () => {
+  it('shows state, leaf filename with full path in title, peer and avg speed on the row', () => {
     const client = newClient();
     stubFetchIndefinitely();
     seedHistory(client, [{ uploads: [makeEntry()], hasMore: false }]);
@@ -60,9 +69,68 @@ describe('UploadHistory rows', () => {
     expect(file).toHaveAttribute('title', 'Boards of Canada\\Geogaddi\\03 - Julie and Candy.flac');
     expect(screen.getByText(t.uploads.toPeerPrefix)).toBeInTheDocument();
     expect(screen.getByText('peer_nick')).toBeInTheDocument();
-    expect(screen.getByText('41.2 MB')).toBeInTheDocument();
     expect(screen.getByText('1.8 MB/s')).toBeInTheDocument();
     expect(screen.getByText(t.uploads.historyStatus.completed)).toBeInTheDocument();
+  });
+
+  it('does not render size, timestamp or detail until the row is expanded', () => {
+    const client = newClient();
+    stubFetchIndefinitely();
+    seedHistory(client, [{ uploads: [makeEntry({ detail: 'file unavailable' })], hasMore: false }]);
+    const { container } = renderHistory(client);
+
+    // Node absence, not just text absence — an unconditionally-rendered but
+    // visually-hidden element would still satisfy a bare queryByText check.
+    expect(screen.queryByText('41.2 MB')).not.toBeInTheDocument();
+    expect(screen.queryByText(/2026-07-31/)).not.toBeInTheDocument();
+    expect(screen.queryByText('file unavailable')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('[id^="upload-history-expansion-"]')).toHaveLength(0);
+  });
+
+  it('expands on caret click to reveal size, finished timestamp and detail, and collapses again on a second click', () => {
+    const client = newClient();
+    stubFetchIndefinitely();
+    seedHistory(client, [{ uploads: [makeEntry({ detail: 'file unavailable' })], hasMore: false }]);
+    renderHistory(client);
+
+    const caret = caretFor('03 - Julie and Candy.flac');
+    expect(caret).toHaveAttribute('aria-expanded', 'false');
+    expect(caret).toHaveAccessibleName(t.uploads.historyShowDetails);
+
+    fireEvent.click(caret);
+    expect(caret).toHaveAttribute('aria-expanded', 'true');
+    expect(caret).toHaveAccessibleName(t.uploads.historyHideDetails);
+    expect(screen.getByText('41.2 MB')).toBeInTheDocument();
+    expect(screen.getByText(t.uploads.historyFinishedLabel)).toBeInTheDocument();
+    expect(screen.getByText('file unavailable')).toBeInTheDocument();
+
+    fireEvent.click(caret);
+    expect(caret).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('41.2 MB')).not.toBeInTheDocument();
+    expect(screen.queryByText('file unavailable')).not.toBeInTheDocument();
+  });
+
+  it('keeps only one row expanded at a time', () => {
+    const client = newClient();
+    stubFetchIndefinitely();
+    seedHistory(client, [
+      {
+        uploads: [
+          makeEntry({ id: 1, filename: 'first.flac' }),
+          makeEntry({ id: 2, filename: 'second.flac' }),
+        ],
+        hasMore: false,
+      },
+    ]);
+    renderHistory(client);
+
+    fireEvent.click(caretFor('first.flac'));
+    expect(caretFor('first.flac')).toHaveAttribute('aria-expanded', 'true');
+    expect(caretFor('second.flac')).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(caretFor('second.flac'));
+    expect(caretFor('first.flac')).toHaveAttribute('aria-expanded', 'false');
+    expect(caretFor('second.flac')).toHaveAttribute('aria-expanded', 'true');
   });
 });
 
@@ -137,7 +205,7 @@ describe('UploadHistory load older', () => {
 });
 
 describe('UploadHistory transferred column', () => {
-  it('shows a dash for a rejected row and never a zero measurement', () => {
+  it('shows a dash for a rejected row\'s size when expanded, and a dash for speed on the row — never a zero measurement', () => {
     const client = newClient();
     stubFetchIndefinitely();
     seedHistory(client, [
@@ -149,12 +217,17 @@ describe('UploadHistory transferred column', () => {
       },
     ]);
     renderHistory(client);
-    expect(screen.getAllByText('—')).toHaveLength(2);
+
+    // Speed lives on the row and must already read '—'.
+    expect(screen.getByText('—')).toBeInTheDocument();
+
+    fireEvent.click(caretFor('03 - Julie and Candy.flac'));
+    expect(screen.getAllByText('—')).toHaveLength(2); // row speed + expansion size
     expect(screen.queryByText(/0 MB/)).not.toBeInTheDocument();
     expect(screen.queryByText(/0 KB\/s/)).not.toBeInTheDocument();
   });
 
-  it('shows sent-of-total for an aborted row', () => {
+  it('shows sent-of-total for an aborted row once expanded', () => {
     const client = newClient();
     stubFetchIndefinitely();
     seedHistory(client, [
@@ -164,29 +237,39 @@ describe('UploadHistory transferred column', () => {
       },
     ]);
     renderHistory(client);
+    fireEvent.click(caretFor('03 - Julie and Candy.flac'));
     expect(screen.getByText('10.0 MB / 40.0 MB')).toBeInTheDocument();
   });
 });
 
 describe('UploadHistory detail line', () => {
-  it('renders detail only when set', () => {
+  it('renders detail only when set, and only once expanded', () => {
     const client = newClient();
     stubFetchIndefinitely();
     seedHistory(client, [
       {
         uploads: [
-          makeEntry({ id: 1, detail: 'file unavailable' }),
-          makeEntry({ id: 2, detail: '' }),
+          makeEntry({ id: 1, filename: 'has-detail.flac', detail: 'file unavailable' }),
+          makeEntry({ id: 2, filename: 'no-detail.flac', detail: '' }),
         ],
         hasMore: false,
       },
     ]);
     const { container } = renderHistory(client);
-    expect(screen.getByText('file unavailable')).toBeInTheDocument();
-    // Asserting only that the text is present would survive an unconditional
+
+    // Expand the EMPTY-detail row on its own first: only one row is expanded
+    // at a time (see the row-identity describe block below), so this is the
+    // only way to observe its expansion in isolation rather than always
+    // looking at whichever row happens to be open last.
+    fireEvent.click(caretFor('no-detail.flac'));
+    expect(screen.queryByText('file unavailable')).not.toBeInTheDocument();
+    // Asserting only that the text is absent would survive an unconditional
     // `<div className={styles.historyDetail}>{e.detail}</div>` too — an empty
-    // string renders no text node either way. Pin the node's absence itself:
-    // exactly one of the two rows may have a `.historyDetail` element at all.
+    // string renders no text node either way. Pin the node's absence itself.
+    expect(container.querySelectorAll('[class*="historyDetail"]')).toHaveLength(0);
+
+    fireEvent.click(caretFor('has-detail.flac'));
+    expect(screen.getByText('file unavailable')).toBeInTheDocument();
     expect(container.querySelectorAll('[class*="historyDetail"]')).toHaveLength(1);
   });
 });

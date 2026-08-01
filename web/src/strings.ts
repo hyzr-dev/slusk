@@ -494,6 +494,15 @@ export const t = {
       rejected: 'REJECTED',
     } as const,
     historyLoadOlder: 'Load older',
+    // The caret's aria-label pair (issue #371) — same naming as
+    // t.jobs.showDetails/hideDetails, kept as its own pair rather than reused
+    // directly since this is a different expansion with its own labels below.
+    historyShowDetails: 'Show details',
+    historyHideDetails: 'Hide details',
+    // Expansion labels (issue #371): size and finished-at move off the row
+    // and behind the caret, alongside the existing detail line.
+    historySizeLabel: 'size',
+    historyFinishedLabel: 'finished',
   },
   // Manual Soulseek search (issue #58). See docs/design/
   // slskdarr-dashboard.dc.html lines 336-520 for the visual spec this
