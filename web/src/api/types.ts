@@ -468,10 +468,18 @@ export interface ConfigUpdateResult {
  * also carry an empty fieldErrors object when the failure is a cross-field
  * rule with no single field to attach to — the message in `error` is the
  * thing to show in that case.
+ *
+ * `code` is a machine-readable discriminator, present on error bodies that
+ * need one to be handled distinctly from an ordinary failure — currently
+ * only POST /api/lidarr/artists' 502 `"addUncertain"` (see
+ * AddLidarrArtistResult's doc comment): that status means the add may or may
+ * not have happened, which IdentifyModal must not render as a definite
+ * failure the way every other status does.
  */
 export interface ApiErrorBody {
   error: string;
   fieldErrors?: Record<string, string>;
+  code?: string;
 }
 
 /**
@@ -805,6 +813,99 @@ export interface LidarrMatch {
   known: boolean;
   inLibrary: boolean;
   albumId?: number;
+}
+
+// ---- Lidarr add-artist flow (issue #331) ----
+
+/**
+ * GET /api/lidarr/artists/{mbid} — internal/observ/lidarr.go
+ * lidarrArtistStatusDTO. Whether Lidarr already knows this MusicBrainz
+ * ARTIST, the artist-level counterpart to LidarrMatch above (which is
+ * per-album). Same three-way semantics: `known: false` means the check
+ * itself is unavailable, never "not in library". `artistId`/`name` are
+ * `omitempty` and genuinely absent when the artist is not in the library or
+ * the check failed.
+ */
+export interface LidarrArtistMatch {
+  known: boolean;
+  inLibrary: boolean;
+  artistId?: number;
+  name?: string;
+}
+
+/** One root folder from GET /api/lidarr/add-options — internal/observ/lidarr.go lidarrRootFolderDTO. */
+export interface LidarrRootFolder {
+  id: number;
+  path: string;
+  accessible: boolean;
+  freeSpace: number;
+  defaultQualityProfileId: number;
+  defaultMetadataProfileId: number;
+}
+
+/** One quality or metadata profile from GET /api/lidarr/add-options — internal/observ/lidarr.go lidarrProfileDTO. */
+export interface LidarrProfile {
+  id: number;
+  name: string;
+}
+
+/**
+ * GET /api/lidarr/add-options response — the "add to Lidarr" form's root
+ * folders and profiles, fetched only once that path is opened (see
+ * IdentifyModal's openAddFlow).
+ */
+export interface LidarrAddOptions {
+  rootFolders: LidarrRootFolder[];
+  qualityProfiles: LidarrProfile[];
+  metadataProfiles: LidarrProfile[];
+}
+
+/** POST /api/lidarr/artists' `monitor` field — "album" for just the release that prompted the add, "all" for the whole discography. */
+export type LidarrMonitorChoice = 'album' | 'all';
+
+/** POST /api/lidarr/artists request body — internal/observ/lidarr.go addArtistRequest. */
+export interface AddLidarrArtistRequest {
+  artistMbid: string;
+  artistName: string;
+  albumMbid: string;
+  rootFolderPath: string;
+  qualityProfileId: number;
+  metadataProfileId: number;
+  monitor: LidarrMonitorChoice;
+}
+
+/**
+ * `albumMonitorState` values for AddLidarrArtistResult, in the order
+ * IdentifyModal treats them as increasingly uncertain:
+ *  - 'monitored': the album is confirmed monitored — the ordinary case.
+ *  - 'notVisibleYet': the artist was created but Lidarr had not finished
+ *    refreshing it yet, so the album could not be monitored.
+ *  - 'reverted': the album was monitored immediately after the add, but
+ *    Lidarr's own refresh then reset it — it did not stick.
+ *  - 'unknown': the monitoring state could not be confirmed at all. This is
+ *    NOT a failure and must never be rendered as one — see IdentifyModal's
+ *    copy for this case.
+ */
+export type LidarrAlbumMonitorState = 'monitored' | 'notVisibleYet' | 'reverted' | 'unknown';
+
+/**
+ * POST /api/lidarr/artists' 201 response — internal/observ/lidarr.go
+ * addArtistResultDTO. Neither `artistMonitored: false` nor any
+ * `albumMonitorState` other than 'monitored' is a failure — the artist (and
+ * usually the album) were still created; see IdentifyModal's per-state copy
+ * for what each combination means to the user.
+ *
+ * A 502 response to this same endpoint, with `{"code": "addUncertain"}` in
+ * its ApiErrorBody, is a different case again: the add may or may not have
+ * happened at all. That is carried as an HTTP error, not a value of this
+ * type — see IdentifyModal's submitAddArtist.
+ */
+export interface AddLidarrArtistResult {
+  artistId: number;
+  alreadyInLibrary: boolean;
+  /** Whether the artist is monitored in Lidarr now. */
+  artistMonitored: boolean;
+  albumMonitorState: LidarrAlbumMonitorState;
 }
 
 /**

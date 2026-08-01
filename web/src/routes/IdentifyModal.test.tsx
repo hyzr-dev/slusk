@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  LidarrAddOptions,
+  LidarrArtistMatch,
   LidarrMatch,
   MusicBrainzEdition,
   MusicBrainzEditionListResult,
@@ -12,6 +14,8 @@ import type {
 import { t } from '../strings';
 import IdentifyModal, {
   computeVerdict,
+  lidarrAddAvailability,
+  lidarrArtistLine,
   lidarrLine,
   parseFolderGuess,
   pickDefaultEdition,
@@ -91,6 +95,68 @@ function stubFetch(routes: Record<string, unknown | (() => unknown)>) {
       return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
     }),
   );
+}
+
+// A method-aware router, needed once GET /api/lidarr/artists/{mbid} and
+// POST /api/lidarr/artists share a common URL prefix — the plain stubFetch
+// above would let the POST route's key wrongly swallow the GET's more
+// specific one (or vice versa) depending on object key iteration order.
+function stubFetchByMethod(routes: { method: string; match: string; body: unknown | (() => unknown); status?: number }[]) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      const route = routes.find((r) => r.method === method && url.startsWith(r.match));
+      if (!route) return Promise.reject(new Error(`unexpected fetch ${method} ${url}`));
+      const body = typeof route.body === 'function' ? (route.body as () => unknown)() : route.body;
+      return Promise.resolve(new Response(JSON.stringify(body), { status: route.status ?? 200 }));
+    }),
+  );
+}
+
+function artistMatch(overrides: Partial<LidarrArtistMatch> = {}): LidarrArtistMatch {
+  return { known: true, inLibrary: false, artistId: 42, name: 'Radiohead', ...overrides };
+}
+
+function addOptions(overrides: Partial<LidarrAddOptions> = {}): LidarrAddOptions {
+  return {
+    rootFolders: [
+      { id: 1, path: '/music', accessible: true, freeSpace: 500_000_000_000, defaultQualityProfileId: 3, defaultMetadataProfileId: 5 },
+    ],
+    qualityProfiles: [{ id: 3, name: 'Lossless' }, { id: 4, name: 'Standard' }],
+    metadataProfiles: [{ id: 5, name: 'Standard' }, { id: 6, name: 'None' }],
+    ...overrides,
+  };
+}
+
+// Drives the modal from initial through to the 'selected' state with the
+// given album/artist Lidarr status stubbed, and returns once the "WILL BE
+// RECORDED AS" summary is on screen. Shared setup for the #331 tests below.
+async function selectWithLidarrStatus(
+  album: LidarrMatch,
+  artist: LidarrArtistMatch | undefined,
+  opts: {
+    searchResult?: MusicBrainzSearchResult;
+    addOptionsRoute?: LidarrAddOptions;
+    extraRoutes?: { method: string; match: string; body: unknown | (() => unknown); status?: number }[];
+  } = {},
+) {
+  const search: MusicBrainzSearchResponse = { results: [opts.searchResult ?? searchResult()], total: 1 };
+  const routes = [
+    ...(opts.extraRoutes ?? []),
+    { method: 'GET', match: '/api/identify/search?', body: search },
+    { method: 'GET', match: '/api/identify/albums/al1/editions', body: { editions: [], total: 0 } },
+    { method: 'GET', match: '/api/identify/albums/al1/lidarr', body: album },
+    { method: 'GET', match: '/api/lidarr/artists/a1', body: artist ?? { known: false, inLibrary: false } },
+    { method: 'GET', match: '/api/lidarr/add-options', body: opts.addOptionsRoute ?? addOptions() },
+  ];
+  stubFetchByMethod(routes);
+  const utils = renderModal(group());
+  fireEvent.click(screen.getByRole('button', { name: t.search.identify.searchButton }));
+  await waitFor(() => screen.getByRole('button', { name: /In Rainbows/ }));
+  fireEvent.click(screen.getByRole('button', { name: /In Rainbows/ }));
+  await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
+  return utils;
 }
 
 describe('parseFolderGuess', () => {
@@ -512,5 +578,303 @@ describe('IdentifyModal states', () => {
   it('gives the dialog the right ARIA role and label', () => {
     renderModal(group());
     expect(screen.getByRole('dialog', { name: t.search.identify.dialogLabel })).toBeInTheDocument();
+  });
+});
+
+describe('lidarrArtistLine', () => {
+  it('reads IN LIBRARY (ok) when known and in the library', () => {
+    expect(lidarrArtistLine({ known: true, inLibrary: true }).tone).toBe('ok');
+  });
+
+  it('reads NOT IN LIBRARY (quiet) when known but absent', () => {
+    const line = lidarrArtistLine({ known: true, inLibrary: false });
+    expect(line.tone).toBe('quiet');
+    expect(line.text).toBe(t.search.identify.artistLidarrNotInLibrary);
+  });
+
+  it('reads UNKNOWN when known is false — distinct from "not in library"', () => {
+    expect(lidarrArtistLine({ known: false, inLibrary: false }).text).toBe(t.search.identify.artistLidarrUnknown);
+  });
+
+  it('reads UNKNOWN when no match was fetched at all', () => {
+    expect(lidarrArtistLine(undefined).text).toBe(t.search.identify.artistLidarrUnknown);
+  });
+});
+
+describe('lidarrAddAvailability', () => {
+  it('is noArtistId when the result has no artistId, regardless of lookup results', () => {
+    expect(lidarrAddAvailability(false, { known: true, inLibrary: false }, { known: true, inLibrary: false })).toBe('noArtistId');
+  });
+
+  it('is unknown when the album lookup failed', () => {
+    expect(lidarrAddAvailability(true, { known: false, inLibrary: false }, { known: true, inLibrary: false })).toBe('unknown');
+  });
+
+  it('is unknown when the artist lookup failed', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: false, inLibrary: false })).toBe('unknown');
+  });
+
+  it('is unknown when the artist lookup never resolved at all', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, undefined)).toBe('unknown');
+  });
+
+  it('is inLibrary when the album is already in the library', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: true }, { known: true, inLibrary: true })).toBe('inLibrary');
+  });
+
+  it('is offerAdd when both lookups succeeded and the album is not in the library', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: true, inLibrary: false })).toBe('offerAdd');
+  });
+});
+
+describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
+  it('renders all three artist status states alongside the album status', async () => {
+    await selectWithLidarrStatus({ known: true, inLibrary: true }, artistMatch({ inLibrary: true }));
+    expect(screen.getByText(t.search.identify.artistLidarrInLibrary)).toBeInTheDocument();
+    expect(screen.getByText(t.search.identify.lidarrInLibrary)).toBeInTheDocument();
+  });
+
+  it('hides the add path and shows the "no artist ID" explanation when the result has no artistId', async () => {
+    await selectWithLidarrStatus(
+      { known: true, inLibrary: false },
+      undefined,
+      { searchResult: searchResult({ artistId: undefined }) },
+    );
+    expect(screen.getByText(t.search.identify.noArtistId)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    // The ordinary single Confirm button remains the only way forward.
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+    // No artist status line either — no lookup was ever made.
+    expect(screen.queryByText(t.search.identify.artistLidarrUnknown)).not.toBeInTheDocument();
+  });
+
+  it('hides the add path when the album Lidarr status is unknown (known: false)', async () => {
+    await selectWithLidarrStatus({ known: false, inLibrary: false }, artistMatch());
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+  });
+
+  it('hides the add path when the artist Lidarr status is unknown even if the album status is known', async () => {
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, { known: false, inLibrary: false });
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+  });
+
+  it('asks no extra question when both artist and album are already in the library', async () => {
+    await selectWithLidarrStatus({ known: true, inLibrary: true }, artistMatch({ inLibrary: true }));
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.search.identify.downloadAnyway })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+  });
+
+  it('offers both "add to Lidarr" and "download anyway" when the album is not in the library and both lookups succeeded', async () => {
+    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch());
+    expect(screen.getByRole('button', { name: t.search.identify.addToLidarr })).toBeInTheDocument();
+    const downloadAnyway = screen.getByRole('button', { name: t.search.identify.downloadAnyway });
+    expect(downloadAnyway).toBeInTheDocument();
+    // "download anyway" proceeds exactly like the ordinary confirm path —
+    // it must not be visually or functionally demoted.
+    fireEvent.click(downloadAnyway);
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+  });
+
+  it('prefills quality/metadata from the selected root folder and re-prefills on change', async () => {
+    const opts = addOptions({
+      rootFolders: [
+        { id: 1, path: '/music', accessible: true, freeSpace: 1000, defaultQualityProfileId: 3, defaultMetadataProfileId: 5 },
+        { id: 2, path: '/music2', accessible: true, freeSpace: 2000, defaultQualityProfileId: 4, defaultMetadataProfileId: 6 },
+      ],
+    });
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), { addOptionsRoute: opts });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    const qualitySelect = screen.getByRole('combobox', { name: t.search.identify.qualityProfileLabel });
+    const metadataSelect = screen.getByRole('combobox', { name: t.search.identify.metadataProfileLabel });
+    expect(qualitySelect).toHaveValue('3');
+    expect(metadataSelect).toHaveValue('5');
+
+    const rootFolderSelect = screen.getByRole('combobox', { name: t.search.identify.rootFolderLabel });
+    fireEvent.change(rootFolderSelect, { target: { value: '/music2' } });
+    expect(qualitySelect).toHaveValue('4');
+    expect(metadataSelect).toHaveValue('6');
+  });
+
+  it('marks an inaccessible root folder unselectable', async () => {
+    const opts = addOptions({
+      rootFolders: [
+        { id: 1, path: '/broken', accessible: false, freeSpace: 0, defaultQualityProfileId: 3, defaultMetadataProfileId: 5 },
+        { id: 2, path: '/music', accessible: true, freeSpace: 1000, defaultQualityProfileId: 3, defaultMetadataProfileId: 5 },
+      ],
+    });
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), { addOptionsRoute: opts });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    const option = screen.getByRole('option', { name: /broken/ }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    // The form falls back to the first ACCESSIBLE folder, not the first one.
+    const rootFolderSelect = screen.getByRole('combobox', { name: t.search.identify.rootFolderLabel });
+    expect(rootFolderSelect).toHaveValue('/music');
+  });
+
+  it('posts monitor: "album" for the default choice', async () => {
+    const opts = addOptions();
+    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
+      addOptionsRoute: opts,
+      extraRoutes: [
+        {
+          method: 'POST',
+          match: '/api/lidarr/artists',
+          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'monitored' }),
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    const fetchSpy = vi.mocked(fetch);
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+
+    const postCall = fetchSpy.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+    const postedBody = JSON.parse((postCall?.[1] as RequestInit).body as string);
+    expect(postedBody).toMatchObject({ monitor: 'album', artistMbid: 'a1', albumMbid: 'al1' });
+  });
+
+  it('posts monitor: "all" and shows the discography warning when "Entire discography" is chosen', async () => {
+    const opts = addOptions();
+    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
+      addOptionsRoute: opts,
+      extraRoutes: [
+        {
+          method: 'POST',
+          match: '/api/lidarr/artists',
+          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'monitored' }),
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    fireEvent.click(screen.getByRole('radio', { name: t.search.identify.monitorAll }));
+    expect(screen.getByText(t.search.identify.monitorAllWarning)).toBeInTheDocument();
+
+    const fetchSpy = vi.mocked(fetch);
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+
+    const postCall = fetchSpy.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+    const postedBody = JSON.parse((postCall?.[1] as RequestInit).body as string);
+    expect(postedBody).toMatchObject({ monitor: 'all' });
+  });
+
+  it('shows the partial-success message (not failure, not silent success) when the album refresh had not finished, and only proceeds after Continue', async () => {
+    const opts = addOptions();
+    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
+      addOptionsRoute: opts,
+      extraRoutes: [
+        {
+          method: 'POST',
+          match: '/api/lidarr/artists',
+          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'notVisibleYet' }),
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
+    await waitFor(() => expect(screen.getByText(t.search.identify.albumMonitorNotVisibleYet, { exact: false })).toBeInTheDocument());
+    // Only the album's note is shown — the artist itself IS monitored here,
+    // so its own line must not also appear.
+    expect(screen.queryByText(t.search.identify.artistNotMonitored, { exact: false })).not.toBeInTheDocument();
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.continue }));
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+  });
+
+  // Review item 5: artistMonitored and albumMonitorState are independent
+  // facts — a retry of an add that had silently landed can find the artist
+  // itself unmonitored even though the album's own state resolves cleanly.
+  it('shows the artist-not-monitored note alongside a clean album state', async () => {
+    const opts = addOptions();
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
+      addOptionsRoute: opts,
+      extraRoutes: [
+        {
+          method: 'POST',
+          match: '/api/lidarr/artists',
+          body: () => ({ artistId: 42, alreadyInLibrary: true, artistMonitored: false, albumMonitorState: 'monitored' }),
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
+    await waitFor(() => expect(screen.getByText(t.search.identify.artistNotMonitored, { exact: false })).toBeInTheDocument());
+  });
+
+  // Review item 6: a 502 addUncertain response must not be rendered with the
+  // definite-failure copy, since the add may well have succeeded.
+  it('shows addUncertain copy, not the definite-failure copy, on a 502 { code: "addUncertain" }', async () => {
+    const opts = addOptions();
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
+      addOptionsRoute: opts,
+      extraRoutes: [
+        {
+          method: 'POST',
+          match: '/api/lidarr/artists',
+          status: 502,
+          body: { error: 'lidarr did not confirm the add', code: 'addUncertain' },
+        },
+      ],
+    });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
+    await waitFor(() => expect(screen.getByText(t.search.identify.addUncertain)).toBeInTheDocument());
+    expect(screen.queryByText(t.search.identify.addArtistFailed)).not.toBeInTheDocument();
+  });
+
+  // Review item 1: the add-options fetch failing must not be a dead end —
+  // there has to be a way back to the two-path choice (and "download
+  // anyway") without closing the whole modal.
+  it('offers a way back to the two-path choice when the add-options fetch fails', async () => {
+    await selectWithLidarrStatus(
+      { known: true, inLibrary: false },
+      artistMatch(),
+      { extraRoutes: [{ method: 'GET', match: '/api/lidarr/add-options', status: 500, body: { error: 'down' } }] },
+    );
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => expect(screen.getByText(t.search.identify.addOptionsFailed)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addOptionsFailedBack }));
+    expect(screen.getByRole('button', { name: t.search.identify.addToLidarr })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.downloadAnyway })).toBeInTheDocument();
+  });
+
+  // Review item 2: when the root folder's default profile id isn't one of
+  // the profiles Lidarr actually returned, the form must fall back to the
+  // first available option rather than leaving state pointing at an id no
+  // <select> can display.
+  it('falls back to the first available quality/metadata profile when the root folder default is missing', async () => {
+    const opts = addOptions({
+      rootFolders: [
+        { id: 1, path: '/music', accessible: true, freeSpace: 1000, defaultQualityProfileId: 0, defaultMetadataProfileId: 0 },
+      ],
+    });
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), { addOptionsRoute: opts });
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
+    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    const qualitySelect = screen.getByRole('combobox', { name: t.search.identify.qualityProfileLabel });
+    const metadataSelect = screen.getByRole('combobox', { name: t.search.identify.metadataProfileLabel });
+    expect(qualitySelect).toHaveValue(String(opts.qualityProfiles[0].id));
+    expect(metadataSelect).toHaveValue(String(opts.metadataProfiles[0].id));
+    expect(screen.getByRole('button', { name: t.search.identify.addSubmit })).not.toBeDisabled();
   });
 });

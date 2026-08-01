@@ -1,8 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
-import { useIdentifyEditions, useIdentifyLidarr, useIdentifySearch } from '../api/queries';
-import type { LidarrMatch, MusicBrainzEdition, MusicBrainzSearchResult } from '../api/types';
+import { ApiError } from '../api/client';
+import {
+  useAddLidarrArtist,
+  useIdentifyEditions,
+  useIdentifyLidarr,
+  useIdentifySearch,
+  useLidarrAddOptions,
+  useLidarrArtistStatus,
+} from '../api/queries';
+import type {
+  AddLidarrArtistResult,
+  LidarrAddOptions,
+  LidarrArtistMatch,
+  LidarrMatch,
+  LidarrMonitorChoice,
+  MusicBrainzEdition,
+  MusicBrainzSearchResult,
+} from '../api/types';
 import type { SearchGroup } from '../api/types';
 import Button from '../components/tui/Button';
+import { formatSizeCompact } from '../format';
 import { t } from '../strings';
 import styles from './IdentifyModal.module.css';
 
@@ -127,6 +144,46 @@ export function lidarrLine(match: LidarrMatch | undefined): { text: string; tone
   return { text: t.search.identify.lidarrNotInLibrary, tone: 'quiet' };
 }
 
+/**
+ * The artist-level counterpart to lidarrLine (issue #331) — same three-way
+ * semantics, `known: false` is UNKNOWN, never "not in library".
+ */
+export function lidarrArtistLine(match: LidarrArtistMatch | undefined): { text: string; tone: Tone } {
+  if (!match || !match.known) return { text: t.search.identify.artistLidarrUnknown, tone: 'quiet' };
+  if (match.inLibrary) return { text: t.search.identify.artistLidarrInLibrary, tone: 'ok' };
+  return { text: t.search.identify.artistLidarrNotInLibrary, tone: 'quiet' };
+}
+
+/**
+ * Which of the five cases in the #331 brief applies once an album is
+ * selected — drives whether the "add to Lidarr and download" path is
+ * offered alongside "download anyway", or whether the modal proceeds as it
+ * always has (single CONFIRM, download-only):
+ *
+ *  - 'noArtistId': the picked result carries no artistId at all (an empty
+ *    artist-credit) — adding to Lidarr needs to know which artist it is,
+ *    and deriving one from the folder name is exactly what #321 exists to
+ *    stop doing. Download-anyway only.
+ *  - 'unknown': either lookup came back `known: false` (Lidarr unreachable,
+ *    or the lookup itself failed) — we cannot tell whether the artist/album
+ *    already exists, so adding is not offered. Download-anyway only.
+ *  - 'inLibrary': both are already known and the album is in the library —
+ *    the brief is explicit that no extra question is asked here.
+ *  - 'offerAdd': the only case where both paths are shown side by side.
+ */
+export type LidarrAddAvailability = 'noArtistId' | 'unknown' | 'inLibrary' | 'offerAdd';
+
+export function lidarrAddAvailability(
+  hasArtistId: boolean,
+  album: LidarrMatch | undefined,
+  artist: LidarrArtistMatch | undefined,
+): LidarrAddAvailability {
+  if (!hasArtistId) return 'noArtistId';
+  if (!album?.known || !artist?.known) return 'unknown';
+  if (album.inLibrary) return 'inLibrary';
+  return 'offerAdd';
+}
+
 function yearOf(date?: string): string {
   const m = date ? /^(\d{4})/.exec(date) : null;
   return m ? m[1] : '—';
@@ -158,10 +215,34 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   const [editionsTotal, setEditionsTotal] = useState(0);
   const [selectedEditionId, setSelectedEditionId] = useState<string | undefined>(undefined);
   const [lidarr, setLidarr] = useState<LidarrMatch | undefined>(undefined);
+  const [lidarrArtist, setLidarrArtist] = useState<LidarrArtistMatch | undefined>(undefined);
+
+  // The "add to Lidarr" sub-flow (issue #331), only ever reachable from the
+  // 'offerAdd' case of lidarrAddAvailability. 'closed' is the two-button
+  // choice (addToLidarr vs downloadAnyway); 'open' is the root
+  // folder/profile/monitor form.
+  const [addFlow, setAddFlow] = useState<'closed' | 'open'>('closed');
+  const [addOptions, setAddOptions] = useState<LidarrAddOptions | undefined>(undefined);
+  const [addOptionsFailed, setAddOptionsFailed] = useState(false);
+  const [rootFolderPath, setRootFolderPath] = useState<string | undefined>(undefined);
+  const [qualityProfileId, setQualityProfileId] = useState<number | undefined>(undefined);
+  const [metadataProfileId, setMetadataProfileId] = useState<number | undefined>(undefined);
+  const [monitorChoice, setMonitorChoice] = useState<LidarrMonitorChoice>('album');
+  const [addSubmitError, setAddSubmitError] = useState<string | undefined>(undefined);
+  // Set once POST /api/lidarr/artists succeeds with something short of full
+  // monitoring (artistMonitored: false, or albumMonitorState other than
+  // 'monitored') — see addPartialNoteFor. None of these are a failure (see
+  // AddLidarrArtistResult's doc comment), so this is rendered as a one-line
+  // notice with its own Continue button rather than proceeding straight to
+  // onConfirm, so the user actually sees it before the modal closes.
+  const [addPartialNote, setAddPartialNote] = useState<string | undefined>(undefined);
 
   const identifySearch = useIdentifySearch();
   const identifyEditions = useIdentifyEditions();
   const identifyLidarr = useIdentifyLidarr();
+  const lidarrArtistStatus = useLidarrArtistStatus();
+  const lidarrAddOptions = useLidarrAddOptions();
+  const addLidarrArtist = useAddLidarrArtist();
 
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -258,16 +339,137 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     setEditionsTotal(0);
     setSelectedEditionId(undefined);
     setLidarr(undefined);
+    setLidarrArtist(undefined);
+    resetAddFlow();
     setState('selected');
 
     const editionsPromise = identifyEditions.mutateAsync(picked.id).catch(() => ({ editions: [], total: 0 }));
     const lidarrPromise = identifyLidarr.mutateAsync(picked.id).catch((): LidarrMatch => ({ known: false, inLibrary: false }));
-    const [editionsResult, lidarrResult] = await Promise.all([editionsPromise, lidarrPromise]);
+    // Only fetched when the result carries an artistId at all (see
+    // lidarrAddAvailability's 'noArtistId' case) — MusicBrainzSearchResult's
+    // artist/artistId are genuinely absent, not empty strings, for a
+    // release-group whose artist-credit is itself empty.
+    const artistPromise: Promise<LidarrArtistMatch | undefined> = picked.artistId
+      ? lidarrArtistStatus.mutateAsync(picked.artistId).catch((): LidarrArtistMatch => ({ known: false, inLibrary: false }))
+      : Promise.resolve(undefined);
+    const [editionsResult, lidarrResult, artistResult] = await Promise.all([editionsPromise, lidarrPromise, artistPromise]);
     if (seq !== pickSeq.current) return; // superseded by a later pick
     setEditions(editionsResult.editions);
     setEditionsTotal(editionsResult.total);
     setSelectedEditionId(pickDefaultEdition(editionsResult.editions, group.trackCount)?.id);
     setLidarr(lidarrResult);
+    setLidarrArtist(artistResult);
+  }
+
+  // Resets every piece of "add to Lidarr" sub-flow state — shared by
+  // pickResult (a fresh pick starts over) and the choice screen's own
+  // "back to the two-path choice" affordance.
+  function resetAddFlow() {
+    setAddFlow('closed');
+    setAddOptions(undefined);
+    setAddOptionsFailed(false);
+    setRootFolderPath(undefined);
+    setQualityProfileId(undefined);
+    setMetadataProfileId(undefined);
+    setMonitorChoice('album');
+    setAddSubmitError(undefined);
+    setAddPartialNote(undefined);
+  }
+
+  // Opens the root-folder/profile/monitor form and loads its options on
+  // first entry only — reopening after a Cancel reuses what's already
+  // fetched rather than refetching.
+  async function openAddFlow() {
+    setAddFlow('open');
+    if (addOptions) return;
+    setAddOptionsFailed(false);
+    try {
+      const opts = await lidarrAddOptions.mutateAsync();
+      setAddOptions(opts);
+      const preferred = opts.rootFolders.find((r) => r.accessible) ?? opts.rootFolders[0];
+      if (preferred) applyRootFolder(preferred.path, opts);
+    } catch {
+      setAddOptionsFailed(true);
+    }
+  }
+
+  // Re-prefills quality/metadata from the newly selected root folder's own
+  // defaults — see the brief: "re-prefill when the root folder changes". Falls
+  // back to the first available profile when the folder's default id isn't
+  // actually one of the profiles Lidarr returned (review item 2): posting a
+  // default that doesn't exist would leave the <select> painting the first
+  // option while state held a different (submitted) id — a silent mismatch
+  // between what's shown and what's sent.
+  function applyRootFolder(path: string, opts: LidarrAddOptions = addOptions ?? { rootFolders: [], qualityProfiles: [], metadataProfiles: [] }) {
+    setRootFolderPath(path);
+    const folder = opts.rootFolders.find((r) => r.path === path);
+    if (!folder) return;
+    const quality = opts.qualityProfiles.some((p) => p.id === folder.defaultQualityProfileId)
+      ? folder.defaultQualityProfileId
+      : opts.qualityProfiles[0]?.id;
+    const metadata = opts.metadataProfiles.some((p) => p.id === folder.defaultMetadataProfileId)
+      ? folder.defaultMetadataProfileId
+      : opts.metadataProfiles[0]?.id;
+    setQualityProfileId(quality);
+    setMetadataProfileId(metadata);
+  }
+
+  // Composes the partial-success notice from the two independent facts a
+  // 201 can carry short of full success (review item 5/6): artistMonitored
+  // is a fact about the ARTIST, albumMonitorState about the specific album,
+  // and either can be the "off" one regardless of the other — a retry of an
+  // add that had silently landed can find the artist already unmonitored
+  // even though this album's own state resolves to 'monitored'.
+  function addPartialNoteFor(result: AddLidarrArtistResult): string {
+    const parts: string[] = [];
+    if (!result.artistMonitored) parts.push(t.search.identify.artistNotMonitored);
+    switch (result.albumMonitorState) {
+      case 'notVisibleYet':
+        parts.push(t.search.identify.albumMonitorNotVisibleYet);
+        break;
+      case 'reverted':
+        parts.push(t.search.identify.albumMonitorReverted);
+        break;
+      case 'unknown':
+        parts.push(t.search.identify.albumMonitorUnknown);
+        break;
+      case 'monitored':
+        break;
+    }
+    parts.push(t.search.identify.addPartialProceeds);
+    return parts.join(' ');
+  }
+
+  async function submitAddArtist() {
+    if (!selectedResult?.artistId || !rootFolderPath || !qualityProfileId || !metadataProfileId) return;
+    setAddSubmitError(undefined);
+    try {
+      const result = await addLidarrArtist.mutateAsync({
+        artistMbid: selectedResult.artistId,
+        artistName: canonicalArtistOf(selectedResult) ?? '',
+        albumMbid: selectedResult.id,
+        rootFolderPath,
+        qualityProfileId,
+        metadataProfileId,
+        monitor: monitorChoice,
+      });
+      if (result.artistMonitored && result.albumMonitorState === 'monitored') {
+        confirm();
+      } else {
+        setAddPartialNote(addPartialNoteFor(result));
+      }
+    } catch (err) {
+      // A 502 { code: "addUncertain" } means the add may or may not have
+      // happened server-side — a genuinely different fact from every other
+      // failure status, which all mean the add definitely did not happen.
+      // Rendering it with the definite-failure copy would invent certainty
+      // the response doesn't have (review item 6).
+      if (err instanceof ApiError && err.status === 502 && err.body?.code === 'addUncertain') {
+        setAddSubmitError(t.search.identify.addUncertain);
+      } else {
+        setAddSubmitError(t.search.identify.addArtistFailed);
+      }
+    }
   }
 
   // MusicBrainzSearchResult.artist is absent, not empty, for a release-group
@@ -310,6 +512,18 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // Review item H: the endpoint 422s on a blank album, so the button is
   // disabled rather than silently doing nothing when clicked.
   const albumBlank = album.trim().length === 0;
+  // See lidarrAddAvailability's doc comment for what each case means.
+  const availability = selectedResult
+    ? lidarrAddAvailability(Boolean(selectedResult.artistId), lidarr, lidarrArtist)
+    : 'unknown';
+  const selectedRootFolder = addOptions?.rootFolders.find((r) => r.path === rootFolderPath);
+  const addFormValid = Boolean(selectedRootFolder?.accessible && qualityProfileId && metadataProfileId);
+  // Review item 3: whether the add form has anything usable to submit at
+  // all. When it doesn't, every option in one of its selects is disabled and
+  // addFormValid is permanently false with nothing on screen explaining why
+  // — this drives an explicit line instead.
+  const hasAccessibleRootFolder = Boolean(addOptions?.rootFolders.some((r) => r.accessible));
+  const hasUsableProfiles = Boolean(addOptions?.qualityProfiles.length && addOptions?.metadataProfiles.length);
 
   return (
     <div
@@ -486,27 +700,188 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
 
               {(() => {
                 const verdict = computeVerdict(group.trackCount, selectedEdition);
-                const lidarrStatus = lidarrLine(lidarr);
+                const albumStatus = lidarrLine(lidarr);
+                const artistStatus = lidarrArtistLine(lidarrArtist);
                 return (
                   <div className={styles.statusLines}>
                     <div className={styles[`tone-${verdict.tone}`]}>{verdict.text}</div>
-                    <div className={styles[`tone-${lidarrStatus.tone}`]}>{lidarrStatus.text}</div>
+                    {selectedResult.artistId && (
+                      <div className={styles[`tone-${artistStatus.tone}`]}>{artistStatus.text}</div>
+                    )}
+                    <div className={styles[`tone-${albumStatus.tone}`]}>{albumStatus.text}</div>
+                    {availability === 'noArtistId' && (
+                      <div className={styles['tone-quiet']}>{t.search.identify.noArtistId}</div>
+                    )}
                   </div>
                 );
               })()}
 
-              <div className={styles.actions}>
-                <Button variant="ghost" onClick={() => setState('suggestions')}>{t.search.identify.back}</Button>
-                <span className={styles.spacer} />
-                <Button
-                  variant="primary"
-                  onClick={confirm}
-                  disabled={!canonicalArtist}
-                  title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
-                >
-                  {t.search.identify.confirm}
-                </Button>
-              </div>
+              {/* The two-path choice (issue #331 case 2) — only reachable
+                  when the album is confirmed NOT in the library and both the
+                  artist and album lookups succeeded. Neither path is
+                  demoted: "download anyway" renders as a real button, not a
+                  footnote. */}
+              {availability === 'offerAdd' && addFlow === 'closed' && !addPartialNote && (
+                <div className={styles.actions}>
+                  <Button variant="ghost" onClick={() => setState('suggestions')}>{t.search.identify.back}</Button>
+                  <span className={styles.spacer} />
+                  <Button
+                    variant="ghost"
+                    onClick={confirm}
+                    disabled={!canonicalArtist}
+                    title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
+                  >
+                    {t.search.identify.downloadAnyway}
+                  </Button>
+                  <Button variant="primary" onClick={openAddFlow}>{t.search.identify.addToLidarr}</Button>
+                </div>
+              )}
+
+              {availability === 'offerAdd' && addFlow === 'open' && !addPartialNote && (
+                <div className={styles.addForm}>
+                  {!addOptions && !addOptionsFailed && (
+                    <div className={styles.centered}>
+                      <span aria-hidden className={styles.spinner} />
+                      {t.search.identify.addOptionsLoading}
+                    </div>
+                  )}
+
+                  {addOptionsFailed && (
+                    <div className={styles.centeredBlock}>
+                      <div className={styles.bodyText}>{t.search.identify.addOptionsFailed}</div>
+                      <Button variant="ghost" onClick={openAddFlow}>{t.search.identify.retry}</Button>
+                      {/* Review item 1: without this, a failed fetch was a
+                          dead end — Cancel lived inside the addOptions guard
+                          below, unreachable once options never load, with no
+                          way back to "download anyway" short of closing the
+                          whole modal. */}
+                      <Button variant="ghost" onClick={() => setAddFlow('closed')}>{t.search.identify.addOptionsFailedBack}</Button>
+                    </div>
+                  )}
+
+                  {addOptions && (
+                    <>
+                      <label className={styles.field}>
+                        <span className={styles.fieldLabel}>{t.search.identify.rootFolderLabel}</span>
+                        <select
+                          className={styles.select}
+                          value={rootFolderPath ?? ''}
+                          onChange={(e) => applyRootFolder(e.target.value)}
+                        >
+                          {addOptions.rootFolders.map((r) => (
+                            <option key={r.id} value={r.path} disabled={!r.accessible}>
+                              {r.path}
+                              {r.accessible
+                                ? ` (${formatSizeCompact(r.freeSpace)} free)`
+                                : ` — ${t.search.identify.rootFolderInaccessible}`}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {!hasAccessibleRootFolder && (
+                        <div className={styles['tone-bad']}>{t.search.identify.noAccessibleRootFolder}</div>
+                      )}
+
+                      <label className={styles.field}>
+                        <span className={styles.fieldLabel}>{t.search.identify.qualityProfileLabel}</span>
+                        <select
+                          className={styles.select}
+                          value={qualityProfileId ?? ''}
+                          onChange={(e) => setQualityProfileId(Number(e.target.value))}
+                        >
+                          {addOptions.qualityProfiles.map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className={styles.field}>
+                        <span className={styles.fieldLabel}>{t.search.identify.metadataProfileLabel}</span>
+                        <select
+                          className={styles.select}
+                          value={metadataProfileId ?? ''}
+                          onChange={(e) => setMetadataProfileId(Number(e.target.value))}
+                        >
+                          {addOptions.metadataProfiles.map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {!hasUsableProfiles && (
+                        <div className={styles['tone-bad']}>{t.search.identify.noUsableProfiles}</div>
+                      )}
+
+                      <div className={styles.field}>
+                        <span className={styles.fieldLabel} id="identify-monitor-label">{t.search.identify.monitorLabel}</span>
+                        <div role="radiogroup" aria-labelledby="identify-monitor-label">
+                          <label className={styles.radioRow}>
+                            <input
+                              type="radio"
+                              name="lidarr-monitor"
+                              checked={monitorChoice === 'album'}
+                              onChange={() => setMonitorChoice('album')}
+                            />
+                            {t.search.identify.monitorAlbum}
+                          </label>
+                          <label className={styles.radioRow}>
+                            <input
+                              type="radio"
+                              name="lidarr-monitor"
+                              checked={monitorChoice === 'all'}
+                              onChange={() => setMonitorChoice('all')}
+                            />
+                            {t.search.identify.monitorAll}
+                          </label>
+                        </div>
+                        {monitorChoice === 'all' && (
+                          <div className={styles['tone-dim']}>{t.search.identify.monitorAllWarning}</div>
+                        )}
+                      </div>
+
+                      {addSubmitError && <div className={styles['tone-bad']}>{addSubmitError}</div>}
+
+                      <div className={styles.actions}>
+                        <Button variant="ghost" onClick={() => setAddFlow('closed')}>{t.search.identify.addCancel}</Button>
+                        <span className={styles.spacer} />
+                        <Button
+                          variant="primary"
+                          onClick={submitAddArtist}
+                          disabled={!addFormValid || addLidarrArtist.isPending}
+                        >
+                          {addLidarrArtist.isPending ? t.search.identify.addSubmitting : t.search.identify.addSubmit}
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {addPartialNote && (
+                <>
+                  <div className={styles.statusLines}>
+                    <div className={styles['tone-dim']}>{addPartialNote}</div>
+                  </div>
+                  <div className={styles.actions}>
+                    <span className={styles.spacer} />
+                    <Button variant="primary" onClick={confirm}>{t.search.identify.continue}</Button>
+                  </div>
+                </>
+              )}
+
+              {availability !== 'offerAdd' && (
+                <div className={styles.actions}>
+                  <Button variant="ghost" onClick={() => setState('suggestions')}>{t.search.identify.back}</Button>
+                  <span className={styles.spacer} />
+                  <Button
+                    variant="primary"
+                    onClick={confirm}
+                    disabled={!canonicalArtist}
+                    title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
+                  >
+                    {t.search.identify.confirm}
+                  </Button>
+                </div>
+              )}
             </>
           )}
         </div>

@@ -14,6 +14,8 @@ import {
   normalizeStatusReport,
 } from './normalize';
 import type {
+  AddLidarrArtistRequest,
+  AddLidarrArtistResult,
   AppConfig,
   ChartsReport,
   ConfigUpdateRequest,
@@ -26,6 +28,8 @@ import type {
   JobEvent,
   JobPage,
   JobPageParams,
+  LidarrAddOptions,
+  LidarrArtistMatch,
   LidarrMatch,
   MarkReadResult,
   MusicBrainzEditionListResult,
@@ -804,6 +808,34 @@ export function useIdentifyLidarr() {
   return useMutation({
     mutationFn: (albumId: string) =>
       apiGet<LidarrMatch>(`/api/identify/albums/${encodeURIComponent(albumId)}/lidarr`),
+  });
+}
+
+// ---- Lidarr add-artist flow (issue #331) ----
+//
+// Same explicit-mutation shape as the three identify hooks above, and for
+// the same reason: fired by IdentifyModal's own state machine (artist pick,
+// "add to Lidarr" opened, form submitted), never a mounted/polling query.
+
+/** GET /api/lidarr/artists/{mbid} — the artist-level counterpart to useIdentifyLidarr. */
+export function useLidarrArtistStatus() {
+  return useMutation({
+    mutationFn: (artistMbid: string) =>
+      apiGet<LidarrArtistMatch>(`/api/lidarr/artists/${encodeURIComponent(artistMbid)}`),
+  });
+}
+
+/** GET /api/lidarr/add-options — root folders and profiles for the "add to Lidarr" form, fetched once that path is opened. */
+export function useLidarrAddOptions() {
+  return useMutation({
+    mutationFn: () => apiGet<LidarrAddOptions>('/api/lidarr/add-options'),
+  });
+}
+
+/** POST /api/lidarr/artists — creates the artist and monitors the chosen album(s). */
+export function useAddLidarrArtist() {
+  return useMutation({
+    mutationFn: (body: AddLidarrArtistRequest) => apiPostJson<AddLidarrArtistResult>('/api/lidarr/artists', body),
   });
 }
 
