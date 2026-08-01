@@ -1137,13 +1137,13 @@ func TestImportingStuckEscalationSurvivesCooldown(t *testing.T) {
 // import executing), while album_jobs.lidarr_album_id stays NULL.
 //
 // That last assertion is the load-bearing one. Persisting the resolved id is
-// the obvious optimisation and is exactly what must not happen: SyncWantedJobs'
-// revive and re-enter predicates match on lidarr_album_id with no source
-// filter, so a manual job carrying one would be revived to WANTED with its
-// candidate rows deleted — and RetryManualJob reports a job with no candidate
-// row as not retryable, so the user's Retry button would be dead forever.
-// Hardening those predicates so they do not depend on this invariant at all
-// is tracked as #369; until then, this test is the guard.
+// the obvious optimisation and is exactly what must not happen. It once made a
+// manual job revivable by SyncWantedJobs, which reset it to WANTED and deleted
+// the candidate rows RetryManualJob needs — leaving the user's Retry button
+// dead forever. #369 hardened every WantedSync predicate to filter on source,
+// so that specific route is closed, but a manual job carrying a Lidarr album id
+// still puts two rows in album_jobs claiming the same album. This test keeps
+// the column meaning what it says.
 func TestImportingResolvesManualAlbumAndProceedsToVerify(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
