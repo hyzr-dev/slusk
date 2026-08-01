@@ -661,7 +661,7 @@ func TestSelectingManualJobExhaustionFailsOnFirstFailure(t *testing.T) {
 	p, st := newSelectingParams(t, &fakeSearcher{})
 	p.MaxRetries = 3 // would NOT be terminal for a lidarr job at this retry count
 
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
 		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -716,7 +716,7 @@ func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
 	p, st := newSelectingParams(t, &fakeSearcher{})
 	p.CompleteDir = t.TempDir()
 
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", []store.ManualJobFile{
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "", []store.ManualJobFile{
 		{Filename: `music\` + leaf + `\01.flac`, Size: 1},
 	}, now)
 	if err != nil {
@@ -767,7 +767,7 @@ func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	p, st := newSelectingParams(t, searcher)
 	p.CandidateTTL = 24 * time.Hour
 
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
 		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)

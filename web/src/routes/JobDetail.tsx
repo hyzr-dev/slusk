@@ -101,6 +101,9 @@ export default function JobDetail() {
           {job.retries > 0 && (
             <div className={styles.subline}>{t.jobs.retries(job.retries)}</div>
           )}
+          {job.albumMbid && (
+            <div className={styles.subline}>{t.jobs.albumMbid(job.albumMbid)}</div>
+          )}
           {job.failReason && <div className={styles.failReason}>{job.failReason}</div>}
         </>
       ) : (

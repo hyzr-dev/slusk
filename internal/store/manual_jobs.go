@@ -35,13 +35,21 @@ type ManualJobFile struct {
 // (issue #155). Its lidarr_album_id is NULL and source is 'manual', so
 // WantedSync never touches it (see the partial unique index on album_jobs).
 //
+// albumMBID is the MusicBrainz release-group id the user identified the
+// download against, or "" if they chose not to. It is the wire's only album
+// identity for a manual job (see core.AlbumJob.AlbumMBID) - lidarr_album_id
+// stays NULL for the job's whole life. Importing resolves albumMBID through
+// AlbumByForeignID on each tick and never writes the answer back, which is
+// what keeps the invariant above ("WantedSync never touches it") true even
+// after a manual job has been matched to a real Lidarr album (issue #59).
+//
 // Returns ErrRemoteFileBusy if another live candidate already owns a (peer,
 // filename) pair among files.
 //
 // Callers are expected to pre-validate files before calling: non-empty,
 // unique non-blank filenames, and non-negative sizes. The HTTP handler
 // (validateCreateJobRequest in internal/observ) does this.
-func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer string, files []ManualJobFile, now time.Time) (core.AlbumJob, error) {
+func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []ManualJobFile, now time.Time) (core.AlbumJob, error) {
 	candidateFiles := make([]core.CandidateFile, len(files))
 	for i, f := range files {
 		candidateFiles[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
@@ -59,10 +67,10 @@ func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer str
 
 	var jobID int64
 	if err := tx.QueryRowContext(ctx,
-		`INSERT INTO album_jobs (lidarr_album_id, source, state, created_at, updated_at, title, artist_name)
-		 VALUES (NULL, $1, $2, $3, $3, $4, $5)
+		`INSERT INTO album_jobs (lidarr_album_id, source, state, created_at, updated_at, title, artist_name, album_mbid)
+		 VALUES (NULL, $1, $2, $3, $3, $4, $5, $6)
 		 RETURNING id`,
-		string(core.SourceManual), string(core.StateDownloading), now, title, artistName).Scan(&jobID); err != nil {
+		string(core.SourceManual), string(core.StateDownloading), now, title, artistName, albumMBID).Scan(&jobID); err != nil {
 		return core.AlbumJob{}, fmt.Errorf("insert manual job: %w", err)
 	}
 
@@ -104,5 +112,6 @@ func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer str
 		UpdatedAt:  now,
 		Title:      title,
 		ArtistName: artistName,
+		AlbumMBID:  albumMBID,
 	}, nil
 }

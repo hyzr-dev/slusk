@@ -459,9 +459,6 @@ func TestSetJobTrackBand(t *testing.T) {
 	}
 }
 
-// TestParkJobForCandidate covers Downloading.reconcile's retry-budget-
-// exhausted path (issue #158): terminalizing the transfer and parking its job
-// happen atomically, while a job that already left DOWNLOADING is not clobbered.
 func TestParkJobForCandidate(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 

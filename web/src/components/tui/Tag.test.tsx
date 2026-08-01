@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import Tag, { tagFor } from './Tag';
+import { t } from '../../strings';
 
 describe('tagFor', () => {
   it('maps each job status to its tag', () => {
@@ -14,6 +15,10 @@ describe('tagFor', () => {
 
   it('reports importing from the status (issue #269 — the backend used to serialize it as active)', () => {
     expect(tagFor('importing')).toBe('IM');
+  });
+
+  it('reports a manual job downloaded without an albumMbid as not imported (issue #59)', () => {
+    expect(tagFor('notImported')).toBe('NI');
   });
 
   it('reports a job waiting in a peer queue as queued, not downloading', () => {
@@ -35,5 +40,17 @@ describe('Tag', () => {
     render(<Tag status="parked" />);
     const el = screen.getByText('PA');
     expect(el).toHaveAttribute('title', 'Parked');
+  });
+
+  it('renders NI with the title from strings (issue #59)', () => {
+    render(<Tag status="notImported" />);
+    const el = screen.getByText('NI');
+    // Asserted against t, not a second copy of the sentence: the wording is
+    // owned by strings.ts, and duplicating it here means every rewording has
+    // to be made twice, failing for a reason that is not a defect.
+    expect(el).toHaveAttribute('title', t.tagTitle.NI);
+    // What does need pinning is that it never reads as a failure — nothing
+    // went wrong, the download succeeded and the files are on disk.
+    expect(t.tagTitle.NI).not.toMatch(/fail|error/i);
   });
 });

@@ -202,6 +202,34 @@ describe('meta row: nextAttemptAt and retries', () => {
   });
 });
 
+describe('meta row: albumMbid (issue #59)', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  it('shows the release-group MBID when the job carries one', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ albumMbid: 'rg-123' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(t.jobs.albumMbid('rg-123'))).toBeInTheDocument();
+  });
+
+  it('omits the row entirely when the job has no albumMbid', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ albumMbid: undefined }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByText(/MusicBrainz release group/)).not.toBeInTheDocument();
+  });
+});
+
 describe('transfer live progress', () => {
   function stubFetchIndefinitely() {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));

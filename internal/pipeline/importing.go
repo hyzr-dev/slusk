@@ -146,6 +146,33 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 		if !found {
 			continue
 		}
+		// A manual job carries no lidarr_album_id, so its album is resolved
+		// from AlbumMBID here, once per tick, before either phase can reach
+		// an AlbumStatus call. Resolving in Tick rather than inside verify
+		// covers confirm too, which polls AlbumStatus on every tick of its
+		// own and would otherwise be the one path still able to ask for
+		// album 0.
+		//
+		// The resolved id is deliberately NOT written back to the job row.
+		// album_jobs.lidarr_album_id means "this job came from Lidarr's
+		// wanted list", and several WantedSync predicates key on it with no
+		// source filter (see store.SyncWantedJobs' revive and re-enter CTEs)
+		// precisely because a manual job's is guaranteed NULL. Caching a
+		// resolved id there would make a failed manual job look revivable to
+		// WantedSync, which would reset it to WANTED and delete the very
+		// candidate rows RetryManualJob needs (hardening those predicates so
+		// they never depend on this invariant is tracked as #369). Re-resolving costs one library
+		// lookup per tick on a job that is importing anyway, and in exchange
+		// a Lidarr album that was deleted and re-added is picked up on the
+		// next tick instead of stranding the job on a stale id.
+		resolved, ok, err := m.resolveAlbumID(ctx, job, cand, now)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		job.LidarrAlbumID = resolved
 		if cand.ImportSubmittedAt == nil {
 			if err := m.verify(ctx, job, cand, now); err != nil {
 				return err
@@ -167,8 +194,21 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 // other candidates usually remain cached, so the next SELECTING tick tries one
 // immediately. The best-effort cleanup/outcome errors are logged inside their
 // helpers; only the combined store call's error is propagated.
+//
+// A manual job's folder is never cleaned up (issue #59). cleanupFolder is a
+// recursive delete, and for a Lidarr-sourced job that is right: the download
+// was slskdarr's own attempt, another candidate will be tried, and the
+// rejected files are cruft. A manual job has no next candidate - Selecting
+// marks it FAILED - and its files are the thing the user explicitly asked
+// for. Deleting them turns "Lidarr would not import this" into silent data
+// loss, which is the one outcome a manual download must never produce. The
+// commonest way to get here is the coverage gate: someone picks six tracks
+// of a twelve-track album, so importable < MinTrackCount and the candidate
+// is rejected. The files stay; the job still reports why in its events.
 func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, now time.Time) error {
-	cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
+	if job.Source != core.SourceManual {
+		cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
+	}
 	m.recordOutcome(ctx, job, cand.Username, false, now)
 	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
 		return err
@@ -198,6 +238,9 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	for _, t := range transfers {
 		names = append(names, t.Filename)
 	}
+
+	// job.LidarrAlbumID is already resolved by Tick (see resolveAlbumID), so
+	// it is non-zero here for every job, manual or not.
 	folder := AlbumFolder(m.p.CompleteDir, names)
 	if folder != m.p.CompleteDir {
 		// Best-effort dedup before Lidarr scans the folder: a messy share can
@@ -303,16 +346,35 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// Completeness is judged against the smallest valid edition
 	// (MinTrackCount, cached by Discovery from Lidarr's release list): with
 	// release switching enabled, a candidate matching any real edition is a
-	// full album. Fall back to the live canonical total only when the band was
-	// never cached (0) — e.g. a job searched before the band existed.
+	// full album. When the band was never cached (0) — every manual job, since
+	// only Discovery caches it, plus any job searched before the band existed
+	// — read the release list live rather than asking AlbumStatus.
+	//
+	// AlbumStatus is the wrong question here twice over. It reports the
+	// *currently selected* release's track count, so a legitimate download of
+	// one edition is measured against a different one: a real manual job was
+	// rejected "covered 10/21" for a ten-track album whose selected release
+	// was the twenty-one-track 2xCD, and Lidarr then never got to switch
+	// release, because switching happens during the import this gate refused
+	// to start. And it reports 0 for an unmonitored album with no files yet,
+	// which would turn the gate into a no-op instead of a stricter check.
+	// The release list answers both correctly and is unaffected by monitoring.
 	minRequired := job.MinTrackCount
 	if minRequired == 0 {
-		_, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+		releases, err := m.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
 		if err != nil {
-			m.log().Error("album status failed", "album_job", job.ID, "err", err)
-			return m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
+			m.log().Error("album releases lookup failed", "album_job", job.ID, "err", err)
+			return m.escalateIfStuck(ctx, job, cand, names, "album releases lookup failed", now)
 		}
-		minRequired = total
+		minRequired, _ = trackBand(releases)
+		if minRequired == 0 {
+			// No release carries a usable track count, so there is no
+			// expectation to measure against. Say so rather than letting a
+			// gate that could not be evaluated read as a gate that passed;
+			// Lidarr still has the final word on the import itself.
+			m.log().Warn("no usable track count on any release, skipping the coverage gate",
+				"album_job", job.ID, "releases", len(releases))
+		}
 	}
 	if coverage(importable) < minRequired {
 		// A source that can't complete any valid edition is rejected outright
@@ -340,6 +402,62 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// imported the files, so ManualImportCandidates finds nothing left).
 	if err := m.p.Store.MarkImportSubmitted(ctx, cand.ID, now); err != nil {
 		m.log().Error("mark import submitted failed", "candidate", cand.ID, "err", err)
+	}
+	return nil
+}
+
+// resolveAlbumID returns the Lidarr album id to use for this job on this tick.
+// A Lidarr-sourced job already carries one. A manual job (issue #59) carries
+// none and is resolved from its AlbumMBID, which must happen before either
+// phase can make an AlbumStatus call - AlbumStatus(0) errors on every tick,
+// which is the defect #59 exists to fix.
+//
+// The second return is false when this tick's work on the job is already
+// done: it was routed to the terminal NOT_IMPORTED (nothing to import into),
+// or the Lidarr lookup failed and escalateIfStuck cooled the job down to try
+// again next tick.
+func (m *Importing) resolveAlbumID(ctx context.Context, job core.AlbumJob, cand core.Candidate, now time.Time) (int64, bool, error) {
+	if job.LidarrAlbumID != 0 {
+		return job.LidarrAlbumID, true, nil
+	}
+	if job.AlbumMBID == "" {
+		// Defensive: Downloading's allDone routing (downloading.go) should
+		// already have sent an unidentified manual job straight to
+		// NOT_IMPORTED without ever reaching IMPORTING. If it somehow did
+		// anyway, this must still never fall through to AlbumStatus(0).
+		return 0, false, m.routeNotImported(ctx, job, cand, "no album identified for import", now)
+	}
+	album, found, err := m.p.Music.AlbumByForeignID(ctx, job.AlbumMBID)
+	if err != nil {
+		m.log().Error("resolve manual job album failed", "album_job", job.ID, "album_mbid", job.AlbumMBID, "err", err)
+		// nil filenames: only a manual job can reach here (a Lidarr job
+		// returned above), and failCandidate never cleans up a manual job's
+		// folder - see its comment. Nothing downstream reads them.
+		return 0, false, m.escalateIfStuck(ctx, job, cand, nil, "resolve album failed", now)
+	}
+	if !found {
+		detail := fmt.Sprintf("identified release group %s is not in Lidarr's library", job.AlbumMBID)
+		return 0, false, m.routeNotImported(ctx, job, cand, detail, now)
+	}
+	return album.ID, true, nil
+}
+
+// routeNotImported advances job to the terminal NOT_IMPORTED (issue #59): the
+// download succeeded but there is no Lidarr album to import into. No cleanup
+// runs - the downloaded files are the deliverable, exactly like Downloading's
+// own allDone routing for the same case (downloading.go).
+//
+// The candidate is marked SUCCEEDED, not failed, and the peer is credited: it
+// delivered every file it was asked for. Nothing about this outcome is the
+// peer's doing, and leaving the candidate ACTIVE on a terminal job would both
+// strand it in ActiveCandidate forever and make the job detail view report an
+// attempt still "In progress" on a job that has finished.
+func (m *Importing) routeNotImported(ctx context.Context, job core.AlbumJob, cand core.Candidate, detail string, now time.Time) error {
+	m.log().Info(detail, "album_job", job.ID)
+	m.recordEvent(ctx, job.ID, core.EventNotImported, detail, now)
+	m.recordOutcome(ctx, job, cand.Username, true, now)
+	if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateNotImported, now); err != nil {
+		return err
 	}
 	return nil
 }
@@ -427,7 +545,16 @@ func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Ca
 		}
 		return nil
 	}
-	if present >= total {
+	// total > 0 for the same reason albumAlreadyComplete requires it, and it
+	// is not hypothetical: Lidarr reports statistics.trackCount as 0 for an
+	// album that is unmonitored and has no files yet, which is precisely the
+	// state a manual job's album sits in between submitting the import and
+	// Lidarr finishing it. Without this guard that reads as 0 >= 0, and the
+	// job would announce "import confirmed, completed (0/0 present)", mark
+	// itself DONE and delete the download folder having imported nothing.
+	// A total that stays 0 is not success, it is an answer we do not have
+	// yet — let ImportConfirmTimeout below decide when to give up.
+	if total > 0 && present >= total {
 		confirmedDetail := fmt.Sprintf("import confirmed, completed (%d/%d present)", present, total)
 		m.log().Info(confirmedDetail, "album_job", job.ID)
 		m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, confirmedDetail, now)

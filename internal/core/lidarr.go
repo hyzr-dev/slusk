@@ -39,10 +39,9 @@ type LidarrProfile struct {
 // AddArtistRequest is what internal/lidarr.Client.AddArtist needs to create
 // an artist (issue #331). It deliberately carries no monitoring intent -
 // AddArtist always sends monitorNewItems:"none" and
-// addOptions:{monitor:"none"} itself, regardless of what the caller wants
-// monitored. See AddArtist's doc comment for why: on Lidarr 3.1.0,
-// addOptions.monitor is inert, so intent must be expressed afterward via
-// SetArtistMonitored and MonitorAlbums instead.
+// addOptions:{monitor:"none"}, and nothing monitors anything afterward
+// either. See AddArtist's doc comment and internal/app/lidarr_library.go's
+// package doc comment.
 type AddArtistRequest struct {
 	ForeignArtistID   string
 	ArtistName        string
@@ -51,20 +50,17 @@ type AddArtistRequest struct {
 	RootFolderPath    string
 }
 
-// LidarrCommand is one entry in Lidarr's GET /command response (issue #331).
-// AddArtistAndMonitor watches RefreshArtist/RefreshAlbum/RescanFolders here
-// to avoid applying monitoring while Lidarr's asynchronous post-add refresh
-// is still running - see testenv/seed_lidarr.py's wait_for_idle, which
-// documents the exact race this mirrors: that refresh re-applies the
-// artist's monitor policy and can silently undo monitoring set just before
-// it ran.
+// LidarrCommand is one entry in Lidarr's GET /command response (issue #331),
+// as reported by internal/lidarr.Client.RunningCommands. It has no caller in
+// slskdarr itself since the "add to Lidarr" flow stopped monitoring anything
+// and no longer needs to wait out Lidarr's asynchronous post-add refresh
+// (see internal/app/lidarr_library.go's package doc comment); the wire
+// method stays because internal/lidarr is a client library.
 //
 // ArtistIDs is decoded from the command's body.artistIds - verified against
 // the PR lab: a RefreshArtist triggered by our own add carries the exact
 // artist id being added. A nil/empty ArtistIDs means the command is
-// unscoped (a library-wide refresh, for instance), which can still touch
-// our artist, so callers must treat that as blocking too - see
-// app.LidarrLibrary.waitForIdle.
+// unscoped (a library-wide refresh, for instance).
 type LidarrCommand struct {
 	Name      string
 	Status    string

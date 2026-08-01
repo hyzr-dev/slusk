@@ -402,7 +402,7 @@ func jobStateFor(t *testing.T, st *store.Store, jobID int64) core.AlbumJobState 
 		core.StateWanted, core.StateSearching, core.StateSelecting,
 		core.StateDownloading, core.StateVerifying, core.StateImporting,
 		core.StateDone, core.StateCooldown, core.StateFailed, core.StateCancelled,
-		core.StateDiscovered, core.StateCompleted,
+		core.StateDiscovered, core.StateCompleted, core.StateNotImported,
 	}
 	for _, state := range all {
 		jobs, err := st.RunnableJobsInState(ctx, state, farFuture, 100)

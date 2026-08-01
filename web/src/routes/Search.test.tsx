@@ -493,8 +493,30 @@ describe('identify & download (issue #321)', () => {
     await within(dialog).findByText(t.search.identify.willBeRecordedAs);
     fireEvent.click(within(dialog).getByRole('button', { name: t.search.identify.confirm }));
 
-    await waitFor(() => expect(jobsBody).toMatchObject({ title: 'In Rainbows', artist: 'Radiohead' }));
+    // Issue #59: the release-group MBID reaches POST /api/jobs so the
+    // backend can import this job into Lidarr once it downloads.
+    await waitFor(() => expect(jobsBody).toMatchObject({ title: 'In Rainbows', artist: 'Radiohead', albumMbid: 'al1' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: t.search.identify.identified })).toBeInTheDocument();
+  });
+
+  // The complementary case: a plain "Download album"/"Download selected"
+  // with no identification at all must still send no albumMbid — the same
+  // "no import" meaning it always had.
+  it('posts no albumMbid for a plain download with no identification', async () => {
+    const group = wireGroup();
+    let jobsBody: Record<string, unknown> | undefined;
+    await renderWithResults([group], 1, (url, init) => {
+      if (url === '/api/jobs' && init?.method === 'POST') {
+        jobsBody = JSON.parse(init.body as string);
+        return Promise.resolve(new Response(JSON.stringify({ id: 44 }), { status: 201 }));
+      }
+      return undefined;
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: t.search.downloadAlbum }));
+
+    await waitFor(() => expect(jobsBody).toBeDefined());
+    expect(jobsBody?.albumMbid).toBeUndefined();
   });
 });

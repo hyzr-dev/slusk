@@ -866,7 +866,7 @@ export function useLidarrAddOptions() {
   });
 }
 
-/** POST /api/lidarr/artists — creates the artist and monitors the chosen album(s). */
+/** POST /api/lidarr/artists — ensures the artist exists in the library, unmonitored. */
 export function useAddLidarrArtist() {
   return useMutation({
     mutationFn: (body: AddLidarrArtistRequest) => apiPostJson<AddLidarrArtistResult>('/api/lidarr/artists', body),

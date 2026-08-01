@@ -28,8 +28,8 @@ type LidarrArtistStatusFunc func(ctx context.Context, artistMBID string) (app.Li
 // /api/lidarr/add-options.
 type LidarrAddOptionsFunc func(ctx context.Context) (app.LidarrAddOptions, error)
 
-// LidarrAddArtistFunc creates an artist and monitors the chosen album(s)
-// (typically backed by app.LidarrLibrary.AddArtistAndMonitor) for POST
+// LidarrAddArtistFunc ensures an artist exists in the Lidarr library
+// (typically backed by app.LidarrLibrary.EnsureArtist) for POST
 // /api/lidarr/artists.
 type LidarrAddArtistFunc func(ctx context.Context, params app.AddArtistParams) (app.AddArtistResult, error)
 
@@ -89,42 +89,23 @@ func toLidarrAddOptionsDTO(o app.LidarrAddOptions) lidarrAddOptionsDTO {
 	return lidarrAddOptionsDTO{RootFolders: roots, QualityProfiles: quality, MetadataProfiles: metadata}
 }
 
-// addArtistRequest is the JSON body of POST /api/lidarr/artists.
-// AlbumMBID is the release-group id that prompted the add - the one
-// AddArtistAndMonitor polls for and monitors. Monitor is "album" or "all".
+// addArtistRequest is the JSON body of POST /api/lidarr/artists. It carries
+// no album id and no monitoring choice: the add only ensures the artist
+// exists, unmonitored - see internal/app/lidarr_library.go's package doc
+// comment for why monitoring was removed entirely.
 type addArtistRequest struct {
 	ArtistMBID        string `json:"artistMbid"`
 	ArtistName        string `json:"artistName"`
-	AlbumMBID         string `json:"albumMbid"`
 	RootFolderPath    string `json:"rootFolderPath"`
 	QualityProfileID  int64  `json:"qualityProfileId"`
 	MetadataProfileID int64  `json:"metadataProfileId"`
-	Monitor           string `json:"monitor"`
 }
 
 // addArtistResultDTO is the JSON shape of app.AddArtistResult, the 201 body
-// of POST /api/lidarr/artists. AlbumMonitorState is one of app.AlbumMonitorState's
-// string values ("monitored"/"notVisibleYet"/"reverted"/"unknown") - see that
-// type's doc comment for what each means.
+// of POST /api/lidarr/artists.
 type addArtistResultDTO struct {
-	ArtistID          int64  `json:"artistId"`
-	AlreadyInLibrary  bool   `json:"alreadyInLibrary"`
-	ArtistMonitored   bool   `json:"artistMonitored"`
-	AlbumMonitorState string `json:"albumMonitorState"`
-}
-
-// parseMonitorChoice maps the request body's "monitor" string onto
-// app.MonitorChoice. ok is false for anything but the two recognised
-// values, including blank - the zero MonitorChoice is deliberately invalid.
-func parseMonitorChoice(s string) (choice app.MonitorChoice, ok bool) {
-	switch s {
-	case "album":
-		return app.MonitorThisAlbum, true
-	case "all":
-		return app.MonitorAllAlbums, true
-	default:
-		return 0, false
-	}
+	ArtistID         int64 `json:"artistId"`
+	AlreadyInLibrary bool  `json:"alreadyInLibrary"`
 }
 
 // validateAddArtistRequest validates req, mirroring
@@ -137,9 +118,6 @@ func validateAddArtistRequest(req addArtistRequest) (params app.AddArtistParams,
 	if strings.TrimSpace(req.ArtistName) == "" {
 		fieldErrors["artistName"] = "is required"
 	}
-	if strings.TrimSpace(req.AlbumMBID) == "" {
-		fieldErrors["albumMbid"] = "is required"
-	}
 	if strings.TrimSpace(req.RootFolderPath) == "" {
 		fieldErrors["rootFolderPath"] = "is required"
 	}
@@ -149,28 +127,22 @@ func validateAddArtistRequest(req addArtistRequest) (params app.AddArtistParams,
 	if req.MetadataProfileID <= 0 {
 		fieldErrors["metadataProfileId"] = "must be > 0"
 	}
-	monitor, ok := parseMonitorChoice(req.Monitor)
-	if !ok {
-		fieldErrors["monitor"] = `must be "album" or "all"`
-	}
 	return app.AddArtistParams{
-		ArtistMBID: req.ArtistMBID, ArtistName: req.ArtistName, AlbumMBID: req.AlbumMBID,
+		ArtistMBID: req.ArtistMBID, ArtistName: req.ArtistName,
 		RootFolderPath: req.RootFolderPath, QualityProfileID: req.QualityProfileID,
-		MetadataProfileID: req.MetadataProfileID, Monitor: monitor,
+		MetadataProfileID: req.MetadataProfileID,
 	}, fieldErrors
 }
 
 // writeLidarrLibraryError maps a LidarrLibrary service error to a status
 // code and writes it:
 //   - errors.Is(err, app.ErrLidarrLibraryQueryInvalid) -> 422. This error
-//     covers five different required-or-invalid fields (mbid, albumMbid,
+//     covers four different required-or-invalid fields (mbid,
 //     rootFolderPath, qualityProfileId, metadataProfileId) depending on
 //     which endpoint and code path produced it, so unlike the other cases
 //     below it cannot honestly name a single offending field - see issue
 //     #331 backend review #8, which replaced a hardcoded (and often wrong)
 //     "mbid" guess with this generic message instead.
-//   - errors.Is(err, app.ErrLidarrLibraryInvalidMonitorChoice) -> 422 with a
-//     monitor field error.
 //   - errors.Is(err, app.ErrLidarrLibraryInvalidRootFolder) -> 422 with a
 //     rootFolderPath field error.
 //   - errors.Is(err, app.ErrLidarrLibraryAddUncertain) -> 502 with
@@ -182,8 +154,6 @@ func writeLidarrLibraryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, app.ErrLidarrLibraryQueryInvalid):
 		writeConfigError(w, http.StatusUnprocessableEntity, "one or more required fields are missing or invalid", nil)
-	case errors.Is(err, app.ErrLidarrLibraryInvalidMonitorChoice):
-		writeConfigError(w, http.StatusUnprocessableEntity, "validation failed", map[string]string{"monitor": `must be "album" or "all"`})
 	case errors.Is(err, app.ErrLidarrLibraryInvalidRootFolder):
 		writeConfigError(w, http.StatusUnprocessableEntity, "validation failed", map[string]string{"rootFolderPath": "is not a configured, accessible root folder"})
 	case errors.Is(err, app.ErrLidarrLibraryAddUncertain):
@@ -241,10 +211,10 @@ func registerLidarrLibrary(mux *http.ServeMux, artistStatus LidarrArtistStatusFu
 		}
 
 		// The server's WriteTimeout (30s, see cmd/slskdarr/main.go) exists to
-		// bound ordinary request handlers, but AddArtistAndMonitor routinely
-		// exceeds it on a first-time add: waitForIdle alone budgets up to
-		// ~1m55s for Lidarr's post-add refresh to settle (see
-		// internal/app/lidarr_library.go). Clear the deadline the same way
+		// bound ordinary request handlers, but EnsureArtist can exceed it on a
+		// first-time add: a live probe against Lidarr 3.1.0.4875 measured POST
+		// /artist alone taking over 30s while it fetched the artist's metadata
+		// (see internal/app/lidarr_library.go). Clear the deadline the same way
 		// registerStream does for SSE connections, so a slow-but-successful
 		// add isn't killed mid-response. If the underlying ResponseWriter
 		// doesn't support write deadlines at all, fail cleanly now instead of
@@ -263,7 +233,6 @@ func registerLidarrLibrary(mux *http.ServeMux, artistStatus LidarrArtistStatusFu
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(addArtistResultDTO{
 			ArtistID: result.ArtistID, AlreadyInLibrary: result.AlreadyInLibrary,
-			ArtistMonitored: result.ArtistMonitored, AlbumMonitorState: string(result.AlbumMonitorState),
 		})
 	})
 }

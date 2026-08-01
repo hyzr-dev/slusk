@@ -16,6 +16,14 @@ describe('eventLabel', () => {
   it('has a human label for the server-exclusion event', () => {
     expect(eventLabel('search_excluded')).toBe('Search excluded by server');
   });
+
+  // Issue #59: the backend writes this event from two different sites (an
+  // unidentified download, or an identified one whose release group isn't in
+  // Lidarr's library). Without an entry here the Events page and JobDetail
+  // would render the raw snake_case code via the fallback above.
+  it('has a human label for the not-imported event', () => {
+    expect(eventLabel('not_imported')).toBe(t.event.not_imported);
+  });
 });
 
 describe('candidateStateLabel', () => {
@@ -39,5 +47,11 @@ describe('stateLabel', () => {
 
   it('falls back to the raw status when neither the state nor the status is known', () => {
     expect(stateLabel('SOME_NEW_STATE', 'some_future_status')).toBe('some_future_status');
+  });
+
+  // Issue #59: NOT_IMPORTED is a real terminal state, not an unrecognised
+  // one — it must resolve through t.state, not the status/raw fallbacks.
+  it('returns the translated state for NOT_IMPORTED', () => {
+    expect(stateLabel('NOT_IMPORTED', 'notImported')).toBe(t.state.NOT_IMPORTED);
   });
 });

@@ -42,10 +42,12 @@ export const t = {
     },
     search: {
       title: 'Search',
-      // Deliberately does not promise Lidarr import: a manual job downloads
-      // end-to-end, but app.Jobs.Create's doc comment records that the
-      // subsequent import step misbehaves for a NULL lidarr_album_id (#59/#60).
-      // Restore the import wording only once that lands.
+      // Deliberately does not promise Lidarr import: a manual download only
+      // imports when the user identified it (via IdentifyModal, issue #321)
+      // and Lidarr already has that release group in its library. Otherwise
+      // it downloads and stops at the terminal NOT_IMPORTED state (#59) — see
+      // app.Jobs.Create's doc comment. This subtitle stays conditionality-free
+      // rather than spelling that branch out inline.
       subtitle: 'Query the Soulseek network directly and download what you find',
     },
     health: {
@@ -119,6 +121,9 @@ export const t = {
     done: 'Done',
     failed: 'Failed',
     parked: 'Parked',
+    // A manual job (issue #59) that finished downloading with no Lidarr album
+    // to import into. Not a failure: the files are on disk.
+    notImported: 'Not imported',
   },
   // Two-letter status tags in the TUI job grid. The long labels in `status`
   // and `state` are still used wherever there is room for them.
@@ -130,6 +135,7 @@ export const t = {
     FA: 'FA',
     OK: 'OK',
     IM: 'IM',
+    NI: 'NI',
     // Uploads panel marker, not a JobStatus/JobState — the map already
     // serves as a general two-letter tag vocabulary, so it's added here
     // rather than duplicated in its own small map.
@@ -143,6 +149,13 @@ export const t = {
     FA: 'Failed',
     OK: 'Done',
     IM: 'Importing',
+    // Issue #59. Two different routes end here — the download was never
+    // identified against a release group, or it was and that release group
+    // is not in Lidarr's library — and the tag cannot tell them apart, so it
+    // states the outcome's proximate cause rather than guessing which one
+    // applied. The specific reason is recorded as a job event and shown in
+    // the job's detail view, which is where someone troubleshooting looks.
+    NI: 'Downloaded, not imported — no Lidarr album to import into',
     UL: 'Uploading',
   },
   state: {
@@ -154,6 +167,11 @@ export const t = {
     FAILED: 'Failed',
     CANCELLED: 'Cancelled',
     PARKED: 'Parked',
+    // Terminal state for a manual job (issue #59) that finished downloading
+    // with no Lidarr album to import into. See tagTitle.NI's comment on why
+    // the wording states the outcome rather than which of the two routes
+    // there produced it.
+    NOT_IMPORTED: 'Not imported',
   },
   candidateState: {
     NEW: 'Not tried',
@@ -174,6 +192,13 @@ export const t = {
     import_rejected: 'Import rejected',
     job_failed: 'Job failed',
     quarantined: 'Files quarantined',
+    // Written from two different sites in the backend (issue #59) — the
+    // download was never identified against a release group, or it was and
+    // that release group isn't in Lidarr's library. Deliberately names only
+    // the outcome; the distinct detail text carried in the event's own
+    // `detail` field (rendered alongside this label) is where the specific
+    // cause lives.
+    not_imported: 'Downloaded, not imported',
   },
   // The generic column-label object that predates this reskin. Each reskinned
   // view now owns its own `gridHead` map matching the mock's column names;
@@ -215,6 +240,12 @@ export const t = {
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
+    // The MusicBrainz release-group MBID the job was identified against
+    // (issue #59), shown in the job detail view — it's the identity the
+    // import step resolves against, so it's real troubleshooting scent for a
+    // manual job stuck at NOT_IMPORTED. Omitted entirely when the job has
+    // none.
+    albumMbid: (mbid: string) => `MusicBrainz release group: ${mbid}`,
     // The attempt header's file count (job detail page) and a transfer's own
     // retry count — both were inline template strings before this reskin.
     fileCount: (n: number) => `${n} files`,
@@ -585,8 +616,8 @@ export const t = {
     identify: {
       // Trigger button in SearchResultCard's actions row. Deliberately does
       // not say "import" — the app can enqueue a download but can never
-      // promise Lidarr will pick it up (see lidarrUnknown/lidarrNotInLibrary
-      // below).
+      // promise Lidarr will pick it up (see lidarrUnknown and the two
+      // *Missing lines below).
       button: 'Identify & download',
       identified: '✓ Identified',
       // The dialog's own header label — deliberately its own entry rather
@@ -682,7 +713,16 @@ export const t = {
       // absent artist implies an absent album. These name which of the three
       // real situations holds, and each states the import consequence once.
       lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
-      lidarrAlbumMissing: "ALBUM NOT IN LIDARR — download won't be imported",
+      // Deliberately conditional, unlike the artist-and-album line below. When
+      // the artist IS in Lidarr, the album row can still appear on its own:
+      // Lidarr materialises a discography asynchronously, and the import step
+      // resolves the album when the download finishes, not now. A user hit
+      // exactly this — the modal said the album was missing and it imported
+      // anyway. Promising it "won't be imported" would be inventing a
+      // certainty the lookup cannot support.
+      lidarrAlbumMissing: 'ALBUM NOT IN LIDARR — imports only if Lidarr adds it in time',
+      // No such hedge here: with the artist absent too, nothing is going to
+      // create either of them between now and the end of the download.
       lidarrArtistAndAlbumMissing: "ARTIST & ALBUM NOT IN LIDARR — download won't be imported",
       lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
       back: '‹ Back',
@@ -702,7 +742,10 @@ export const t = {
       // result carries no artistId at all (release-group with an empty
       // artist-credit) — case 3 of the brief. Never invents an artist to
       // resolve one; see canonicalArtistOf's own comment on the same rule.
-      noArtistId: "MusicBrainz did not supply an artist ID for this release, so it can't be added to Lidarr. You can still download it without importing.",
+      // Confirming here still forwards the release-group MBID (confirm()'s
+      // withMbid defaults to true even in this branch), so it must not claim
+      // the download won't import — it will, if Lidarr already has the album.
+      noArtistId: "MusicBrainz did not supply an artist ID for this release, so a new artist can't be added to Lidarr from here. If the album is already in Lidarr's library, downloading will still import it.",
       // The two paths offered when the album is confirmed NOT in the
       // library and both artist/album lookups succeeded (case 2). Neither
       // is the default action — both render as equal buttons, per the
@@ -728,13 +771,6 @@ export const t = {
       noUsableProfiles: 'No quality or metadata profile is configured in Lidarr — check its settings there.',
       qualityProfileLabel: 'Quality profile',
       metadataProfileLabel: 'Metadata profile',
-      monitorLabel: 'Monitor',
-      monitorAlbum: 'Just this album',
-      monitorAll: 'Entire discography',
-      // Shown only when "Entire discography" is selected — a plain warning,
-      // not hidden in a tooltip, since it changes Lidarr's behaviour beyond
-      // this one release.
-      monitorAllWarning: 'Lidarr will begin searching for everything this artist has released.',
       addSubmit: 'Add to Lidarr & download',
       addCancel: 'Cancel',
       addSubmitting: 'adding to lidarr…',
@@ -748,24 +784,6 @@ export const t = {
       // it's offered as the next step rather than only "check Lidarr".
       addUncertain:
         'Could not confirm whether the artist was added to Lidarr — it may have succeeded. Check Lidarr, or try again; retrying is safe.',
-      // Per-albumMonitorState copy (see AddLidarrArtistResult). None of these
-      // are failures — the artist was created — so each states plainly what
-      // is and is not known, never inventing a cause it can't confirm.
-      albumMonitorNotVisibleYet: "Lidarr hadn't finished refreshing the artist yet, so this album isn't monitored.",
-      albumMonitorReverted: "Lidarr's own refresh reset the album's monitoring after the add — it didn't stick.",
-      albumMonitorUnknown: 'Could not confirm whether the album is now monitored. Check Lidarr directly.',
-      // Shown alongside an albumMonitorState line whenever the ARTIST itself
-      // isn't monitored — a separate fact from the album's own state (issue
-      // #331 review): this is the real state after a retry of an add that had
-      // silently landed, where Lidarr already knows the artist but never
-      // monitored it.
-      artistNotMonitored: 'The artist is in Lidarr but not monitored, so Lidarr will not act on this.',
-      // Trailing sentence for the partial-success notice, shared by every
-      // non-fully-monitored outcome (issue #331 review, requires an explicit
-      // Continue click rather than proceeding silently, so the user actually
-      // sees it before the modal closes).
-      addPartialProceeds: 'The download will proceed anyway.',
-      continue: 'Continue',
     },
   },
   chat: {

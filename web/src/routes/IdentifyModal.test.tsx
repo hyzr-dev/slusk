@@ -499,7 +499,9 @@ describe('IdentifyModal states', () => {
     fireEvent.click(screen.getByRole('button', { name: /In Rainbows/ }));
     await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+    // Issue #59: the release-group MBID is forwarded so the backend can
+    // import this job into Lidarr later.
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows', albumMbid: 'al1' });
   });
 
   // MusicBrainzSearchResult.artist/artistId are `omitempty` on the Go DTO —
@@ -532,7 +534,11 @@ describe('IdentifyModal states', () => {
     expect(screen.queryByText(/DifferentParent/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation' });
+    // Issue #59: 'noArtistId' still forwards the MBID — only the explicit
+    // "download anyway" button suppresses it. Resolution happens at import
+    // time, so a missing artist credit here must not permanently downgrade
+    // the job.
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation', albumMbid: 'al1' });
   });
 
   // Review item A, the important one. When MusicBrainz supplies no artist
@@ -627,8 +633,17 @@ describe('lidarrAddAvailability', () => {
     expect(lidarrAddAvailability(true, { known: true, inLibrary: true }, { known: true, inLibrary: true })).toBe('inLibrary');
   });
 
-  it('is offerAdd when both lookups succeeded and the album is not in the library', () => {
+  it('is offerAdd only when the ARTIST is absent, since that is all the add creates', () => {
     expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: true, inLibrary: false })).toBe('offerAdd');
+  });
+
+  // Reported from the lab: right after adding an artist, re-opening Identify
+  // offered to add it again. EnsureArtist only ever creates an artist —
+  // Lidarr materialises the albums itself, asynchronously — so with the
+  // artist already present the button does nothing at all. Keying the
+  // decision on the album asked a question the add flow cannot answer.
+  it('is artistInLibrary, not offerAdd, when the artist is there but the album is not', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: true, inLibrary: true })).toBe('artistInLibrary');
   });
 });
 
@@ -651,6 +666,31 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     expect(screen.getByText(t.search.identify.lidarrAlbumMissing)).toBeInTheDocument();
   });
 
+  // The render-level half of the artistInLibrary case: no add button at all,
+  // because EnsureArtist would find the artist already there and change
+  // nothing. Offering it invites the user to press a button that does not act.
+  it('offers no add path when the artist is already in Lidarr but the album is not', async () => {
+    const { onConfirm } = await selectWithLidarrStatus(
+      { known: true, inLibrary: false },
+      artistMatch({ inLibrary: true }),
+    );
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.search.identify.downloadAnyway })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+    // And it still forwards the MBID: the album row can appear before the
+    // download finishes, which is when the import step resolves it.
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
+  });
+
+  // The copy must not promise an outcome the lookup cannot support: a user
+  // saw this line and the album imported anyway, because Lidarr filled in the
+  // discography while the download was still running.
+  it('does not claim the download will go unimported when only the album is missing', () => {
+    expect(t.search.identify.lidarrAlbumMissing).not.toMatch(/won't be imported/i);
+    expect(t.search.identify.lidarrArtistAndAlbumMissing).toMatch(/won't be imported/i);
+  });
+
   it('hides the add path and shows the "no artist ID" explanation when the result has no artistId', async () => {
     await selectWithLidarrStatus(
       { known: true, inLibrary: false },
@@ -668,9 +708,14 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
   });
 
   it('hides the add path when the album Lidarr status is unknown (known: false)', async () => {
-    await selectWithLidarrStatus({ known: false, inLibrary: false }, artistMatch());
+    const { onConfirm } = await selectWithLidarrStatus({ known: false, inLibrary: false }, artistMatch());
     expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+    // Issue #59: a transient Lidarr outage during identify must not
+    // permanently downgrade the job — the MBID is still forwarded, and
+    // resolution is retried at import time.
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
   });
 
   it('hides the add path when the artist Lidarr status is unknown even if the album status is known', async () => {
@@ -692,9 +737,13 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     const downloadAnyway = screen.getByRole('button', { name: t.search.identify.downloadAnyway });
     expect(downloadAnyway).toBeInTheDocument();
     // "download anyway" proceeds exactly like the ordinary confirm path —
-    // it must not be visually or functionally demoted.
+    // it must not be visually or functionally demoted. Issue #59: it is
+    // also the ONE path that deliberately suppresses the MBID, so this job
+    // never imports.
     fireEvent.click(downloadAnyway);
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows', albumMbid: undefined });
+    const [payload] = onConfirm.mock.calls[0];
+    expect(payload.albumMbid).toBeUndefined();
   });
 
   it('prefills quality/metadata from the selected root folder and re-prefills on change', async () => {
@@ -737,7 +786,12 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     expect(rootFolderSelect).toHaveValue('/music');
   });
 
-  it('posts monitor: "album" for the default choice', async () => {
+  // The add carries no monitoring choice at all any more (issue #59
+  // follow-up): the backend adds the artist unmonitored, because a monitored
+  // album with no files lands in Lidarr's wanted/missing list and WantedSync
+  // then races the manual download. There is nothing partial the 201 can
+  // report, so a successful add proceeds straight to confirm().
+  it('posts the add with no monitoring fields and proceeds straight to confirm', async () => {
     const opts = addOptions();
     const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
       addOptionsRoute: opts,
@@ -745,12 +799,15 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
         {
           method: 'POST',
           match: '/api/lidarr/artists',
-          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'monitored' }),
+          body: () => ({ artistId: 42, alreadyInLibrary: false }),
         },
       ],
     });
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
     await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
+
+    // No monitoring control is offered at all.
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
 
     const fetchSpy = vi.mocked(fetch);
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
@@ -758,82 +815,12 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
 
     const postCall = fetchSpy.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
     const postedBody = JSON.parse((postCall?.[1] as RequestInit).body as string);
-    expect(postedBody).toMatchObject({ monitor: 'album', artistMbid: 'a1', albumMbid: 'al1' });
-  });
-
-  it('posts monitor: "all" and shows the discography warning when "Entire discography" is chosen', async () => {
-    const opts = addOptions();
-    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
-      addOptionsRoute: opts,
-      extraRoutes: [
-        {
-          method: 'POST',
-          match: '/api/lidarr/artists',
-          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'monitored' }),
-        },
-      ],
-    });
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
-    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
-
-    fireEvent.click(screen.getByRole('radio', { name: t.search.identify.monitorAll }));
-    expect(screen.getByText(t.search.identify.monitorAllWarning)).toBeInTheDocument();
-
-    const fetchSpy = vi.mocked(fetch);
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
-    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
-
-    const postCall = fetchSpy.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
-    const postedBody = JSON.parse((postCall?.[1] as RequestInit).body as string);
-    expect(postedBody).toMatchObject({ monitor: 'all' });
-  });
-
-  it('shows the partial-success message (not failure, not silent success) when the album refresh had not finished, and only proceeds after Continue', async () => {
-    const opts = addOptions();
-    const { onConfirm } = await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
-      addOptionsRoute: opts,
-      extraRoutes: [
-        {
-          method: 'POST',
-          match: '/api/lidarr/artists',
-          body: () => ({ artistId: 42, alreadyInLibrary: false, artistMonitored: true, albumMonitorState: 'notVisibleYet' }),
-        },
-      ],
-    });
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
-    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
-
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
-    await waitFor(() => expect(screen.getByText(t.search.identify.albumMonitorNotVisibleYet, { exact: false })).toBeInTheDocument());
-    // Only the album's note is shown — the artist itself IS monitored here,
-    // so its own line must not also appear.
-    expect(screen.queryByText(t.search.identify.artistNotMonitored, { exact: false })).not.toBeInTheDocument();
-    expect(onConfirm).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.continue }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
-  });
-
-  // Review item 5: artistMonitored and albumMonitorState are independent
-  // facts — a retry of an add that had silently landed can find the artist
-  // itself unmonitored even though the album's own state resolves cleanly.
-  it('shows the artist-not-monitored note alongside a clean album state', async () => {
-    const opts = addOptions();
-    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch(), {
-      addOptionsRoute: opts,
-      extraRoutes: [
-        {
-          method: 'POST',
-          match: '/api/lidarr/artists',
-          body: () => ({ artistId: 42, alreadyInLibrary: true, artistMonitored: false, albumMonitorState: 'monitored' }),
-        },
-      ],
-    });
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addToLidarr }));
-    await waitFor(() => screen.getByText(t.search.identify.rootFolderLabel));
-
-    fireEvent.click(screen.getByRole('button', { name: t.search.identify.addSubmit }));
-    await waitFor(() => expect(screen.getByText(t.search.identify.artistNotMonitored, { exact: false })).toBeInTheDocument());
+    expect(postedBody).toMatchObject({ artistMbid: 'a1', rootFolderPath: '/music' });
+    expect(postedBody).not.toHaveProperty('monitor');
+    expect(postedBody).not.toHaveProperty('albumMbid');
+    // Issue #59: a successful add-to-Lidarr forwards the MBID, same as every
+    // other non-"download anyway" path.
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
   });
 
   // Review item 6: a 502 addUncertain response must not be rendered with the

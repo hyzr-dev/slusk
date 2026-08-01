@@ -226,7 +226,7 @@ func TestSyncWantedJobsIgnoresManualJobs(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1",
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
 		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -269,7 +269,7 @@ func TestSyncWantedJobsEmptySnapshotIgnoresManualJobs(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1",
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
 		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)

@@ -144,7 +144,7 @@ func TestPostLidarrArtistsValidation(t *testing.T) {
 	}{
 		{"invalid json", `not json`},
 		{"missing fields", `{}`},
-		{"invalid monitor", `{"artistMbid":"a1","artistName":"Aphex Twin","albumMbid":"rg1","rootFolderPath":"/music","qualityProfileId":1,"metadataProfileId":1,"monitor":"nope"}`},
+		{"zero quality profile", `{"artistMbid":"a1","artistName":"Aphex Twin","rootFolderPath":"/music","qualityProfileId":0,"metadataProfileId":1}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -166,16 +166,18 @@ func TestPostLidarrArtistsValidation(t *testing.T) {
 func TestPostLidarrArtistsSuccess(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	addArtist := func(ctx context.Context, params app.AddArtistParams) (app.AddArtistResult, error) {
-		if params.ArtistMBID != "a1" || params.ArtistName != "Aphex Twin" || params.AlbumMBID != "rg1" ||
-			params.RootFolderPath != "/music" || params.QualityProfileID != 2 || params.MetadataProfileID != 1 ||
-			params.Monitor != app.MonitorThisAlbum {
+		if params.ArtistMBID != "a1" || params.ArtistName != "Aphex Twin" ||
+			params.RootFolderPath != "/music" || params.QualityProfileID != 2 || params.MetadataProfileID != 1 {
 			t.Fatalf("unexpected params: %+v", params)
 		}
-		return app.AddArtistResult{ArtistID: 9, AlreadyInLibrary: false, ArtistMonitored: true, AlbumMonitorState: app.AlbumMonitorStateMonitored}, nil
+		return app.AddArtistResult{ArtistID: 9, AlreadyInLibrary: false}, nil
 	}
 	h := newLidarrLibraryTestHandler(reg, nil, nil, addArtist)
 
-	body := `{"artistMbid":"a1","artistName":"Aphex Twin","albumMbid":"rg1","rootFolderPath":"/music","qualityProfileId":2,"metadataProfileId":1,"monitor":"album"}`
+	// The body carries neither a monitor choice nor an album id: the add only
+	// ensures the artist exists, unmonitored (see internal/app's
+	// lidarr_library.go).
+	body := validPostLidarrArtistsBody()
 	rec := newPostLidarrArtistsRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/lidarr/artists", bytes.NewReader([]byte(body))))
 	if rec.Code != http.StatusCreated {
@@ -185,18 +187,19 @@ func TestPostLidarrArtistsSuccess(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ArtistID != 9 || got.AlreadyInLibrary || !got.ArtistMonitored || got.AlbumMonitorState != "monitored" {
+	if got.ArtistID != 9 || got.AlreadyInLibrary {
 		t.Fatalf("unexpected body: %+v", got)
 	}
 }
 
-func TestPostLidarrArtistsMonitorAll(t *testing.T) {
+// TestPostLidarrArtistsIgnoresAMonitorField guards the removal itself: a
+// client still sending the old "monitor"/"albumMbid" fields must not be
+// rejected, and must certainly not reach the service carrying a monitoring
+// intent - there is nowhere left for one to go.
+func TestPostLidarrArtistsIgnoresAMonitorField(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	addArtist := func(ctx context.Context, params app.AddArtistParams) (app.AddArtistResult, error) {
-		if params.Monitor != app.MonitorAllAlbums {
-			t.Fatalf("Monitor = %v, want MonitorAllAlbums", params.Monitor)
-		}
-		return app.AddArtistResult{ArtistID: 9, ArtistMonitored: true, AlbumMonitorState: app.AlbumMonitorStateMonitored}, nil
+		return app.AddArtistResult{ArtistID: 9}, nil
 	}
 	h := newLidarrLibraryTestHandler(reg, nil, nil, addArtist)
 
@@ -209,7 +212,7 @@ func TestPostLidarrArtistsMonitorAll(t *testing.T) {
 }
 
 func validPostLidarrArtistsBody() string {
-	return `{"artistMbid":"a1","artistName":"Aphex Twin","albumMbid":"rg1","rootFolderPath":"/music","qualityProfileId":2,"metadataProfileId":1,"monitor":"album"}`
+	return `{"artistMbid":"a1","artistName":"Aphex Twin","rootFolderPath":"/music","qualityProfileId":2,"metadataProfileId":1}`
 }
 
 // TestPostLidarrArtistsAddUncertainMaps502 covers the wire contract for
@@ -290,7 +293,7 @@ func TestPostLidarrArtistsQueryInvalidDoesNotGuessAField(t *testing.T) {
 
 // TestPostLidarrArtistsSurvivesServerWriteTimeout is a regression test for
 // issue #331's backend review blocker: cmd/slskdarr/main.go sets the shared
-// server's WriteTimeout to 30s, and AddArtistAndMonitor routinely exceeds
+// server's WriteTimeout to 30s, and EnsureArtist can exceed
 // that on a first-time add. httptest.NewServer (used by every other test in
 // this file) sets no WriteTimeout at all, which is exactly why a live probe
 // against this endpoint missed the bug - this test deliberately configures
@@ -301,7 +304,7 @@ func TestPostLidarrArtistsSurvivesServerWriteTimeout(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	addArtist := func(ctx context.Context, params app.AddArtistParams) (app.AddArtistResult, error) {
 		time.Sleep(80 * time.Millisecond) // outlast the server's WriteTimeout below
-		return app.AddArtistResult{ArtistID: 9, ArtistMonitored: true, AlbumMonitorState: app.AlbumMonitorStateMonitored}, nil
+		return app.AddArtistResult{ArtistID: 9}, nil
 	}
 	h := newLidarrLibraryTestHandler(reg, nil, nil, addArtist)
 

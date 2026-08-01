@@ -192,11 +192,15 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		// rip, a bitrate, a particular edition), and Discovery (issue #347)
 		// refuses to search on a manual job's behalf anyway. So this goes
 		// straight to MarkJobFailed instead of failOrBackoff, on the first failure -
-		// retries is never consumed. This is also path 2's fix: an IMPORTING ->
-		// SELECTING bounce from a manual job's import dying on
-		// Music.AlbumStatus(0) (#59) now ends here too, visibly FAILED instead
-		// of ticking in WANTED forever. Whoever solves #59 must know the state
-		// is already FAILED, not WANTED, by the time their fix runs.
+		// retries is never consumed. A manual job can also arrive here via a
+		// genuine IMPORTING -> SELECTING bounce (Importing.failCandidate,
+		// e.g. Lidarr rejected the import) - that path is unrelated to #59
+		// now: #59's own failure mode (AlbumStatus(0) erroring on every tick
+		// because a manual job has no LidarrAlbumID) no longer happens -
+		// Importing resolves AlbumMBID to a real Lidarr album before it ever
+		// calls AlbumStatus, and a job with no identified album is routed to
+		// the terminal core.StateNotImported by Downloading before it even
+		// reaches IMPORTING.
 		if job.Source == core.SourceManual {
 			detail := "manual job candidate failed, not re-searching"
 			s.log().Info(detail, "album_job", job.ID)

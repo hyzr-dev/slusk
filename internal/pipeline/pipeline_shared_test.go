@@ -72,6 +72,15 @@ type fakeMusic struct {
 	// records the items it was actually called with.
 	executeManualImportErr error
 	executedItems          []core.ImportItem
+
+	// albumByForeignID/albumByForeignIDFound/albumByForeignIDErr drive
+	// AlbumByForeignID, Importing's MBID->Lidarr-album resolution for a
+	// manual job (issue #59). albumByForeignIDCalls records every foreign id
+	// it was called with, in order.
+	albumByForeignID      core.LidarrAlbum
+	albumByForeignIDFound bool
+	albumByForeignIDErr   error
+	albumByForeignIDCalls []string
 }
 
 func (f *fakeMusic) WantedMissing(ctx context.Context) ([]core.WantedRelease, error) {
@@ -117,6 +126,14 @@ func (f *fakeMusic) AlbumTracks(ctx context.Context, albumID int64) ([]core.Albu
 		return nil, f.albumTracksErr
 	}
 	return f.albumTracks, nil
+}
+
+func (f *fakeMusic) AlbumByForeignID(ctx context.Context, foreignAlbumID string) (core.LidarrAlbum, bool, error) {
+	f.albumByForeignIDCalls = append(f.albumByForeignIDCalls, foreignAlbumID)
+	if f.albumByForeignIDErr != nil {
+		return core.LidarrAlbum{}, false, f.albumByForeignIDErr
+	}
+	return f.albumByForeignID, f.albumByForeignIDFound, nil
 }
 
 // fakeNetwork is an in-memory PeerNetwork fake for the Downloading module's

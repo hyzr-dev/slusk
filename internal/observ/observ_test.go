@@ -56,7 +56,7 @@ func noopThroughput(ctx context.Context) (core.ThroughputSeries, error) {
 }
 func noopConfigWriter(ConfigUpdate) error { return nil }
 func noopRestart()                        {}
-func noopCreateJob(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+func noopCreateJob(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 	return core.JobView{}, nil
 }
 func noopSearchJob(ctx context.Context, jobID int64) error               { return nil }
@@ -1284,12 +1284,12 @@ func TestJobsEndpointBytesDoneUsesTransferBytesForLiveMatchedCandidate(t *testin
 
 func TestCreateJobEndpointSuccess(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	var gotTitle, gotArtist, gotPeer string
+	var gotTitle, gotArtist, gotPeer, gotAlbumMBID string
 	var gotFiles []core.CandidateFile
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
-		gotTitle, gotArtist, gotPeer, gotFiles = title, artist, peer, files
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
+		gotTitle, gotArtist, gotPeer, gotAlbumMBID, gotFiles = title, artist, peer, albumMBID, files
 		return core.JobView{
-			Job:             core.AlbumJob{ID: 42, Title: title, ArtistName: artist, State: core.StateDownloading, Source: core.SourceManual},
+			Job:             core.AlbumJob{ID: 42, Title: title, ArtistName: artist, State: core.StateDownloading, Source: core.SourceManual, AlbumMBID: albumMBID},
 			Peer:            "persisted_peer",
 			AlbumBytesDone:  0,
 			AlbumBytesTotal: 111,
@@ -1299,7 +1299,7 @@ func TestCreateJobEndpointSuccess(t *testing.T) {
 	deps.CreateJob = create
 	h := NewServer(deps)
 
-	body := `{"title":"Some Album","artist":"Some Artist","peer":"flac_hoarder","files":[{"filename":"a.flac","size":111}]}`
+	body := `{"title":"Some Album","artist":"Some Artist","peer":"flac_hoarder","albumMbid":"a1b2c3d4-e5f6-4789-a012-3456789abcde","files":[{"filename":"a.flac","size":111}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1320,18 +1320,91 @@ func TestCreateJobEndpointSuccess(t *testing.T) {
 	if got.BytesDone != 0 || got.BytesTotal != 111 {
 		t.Errorf("bytes = %d/%d, want persisted aggregate 0/111", got.BytesDone, got.BytesTotal)
 	}
+	if got.AlbumMBID != "a1b2c3d4-e5f6-4789-a012-3456789abcde" {
+		t.Errorf("AlbumMBID = %q, want a1b2c3d4-e5f6-4789-a012-3456789abcde", got.AlbumMBID)
+	}
 	if gotTitle != "Some Album" || gotArtist != "Some Artist" || gotPeer != "flac_hoarder" {
 		t.Errorf("create called with title=%q artist=%q peer=%q", gotTitle, gotArtist, gotPeer)
+	}
+	if gotAlbumMBID != "a1b2c3d4-e5f6-4789-a012-3456789abcde" {
+		t.Errorf("create called with albumMBID=%q", gotAlbumMBID)
 	}
 	if len(gotFiles) != 1 || gotFiles[0].Filename != "a.flac" || gotFiles[0].Size != 111 {
 		t.Errorf("create called with files=%+v", gotFiles)
 	}
 }
 
+// TestCreateJobEndpointEmptyAlbumMBIDIsValid asserts that omitting albumMbid
+// entirely (issue #59's "no import" choice) is accepted, not rejected as a
+// malformed MBID - only a non-blank, malformed value is a validation error
+// (see TestCreateJobEndpointMalformedAlbumMBIDReturns422).
+func TestCreateJobEndpointEmptyAlbumMBIDIsValid(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var gotAlbumMBID string
+	called := false
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
+		called = true
+		gotAlbumMBID = albumMBID
+		return core.JobView{Job: core.AlbumJob{ID: 42, Source: core.SourceManual}}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.CreateJob = create
+	h := NewServer(deps)
+
+	body := `{"peer":"flac_hoarder","files":[{"filename":"a.flac","size":111}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Fatal("create was not called")
+	}
+	if gotAlbumMBID != "" {
+		t.Errorf("albumMBID = %q, want empty", gotAlbumMBID)
+	}
+}
+
+// TestCreateJobEndpointMalformedAlbumMBIDReturns422 asserts a non-blank
+// albumMbid that isn't a well-formed MusicBrainz id (mbidPattern) is rejected
+// with a 422 field error, and create is never called.
+func TestCreateJobEndpointMalformedAlbumMBIDReturns422(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	called := false
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
+		called = true
+		return core.JobView{}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.CreateJob = create
+	h := NewServer(deps)
+
+	body := `{"peer":"flac_hoarder","albumMbid":"not-a-real-mbid","files":[{"filename":"a.flac","size":111}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got errorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := got.FieldErrors["albumMbid"]; !ok {
+		t.Errorf("fieldErrors = %+v, want an \"albumMbid\" entry", got.FieldErrors)
+	}
+	if called {
+		t.Error("create must not be called on a validation failure")
+	}
+}
+
 func TestCreateJobEndpointMissingPeerReturns422(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	called := false
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 		called = true
 		return core.JobView{}, nil
 	}
@@ -1361,7 +1434,7 @@ func TestCreateJobEndpointMissingPeerReturns422(t *testing.T) {
 
 func TestCreateJobEndpointEmptyFilesReturns422(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 		return core.JobView{}, nil
 	}
 	deps := testServerDeps(reg)
@@ -1387,7 +1460,7 @@ func TestCreateJobEndpointEmptyFilesReturns422(t *testing.T) {
 
 func TestCreateJobEndpointMalformedJSONReturns400(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 		return core.JobView{}, nil
 	}
 	deps := testServerDeps(reg)
@@ -1405,7 +1478,7 @@ func TestCreateJobEndpointMalformedJSONReturns400(t *testing.T) {
 
 func TestCreateJobEndpointRemoteFileBusyReturns409(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	create := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	create := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 		return core.JobView{}, app.ErrRemoteFileBusy
 	}
 	deps := testServerDeps(reg)

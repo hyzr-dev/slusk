@@ -146,6 +146,12 @@ const dashboardJobStatusSQL = `CASE
 	WHEN j.state = 'FAILED' THEN 'failed'
 	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
 	WHEN j.state = 'IMPORTING' THEN 'importing'
+	-- A manual job (issue #59) whose download completed with no Lidarr album
+	-- to import into. Terminal and deliberately NOT 'failed' or 'done': the
+	-- download itself succeeded, but there is nothing to report as
+	-- imported. Checked alongside the other job-level states above, before
+	-- any transfer-aggregate fallback applies.
+	WHEN j.state = 'NOT_IMPORTED' THEN 'notImported'
 	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
 	WHEN agg.in_progress > 0 THEN 'active'
 	WHEN agg.stalled > 0 THEN 'stalled'
@@ -160,7 +166,7 @@ END`
 // append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
-		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.empty_searches, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
+		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.empty_searches, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format, j.album_mbid,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
 		agg.bytes_done, agg.bytes_total, agg.bytes_remaining,
 		(` + dashboardJobStatusSQL + `) AS status
@@ -178,7 +184,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var jFormat sql.NullString
 
 	err := r.Scan(
-		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.EmptySearches, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
+		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.EmptySearches, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat, &v.Job.AlbumMBID,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
 		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
 		&v.Status,
@@ -409,12 +415,25 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 			clauses = append(clauses, "j.state IN ("+bind(string(core.StateDownloading))+", "+bind(string(core.StateImporting))+")")
 		case "finished":
 			// Terminal in the pipeline sense and recent (issue #287, Overview's
-			// recently-finished panel). PARKED is excluded on purpose: a job can
-			// sit parked for days, so its updated_at would read as fresh without
-			// anything having just happened. Keyed on j.state for the same
+			// recently-finished panel). Keyed on j.state for the same
 			// disjointness reason as inflight above.
+			//
+			// The membership rule is "the job just stopped, and something
+			// happened when it did" — which is narrower than
+			// AlbumJobState.PipelineTerminal(), so this list is maintained by
+			// hand rather than derived from it. Two states are terminal and
+			// still excluded, each for its own reason: PARKED can sit for
+			// days, so its updated_at reads as fresh without anything having
+			// just happened; CANCELLED means the album left Lidarr's wanted
+			// list, which is a removal rather than a finish. NOT_IMPORTED
+			// (issue #59) is included: the download genuinely completed and
+			// its updated_at marks that moment, so a manual job that finishes
+			// with no Lidarr album to import into must still surface here —
+			// omitting it would make a successful download vanish from the
+			// one panel the user watches for completions.
 			clauses = append(clauses,
-				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+")"+
+				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+
+					", "+bind(string(core.StateNotImported))+")"+
 					" AND j.updated_at > "+bind(q.Now.Add(-DashboardFinishedWindow)))
 		case "failures":
 			// Overview's FAILED panel (issue #310/review follow-up). Keyed on
@@ -628,7 +647,7 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 	var state, source string
 	err := s.db.QueryRowContext(ctx,
 		jobSelect+` WHERE id = $1`, jobID).
-		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.EmptySearches, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount, &source)
+		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.EmptySearches, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount, &source, &job.AlbumMBID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.JobDetail{}, false, nil
 	}

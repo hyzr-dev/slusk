@@ -1,0 +1,12 @@
+-- A manual job (source = 'manual', POST /api/jobs) has no lidarr_album_id at
+-- creation time: the user hands over a peer + file list, not an album
+-- identity. Without a stable identity the Importing module could not resolve
+-- a real Lidarr album to import into, and its four Music.AlbumStatus(0)
+-- calls errored on every tick (issue #59). album_mbid carries the
+-- MusicBrainz release-group id instead — the wire-stable identity the
+-- Identify flow already resolves candidates against — so Importing can look
+-- up the real Lidarr album (lidarr.Client.AlbumByForeignID) once the
+-- download completes and cache the result onto lidarr_album_id itself. Empty
+-- string (the default) means "no album was identified"; that is a valid,
+-- deliberate choice, not a missing value - see core.StateNotImported.
+ALTER TABLE album_jobs ADD COLUMN album_mbid TEXT NOT NULL DEFAULT '';

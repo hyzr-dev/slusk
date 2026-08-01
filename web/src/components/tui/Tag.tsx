@@ -2,7 +2,7 @@ import type { JobStatus } from '../../api/types';
 import { t } from '../../strings';
 import styles from './Tag.module.css';
 
-export type TagKind = 'DL' | 'QU' | 'ST' | 'PA' | 'FA' | 'OK' | 'IM';
+export type TagKind = 'DL' | 'QU' | 'ST' | 'PA' | 'FA' | 'OK' | 'IM' | 'NI';
 
 const BY_STATUS: Record<JobStatus, TagKind> = {
   queued: 'QU',
@@ -12,11 +12,16 @@ const BY_STATUS: Record<JobStatus, TagKind> = {
   done: 'OK',
   failed: 'FA',
   parked: 'PA',
+  notImported: 'NI',
 };
 
+// NI (issue #59) is neither --ok nor --bad: the download succeeded and the
+// files are on disk, it just never reached Lidarr — reading it as a failure
+// would be exactly the invented-certainty the design brief forbids.
 const TONE: Record<TagKind, string> = {
   DL: styles.neutral,
   IM: styles.neutral,
+  NI: styles.neutral,
   QU: styles.quiet,
   OK: styles.ok,
   ST: styles.bad,

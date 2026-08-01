@@ -19,7 +19,13 @@ interface Props {
   onDeleted?: () => void;
 }
 
-const TERMINAL_STATES: JobState[] = ['DONE', 'FAILED', 'CANCELLED'];
+// Cancel is hidden for these. Store.prepareJobCancellation updates
+// album_jobs.state unconditionally — it carries no terminal-state guard of
+// its own — so this list is the only thing stopping an already-finished job
+// from being rewritten to CANCELLED. NOT_IMPORTED (issue #59) belongs here
+// for exactly that reason: the download completed, there is nothing left to
+// cancel.
+const TERMINAL_STATES: JobState[] = ['DONE', 'FAILED', 'CANCELLED', 'NOT_IMPORTED'];
 
 /** FAILED or PARKED are the two states Retry is offered for; exported so
  * JobDetail can share this rule instead of re-declaring it. */

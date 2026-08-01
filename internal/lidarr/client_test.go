@@ -782,9 +782,8 @@ func TestRunningCommands(t *testing.T) {
 
 // TestRunningCommandsParsesArtistIDs covers the PR lab finding
 // (.lidarr-endpoints-verified.md): a RefreshArtist triggered by our own add
-// carries body.artistIds, which app.LidarrLibrary.waitForIdle needs to scope
-// its wait to the artist actually being added rather than the whole
-// instance's activity.
+// carries body.artistIds, so a caller can scope a wait to the artist actually
+// being added rather than the whole instance's activity.
 func TestRunningCommandsParsesArtistIDs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[

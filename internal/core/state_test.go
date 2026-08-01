@@ -23,7 +23,7 @@ func TestAlbumJobStateTerminal(t *testing.T) {
 }
 
 func TestPipelineTerminalStates(t *testing.T) {
-	for _, s := range []AlbumJobState{StateDone, StateCancelled, StateFailed} {
+	for _, s := range []AlbumJobState{StateDone, StateCancelled, StateFailed, StateNotImported} {
 		if !s.PipelineTerminal() {
 			t.Errorf("%s should be pipeline-terminal", s)
 		}

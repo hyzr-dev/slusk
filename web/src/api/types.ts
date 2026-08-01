@@ -6,11 +6,19 @@
 // per-job status now (issue #269) — the backend used to serialize an
 // IMPORTING job's status as 'active' (Tag derived the IM tag separately from
 // `state`), a drift between the SQL and Go copies of this rule that this
-// value removes the need for.
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked';
+// value removes the need for. 'notImported' (issue #59) is the terminal
+// state of a manual job that finished downloading with no Lidarr album to
+// import into — it downloaded successfully and was never handed to Lidarr,
+// which is neither a success nor a failure and must not read as either (see
+// Tag's TONE).
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked' | 'notImported';
+// NOT_IMPORTED is terminal. JobActions.TERMINAL_STATES must list it: the
+// store's cancel path rewrites a job's state unconditionally, so hiding the
+// Cancel button is the only thing stopping a terminal job from being
+// rewritten to CANCELLED.
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED' | 'NOT_IMPORTED';
 export type WireJobStatus = JobStatus | 'orphaned';
 export type WireJobState = JobState | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
@@ -135,6 +143,10 @@ export interface Job {
   year: number | null;
   tracks: number | null;
   format: string | null;
+  // The MusicBrainz release-group MBID this job was created with, if any
+  // (issue #59) — absent means the job was posted without one and can never
+  // reach Lidarr import (see `notImported` on JobStatus).
+  albumMbid?: string;
   // Live, non-persisted values aggregated across every live transfer
   // belonging to the job's current candidate (see aggregateLiveAlbum, issue
   // #157) — album-level analogues of TransferDetail's own queuePosition/speed.
@@ -901,40 +913,26 @@ export interface LidarrAddOptions {
   metadataProfiles: LidarrProfile[];
 }
 
-/** POST /api/lidarr/artists' `monitor` field — "album" for just the release that prompted the add, "all" for the whole discography. */
-export type LidarrMonitorChoice = 'album' | 'all';
-
-/** POST /api/lidarr/artists request body — internal/observ/lidarr.go addArtistRequest. */
+/**
+ * POST /api/lidarr/artists request body — internal/observ/lidarr.go
+ * addArtistRequest. It carries no album id and no monitoring choice: the add
+ * only ensures the artist exists in the library, unmonitored. Monitoring an
+ * album with no files puts it in Lidarr's wanted/missing list, which the
+ * backend's own WantedSync polls, producing a duplicate job racing the manual
+ * download — see internal/app/lidarr_library.go.
+ */
 export interface AddLidarrArtistRequest {
   artistMbid: string;
   artistName: string;
-  albumMbid: string;
   rootFolderPath: string;
   qualityProfileId: number;
   metadataProfileId: number;
-  monitor: LidarrMonitorChoice;
 }
 
 /**
- * `albumMonitorState` values for AddLidarrArtistResult, in the order
- * IdentifyModal treats them as increasingly uncertain:
- *  - 'monitored': the album is confirmed monitored — the ordinary case.
- *  - 'notVisibleYet': the artist was created but Lidarr had not finished
- *    refreshing it yet, so the album could not be monitored.
- *  - 'reverted': the album was monitored immediately after the add, but
- *    Lidarr's own refresh then reset it — it did not stick.
- *  - 'unknown': the monitoring state could not be confirmed at all. This is
- *    NOT a failure and must never be rendered as one — see IdentifyModal's
- *    copy for this case.
- */
-export type LidarrAlbumMonitorState = 'monitored' | 'notVisibleYet' | 'reverted' | 'unknown';
-
-/**
  * POST /api/lidarr/artists' 201 response — internal/observ/lidarr.go
- * addArtistResultDTO. Neither `artistMonitored: false` nor any
- * `albumMonitorState` other than 'monitored' is a failure — the artist (and
- * usually the album) were still created; see IdentifyModal's per-state copy
- * for what each combination means to the user.
+ * addArtistResultDTO. `alreadyInLibrary` means the artist was already there
+ * and was reused untouched, not that anything failed.
  *
  * A 502 response to this same endpoint, with `{"code": "addUncertain"}` in
  * its ApiErrorBody, is a different case again: the add may or may not have
@@ -944,9 +942,6 @@ export type LidarrAlbumMonitorState = 'monitored' | 'notVisibleYet' | 'reverted'
 export interface AddLidarrArtistResult {
   artistId: number;
   alreadyInLibrary: boolean;
-  /** Whether the artist is monitored in Lidarr now. */
-  artistMonitored: boolean;
-  albumMonitorState: LidarrAlbumMonitorState;
 }
 
 /**
@@ -962,6 +957,13 @@ export interface CreateJobRequest {
   artist: string;
   peer: string;
   files: { filename: string; size: number }[];
+  // The MusicBrainz release-group MBID to import into Lidarr once the
+  // download finishes (issue #59) — a lowercase 8-4-4-4-12 hex UUID. Omitted
+  // (or blank) means the job is downloaded but deliberately never imported;
+  // the backend resolves this to a Lidarr album at import time rather than
+  // trusting whatever Lidarr ids were resolved during identify, so a
+  // transient Lidarr outage at identify time never has to downgrade a job.
+  albumMbid?: string;
 }
 
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */
