@@ -19,10 +19,18 @@ type AlbumJob struct {
 	// completes, so the job needs it long after the wanted-list entry that
 	// supplied it is gone. 0 when unknown (e.g. an older job not yet backfilled).
 	ArtistID int64
-	// Retries counts search-cycle failures (empty search, candidates
-	// exhausted). Per-candidate failures do not touch it. At max_retries the
-	// job goes FAILED. Reset to 0 when a search yields candidates.
+	// Retries counts search cycles where peers answered but every candidate
+	// was rejected by filtering (track-count band, relevance gate).
+	// Per-candidate failures do not touch it. At max_retries the job goes
+	// FAILED. Reset to 0 when a search yields surviving candidates.
 	Retries int
+	// EmptySearches counts consecutive search cycles where the Soulseek
+	// network returned no raw results at all — nothing to filter, peers
+	// simply did not answer. A single empty search means little (see
+	// migration 0012's comment for the measurement backing that claim), so
+	// it is tracked and backed off separately from Retries and never fails
+	// the job on its own. Reset to 0 when a search yields any raw results.
+	EmptySearches int
 	// NotBefore hides the job from every pipeline module until it passes.
 	// Backoff lives here as data — there is no COOLDOWN state.
 	NotBefore *time.Time

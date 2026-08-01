@@ -243,6 +243,12 @@ func TestReviveFailedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
+	// A leftover empty-search streak from before the job failed must not
+	// survive revival either - it means nothing once the job starts a
+	// completely fresh cycle.
+	if err := s.SetJobEmptySearchBackoff(ctx, oldFailed.ID, 7, now, now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
 	if err := s.MarkJobFailed(ctx, oldFailed.ID, now.Add(-31*24*time.Hour)); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
@@ -279,6 +285,9 @@ func TestReviveFailedJobs(t *testing.T) {
 	}
 	if revived[0].Retries != 0 {
 		t.Errorf("Retries = %d, want 0 after revival", revived[0].Retries)
+	}
+	if revived[0].EmptySearches != 0 {
+		t.Errorf("EmptySearches = %d, want 0 after revival", revived[0].EmptySearches)
 	}
 	if revived[0].FailedAt != nil {
 		t.Errorf("FailedAt = %v, want nil after revival", revived[0].FailedAt)
@@ -347,6 +356,53 @@ func TestReviveFailedJobsEmptyWantedRevivesNothing(t *testing.T) {
 	failed, err := s.RunnableJobsInState(ctx, core.StateFailed, now, 10)
 	if err != nil || len(failed) != 1 || failed[0].ID != job.ID {
 		t.Fatalf("job must stay FAILED, got %+v (%v)", failed, err)
+	}
+}
+
+// TestSetJobEmptySearchBackoff: bumps empty_searches and hides the job until
+// notBefore, but must NOT touch retries or state (issue #334) - unlike
+// SetJobBackoff this is never a failure-budget write.
+func TestSetJobEmptySearchBackoff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 950, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	// Give the job a nonzero retries first, to prove SetJobEmptySearchBackoff
+	// leaves it alone.
+	if err := s.SetJobBackoff(ctx, job.ID, 2, now, now); err != nil {
+		t.Fatalf("SetJobBackoff: %v", err)
+	}
+
+	notBefore := now.Add(24 * time.Hour)
+	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 5, notBefore, now.Add(time.Minute)); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
+
+	// Hidden until notBefore passes.
+	hidden, err := s.RunnableJobsInState(ctx, core.StateWanted, now.Add(time.Minute), 10)
+	if err != nil || len(hidden) != 0 {
+		t.Fatalf("expected job hidden by not_before, got %+v (%v)", hidden, err)
+	}
+
+	jobs, err := s.RunnableJobsInState(ctx, core.StateWanted, notBefore, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("RunnableJobsInState: %v %+v", err, jobs)
+	}
+	if jobs[0].EmptySearches != 5 {
+		t.Errorf("EmptySearches = %d, want 5", jobs[0].EmptySearches)
+	}
+	if jobs[0].Retries != 2 {
+		t.Errorf("Retries = %d, want 2 (untouched by SetJobEmptySearchBackoff)", jobs[0].Retries)
+	}
+	if jobs[0].State != core.StateWanted {
+		t.Errorf("State = %v, want WANTED (untouched)", jobs[0].State)
+	}
+	if jobs[0].NotBefore == nil || !jobs[0].NotBefore.Equal(notBefore) {
+		t.Errorf("NotBefore = %v, want %v", jobs[0].NotBefore, notBefore)
 	}
 }
 

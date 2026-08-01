@@ -30,9 +30,10 @@ type NewCandidate struct {
 
 // InsertCandidates caches a job's ranked search results as NEW candidates
 // and, in the same transaction, resets the job's search cycle (retries=0,
-// not_before=NULL): a successful search starts a fresh cycle, since
-// retries/backoff track *search* failures (empty results, candidates
-// exhausted) rather than individual candidate failures.
+// empty_searches=0, not_before=NULL): a successful search starts a fresh
+// cycle, since retries/backoff track *search* failures (candidates exhausted
+// after filtering) rather than individual candidate failures, and
+// empty_searches tracks the separate no-raw-results streak.
 func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCandidate, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -54,7 +55,7 @@ func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCa
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET retries = 0, not_before = NULL, updated_at = $1 WHERE id = $2`,
+		`UPDATE album_jobs SET retries = 0, empty_searches = 0, not_before = NULL, updated_at = $1 WHERE id = $2`,
 		now, jobID); err != nil {
 		return fmt.Errorf("reset job search cycle: %w", err)
 	}

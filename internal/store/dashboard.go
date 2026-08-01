@@ -160,7 +160,7 @@ END`
 // append their own WHERE clause.
 const jobViewSelect = `
 	SELECT
-		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
+		j.id, COALESCE(j.lidarr_album_id, 0), j.state, j.candidates_tried, j.next_attempt_at, j.created_at, j.updated_at, j.title, j.artist_name, j.retries, j.empty_searches, j.not_before, j.failed_at, j.source, j.year, j.tracks, j.format,
 		a.id, a.album_job_id, a.username, a.score, a.state, a.fail_reason, a.created_at, a.updated_at, a.files,
 		agg.bytes_done, agg.bytes_total, agg.bytes_remaining,
 		(` + dashboardJobStatusSQL + `) AS status
@@ -178,7 +178,7 @@ func scanJobView(r rowScanner) (core.JobView, error) {
 	var jFormat sql.NullString
 
 	err := r.Scan(
-		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
+		&v.Job.ID, &v.Job.LidarrAlbumID, &jState, &v.Job.CandidatesTried, &v.Job.NextAttemptAt, &v.Job.CreatedAt, &v.Job.UpdatedAt, &v.Job.Title, &v.Job.ArtistName, &v.Job.Retries, &v.Job.EmptySearches, &v.Job.NotBefore, &v.Job.FailedAt, &jSource, &jYear, &jTracks, &jFormat,
 		&aID, &aAlbumJobID, &aUsername, &aScore, &aState, &aFailReason, &aCreatedAt, &aUpdatedAt, &aFiles,
 		&v.AlbumBytesDone, &v.AlbumBytesTotal, &v.AlbumBytesRemaining,
 		&v.Status,
@@ -628,7 +628,7 @@ func (s *Store) JobDetail(ctx context.Context, jobID int64) (core.JobDetail, boo
 	var state, source string
 	err := s.db.QueryRowContext(ctx,
 		jobSelect+` WHERE id = $1`, jobID).
-		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount, &source)
+		Scan(&job.ID, &job.LidarrAlbumID, &state, &job.CandidatesTried, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt, &job.Title, &job.ArtistName, &job.ReleaseDate, &job.ArtistID, &job.Retries, &job.EmptySearches, &job.NotBefore, &job.FailedAt, &job.MinTrackCount, &job.MaxTrackCount, &source)
 	if errors.Is(err, sql.ErrNoRows) {
 		return core.JobDetail{}, false, nil
 	}

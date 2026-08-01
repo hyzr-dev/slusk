@@ -360,17 +360,29 @@ func TestFullLifecycleFailedCandidateRotation(t *testing.T) {
 }
 
 // TestFullLifecycleExhaustionToFailedAndRevival drives Discovery through
-// repeated empty searches until the job's search-cycle retry budget is
-// exhausted (FAILED, failed_at set), then advances the clock past
+// repeated search cycles where peers answer but every candidate is rejected
+// by the track-count band filter, until the job's search-cycle retry budget
+// is exhausted (FAILED, failed_at set), then advances the clock past
 // FailedReviveAfter and confirms WantedSync revives the still-wanted album
 // back to WANTED with retries reset.
+//
+// Deliberately NOT driven by empty (zero raw results) searches (issue #334):
+// since those no longer touch the retry budget or fail the job at all, they
+// would never reach FAILED here. The candidate here has 1 file against the
+// album's 2-track band, which is guaranteed to be filtered out on every
+// cycle while still exercising a genuine raw search hit each time.
 func TestFullLifecycleExhaustionToFailedAndRevival(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	const maxRetries = 2 // small budget to keep the test fast
 
-	music := &fakeMusic{wanted: []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}}}
-	search := &fakeSearcher{} // no results ever, primary or fallback
+	music := &fakeMusic{
+		wanted:        []core.WantedRelease{{ID: 1, Title: "Album", ArtistName: "Artist"}},
+		albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}},
+	}
+	search := &fakeSearcher{results: []core.SearchResult{
+		{Username: "toofew", Filename: "toofew/Artist - Album/01.flac", Size: 10, BitRate: 900},
+	}}
 	network := &fakeNetwork{}
 	lm := newLifecycleModules(t, music, search, network, maxRetries)
 

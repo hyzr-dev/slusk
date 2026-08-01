@@ -36,9 +36,10 @@ type BackoffStore interface {
 // failOrBackoff records one search-cycle failure: retries+1 >= maxRetries ->
 // MarkJobFailed; otherwise back off exponentially. resetToWanted selects
 // whether the job also returns to WANTED (Selecting exhaustion) or stays put
-// (Discovery empty search - already WANTED). The AddJobEvent write is
-// best-effort: a failure is logged at warn level and swallowed rather than
-// propagated, since the audit trail must never block the pipeline.
+// (Discovery: peers answered but every candidate was rejected by filtering -
+// already WANTED). The AddJobEvent write is best-effort: a failure is logged
+// at warn level and swallowed rather than propagated, since the audit trail
+// must never block the pipeline.
 //
 // failed reports that this was the terminal transition (MarkJobFailed), so a
 // caller that owns post-mortem work - Selecting quarantining the job's

@@ -17,14 +17,14 @@ import (
 // it to settle (or fail) first.
 var ErrJobImporting = errors.New("job is importing")
 
-const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, not_before, failed_at, min_track_count, max_track_count, source FROM album_jobs`
+const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, empty_searches, not_before, failed_at, min_track_count, max_track_count, source FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
 		var state, source string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount, &source); err != nil {
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount, &source); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)
@@ -93,13 +93,31 @@ func (s *Store) RunnableJobsInState(ctx context.Context, state core.AlbumJobStat
 	return scanJobs(rows)
 }
 
-// SetJobBackoff bumps retries and hides the job until notBefore. State unchanged.
+// SetJobBackoff bumps retries and hides the job until notBefore. State
+// unchanged. This is only reached once a search returned raw results (see
+// discovery.go), so empty_searches resets to 0 - the network answered, the
+// job just has no surviving candidate this cycle.
 func (s *Store) SetJobBackoff(ctx context.Context, jobID int64, retries int, notBefore time.Time, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET retries = $1, not_before = $2, updated_at = $3 WHERE id = $4`,
+		`UPDATE album_jobs SET retries = $1, empty_searches = 0, not_before = $2, updated_at = $3 WHERE id = $4`,
 		retries, notBefore, now, jobID)
 	if err != nil {
 		return fmt.Errorf("set job backoff: %w", err)
+	}
+	return nil
+}
+
+// SetJobEmptySearchBackoff records a search cycle where the Soulseek network
+// returned no raw results at all: it bumps empty_searches and hides the job
+// until notBefore, but deliberately leaves retries and state untouched -
+// unlike SetJobBackoff this never counts toward max_retries and never fails
+// the job (see discovery.go's searchJob). Modelled on SetJobBackoff.
+func (s *Store) SetJobEmptySearchBackoff(ctx context.Context, jobID int64, emptySearches int, notBefore time.Time, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET empty_searches = $1, not_before = $2, updated_at = $3 WHERE id = $4`,
+		emptySearches, notBefore, now, jobID)
+	if err != nil {
+		return fmt.Errorf("set job empty search backoff: %w", err)
 	}
 	return nil
 }
@@ -139,8 +157,10 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 // ResetJobToWanted deletes the job's candidates (and their transfers) and
 // returns it to WANTED in one tx. retries/notBefore are written as given
 // (exhaustion passes bumped values; TTL expiry and manual retry pass
-// job.Retries-as-is / 0 and nil). Transfers must go with the candidates to
-// satisfy transfer ownership/FK integrity and leave no stale cycle data.
+// job.Retries-as-is / 0 and nil). empty_searches always resets to 0 - a
+// caller reaching this point has real candidate data to reset around, so any
+// prior empty-search streak is stale. Transfers must go with the candidates
+// to satisfy transfer ownership/FK integrity and leave no stale cycle data.
 // The job UPDATE is guarded on the caller-supplied `from` state (per the
 // single-writer invariant every transition UPDATE must be conditional): every
 // caller resets a SELECTING job, so a job WantedSync cancelled underneath us
@@ -155,7 +175,7 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 	// The guarded transition runs first: if it bounces, the deferred rollback
 	// leaves the candidates/transfers intact for the job that turned CANCELLED.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = $2, not_before = $3, updated_at = $4 WHERE id = $5 AND state = $6`,
+		`UPDATE album_jobs SET state = $1, retries = $2, empty_searches = 0, not_before = $3, updated_at = $4 WHERE id = $5 AND state = $6`,
 		string(core.StateWanted), retries, notBefore, now, jobID, string(from))
 	if err != nil {
 		return fmt.Errorf("reset job to wanted: %w", err)
@@ -178,10 +198,11 @@ func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.Alb
 }
 
 // RetryFailedJob manually revives one FAILED, PARKED, or legacy ORPHANED job:
-// retries 0, not_before/failed_at cleared, candidates deleted, state WANTED.
-// Returns false when the job is not retryable (the dashboard button raced a
-// state change) or does not exist. Candidates/transfers must go with the reset
-// for the same ownership/FK and clean-slate reason as ResetJobToWanted.
+// retries 0, empty_searches 0, not_before/failed_at cleared, candidates
+// deleted, state WANTED. Returns false when the job is not retryable (the
+// dashboard button raced a state change) or does not exist.
+// Candidates/transfers must go with the reset for the same ownership/FK and
+// clean-slate reason as ResetJobToWanted.
 // A manual job goes through RetryManualJob instead (issue #347); this
 // function is deliberately not source-guarded, since the routing between the
 // two lives in app.Jobs.Retry, not here.
@@ -193,7 +214,7 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE id = $3 AND state IN ($4, $5, $6)`,
 		string(core.StateWanted), now, jobID,
 		string(core.StateFailed), string(core.StateParked), string(core.StateOrphaned))
@@ -270,7 +291,7 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE id = $3 AND source = $4 AND state IN ($5, $6, $7)`,
 		string(core.StateSelecting), now, jobID, string(core.SourceManual),
 		string(core.StateFailed), string(core.StateParked), string(core.StateOrphaned))
@@ -435,10 +456,11 @@ func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now 
 }
 
 // ReviveFailedJobs returns FAILED jobs with failed_at < cutoff AND album still
-// in wantedIDs to WANTED with retries=0, not_before=NULL, failed_at=NULL.
+// in wantedIDs to WANTED with retries=0, empty_searches=0, not_before=NULL,
+// failed_at=NULL.
 func (s *Store) ReviveFailedJobs(ctx context.Context, wantedIDs []int64, cutoff time.Time, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5)`,
 		string(core.StateWanted), now, string(core.StateFailed), cutoff, wantedIDs)
 	if err != nil {
@@ -511,7 +533,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 	if err := tx.QueryRowContext(ctx, `WITH wanted AS (`+wantedInput+`),
 		reentered AS (
 			UPDATE album_jobs AS jobs
-			SET state = $6, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $7
+			SET state = $6, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $7
 			FROM wanted
 			WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $8
 			RETURNING jobs.id
@@ -574,7 +596,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 	var revivedRows int
 	if err := tx.QueryRowContext(ctx, `WITH revived AS (
 			UPDATE album_jobs
-			SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+			SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 			WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5::bigint[])
 			RETURNING id
 		), deleted_transfers AS (
@@ -601,11 +623,11 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 // UpsertWantedJob inserts a WANTED job for the album (no-op if one already
 // exists) and, in the same transaction, re-enters a previously-CANCELLED job
 // whose album is wanted again: it is reset to WANTED with a clean slate
-// (retries=0, not_before/failed_at cleared, leftover candidates+transfers
-// deleted, same as RetryFailedJob), gated strictly on state='CANCELLED' so an
-// in-flight job for a still-wanted album is left untouched. Without this a
-// re-wanted CANCELLED album would never re-enter, since the INSERT is ON
-// CONFLICT DO NOTHING.
+// (retries=0, empty_searches=0, not_before/failed_at cleared, leftover
+// candidates+transfers deleted, same as RetryFailedJob), gated strictly on
+// state='CANCELLED' so an in-flight job for a still-wanted album is left
+// untouched. Without this a re-wanted CANCELLED album would never re-enter,
+// since the INSERT is ON CONFLICT DO NOTHING.
 func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now time.Time) (core.AlbumJob, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -623,7 +645,7 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 
 	// Re-enter a re-wanted CANCELLED job with a clean slate.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE lidarr_album_id = $3 AND state = $4`,
 		string(core.StateWanted), now, lidarrAlbumID, string(core.StateCancelled))
 	if err != nil {
@@ -651,9 +673,9 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	var j core.AlbumJob
 	var state, source string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, not_before, failed_at, source
+		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, empty_searches, not_before, failed_at, source
 		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.NotBefore, &j.FailedAt, &source)
+		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &source)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
 	}
@@ -681,13 +703,14 @@ func (s *Store) SetJobTrackBand(ctx context.Context, jobID int64, minTracks, max
 }
 
 // ForceSearchJob manually re-queues one job (issue #159) for an immediate
-// re-search: retries/not_before/candidates are wiped clean-slate, same as
-// RetryFailedJob, and the state is forced to WANTED so the next Discovery
-// tick picks it up. Guarded on state NOT IN (DOWNLOADING, IMPORTING) instead
-// of RetryFailedJob's retryable-state allowlist, since a force-search is
-// valid from almost any non-active state (WANTED, SELECTING, FAILED, PARKED,
-// legacy ORPHANED, CANCELLED, ...). Returns false when the job is actively
-// transferring (the dashboard button raced a state change) or does not exist.
+// re-search: retries/empty_searches/not_before/candidates are wiped
+// clean-slate, same as RetryFailedJob, and the state is forced to WANTED so
+// the next Discovery tick picks it up. Guarded on state NOT IN (DOWNLOADING,
+// IMPORTING) instead of RetryFailedJob's retryable-state allowlist, since a
+// force-search is valid from almost any non-active state (WANTED, SELECTING,
+// FAILED, PARKED, legacy ORPHANED, CANCELLED, ...). Returns false when the
+// job is actively transferring (the dashboard button raced a state change)
+// or does not exist.
 //
 // Deliberately not source-guarded: a manual job is rejected upstream, in
 // app.Jobs.ForceSearch (issue #347), before this ever runs - resetting one to
@@ -702,7 +725,7 @@ func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) 
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, retries = 0, not_before = NULL, failed_at = NULL, updated_at = $2
+		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
 		 WHERE id = $3 AND state NOT IN ($4, $5)`,
 		string(core.StateWanted), now, jobID, string(core.StateDownloading), string(core.StateImporting))
 	if err != nil {

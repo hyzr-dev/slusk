@@ -210,7 +210,12 @@ func TestDiscoverySummarizesThousandsOfRejectedCandidates(t *testing.T) {
 	}
 }
 
-func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
+// TestDiscoveryEmptySearchBacksOffOnItsOwnCurveWithoutTouchingRetries
+// (issue #334): a search cycle where the Soulseek network returns zero raw
+// results (primary and fallback both empty) must back off on empty_searches
+// alone - retries must stay at 0, since retries is reserved for "peers
+// answered but every candidate was rejected by filtering".
+func TestDiscoveryEmptySearchBacksOffOnItsOwnCurveWithoutTouchingRetries(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
@@ -236,8 +241,11 @@ func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].ID != job.ID {
 		t.Fatalf("expected job still WANTED and runnable after 35m, got %+v", jobs)
 	}
-	if jobs[0].Retries != 1 {
-		t.Errorf("expected retries=1, got %d", jobs[0].Retries)
+	if jobs[0].Retries != 0 {
+		t.Errorf("expected retries=0 (empty search must not touch it), got %d", jobs[0].Retries)
+	}
+	if jobs[0].EmptySearches != 1 {
+		t.Errorf("expected empty_searches=1, got %d", jobs[0].EmptySearches)
 	}
 	if jobs[0].NotBefore == nil {
 		t.Fatalf("expected not_before to be set")
@@ -258,8 +266,11 @@ func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
 	if len(jobs2) != 1 || jobs2[0].ID != job.ID {
 		t.Fatalf("expected job still WANTED and runnable, got %+v", jobs2)
 	}
-	if jobs2[0].Retries != 2 {
-		t.Errorf("expected retries=2, got %d", jobs2[0].Retries)
+	if jobs2[0].Retries != 0 {
+		t.Errorf("expected retries=0, got %d", jobs2[0].Retries)
+	}
+	if jobs2[0].EmptySearches != 2 {
+		t.Errorf("expected empty_searches=2, got %d", jobs2[0].EmptySearches)
 	}
 	wantNotBefore2 := now2.Add(1 * time.Hour)
 	if diff := jobs2[0].NotBefore.Sub(wantNotBefore2); diff < -time.Second || diff > time.Second {
@@ -267,13 +278,75 @@ func TestDiscoveryEmptySearchBacksOffExponentially(t *testing.T) {
 	}
 }
 
-func TestDiscoveryFailsJobAtMaxRetries(t *testing.T) {
+// TestDiscoveryEmptySearchNeverFailsJobEvenAtHighStreak (issue #334): unlike
+// retries, empty_searches has no terminal branch - a job stuck at a high
+// streak stays WANTED and keeps retrying at the backoff cap forever, rather
+// than being marked FAILED and stranded for failed_revive_after.
+func TestDiscoveryEmptySearchNeverFailsJobEvenAtHighStreak(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 
 	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
 	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
-	searcher := &fakeSearcher{}
+	searcher := &fakeSearcher{} // no results ever, primary or fallback
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+	p.MaxRetries = 3
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	// Pre-set an empty_searches count far beyond MaxRetries: if the empty
+	// path ever consulted MaxRetries it would fail the job here. The
+	// zero time.Time is fine as notBefore - only empty_searches is under
+	// test here, and Tick below overwrites not_before with a real value.
+	if err := st.SetJobEmptySearchBackoff(ctx, job.ID, 50, time.Time{}, now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateWanted, now.Add(48*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job still WANTED, never FAILED, got %+v", jobs)
+	}
+	if jobs[0].EmptySearches != 51 {
+		t.Errorf("expected empty_searches=51, got %d", jobs[0].EmptySearches)
+	}
+
+	failed, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState FAILED: %v", err)
+	}
+	if len(failed) != 0 {
+		t.Fatalf("expected no FAILED jobs, got %+v", failed)
+	}
+}
+
+// TestDiscoveryFailsJobAtMaxRetries (issue #334): the retry budget is only
+// consumed when peers actually answer but every candidate is rejected by
+// filtering - not when the network returns nothing at all. Results here are
+// deliberately non-empty (one candidate, one file, below the album's 2-track
+// band) so survivors ends up empty via filtering rather than via a raw-zero
+// search.
+func TestDiscoveryFailsJobAtMaxRetries(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{
+		wanted:        []core.WantedRelease{wanted[1]},
+		albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}},
+	}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "toofew", Filename: "toofew/Artist - Album/01.flac", Size: 10, BitRate: 900},
+	}}
 	p, st := newDiscoveryParams(t, music, searcher, wanted)
 	p.MaxRetries = 3
 
@@ -358,6 +431,120 @@ func TestDiscoveryFallbackQuery(t *testing.T) {
 	}
 	if !sawFallback {
 		t.Errorf("expected an EventSearchFallback event, got %+v", events)
+	}
+}
+
+// TestDiscoveryTokenDropRewriteFiresAtThreshold (issue #334): once a job has
+// accumulated emptySearchRewriteThreshold consecutive empty-search cycles,
+// a search that is still empty after the normalized-query fallback gets one
+// more attempt with a single artist token dropped (matcher.DropTokenQuery),
+// exactly like "Bob Dylan Desire" (0 raw results) vs "Dylan Desire" (real
+// hits) from the issue's own observation.
+func TestDiscoveryTokenDropRewriteFiresAtThreshold(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Desire", ArtistName: "Bob Dylan"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	primary := "Bob Dylan Desire"
+	rewrite := "Dylan Desire" // matcher.DropTokenQuery("Bob Dylan", "Desire", 0)
+	searcher := &fakeSearcher{resultsForQuery: map[string][]core.SearchResult{
+		rewrite: {
+			{Username: "peer", Filename: "peer/Bob Dylan - Desire/01.flac", Size: 10, BitRate: 900},
+		},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.SetJobEmptySearchBackoff(ctx, job.ID, emptySearchRewriteThreshold, time.Time{}, now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	// NormalizeQuery(primary) is a no-op here (no brackets/punctuation to
+	// strip), so the existing normalized-query fallback is skipped and
+	// exactly one extra search - the token-dropped rewrite - is issued.
+	if len(searcher.queries) != 2 {
+		t.Fatalf("expected 2 searches (primary + token-dropped rewrite), got %d: %v", len(searcher.queries), searcher.queries)
+	}
+	if searcher.queries[0] != primary {
+		t.Errorf("expected first query %q, got %q", primary, searcher.queries[0])
+	}
+	if searcher.queries[1] != rewrite {
+		t.Errorf("expected rewrite query %q, got %q", rewrite, searcher.queries[1])
+	}
+
+	got, err := st.RunnableJobsInState(ctx, core.StateSelecting, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != job.ID {
+		t.Fatalf("expected job in SELECTING (rewrite found a match), got %+v", got)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	var sawFallback bool
+	for _, e := range events {
+		if e.Event == core.EventSearchFallback {
+			sawFallback = true
+		}
+	}
+	if !sawFallback {
+		t.Errorf("expected an EventSearchFallback event for the rewrite, got %+v", events)
+	}
+}
+
+// TestDiscoveryTokenDropRewriteDoesNotFireBelowThreshold (issue #334): below
+// emptySearchRewriteThreshold, a run of empty searches is ordinary network
+// noise, not evidence of a persistently blocked query - no rewrite search is
+// issued, and empty_searches simply advances by one.
+func TestDiscoveryTokenDropRewriteDoesNotFireBelowThreshold(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Desire", ArtistName: "Bob Dylan"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}}
+	searcher := &fakeSearcher{} // no results for any query
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.SetJobEmptySearchBackoff(ctx, job.ID, emptySearchRewriteThreshold-1, time.Time{}, now); err != nil {
+		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	// NormalizeQuery(primary) is a no-op, so below the threshold the primary
+	// search is the only search issued.
+	if len(searcher.queries) != 1 {
+		t.Fatalf("expected exactly 1 search below the rewrite threshold, got %d: %v", len(searcher.queries), searcher.queries)
+	}
+
+	jobs, err := st.RunnableJobsInState(ctx, core.StateWanted, now.Add(48*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected job still WANTED, got %+v", jobs)
+	}
+	if jobs[0].EmptySearches != emptySearchRewriteThreshold {
+		t.Errorf("expected empty_searches=%d, got %d", emptySearchRewriteThreshold, jobs[0].EmptySearches)
 	}
 }
 

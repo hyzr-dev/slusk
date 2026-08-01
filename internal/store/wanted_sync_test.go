@@ -99,10 +99,21 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, reentered.ID, core.StateCancelled, created); err != nil {
 		t.Fatal(err)
 	}
+	// Seed an empty-search streak (issue #334): the CANCELLED-reentry branch
+	// below is a clean-slate reset and must wipe it too.
+	if err := s.SetJobEmptySearchBackoff(ctx, reentered.ID, 4, created, created); err != nil {
+		t.Fatal(err)
+	}
 
 	oldFailed, _ := s.UpsertWantedJob(ctx, 6, created)
 	failedCandidate := seedWantedSyncChild(t, s, oldFailed.ID, created, "failed-child")
 	if err := s.MarkJobFailed(ctx, oldFailed.ID, cutoff.Add(-time.Microsecond)); err != nil {
+		t.Fatal(err)
+	}
+	// Same for the FAILED-revive branch - this is SyncWantedJobs' own
+	// inlined revive, the production path RetryFailedJob and
+	// ReviveFailedJobs are not (ReviveFailedJobs has no caller).
+	if err := s.SetJobEmptySearchBackoff(ctx, oldFailed.ID, 6, created, created); err != nil {
 		t.Fatal(err)
 	}
 	boundaryFailed, _ := s.UpsertWantedJob(ctx, 7, created)
@@ -134,6 +145,8 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	assertWantedSyncState(t, s, reentered.ID, core.StateWanted)
 	assertWantedSyncState(t, s, oldFailed.ID, core.StateWanted)
 	assertWantedSyncState(t, s, boundaryFailed.ID, core.StateFailed)
+	assertWantedSyncEmptySearches(t, s, reentered.ID, 0)
+	assertWantedSyncEmptySearches(t, s, oldFailed.ID, 0)
 
 	for _, child := range []struct{ jobID, candidateID int64 }{{reentered.ID, reenteredCandidate}, {oldFailed.ID, failedCandidate}} {
 		var candidates, transfers int
@@ -330,6 +343,17 @@ func assertWantedSyncState(t *testing.T, s *Store, jobID int64, want core.AlbumJ
 	}
 	if core.AlbumJobState(state) != want {
 		t.Errorf("job %d state = %s, want %s", jobID, state, want)
+	}
+}
+
+func assertWantedSyncEmptySearches(t *testing.T, s *Store, jobID int64, want int) {
+	t.Helper()
+	var got int
+	if err := s.db.QueryRow(`SELECT empty_searches FROM album_jobs WHERE id=$1`, jobID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("job %d empty_searches = %d, want %d", jobID, got, want)
 	}
 }
 
