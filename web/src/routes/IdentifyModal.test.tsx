@@ -15,7 +15,6 @@ import { t } from '../strings';
 import IdentifyModal, {
   computeVerdict,
   lidarrAddAvailability,
-  lidarrArtistLine,
   lidarrLine,
   parseFolderGuess,
   pickDefaultEdition,
@@ -303,23 +302,49 @@ describe('computeVerdict', () => {
 });
 
 describe('lidarrLine', () => {
-  it('reads IN LIBRARY (ok) when known and in the library', () => {
-    expect(lidarrLine({ known: true, inLibrary: true }).tone).toBe('ok');
+  const inLib = { known: true, inLibrary: true };
+  const absent = { known: true, inLibrary: false };
+  const unknown = { known: false, inLibrary: false };
+
+  it('reads IN LIBRARY (ok) when the album is in the library', () => {
+    expect(lidarrLine(inLib, inLib, true).tone).toBe('ok');
   });
 
-  it('reads NOT IN LIBRARY (quiet, not bad) when known but absent', () => {
-    const line = lidarrLine({ known: true, inLibrary: false });
+  it('names artist AND album when both are absent — one line, not two', () => {
+    const line = lidarrLine(absent, absent, true);
     expect(line.tone).toBe('quiet');
-    expect(line.text).toBe(t.search.identify.lidarrNotInLibrary);
+    expect(line.text).toBe(t.search.identify.lidarrArtistAndAlbumMissing);
   });
 
-  it('reads UNKNOWN when known is false — distinct from "not in library"', () => {
-    const line = lidarrLine({ known: false, inLibrary: false });
-    expect(line.text).toBe(t.search.identify.lidarrUnknown);
+  it('names only the album when the artist is present but the album is not', () => {
+    const line = lidarrLine(absent, inLib, true);
+    expect(line.text).toBe(t.search.identify.lidarrAlbumMissing);
+  });
+
+  it('reads UNKNOWN when the album lookup is unknown — distinct from "not in library"', () => {
+    expect(lidarrLine(unknown, inLib, true).text).toBe(t.search.identify.lidarrUnknown);
+  });
+
+  it('reads UNKNOWN when the album is absent and the ARTIST lookup failed — we cannot say which case it is', () => {
+    expect(lidarrLine(absent, unknown, true).text).toBe(t.search.identify.lidarrUnknown);
+  });
+
+  it('still reads IN LIBRARY when the artist lookup failed but the album IS present', () => {
+    // An album in the library implies its artist is too, so a failed artist
+    // lookup must not downgrade a decisive album answer to UNKNOWN.
+    expect(lidarrLine(inLib, unknown, true).tone).toBe('ok');
+    expect(lidarrLine(inLib, undefined, true).tone).toBe('ok');
   });
 
   it('reads UNKNOWN when no match was fetched at all (e.g. the lookup failed)', () => {
-    expect(lidarrLine(undefined).text).toBe(t.search.identify.lidarrUnknown);
+    expect(lidarrLine(undefined, undefined, true).text).toBe(t.search.identify.lidarrUnknown);
+  });
+
+  it('judges on the album alone when there is no artist MBID to look up', () => {
+    // No artistId means no artist lookup was ever made; reporting that
+    // never-made lookup as UNKNOWN would hide a perfectly good album answer.
+    expect(lidarrLine(absent, undefined, false).text).toBe(t.search.identify.lidarrAlbumMissing);
+    expect(lidarrLine(inLib, undefined, false).tone).toBe('ok');
   });
 });
 
@@ -581,26 +606,6 @@ describe('IdentifyModal states', () => {
   });
 });
 
-describe('lidarrArtistLine', () => {
-  it('reads IN LIBRARY (ok) when known and in the library', () => {
-    expect(lidarrArtistLine({ known: true, inLibrary: true }).tone).toBe('ok');
-  });
-
-  it('reads NOT IN LIBRARY (quiet) when known but absent', () => {
-    const line = lidarrArtistLine({ known: true, inLibrary: false });
-    expect(line.tone).toBe('quiet');
-    expect(line.text).toBe(t.search.identify.artistLidarrNotInLibrary);
-  });
-
-  it('reads UNKNOWN when known is false — distinct from "not in library"', () => {
-    expect(lidarrArtistLine({ known: false, inLibrary: false }).text).toBe(t.search.identify.artistLidarrUnknown);
-  });
-
-  it('reads UNKNOWN when no match was fetched at all', () => {
-    expect(lidarrArtistLine(undefined).text).toBe(t.search.identify.artistLidarrUnknown);
-  });
-});
-
 describe('lidarrAddAvailability', () => {
   it('is noArtistId when the result has no artistId, regardless of lookup results', () => {
     expect(lidarrAddAvailability(false, { known: true, inLibrary: false }, { known: true, inLibrary: false })).toBe('noArtistId');
@@ -628,10 +633,22 @@ describe('lidarrAddAvailability', () => {
 });
 
 describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
-  it('renders all three artist status states alongside the album status', async () => {
+  it('states the library situation on ONE line when both artist and album are present', async () => {
     await selectWithLidarrStatus({ known: true, inLibrary: true }, artistMatch({ inLibrary: true }));
-    expect(screen.getByText(t.search.identify.artistLidarrInLibrary)).toBeInTheDocument();
     expect(screen.getByText(t.search.identify.lidarrInLibrary)).toBeInTheDocument();
+  });
+
+  // The redundancy this replaced: "ARTIST NOT IN LIDARR LIBRARY" rendered
+  // directly above "NOT IN LIDARR LIBRARY — …", two lines for one fact.
+  it('states artist AND album absence on one line, not two', async () => {
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch({ inLibrary: false }));
+    expect(screen.getByText(t.search.identify.lidarrArtistAndAlbumMissing)).toBeInTheDocument();
+    expect(screen.queryByText(t.search.identify.lidarrAlbumMissing)).not.toBeInTheDocument();
+  });
+
+  it('names only the album when the artist is already in Lidarr', async () => {
+    await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch({ inLibrary: true }));
+    expect(screen.getByText(t.search.identify.lidarrAlbumMissing)).toBeInTheDocument();
   });
 
   it('hides the add path and shows the "no artist ID" explanation when the result has no artistId', async () => {
@@ -644,8 +661,10 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
     // The ordinary single Confirm button remains the only way forward.
     expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
-    // No artist status line either — no lookup was ever made.
-    expect(screen.queryByText(t.search.identify.artistLidarrUnknown)).not.toBeInTheDocument();
+    // The never-made artist lookup must not turn the line UNKNOWN — the
+    // album answer we DO have is reported.
+    expect(screen.queryByText(t.search.identify.lidarrUnknown)).not.toBeInTheDocument();
+    expect(screen.getByText(t.search.identify.lidarrAlbumMissing)).toBeInTheDocument();
   });
 
   it('hides the add path when the album Lidarr status is unknown (known: false)', async () => {

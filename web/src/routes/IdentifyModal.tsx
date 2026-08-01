@@ -134,24 +134,38 @@ export function computeVerdict(folderTracks: number, edition: MusicBrainzEdition
 }
 
 /**
- * The Lidarr status line. `known: false` is UNKNOWN (Lidarr unreachable or
- * the check itself failed), never treated as "not in library" — those are
- * different facts and the copy must not conflate them.
+ * The single Lidarr status line, covering artist and album together.
+ *
+ * `known: false` on either lookup is UNKNOWN (Lidarr unreachable or the check
+ * itself failed), never treated as "not in library" — those are different
+ * facts and the copy must not conflate them. Unknown wins over everything
+ * else: if we could not ask about one half, we cannot describe the state.
+ *
+ * This was two lines until #331 review feedback. An absent artist implies an
+ * absent album, so rendering both produced two lines saying the same thing
+ * ("ARTIST NOT IN LIDARR LIBRARY" directly above "NOT IN LIDARR LIBRARY —
+ * …"). One line states which of the three real situations holds and what it
+ * means for the import.
  */
-export function lidarrLine(match: LidarrMatch | undefined): { text: string; tone: Tone } {
-  if (!match || !match.known) return { text: t.search.identify.lidarrUnknown, tone: 'quiet' };
-  if (match.inLibrary) return { text: t.search.identify.lidarrInLibrary, tone: 'ok' };
-  return { text: t.search.identify.lidarrNotInLibrary, tone: 'quiet' };
-}
-
-/**
- * The artist-level counterpart to lidarrLine (issue #331) — same three-way
- * semantics, `known: false` is UNKNOWN, never "not in library".
- */
-export function lidarrArtistLine(match: LidarrArtistMatch | undefined): { text: string; tone: Tone } {
-  if (!match || !match.known) return { text: t.search.identify.artistLidarrUnknown, tone: 'quiet' };
-  if (match.inLibrary) return { text: t.search.identify.artistLidarrInLibrary, tone: 'ok' };
-  return { text: t.search.identify.artistLidarrNotInLibrary, tone: 'quiet' };
+export function lidarrLine(
+  album: LidarrMatch | undefined,
+  artist: LidarrArtistMatch | undefined,
+  hasArtistId: boolean,
+): { text: string; tone: Tone } {
+  if (!album?.known) return { text: t.search.identify.lidarrUnknown, tone: 'quiet' };
+  // An album in the library necessarily belongs to an artist in the library,
+  // so this answer stands on its own — a failed artist lookup must not
+  // downgrade a decisive album answer to UNKNOWN.
+  if (album.inLibrary) return { text: t.search.identify.lidarrInLibrary, tone: 'ok' };
+  // The album is genuinely absent. Only now does the artist matter, and only
+  // when there was an artist to look up: with no artist MBID no lookup was
+  // ever made, and reporting one we never made as unknown would be inventing
+  // doubt rather than reporting it.
+  if (!hasArtistId) return { text: t.search.identify.lidarrAlbumMissing, tone: 'quiet' };
+  if (!artist?.known) return { text: t.search.identify.lidarrUnknown, tone: 'quiet' };
+  return artist.inLibrary
+    ? { text: t.search.identify.lidarrAlbumMissing, tone: 'quiet' }
+    : { text: t.search.identify.lidarrArtistAndAlbumMissing, tone: 'quiet' };
 }
 
 /**
@@ -700,15 +714,11 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
 
               {(() => {
                 const verdict = computeVerdict(group.trackCount, selectedEdition);
-                const albumStatus = lidarrLine(lidarr);
-                const artistStatus = lidarrArtistLine(lidarrArtist);
+                const status = lidarrLine(lidarr, lidarrArtist, Boolean(selectedResult.artistId));
                 return (
                   <div className={styles.statusLines}>
                     <div className={styles[`tone-${verdict.tone}`]}>{verdict.text}</div>
-                    {selectedResult.artistId && (
-                      <div className={styles[`tone-${artistStatus.tone}`]}>{artistStatus.text}</div>
-                    )}
-                    <div className={styles[`tone-${albumStatus.tone}`]}>{albumStatus.text}</div>
+                    <div className={styles[`tone-${status.tone}`]}>{status.text}</div>
                     {availability === 'noArtistId' && (
                       <div className={styles['tone-quiet']}>{t.search.identify.noArtistId}</div>
                     )}

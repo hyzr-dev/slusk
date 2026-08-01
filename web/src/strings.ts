@@ -666,8 +666,14 @@ export const t = {
       // canonical-artist fallback chain was fixed for.
       verdictUnknownEdition: 'COMPLETENESS UNKNOWN — this edition has no track listing',
       verdictNoEdition: 'COMPLETENESS UNKNOWN — no edition selected',
+      // The three outcomes of the single Lidarr status line (see
+      // IdentifyModal's lidarrLine). #331 briefly rendered artist and album
+      // status as two separate lines, which said the same thing twice — an
+      // absent artist implies an absent album. These name which of the three
+      // real situations holds, and each states the import consequence once.
       lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
-      lidarrNotInLibrary: "NOT IN LIDARR LIBRARY — download will succeed but won't be imported",
+      lidarrAlbumMissing: "ALBUM NOT IN LIDARR — download won't be imported",
+      lidarrArtistAndAlbumMissing: "ARTIST & ALBUM NOT IN LIDARR — download won't be imported",
       lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
       back: '‹ Back',
       confirm: 'Confirm identification',
@@ -682,14 +688,7 @@ export const t = {
 
       // ---- Lidarr add-artist flow (issue #331) ----
       //
-      // The artist-level counterpart to lidarrInLibrary/lidarrNotInLibrary/
-      // lidarrUnknown above (which are per-ALBUM). Deliberately terser —
-      // the album line already spells out the import consequence, so the
-      // artist line only needs to state the fact.
-      artistLidarrInLibrary: 'ARTIST IN LIDARR LIBRARY',
-      artistLidarrNotInLibrary: 'ARTIST NOT IN LIDARR LIBRARY',
-      artistLidarrUnknown: 'ARTIST LIDARR STATUS UNKNOWN — service unreachable',
-      // Shown instead of the artist status line when the picked search
+      // Shown below the status line when the picked search
       // result carries no artistId at all (release-group with an empty
       // artist-credit) — case 3 of the brief. Never invents an artist to
       // resolve one; see canonicalArtistOf's own comment on the same rule.

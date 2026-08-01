@@ -225,7 +225,19 @@
 /* The "add to Lidarr" form (issue #331) — root folder/quality/metadata
    selects plus the monitor choice, reusing .field/.fieldLabel/.select from
    above rather than introducing a parallel set of form styles. */
-.addForm { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+/* The .tone-* classes carry colour but deliberately no font-size, because
+   inside .statusLines they inherit its 11px. In here they had nothing to
+   inherit from and rendered at the dialog's base size — visibly larger than
+   every control around them. Every control below sets its own size
+   (.select 12px, .fieldLabel 9.5px, .radioRow 11.5px), so sizing the
+   container only reaches the .tone-* notes, which is exactly the intent. */
+.addForm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 11px;
+}
 
 .radioRow {
   display: flex;
