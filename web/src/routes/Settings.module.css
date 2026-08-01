@@ -158,7 +158,11 @@
 
 .helpWrapper { position: relative; display: inline-flex; }
 
+/* position: relative anchors the ::after hit area below. Without it the
+   overlay would silently anchor to .helpWrapper instead, which is also
+   positioned — same result today, but only by accident. */
 .helpButton {
+  position: relative;
   padding: 0 4px;
   border: 1px solid var(--line2);
   background: none;
@@ -166,6 +170,25 @@
   font-size: 9.5px;
   line-height: 14px;
   cursor: pointer;
+}
+
+/* The hit area, not the box — 24x24 for WCAG 2.5.8. Measured in the browser,
+   the real button is 15.7 x 16. .closeButton in IdentifyModal.module.css meets
+   the same requirement by growing its real box with min-width/min-height; that
+   does not work here, because this button has a visible 1px border and growing
+   the box would redraw it as a 24x24 frame around a 9.5px glyph. So this
+   follows .caretButton in Jobs/Peers instead: an out-of-flow pseudo-element
+   centred on the glyph, leaving border, layout and row height untouched. It
+   overhangs ~4px per side horizontally, which stays inside .labelRow's 6px
+   gap, and nothing else in the row is clickable. */
+.helpButton::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px;
+  height: 24px;
 }
 .helpButton:hover { color: var(--fg); border-color: var(--dim); }
 .helpButton:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
