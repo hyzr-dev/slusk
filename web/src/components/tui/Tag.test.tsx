@@ -16,6 +16,10 @@ describe('tagFor', () => {
     expect(tagFor('importing')).toBe('IM');
   });
 
+  it('reports a manual job downloaded without an albumMbid as not imported (issue #59)', () => {
+    expect(tagFor('notImported')).toBe('NI');
+  });
+
   it('reports a job waiting in a peer queue as queued, not downloading', () => {
     // This is the case StatusPill could not express (issue #190): the job is
     // active, but no bytes move until the peer reaches us in its own queue.
@@ -35,5 +39,11 @@ describe('Tag', () => {
     render(<Tag status="parked" />);
     const el = screen.getByText('PA');
     expect(el).toHaveAttribute('title', 'Parked');
+  });
+
+  it('renders NI with a candid, non-failure title (issue #59)', () => {
+    render(<Tag status="notImported" />);
+    const el = screen.getByText('NI');
+    expect(el).toHaveAttribute('title', 'Downloaded, not imported — no album was identified');
   });
 });

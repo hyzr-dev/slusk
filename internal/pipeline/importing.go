@@ -41,6 +41,13 @@ type ImportingStore interface {
 	// without touching retries or updated_at, so a verify-phase retry cooldown
 	// does not reset escalateIfStuck's StuckAfter clock (keyed on updated_at).
 	SetJobNotBefore(ctx context.Context, jobID int64, notBefore time.Time) error
+	// SetJobLidarrAlbumID caches the Lidarr album id resolved from a manual
+	// job's AlbumMBID (issue #59), so later ticks skip re-resolving it.
+	SetJobLidarrAlbumID(ctx context.Context, jobID, albumID int64) error
+	// AdvanceJobStateFrom conditionally transitions a job (IMPORTING->
+	// NOT_IMPORTED when a manual job has no Lidarr album to import into,
+	// issue #59).
+	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// RecordAttemptOutcome writes a candidate's terminal success/fail outcome to
 	// the peer reliability tables (best-effort).
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
@@ -198,6 +205,24 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	for _, t := range transfers {
 		names = append(names, t.Filename)
 	}
+
+	if job.LidarrAlbumID == 0 {
+		// Only a manual job (issue #59) ever reaches IMPORTING with
+		// LidarrAlbumID still 0 - a Lidarr-sourced job always has a real one
+		// from WantedSync. Resolve it before any AlbumStatus(0) call, which
+		// errors on every tick otherwise.
+		resolved, err := m.resolveManualAlbum(ctx, job, cand, names, now)
+		if err != nil {
+			return err
+		}
+		if resolved == 0 {
+			// Either routed to NOT_IMPORTED, or the Lidarr lookup failed and
+			// the job is cooling down for another tick (escalateIfStuck) -
+			// either way this tick's work on the job is done.
+			return nil
+		}
+		job.LidarrAlbumID = resolved
+	}
 	folder := AlbumFolder(m.p.CompleteDir, names)
 	if folder != m.p.CompleteDir {
 		// Best-effort dedup before Lidarr scans the folder: a messy share can
@@ -340,6 +365,49 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// imported the files, so ManualImportCandidates finds nothing left).
 	if err := m.p.Store.MarkImportSubmitted(ctx, cand.ID, now); err != nil {
 		m.log().Error("mark import submitted failed", "candidate", cand.ID, "err", err)
+	}
+	return nil
+}
+
+// resolveManualAlbum resolves a manual job's AlbumMBID to a real Lidarr album
+// id (issue #59), the one thing verify must do before it can call any
+// AlbumStatus-based check - AlbumStatus(0) errors on every tick. Returns the
+// resolved id, or 0 when this tick's work on the job is already done: either
+// it was routed to the terminal NOT_IMPORTED (no album to import into), or
+// the Lidarr lookup itself failed and escalateIfStuck cooled the job down
+// for another attempt next tick.
+func (m *Importing) resolveManualAlbum(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, now time.Time) (int64, error) {
+	if job.AlbumMBID == "" {
+		// Defensive: Downloading's allDone routing (downloading.go) should
+		// already have sent an unidentified manual job straight to
+		// NOT_IMPORTED without ever reaching IMPORTING. If it somehow did
+		// anyway, this must still never fall through to AlbumStatus(0).
+		return 0, m.routeNotImported(ctx, job, "no album identified for import", now)
+	}
+	album, found, err := m.p.Music.AlbumByForeignID(ctx, job.AlbumMBID)
+	if err != nil {
+		m.log().Error("resolve manual job album failed", "album_job", job.ID, "album_mbid", job.AlbumMBID, "err", err)
+		return 0, m.escalateIfStuck(ctx, job, cand, names, "resolve album failed", now)
+	}
+	if !found {
+		detail := fmt.Sprintf("identified release group %s is not in Lidarr's library", job.AlbumMBID)
+		return 0, m.routeNotImported(ctx, job, detail, now)
+	}
+	if err := m.p.Store.SetJobLidarrAlbumID(ctx, job.ID, album.ID); err != nil {
+		return 0, err
+	}
+	return album.ID, nil
+}
+
+// routeNotImported advances job to the terminal NOT_IMPORTED (issue #59): the
+// download succeeded but there is no Lidarr album to import into. No cleanup
+// runs - the downloaded files are the deliverable, exactly like Downloading's
+// own allDone routing for the same case (downloading.go).
+func (m *Importing) routeNotImported(ctx context.Context, job core.AlbumJob, detail string, now time.Time) error {
+	m.log().Info(detail, "album_job", job.ID)
+	m.recordEvent(ctx, job.ID, core.EventNotImported, detail, now)
+	if _, err := m.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateImporting, core.StateNotImported, now); err != nil {
+		return err
 	}
 	return nil
 }

@@ -6,8 +6,11 @@
 // per-job status now (issue #269) — the backend used to serialize an
 // IMPORTING job's status as 'active' (Tag derived the IM tag separately from
 // `state`), a drift between the SQL and Go copies of this rule that this
-// value removes the need for.
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked';
+// value removes the need for. 'notImported' (issue #59) is the terminal
+// state of a manual job created without an albumMbid — it downloaded
+// successfully and deliberately was never handed to Lidarr, which is neither
+// a success nor a failure and must not read as either (see Tag's TONE).
+export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked' | 'notImported';
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
   | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED';
@@ -135,6 +138,10 @@ export interface Job {
   year: number | null;
   tracks: number | null;
   format: string | null;
+  // The MusicBrainz release-group MBID this job was created with, if any
+  // (issue #59) — absent means the job was posted without one and can never
+  // reach Lidarr import (see `notImported` on JobStatus).
+  albumMbid?: string;
   // Live, non-persisted values aggregated across every live transfer
   // belonging to the job's current candidate (see aggregateLiveAlbum, issue
   // #157) — album-level analogues of TransferDetail's own queuePosition/speed.
@@ -962,6 +969,13 @@ export interface CreateJobRequest {
   artist: string;
   peer: string;
   files: { filename: string; size: number }[];
+  // The MusicBrainz release-group MBID to import into Lidarr once the
+  // download finishes (issue #59) — a lowercase 8-4-4-4-12 hex UUID. Omitted
+  // (or blank) means the job is downloaded but deliberately never imported;
+  // the backend resolves this to a Lidarr album at import time rather than
+  // trusting whatever Lidarr ids were resolved during identify, so a
+  // transient Lidarr outage at identify time never has to downgrade a job.
+  albumMbid?: string;
 }
 
 /** internal/observ/charts.go passDTO — one completed Discovery search cycle. */

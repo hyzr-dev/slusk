@@ -60,6 +60,42 @@ func seedImportingJob(t *testing.T, st *store.Store, albumID int64, username str
 	return jobID, candID
 }
 
+// seedImportingManualJob creates a manual job (issue #59) with the given
+// albumMBID, marks its download-time transfers COMPLETED, and advances it
+// straight to IMPORTING with LidarrAlbumID still 0 - the exact state
+// Importing's MBID-resolution branch expects, mirroring seedImportingJob's
+// Lidarr-sourced setup but through CreateManualJob instead of
+// UpsertWantedJob/ActivateCandidateWithTransfers.
+func seedImportingManualJob(t *testing.T, st *store.Store, username, albumMBID string, files []core.CandidateFile, now time.Time) (jobID, candID int64) {
+	t.Helper()
+	ctx := context.Background()
+	manualFiles := make([]store.ManualJobFile, len(files))
+	for i, f := range files {
+		manualFiles[i] = store.ManualJobFile{Filename: f.Filename, Size: f.Size}
+	}
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", username, albumMBID, manualFiles, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	transfers, err := st.TransfersForCandidate(ctx, cand.ID)
+	if err != nil {
+		t.Fatalf("TransfersForCandidate: %v", err)
+	}
+	for _, tr := range transfers {
+		if err := st.UpdateTransferProgress(ctx, tr.ID, core.TransferCompleted, tr.BytesTotal, tr.BytesTotal, now); err != nil {
+			t.Fatalf("UpdateTransferProgress: %v", err)
+		}
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	return job.ID, cand.ID
+}
+
 // assertCandidateNoLongerActive asserts the candidate has left the ACTIVE
 // state (store exposes no by-id lookup across every candidate state, so a
 // terminal candidate is verified by absence from ActiveCandidate combined with
@@ -214,11 +250,18 @@ func TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt(t *testing.T
 		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{1}},
 		},
+		// This manual job identifies against a real MusicBrainz release group
+		// (issue #59), so verify can resolve a real Lidarr album and actually
+		// run - the whole point of this test is exercising verify, which a
+		// job with no AlbumMBID would never reach (it routes to NOT_IMPORTED
+		// instead; see TestDownloadingRoutesUnidentifiedManualJobToNotImported).
+		albumByForeignID:      core.LidarrAlbum{ID: 900},
+		albumByForeignIDFound: true,
 	}
 	peers := &fakeSearcher{}
 	p, st := newImportingParams(t, music, peers)
 
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob",
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob", "a1b2c3d4-e5f6-4789-a012-3456789abcde",
 		[]store.ManualJobFile{{Filename: `A\01.mp3`, Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -934,6 +977,141 @@ func TestImportingStuckEscalationSurvivesCooldown(t *testing.T) {
 	}
 	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
 		t.Errorf("stuck job past StuckAfter should fail to SELECTING, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+}
+
+// ---------------------------------------------------------------------------
+// Issue #59: manual job AlbumMBID resolution before verify.
+// ---------------------------------------------------------------------------
+
+// TestImportingResolvesManualAlbumAndProceedsToVerify covers the found path:
+// AlbumByForeignID resolves a real Lidarr album, the resolved id is cached
+// via SetJobLidarrAlbumID, and verify runs normally afterward (proven by
+// ManualImportCandidates actually being called and the import executing).
+func TestImportingResolvesManualAlbumAndProceedsToVerify(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{1}},
+		},
+		albumByForeignID:      core.LidarrAlbum{ID: 900, ArtistID: 7},
+		albumByForeignIDFound: true,
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
+	jobID, _ := seedImportingManualJob(t, st, "bob", mbid, []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := st.SetJobTrackBand(ctx, jobID, 1, 1); err != nil {
+		t.Fatalf("SetJobTrackBand: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.albumByForeignIDCalls) != 1 || music.albumByForeignIDCalls[0] != mbid {
+		t.Fatalf("AlbumByForeignID calls = %v, want [%s]", music.albumByForeignIDCalls, mbid)
+	}
+	if len(music.manualImportCalls) != 1 {
+		t.Fatalf("expected verify to run after resolution, got %d ManualImportCandidates calls", len(music.manualImportCalls))
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("job state = %v, want still IMPORTING (submitted, awaiting confirm)", got)
+	}
+	view, found, err := st.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.LidarrAlbumID != 900 {
+		t.Errorf("LidarrAlbumID = %d, want 900 (cached via SetJobLidarrAlbumID)", view.Job.LidarrAlbumID)
+	}
+}
+
+// TestImportingRoutesUnresolvableManualAlbumToNotImported covers the
+// not-found path: AlbumByForeignID reports the identified release group is
+// not in Lidarr's library, so verify never runs and the job goes straight to
+// the terminal NOT_IMPORTED.
+func TestImportingRoutesUnresolvableManualAlbumToNotImported(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumByForeignIDFound: false}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
+	jobID, _ := seedImportingManualJob(t, st, "bob", mbid, []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.manualImportCalls) != 0 {
+		t.Errorf("verify must not run when the album cannot be resolved, got %d ManualImportCandidates calls", len(music.manualImportCalls))
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateNotImported {
+		t.Errorf("job state = %v, want NOT_IMPORTED", got)
+	}
+	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventNotImported {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventNotImported)
+	}
+}
+
+// TestImportingDefensivelyRoutesEmptyAlbumMBIDToNotImported covers the
+// defensive branch: a manual job that somehow reaches IMPORTING with no
+// AlbumMBID at all (Downloading's own routing should already prevent this)
+// must still never call AlbumStatus(0) - it goes straight to NOT_IMPORTED.
+func TestImportingDefensivelyRoutesEmptyAlbumMBIDToNotImported(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingManualJob(t, st, "bob", "", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.manualImportCalls) != 0 {
+		t.Errorf("verify must not run with no AlbumMBID, got %d ManualImportCandidates calls", len(music.manualImportCalls))
+	}
+	if len(music.albumByForeignIDCalls) != 0 {
+		t.Errorf("AlbumByForeignID must not be called with no AlbumMBID, got %v", music.albumByForeignIDCalls)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateNotImported {
+		t.Errorf("job state = %v, want NOT_IMPORTED", got)
+	}
+}
+
+// TestImportingResolveErrorEscalatesLikeAnyOtherVerifyError covers the error
+// path: AlbumByForeignID failing is treated exactly like any other verify
+// error (escalateIfStuck) - a no-op within StuckAfter, then a fail to
+// SELECTING once stuck past it. It must never advance to NOT_IMPORTED, since
+// a transient Lidarr error says nothing about whether the album exists.
+func TestImportingResolveErrorEscalatesLikeAnyOtherVerifyError(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumByForeignIDErr: context.DeadlineExceeded}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.StuckAfter = time.Hour
+	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
+	jobID, _ := seedImportingManualJob(t, st, "bob", mbid, []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Errorf("job state = %v, want still IMPORTING within StuckAfter", got)
+	}
+
+	if err := m.Tick(ctx, now.Add(p.StuckAfter+time.Second)); err != nil {
+		t.Fatalf("Tick past StuckAfter: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("job state = %v, want SELECTING once stuck past StuckAfter", got)
 	}
 	assertCandidateNoLongerActive(t, st, jobID)
 }

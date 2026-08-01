@@ -119,6 +119,9 @@ export const t = {
     done: 'Done',
     failed: 'Failed',
     parked: 'Parked',
+    // A manual job downloaded without an albumMbid (issue #59) — deliberately
+    // never handed to Lidarr. Not a failure: the files are on disk.
+    notImported: 'Not imported',
   },
   // Two-letter status tags in the TUI job grid. The long labels in `status`
   // and `state` are still used wherever there is room for them.
@@ -130,6 +133,7 @@ export const t = {
     FA: 'FA',
     OK: 'OK',
     IM: 'IM',
+    NI: 'NI',
     // Uploads panel marker, not a JobStatus/JobState — the map already
     // serves as a general two-letter tag vocabulary, so it's added here
     // rather than duplicated in its own small map.
@@ -143,6 +147,9 @@ export const t = {
     FA: 'Failed',
     OK: 'Done',
     IM: 'Importing',
+    // Candid about why, not just that (issue #59): this job was downloaded
+    // but never imported into Lidarr because no album was identified for it.
+    NI: 'Downloaded, not imported — no album was identified',
     UL: 'Uploading',
   },
   state: {

@@ -1245,7 +1245,7 @@ func TestDiscoverySkipsAndFailsManualJob(t *testing.T) {
 	searcher := &fakeSearcher{}
 	p, st := newDiscoveryParams(t, music, searcher, map[int64]core.WantedRelease{})
 
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice",
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
 		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)

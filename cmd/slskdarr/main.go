@@ -400,12 +400,12 @@ func main() {
 	// createJobFn converts observ's core.CandidateFile request shape into
 	// store.ManualJobFile: observ deliberately does not import internal/store,
 	// so the conversion happens here at the wiring boundary instead.
-	createJobFn := func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error) {
+	createJobFn := func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error) {
 		manualFiles := make([]store.ManualJobFile, len(files))
 		for i, f := range files {
 			manualFiles[i] = store.ManualJobFile{Filename: f.Filename, Size: f.Size}
 		}
-		return jobs.Create(ctx, title, artist, peer, manualFiles)
+		return jobs.Create(ctx, title, artist, peer, albumMBID, manualFiles)
 	}
 	// Liveness only requires modules to keep attempting work. Readiness also
 	// requires successful work and fails after sustained errors.

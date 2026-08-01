@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -168,6 +169,12 @@ type jobDTO struct {
 	QueuePosition uint32 `json:"queuePosition,omitempty"`
 	Speed         int64  `json:"speed,omitempty"`
 	ETASeconds    int64  `json:"etaSeconds,omitempty"`
+	// AlbumMBID is the MusicBrainz release-group id a manual job was
+	// identified against (issue #59, core.AlbumJob.AlbumMBID), or "" if it
+	// never was. omitempty since it is meaningless for a Lidarr-sourced job
+	// (Source == "lidarr") and absent is more honest than an always-blank
+	// field - see interface-must-not-invent-data.
+	AlbumMBID string `json:"albumMbid,omitempty"`
 }
 
 // toJobDTO flattens a core.JobView into the dashboard's display-ready shape.
@@ -202,6 +209,7 @@ func toJobDTO(v core.JobView, failedRetryAfter time.Duration, maxCandidates int,
 		Format:          v.Job.Format,
 		BytesDone:       v.AlbumBytesDone,
 		BytesTotal:      v.AlbumBytesTotal,
+		AlbumMBID:       v.Job.AlbumMBID,
 	}
 	if v.Attempt != nil {
 		d.FailReason = v.Attempt.FailReason
@@ -324,10 +332,13 @@ type SearchJobFunc func(ctx context.Context, jobID int64) error
 type DeleteJobFunc func(ctx context.Context, jobID int64) error
 
 // CreateJobFunc manually creates a job that downloads a known peer's files
-// directly (typically backed by app.Jobs.Create; see issue #155). Errors are
-// mapped to a status code by the POST /api/jobs handler:
-// errors.Is(err, app.ErrRemoteFileBusy) -> 409, anything else -> 500.
-type CreateJobFunc func(ctx context.Context, title, artist, peer string, files []core.CandidateFile) (core.JobView, error)
+// directly (typically backed by app.Jobs.Create; see issue #155). albumMBID
+// is the MusicBrainz release-group id identified for the download, or "" if
+// the caller chose not to identify it (issue #59) - see
+// validateCreateJobRequest for its format validation. Errors are mapped to a
+// status code by the POST /api/jobs handler: errors.Is(err,
+// app.ErrRemoteFileBusy) -> 409, anything else -> 500.
+type CreateJobFunc func(ctx context.Context, title, artist, peer, albumMBID string, files []core.CandidateFile) (core.JobView, error)
 
 // HealthyFunc reports either liveness or readiness. /healthz uses liveness
 // (modules continue attempting work), while /readyz additionally requires
@@ -1040,25 +1051,41 @@ type createJobFileRequest struct {
 // createJobRequest is the POST /api/jobs request body: a manual job download
 // directly from a known peer (issue #155). Title/Artist are optional
 // free-text display fields; Peer and at least one File are required.
+// AlbumMBID is optional too (issue #59): it identifies the download against
+// a MusicBrainz release group so Importing can hand it to Lidarr once it
+// completes; omitting it (or leaving it blank) means the download will
+// advance straight to core.StateNotImported instead.
 type createJobRequest struct {
-	Title  string                 `json:"title"`
-	Artist string                 `json:"artist"`
-	Peer   string                 `json:"peer"`
-	Files  []createJobFileRequest `json:"files"`
+	Title     string                 `json:"title"`
+	Artist    string                 `json:"artist"`
+	Peer      string                 `json:"peer"`
+	AlbumMBID string                 `json:"albumMbid"`
+	Files     []createJobFileRequest `json:"files"`
 }
+
+// mbidPattern matches a MusicBrainz id: a lowercase UUID, 8-4-4-4-12 hex
+// digits. Every MBID slskdarr reads back from internal/musicbrainz is
+// already in this exact form, so a value that doesn't match one is not a
+// real MBID and must be rejected rather than passed through to Lidarr.
+var mbidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // validateCreateJobRequest checks a decoded createJobRequest, returning field
 // errors keyed the same way as validateConfigUpdate (see errorResponse):
 // peer must be non-blank, at least one file is required, and every file must
-// have a non-blank, unique filename and a non-negative size.
-func validateCreateJobRequest(req createJobRequest) (peer string, files []core.CandidateFile, fieldErrors map[string]string) {
+// have a non-blank, unique filename and a non-negative size. albumMbid is
+// optional - blank is valid and means "no import" (issue #59) - but a
+// non-blank value must be a well-formed MusicBrainz id (see mbidPattern).
+func validateCreateJobRequest(req createJobRequest) (peer, albumMBID string, files []core.CandidateFile, fieldErrors map[string]string) {
 	fieldErrors = make(map[string]string)
 	if strings.TrimSpace(req.Peer) == "" {
 		fieldErrors["peer"] = "is required"
 	}
+	if req.AlbumMBID != "" && !mbidPattern.MatchString(req.AlbumMBID) {
+		fieldErrors["albumMbid"] = "must be a valid MusicBrainz id"
+	}
 	if len(req.Files) == 0 {
 		fieldErrors["files"] = "at least one file is required"
-		return req.Peer, nil, fieldErrors
+		return req.Peer, req.AlbumMBID, nil, fieldErrors
 	}
 	seen := make(map[string]struct{}, len(req.Files))
 	files = make([]core.CandidateFile, len(req.Files))
@@ -1076,7 +1103,7 @@ func validateCreateJobRequest(req createJobRequest) (peer string, files []core.C
 		}
 		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
 	}
-	return req.Peer, files, fieldErrors
+	return req.Peer, req.AlbumMBID, files, fieldErrors
 }
 
 // serveCreateJob decodes, validates, and creates a manual job (POST
@@ -1090,13 +1117,13 @@ func serveCreateJob(w http.ResponseWriter, r *http.Request, create CreateJobFunc
 		return
 	}
 
-	peer, files, fieldErrors := validateCreateJobRequest(req)
+	peer, albumMBID, files, fieldErrors := validateCreateJobRequest(req)
 	if len(fieldErrors) > 0 {
 		writeConfigError(w, http.StatusUnprocessableEntity, "validation failed", fieldErrors)
 		return
 	}
 
-	view, err := create(r.Context(), req.Title, req.Artist, peer, files)
+	view, err := create(r.Context(), req.Title, req.Artist, peer, albumMBID, files)
 	switch {
 	case err == nil:
 		w.Header().Set("Content-Type", "application/json")

@@ -14,7 +14,7 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Some Album", "Some Artist", "peer1", []ManualJobFile{
+	job, err := s.CreateManualJob(ctx, "Some Album", "Some Artist", "peer1", "", []ManualJobFile{
 		{Filename: "01 - Track.flac", Size: 111},
 		{Filename: "02 - Track.flac", Size: 222},
 	}, now)
@@ -82,6 +82,80 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 	}
 }
 
+// TestCreateManualJobPersistsAlbumMBID exercises issue #59's wire identity: a
+// non-blank albumMBID must round-trip through every read path that projects
+// an AlbumJob, since a site that silently drops it would route a job to
+// NOT_IMPORTED even though the user identified it (see the audit list in
+// pipeline.go's jobSelect and dashboard.go's jobViewSelect).
+func TestCreateManualJobPersistsAlbumMBID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer4", mbid,
+		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if job.AlbumMBID != mbid {
+		t.Errorf("CreateManualJob return value AlbumMBID = %q, want %q", job.AlbumMBID, mbid)
+	}
+	if job.LidarrAlbumID != 0 {
+		t.Fatalf("job.LidarrAlbumID = %d, want 0 (NULL) - the MBID is not resolved at creation time", job.LidarrAlbumID)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.AlbumMBID != mbid {
+		t.Errorf("JobWithTransfer AlbumMBID = %q, want %q", view.Job.AlbumMBID, mbid)
+	}
+
+	detail, found, err := s.JobDetail(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobDetail: %v found=%v", err, found)
+	}
+	if detail.Job.AlbumMBID != mbid {
+		t.Errorf("JobDetail AlbumMBID = %q, want %q", detail.Job.AlbumMBID, mbid)
+	}
+
+	runnable, err := s.RunnableJobsInState(ctx, core.StateDownloading, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(runnable) != 1 || runnable[0].AlbumMBID != mbid {
+		t.Fatalf("RunnableJobsInState = %+v, want one job with AlbumMBID %q", runnable, mbid)
+	}
+}
+
+// TestCreateManualJobEmptyAlbumMBID asserts the "no import" choice (issue
+// #59: the user never identified the download) round-trips as an empty
+// string, not NULL or some other sentinel - core.AlbumJob.AlbumMBID has no
+// concept of "unset" distinct from "".
+func TestCreateManualJobEmptyAlbumMBID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer5", "",
+		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if job.AlbumMBID != "" {
+		t.Errorf("AlbumMBID = %q, want empty", job.AlbumMBID)
+	}
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.AlbumMBID != "" {
+		t.Errorf("JobWithTransfer AlbumMBID = %q, want empty", view.Job.AlbumMBID)
+	}
+}
+
 func TestCreateManualJobCoexistsWithLidarrJob(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -91,7 +165,7 @@ func TestCreateManualJobCoexistsWithLidarrJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
-	manualJob, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer2",
+	manualJob, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer2", "",
 		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -177,12 +251,12 @@ func TestCreateManualJobRejectsLiveRemoteFileConflict(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
-	if _, err := s.CreateManualJob(ctx, "First", "Artist", "peer3",
+	if _, err := s.CreateManualJob(ctx, "First", "Artist", "peer3", "",
 		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now); err != nil {
 		t.Fatalf("CreateManualJob (first): %v", err)
 	}
 
-	_, err := s.CreateManualJob(ctx, "Second", "Artist", "peer3",
+	_, err := s.CreateManualJob(ctx, "Second", "Artist", "peer3", "",
 		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now.Add(time.Minute))
 	if !errors.Is(err, ErrRemoteFileBusy) {
 		t.Fatalf("CreateManualJob (conflicting) = %v, want ErrRemoteFileBusy", err)

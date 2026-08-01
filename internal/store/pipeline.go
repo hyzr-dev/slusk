@@ -17,14 +17,14 @@ import (
 // it to settle (or fail) first.
 var ErrJobImporting = errors.New("job is importing")
 
-const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, empty_searches, not_before, failed_at, min_track_count, max_track_count, source FROM album_jobs`
+const jobSelect = `SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, title, artist_name, release_date, artist_id, retries, empty_searches, not_before, failed_at, min_track_count, max_track_count, source, album_mbid FROM album_jobs`
 
 func scanJobs(rows *sql.Rows) ([]core.AlbumJob, error) {
 	var out []core.AlbumJob
 	for rows.Next() {
 		var j core.AlbumJob
 		var state, source string
-		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount, &source); err != nil {
+		if err := rows.Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.Title, &j.ArtistName, &j.ReleaseDate, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &j.MinTrackCount, &j.MaxTrackCount, &source, &j.AlbumMBID); err != nil {
 			return nil, err
 		}
 		j.State = core.AlbumJobState(state)
@@ -673,9 +673,9 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	var j core.AlbumJob
 	var state, source string
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, empty_searches, not_before, failed_at, source
+		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, empty_searches, not_before, failed_at, source, album_mbid
 		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
-		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &source)
+		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &source, &j.AlbumMBID)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
 	}
@@ -685,6 +685,22 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	j.State = core.AlbumJobState(state)
 	j.Source = core.JobSource(source)
 	return j, nil
+}
+
+// SetJobLidarrAlbumID caches the Lidarr album id Importing resolved from a
+// manual job's AlbumMBID (issue #59, lidarr.Client.AlbumByForeignID), so
+// every later verify/confirm tick on this job can use lidarr_album_id
+// directly instead of re-resolving the MBID every time. Like SetJobTrackBand
+// this is a metadata cache write, so updated_at is deliberately not bumped -
+// caching the resolved id must not reset escalateIfStuck's StuckAfter clock.
+func (s *Store) SetJobLidarrAlbumID(ctx context.Context, jobID, albumID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`,
+		albumID, jobID)
+	if err != nil {
+		return fmt.Errorf("set job lidarr album id: %w", err)
+	}
+	return nil
 }
 
 // SetJobTrackBand caches the album's valid track-count band (min/max across

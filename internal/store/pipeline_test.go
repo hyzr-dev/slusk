@@ -459,6 +459,41 @@ func TestSetJobTrackBand(t *testing.T) {
 	}
 }
 
+// TestSetJobLidarrAlbumID covers issue #59: Importing caches the Lidarr
+// album id it resolved from a manual job's AlbumMBID so later ticks read it
+// straight off the job instead of re-resolving every time. Written on a
+// manual job specifically, since that is the only job source whose
+// lidarr_album_id ever starts at 0 - and the write must not collide with
+// idx_album_jobs_lidarr_id, the partial unique index scoped to source =
+// 'lidarr' (migration 0003), which is exactly why that index is scoped at
+// all.
+func TestSetJobLidarrAlbumID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer1", "a1b2c3d4-e5f6-4789-a012-3456789abcde",
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if job.LidarrAlbumID != 0 {
+		t.Fatalf("fresh manual job LidarrAlbumID = %d, want 0", job.LidarrAlbumID)
+	}
+
+	if err := s.SetJobLidarrAlbumID(ctx, job.ID, 900); err != nil {
+		t.Fatalf("SetJobLidarrAlbumID: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.LidarrAlbumID != 900 {
+		t.Errorf("LidarrAlbumID = %d, want 900", view.Job.LidarrAlbumID)
+	}
+}
+
 // TestParkJobForCandidate covers Downloading.reconcile's retry-budget-
 // exhausted path (issue #158): terminalizing the transfer and parking its job
 // happen atomically, while a job that already left DOWNLOADING is not clobbered.

@@ -58,7 +58,7 @@ type JobStore interface {
 	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
-	CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
+	CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	DeleteJob(ctx context.Context, jobID int64) (bool, error)
 }
@@ -157,12 +157,15 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 // created unconditionally. Returns ErrRemoteFileBusy if another live
 // candidate already owns one of the requested (peer, filename) pairs.
 //
-// Importing a manual job is out of scope: a completed download auto-advances
-// to IMPORTING where Music.AlbumStatus misbehaves for a NULL/0 lidarr_album_id
-// (see #59/#60). Downloading still works end-to-end; only the subsequent
-// Lidarr import step is affected.
-func (j *Jobs) Create(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile) (core.JobView, error) {
-	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, files, time.Now())
+// albumMBID is the MusicBrainz release-group id the caller identified the
+// download against (the Identify flow), or "" if they chose not to. Once the
+// download completes, Importing resolves it to a real Lidarr album via
+// AlbumByForeignID and imports normally (issue #59). A job created with no
+// albumMBID - or whose identified release group turns out not to be in
+// Lidarr's library - advances straight to the terminal core.StateNotImported
+// instead: the files are left on disk, and Importing is never reached.
+func (j *Jobs) Create(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile) (core.JobView, error) {
+	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, albumMBID, files, time.Now())
 	if errors.Is(err, store.ErrRemoteFileBusy) {
 		return core.JobView{}, ErrRemoteFileBusy
 	}

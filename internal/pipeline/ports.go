@@ -23,6 +23,11 @@ type MusicSource interface {
 	// degrades that gate to a directory-only check rather than aborting
 	// discovery - see discovery.go's searchJob for why.
 	AlbumTracks(ctx context.Context, albumID int64) ([]core.AlbumTrack, error)
+	// AlbumByForeignID resolves a manual job's AlbumMBID to a real Lidarr
+	// album id (issue #59), used by Importing's verify phase before it can
+	// call AlbumStatus for a manual job. found is false when the release
+	// group is not in Lidarr's library, distinct from a transient error.
+	AlbumByForeignID(ctx context.Context, foreignAlbumID string) (core.LidarrAlbum, bool, error)
 }
 
 // PeerSearcher is the slice of the peer backend (slskd daemon or native

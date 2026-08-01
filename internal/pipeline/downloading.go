@@ -630,6 +630,21 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 			return false, err
 		}
 		return true, nil
+	case allDone && job.Source == core.SourceManual && job.AlbumMBID == "":
+		// A manual job the user never identified against a MusicBrainz
+		// release group has nothing for Importing to import into (issue
+		// #59): its LidarrAlbumID would stay 0 forever, and
+		// Music.AlbumStatus(0) errors on every tick. Route straight to the
+		// terminal NOT_IMPORTED instead - the files are the deliverable, so
+		// no cleanup runs here (contrast the anyFailed branch above, which
+		// does clean up a genuinely failed download).
+		notImportedDetail := "download complete, no album identified - leaving files in place"
+		d.log().Info(notImportedDetail, "album_job", job.ID)
+		d.recordEvent(ctx, job.ID, core.EventNotImported, notImportedDetail, now)
+		if _, err := d.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateNotImported, now); err != nil {
+			d.log().Error("advance to not imported failed", "album_job", job.ID, "err", err)
+		}
+		return true, nil
 	case allDone:
 		d.log().Info("download complete, importing", "album_job", job.ID)
 		if _, err := d.p.Store.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateImporting, now); err != nil {

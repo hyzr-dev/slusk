@@ -1057,6 +1057,56 @@ func TestDownloadingSuccessAdvancesToImporting(t *testing.T) {
 	}
 }
 
+// TestDownloadingRoutesUnidentifiedManualJobToNotImported covers issue #59: a
+// manual job whose download completes but that was never identified against
+// a MusicBrainz release group (AlbumMBID == "") must go straight to the
+// terminal NOT_IMPORTED, not IMPORTING - IMPORTING would call
+// Music.AlbumStatus(0) on every tick since the job has no LidarrAlbumID.
+func TestDownloadingRoutesUnidentifiedManualJobToNotImported(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	p, st := newDownloadingParams(t, &fakeNetwork{}, &fakeSearcher{})
+
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob", "",
+		[]store.ManualJobFile{{Filename: `A\01.flac`, Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	transfers, err := st.TransfersForCandidate(ctx, cand.ID)
+	if err != nil || len(transfers) != 1 {
+		t.Fatalf("TransfersForCandidate: %v transfers=%+v", err, transfers)
+	}
+	if err := st.UpdateTransferProgress(ctx, transfers[0].ID, core.TransferCompleted, 10, 10, now); err != nil {
+		t.Fatalf("UpdateTransferProgress: %v", err)
+	}
+
+	d := NewDownloading(p)
+	if err := d.resolve(ctx, now); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := jobStateFor(t, st, job.ID); got != core.StateNotImported {
+		t.Errorf("job state = %v, want NOT_IMPORTED", got)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	found = false
+	for _, e := range events {
+		if e.Event == core.EventNotImported {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("job events = %+v, want one EventNotImported", events)
+	}
+}
+
 func TestDownloadingFailureReturnsJobToSelectingWithoutRetryBump(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)

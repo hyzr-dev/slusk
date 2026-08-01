@@ -31,6 +31,17 @@ const (
 	// reading databases and accepting operations from before migration 0008.
 	// New transitions must write StateParked instead.
 	StateOrphaned AlbumJobState = "ORPHANED"
+	// StateNotImported is the terminal outcome of a manual job (issue #59)
+	// whose download completed but that never reached Lidarr: either the
+	// user never identified it against a MusicBrainz release group
+	// (AlbumMBID is empty), or the identified release group is not in
+	// Lidarr's library (lidarr.Client.AlbumByForeignID reported not-found).
+	// The downloaded files are left on disk exactly as they landed - no
+	// cleanup runs, since they are the deliverable. This is NOT a failure:
+	// it must never be retried, revived, or otherwise treated as an error
+	// condition. Only a manual job can reach it; a Lidarr-sourced job always
+	// has a real LidarrAlbumID by construction.
+	StateNotImported AlbumJobState = "NOT_IMPORTED"
 )
 
 // Terminal reports whether the state is an end state that needs no further work
@@ -46,7 +57,7 @@ func (s AlbumJobState) Terminal() bool {
 // normal advance. Distinct from Terminal() (the legacy engine's notion) until
 // the engine is deleted.
 func (s AlbumJobState) PipelineTerminal() bool {
-	return s == StateDone || s == StateCancelled || s == StateFailed
+	return s == StateDone || s == StateCancelled || s == StateFailed || s == StateNotImported
 }
 
 // TransferState mirrors slskd's transfer states, plus STALLED which slskdarr
@@ -87,6 +98,12 @@ const (
 	EventDedup             JobEventType = "dedup"
 	EventJobFailed         JobEventType = "job_failed"
 	EventQuarantined       JobEventType = "quarantined"
+	// EventNotImported records a manual job's download completing with no
+	// Lidarr album to import into (issue #59, StateNotImported) - either no
+	// MusicBrainz release group was ever identified, or the identified one
+	// is not in Lidarr's library. Deliberately distinct from
+	// EventAttemptFailed/EventJobFailed: this is not a failure.
+	EventNotImported JobEventType = "not_imported"
 )
 
 // CandidateState is the lifecycle of one cached candidate (see core.Candidate).

@@ -896,7 +896,7 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
 		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -968,7 +968,7 @@ func TestRetryManualJobClearsFailReasonAndImportSubmittedAt(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
 		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -1026,7 +1026,7 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
 		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -1092,7 +1092,7 @@ func TestRetryManualJobNoopWithoutCandidates(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Album", "Artist", "bob",
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "bob", "",
 		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -1161,7 +1161,7 @@ func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
-	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one",
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
 		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
@@ -1173,6 +1173,42 @@ func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected RetryManualJob to return false for a still-DOWNLOADING job")
+	}
+}
+
+// TestRetryJobsNoopForNotImportedJob covers issue #59: NOT_IMPORTED is a
+// terminal, non-failure outcome (the download succeeded, there was simply no
+// Lidarr album to import into), so neither retry path may revive it - the
+// download is not a failure to retry. Both RetryFailedJob (the generic path)
+// and RetryManualJob (the manual-specific one) must independently refuse it,
+// since app.Jobs.Retry's ErrJobNotRetryable relies on the store-side WHERE
+// clause, not on any state check of its own.
+func TestRetryJobsNoopForNotImportedJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if ok, err := s.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateNotImported, now); err != nil || !ok {
+		t.Fatalf("AdvanceJobStateFrom: ok=%v err=%v", ok, err)
+	}
+
+	if ok, err := s.RetryManualJob(ctx, job.ID, now); err != nil || ok {
+		t.Fatalf("RetryManualJob: ok=%v err=%v, want ok=false", ok, err)
+	}
+	if ok, err := s.RetryFailedJob(ctx, job.ID, now); err != nil || ok {
+		t.Fatalf("RetryFailedJob: ok=%v err=%v, want ok=false", ok, err)
+	}
+	view, found, err := s.JobWithTransfer(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Job.State != core.StateNotImported {
+		t.Errorf("job state after no-op retries = %v, want still NOT_IMPORTED", view.Job.State)
 	}
 }
 
@@ -2024,6 +2060,33 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 	}
 }
 
+// TestJobViewStatusNotImportedForNotImportedState covers issue #59's status
+// mapping: dashboardJobStatusSQL must classify NOT_IMPORTED as "notImported"
+// on its own, checked before the transfer-aggregate fallback that would
+// otherwise (wrongly) read it as "queued" - a NOT_IMPORTED job's completed
+// transfers leave agg.in_progress/stalled/live/failed all at their zero
+// values, which is exactly the shape the ELSE 'queued' branch matches.
+// Deliberately not folded into
+// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter's fixture table:
+// "notImported" is not (yet) an accepted dashboard Filter value, so this
+// checks the JobView projection directly instead of round-tripping through
+// ListDashboardJobs's filter.
+func TestJobViewStatusNotImportedForNotImportedState(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+
+	id := insertDashboardTestJob(t, s, 0, core.SourceManual, core.StateNotImported, core.TransferCompleted, "Job", "Artist", "peer_one", 0, now)
+
+	view, found, err := s.JobWithTransfer(ctx, id)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: %v found=%v", err, found)
+	}
+	if view.Status != "notImported" {
+		t.Errorf("Status = %q, want notImported", view.Status)
+	}
+}
+
 // TestListDashboardJobsAggregateActiveMatchesFacetAndFilter is the
 // ListDashboardJobs-level counterpart of
 // TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow: that test
@@ -2342,6 +2405,68 @@ func TestListDashboardJobsFilterFinishedHonoursTheWindow(t *testing.T) {
 	want := []int64{justDone, justFailed, insideEdge}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ids = %v, want %v", got, want)
+	}
+}
+
+// A manual job that finishes as NOT_IMPORTED (issue #59) downloaded
+// successfully — it just had no Lidarr album to import into. Overview's
+// recently-finished panel is the one place a user watches for completions, so
+// leaving it out of filter=finished would make a download that worked look
+// like nothing happened. PARKED and CANCELLED stay out (see the predicate's
+// comment); this test pins all three decisions together so a future state
+// cannot be added to PipelineTerminal() and silently inherit the wrong answer.
+func TestListDashboardJobsFinishedIncludesNotImported(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Minute)
+
+	notImported := insertDashboardTestJob(t, s, 0, core.SourceManual, core.StateNotImported, "", "Kid A", "Radiohead", "peer1", 0, at)
+	done := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Rounds", "Four Tet", "peer2", 0, at)
+	insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateParked, "", "Parked", "P", "peer3", 0, at)
+	insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateCancelled, "", "Cancelled", "C", "peer4", 0, at)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, j := range page.Jobs {
+		got[j.Job.ID] = true
+	}
+	if !got[notImported] {
+		t.Errorf("NOT_IMPORTED job %d missing from filter=finished, want present", notImported)
+	}
+	if !got[done] {
+		t.Errorf("DONE job %d missing from filter=finished, want present", done)
+	}
+	if len(got) != 2 {
+		t.Errorf("finished returned %d jobs (%v), want exactly the DONE and NOT_IMPORTED ones — PARKED and CANCELLED must stay out", len(got), got)
+	}
+}
+
+// A NOT_IMPORTED job must render as its own status, never collapsed into
+// 'done' (nothing was imported) or 'failed' (nothing went wrong).
+func TestListDashboardJobsNotImportedStatus(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	id := insertDashboardTestJob(t, s, 0, core.SourceManual, core.StateNotImported, "", "Kid A", "Radiohead", "peer1", 0, now.Add(-time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "all", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != id {
+		t.Fatalf("jobs = %+v, want just %d", page.Jobs, id)
+	}
+	if page.Jobs[0].Status != "notImported" {
+		t.Errorf("status = %q, want %q", page.Jobs[0].Status, "notImported")
+	}
+	if page.Facets.Status.All != 1 {
+		t.Errorf("facets.status.all = %d, want 1 (a NOT_IMPORTED job still counts under ALL)", page.Facets.Status.All)
 	}
 }
 

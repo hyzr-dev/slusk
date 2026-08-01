@@ -197,8 +197,11 @@ export default function Search() {
 
   // `identity`, when given, overrides title/artist with the canonical
   // MusicBrainz values the Identify modal resolved (issue #321) — the
-  // confirm handler below is the only caller that passes it.
-  function download(group: SearchGroup, files: SearchFile[], identity?: { artist: string; title: string }) {
+  // confirm handler below is the only caller that passes it. `identity.albumMbid`
+  // (issue #59) is forwarded as-is, including when absent: a plain "Download
+  // album"/"Download selected" with no identity at all sends none, unchanged
+  // from before — and now explicitly means "no import".
+  function download(group: SearchGroup, files: SearchFile[], identity?: { artist: string; title: string; albumMbid?: string }) {
     if (files.length === 0) return;
     createJob.mutate(
       {
@@ -214,6 +217,7 @@ export default function Search() {
         artist: identity?.artist ?? group.parent,
         peer: group.peer,
         files: files.map((f) => ({ filename: f.filename, size: f.size })),
+        albumMbid: identity?.albumMbid,
       },
       {
         onSuccess: () => {
@@ -233,10 +237,10 @@ export default function Search() {
   // count against the selected edition's — downloading only a hand-picked
   // subset after confirming "COMPLETE" or "INCOMPLETE" against the whole
   // folder would make that verdict a lie about what actually got queued.
-  function confirmIdentify(group: SearchGroup, identity: { artist: string; album: string }) {
+  function confirmIdentify(group: SearchGroup, identity: { artist: string; album: string; albumMbid?: string }) {
     setIdentifiedIds((prev) => new Set(prev).add(group.id));
     setIdentifyGroupId(null);
-    download(group, group.files, { artist: identity.artist, title: identity.album });
+    download(group, group.files, { artist: identity.artist, title: identity.album, albumMbid: identity.albumMbid });
   }
 
   // POST /api/search is in flight. `searchId` is still the PREVIOUS search's

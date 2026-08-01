@@ -214,7 +214,10 @@ function focusable(container: HTMLElement): HTMLElement[] {
 interface Props {
   group: SearchGroup;
   onClose: () => void;
-  onConfirm: (payload: { artist: string; album: string }) => void;
+  // `albumMbid` (issue #59) is the release-group MBID to forward for import,
+  // absent only when the user explicitly clicked "download anyway" — see
+  // confirm() below for which of the five outcomes forward it.
+  onConfirm: (payload: { artist: string; album: string; albumMbid?: string }) => void;
 }
 
 export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
@@ -508,11 +511,22 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     return result.artist || (fromField ? fromField : undefined);
   }
 
-  function confirm() {
+  // `withMbid` defaults to true: every path forwards the identified
+  // release-group MBID EXCEPT the explicit "download anyway" button, which is
+  // the user's deliberate choice to skip import (issue #59). That includes
+  // the 'unknown' and 'noArtistId' availability cases (a Lidarr outage during
+  // identify, or a result with no artist credit) — resolution happens later
+  // at import time, so those must not be silently downgraded to
+  // never-imports the way "download anyway" is.
+  function confirm(withMbid = true) {
     if (!selectedResult) return;
     const canonicalArtist = canonicalArtistOf(selectedResult);
     if (!canonicalArtist) return;
-    onConfirm({ artist: canonicalArtist, album: selectedResult.title });
+    onConfirm({
+      artist: canonicalArtist,
+      album: selectedResult.title,
+      albumMbid: withMbid ? selectedResult.id : undefined,
+    });
   }
 
   const selectedEdition = editions.find((e) => e.id === selectedEditionId);
@@ -737,7 +751,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                   <span className={styles.spacer} />
                   <Button
                     variant="ghost"
-                    onClick={confirm}
+                    onClick={() => confirm(false)}
                     disabled={!canonicalArtist}
                     title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
                   >
@@ -873,7 +887,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                   </div>
                   <div className={styles.actions}>
                     <span className={styles.spacer} />
-                    <Button variant="primary" onClick={confirm}>{t.search.identify.continue}</Button>
+                    <Button variant="primary" onClick={() => confirm()}>{t.search.identify.continue}</Button>
                   </div>
                 </>
               )}
@@ -884,7 +898,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                   <span className={styles.spacer} />
                   <Button
                     variant="primary"
-                    onClick={confirm}
+                    onClick={() => confirm()}
                     disabled={!canonicalArtist}
                     title={!canonicalArtist ? t.search.identify.noCanonicalArtist : undefined}
                   >

@@ -50,8 +50,8 @@ type fakeJobStore struct {
 	lookupIDs         []int64
 	operations        *[]string
 	createCalled      struct {
-		title, artistName, peer string
-		files                   []store.ManualJobFile
+		title, artistName, peer, albumMBID string
+		files                              []store.ManualJobFile
 	}
 }
 
@@ -103,8 +103,8 @@ func (f *fakeJobStore) RetryManualJob(ctx context.Context, jobID int64, now time
 	return f.retryManualOK, nil
 }
 
-func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error) {
-	f.createCalled.title, f.createCalled.artistName, f.createCalled.peer, f.createCalled.files = title, artistName, peer, files
+func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error) {
+	f.createCalled.title, f.createCalled.artistName, f.createCalled.peer, f.createCalled.albumMBID, f.createCalled.files = title, artistName, peer, albumMBID, files
 	if f.createErr != nil {
 		return core.AlbumJob{}, f.createErr
 	}
@@ -346,7 +346,7 @@ func TestJobsCreateReturnsCanonicalView(t *testing.T) {
 	}
 	j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
 
-	got, err := j.Create(context.Background(), "Requested Title", "Requested Artist", "requested_peer", files)
+	got, err := j.Create(context.Background(), "Requested Title", "Requested Artist", "requested_peer", "a1b2c3d4-e5f6-4789-a012-3456789abcde", files)
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
@@ -359,6 +359,9 @@ func TestJobsCreateReturnsCanonicalView(t *testing.T) {
 	if store.createCalled.title != "Requested Title" || store.createCalled.artistName != "Requested Artist" || store.createCalled.peer != "requested_peer" {
 		t.Errorf("CreateManualJob args = title %q, artist %q, peer %q", store.createCalled.title, store.createCalled.artistName, store.createCalled.peer)
 	}
+	if store.createCalled.albumMBID != "a1b2c3d4-e5f6-4789-a012-3456789abcde" {
+		t.Errorf("CreateManualJob albumMBID = %q, want a1b2c3d4-e5f6-4789-a012-3456789abcde", store.createCalled.albumMBID)
+	}
 	if len(store.createCalled.files) != 1 || store.createCalled.files[0] != files[0] {
 		t.Errorf("CreateManualJob files = %+v, want %+v", store.createCalled.files, files)
 	}
@@ -369,7 +372,7 @@ func TestJobsCreateReadbackError(t *testing.T) {
 	fakeStore := &fakeJobStore{createJob: core.AlbumJob{ID: 42}, jobErr: lookupErr}
 	j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
 
-	_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+	_, err := j.Create(context.Background(), "Title", "Artist", "peer", "", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
 	if !errors.Is(err, lookupErr) {
 		t.Fatalf("Create() = %v, want readback error", err)
 	}
@@ -382,7 +385,7 @@ func TestJobsCreateReadbackNotFound(t *testing.T) {
 	fakeStore := &fakeJobStore{createJob: core.AlbumJob{ID: 42}, jobs: map[int64]core.JobView{}}
 	j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
 
-	_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+	_, err := j.Create(context.Background(), "Title", "Artist", "peer", "", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
 	if !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("Create() = %v, want ErrJobNotFound", err)
 	}
@@ -405,7 +408,7 @@ func TestJobsCreateFailureSkipsReadback(t *testing.T) {
 			fakeStore := &fakeJobStore{createErr: tt.storeErr}
 			j := &Jobs{Store: fakeStore, Peers: &fakePeerCanceller{}}
 
-			_, err := j.Create(context.Background(), "Title", "Artist", "peer", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
+			_, err := j.Create(context.Background(), "Title", "Artist", "peer", "", []store.ManualJobFile{{Filename: "track.flac", Size: 1}})
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("Create() = %v, want %v", err, tt.wantErr)

@@ -499,7 +499,9 @@ describe('IdentifyModal states', () => {
     fireEvent.click(screen.getByRole('button', { name: /In Rainbows/ }));
     await waitFor(() => screen.getByText(t.search.identify.willBeRecordedAs));
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+    // Issue #59: the release-group MBID is forwarded so the backend can
+    // import this job into Lidarr later.
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows', albumMbid: 'al1' });
   });
 
   // MusicBrainzSearchResult.artist/artistId are `omitempty` on the Go DTO —
@@ -532,7 +534,11 @@ describe('IdentifyModal states', () => {
     expect(screen.queryByText(/DifferentParent/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation' });
+    // Issue #59: 'noArtistId' still forwards the MBID — only the explicit
+    // "download anyway" button suppresses it. Resolution happens at import
+    // time, so a missing artist credit here must not permanently downgrade
+    // the job.
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Guessed Artist', album: 'Anonymous Compilation', albumMbid: 'al1' });
   });
 
   // Review item A, the important one. When MusicBrainz supplies no artist
@@ -668,9 +674,14 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
   });
 
   it('hides the add path when the album Lidarr status is unknown (known: false)', async () => {
-    await selectWithLidarrStatus({ known: false, inLibrary: false }, artistMatch());
+    const { onConfirm } = await selectWithLidarrStatus({ known: false, inLibrary: false }, artistMatch());
     expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+    // Issue #59: a transient Lidarr outage during identify must not
+    // permanently downgrade the job — the MBID is still forwarded, and
+    // resolution is retried at import time.
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
   });
 
   it('hides the add path when the artist Lidarr status is unknown even if the album status is known', async () => {
@@ -692,9 +703,13 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     const downloadAnyway = screen.getByRole('button', { name: t.search.identify.downloadAnyway });
     expect(downloadAnyway).toBeInTheDocument();
     // "download anyway" proceeds exactly like the ordinary confirm path —
-    // it must not be visually or functionally demoted.
+    // it must not be visually or functionally demoted. Issue #59: it is
+    // also the ONE path that deliberately suppresses the MBID, so this job
+    // never imports.
     fireEvent.click(downloadAnyway);
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows', albumMbid: undefined });
+    const [payload] = onConfirm.mock.calls[0];
+    expect(payload.albumMbid).toBeUndefined();
   });
 
   it('prefills quality/metadata from the selected root folder and re-prefills on change', async () => {
@@ -759,6 +774,9 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     const postCall = fetchSpy.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
     const postedBody = JSON.parse((postCall?.[1] as RequestInit).body as string);
     expect(postedBody).toMatchObject({ monitor: 'album', artistMbid: 'a1', albumMbid: 'al1' });
+    // Issue #59: a full-success add-to-Lidarr proceeds straight to confirm()
+    // and forwards the MBID, same as every other non-"download anyway" path.
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
   });
 
   it('posts monitor: "all" and shows the discography warning when "Entire discography" is chosen', async () => {
@@ -811,7 +829,9 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
     expect(onConfirm).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: t.search.identify.continue }));
-    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows' });
+    // Issue #59: the partial-success Continue button still forwards the
+    // MBID — it isn't a failure, so it isn't the "download anyway" case.
+    expect(onConfirm).toHaveBeenCalledWith({ artist: 'Radiohead', album: 'In Rainbows', albumMbid: 'al1' });
   });
 
   // Review item 5: artistMonitored and albumMonitorState are independent

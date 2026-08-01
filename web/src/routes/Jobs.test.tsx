@@ -80,7 +80,9 @@ function facetsFor(jobs: Job[]): JobFacets {
   };
   for (const job of jobs) {
     if (job.state === 'IMPORTING') status.importing += 1;
-    else status[job.status] += 1;
+    // 'notImported' has no facet of its own (JobStatusFacets predates issue
+    // #59) — it doesn't fold into any of the counters above.
+    else if (job.status !== 'notImported') status[job.status] += 1;
   }
   return {
     status,
