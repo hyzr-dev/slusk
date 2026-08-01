@@ -19,9 +19,17 @@ import "strings"
 // artist's tokens that are sacrificed. attempt (>=0) selects which artist
 // token to drop, rotating modulo the number of artist tokens, so repeated
 // calls with 0, 1, 2, ... try different single-token drops deterministically
-// and the rotation never reaches album tokens.
+// and the rotation never reaches album tokens. A single-token artist
+// therefore has only one variant and returns the same rewrite for every
+// attempt - the caller re-issues an identical extra search once per backoff
+// interval in that case, which is the accepted cost of never dropping the
+// album title.
 //
-// Returns "" when there are no artist tokens to drop, when attempt < 0
+// Returns "" when there are no artist tokens to drop, when there are no
+// album tokens either (a titleless album would leave an artist-only query,
+// which is exactly what the two-token floor exists to prevent - the combined
+// count alone does not rule it out, since a three-word artist satisfies it on
+// its own), when attempt < 0
 // (precondition: the sole caller only reaches this once
 // job.EmptySearches >= emptySearchRewriteThreshold, so attempt is always
 // >= 0), or when fewer than 3 tokens are present in total - dropping one
@@ -36,7 +44,7 @@ func DropTokenQuery(artist, album string, attempt int) string {
 	artistTokens := strings.Fields(artist)
 	albumTokens := strings.Fields(album)
 	total := len(artistTokens) + len(albumTokens)
-	if total < 3 || len(artistTokens) == 0 {
+	if total < 3 || len(artistTokens) == 0 || len(albumTokens) == 0 {
 		return ""
 	}
 

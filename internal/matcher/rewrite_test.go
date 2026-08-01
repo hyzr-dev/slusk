@@ -1,6 +1,9 @@
 package matcher
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestDropTokenQuery(t *testing.T) {
 	cases := []struct {
@@ -106,6 +109,37 @@ func TestDropTokenQuery(t *testing.T) {
 			artist:  "",
 			album:   "Bob Dylan Desire",
 			attempt: 0,
+			want:    "",
+		},
+		{
+			name:    "titleless album would leave an artist-only query, so no rewrite",
+			artist:  "Emerson Lake Palmer",
+			album:   "",
+			attempt: 0,
+			want:    "",
+		},
+		{
+			name:    "whitespace-only album title is treated as titleless",
+			artist:  "Emerson Lake Palmer",
+			album:   "   ",
+			attempt: 1,
+			want:    "",
+		},
+		// The extremes of int are pinned because the modulo is the one place
+		// this function could panic or wrap; the caller never passes them, so
+		// nothing but this table protects that.
+		{
+			name:    "math.MaxInt attempt still lands inside the artist tokens",
+			artist:  "Bob Dylan",
+			album:   "Desire",
+			attempt: math.MaxInt,
+			want:    "Bob Desire", // MaxInt is odd, so MaxInt % 2 == 1
+		},
+		{
+			name:    "math.MinInt attempt is rejected by the non-negative precondition",
+			artist:  "Bob Dylan",
+			album:   "Desire",
+			attempt: math.MinInt,
 			want:    "",
 		},
 		{
