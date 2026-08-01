@@ -3,7 +3,10 @@ name: ${COMPOSE_PROJECT_NAME:-slskdarr-pr-lab}
 services:
   volume-init:
     image: alpine:3.22
-    command: ["sh", "-c", "mkdir -p /music/slskd-downloads /music/library && chmod 0777 /music/slskd-downloads /music/library"]
+    # chmod -R, not plain chmod: an existing lab already holds album directories
+    # created by an older slskdarr uid, and those stay unwritable to Lidarr
+    # otherwise. `lab.sh up` keeps state, so this has to heal in place.
+    command: ["sh", "-c", "mkdir -p /music/slskd-downloads /music/library && chmod -R a+rwX /music/slskd-downloads /music/library"]
     volumes:
       - downloads:/music/slskd-downloads
       - music:/music/library
@@ -73,6 +76,13 @@ services:
   slskdarr:
     build:
       context: ..
+    # The image runs as distroless `nonroot` (uid 65532), but the native
+    # Soulseek backend writes the album directories itself with mode 0755. That
+    # leaves them owned by 65532 and unwritable to Lidarr, which runs as PUID —
+    # and deleting a file needs write on its *directory*, so Lidarr's import
+    # (copy + delete source) dies at the delete with EACCES. Running both as the
+    # same uid is the lab's fix; production doesn't hit this.
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       TZ: ${TZ:-Etc/UTC}
     ports:
