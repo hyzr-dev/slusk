@@ -234,7 +234,27 @@
    label read as the less important half of the pair. The TOML key stays at
    --text-dim — that one really is secondary. */
 .label { font-size: 11.5px; color: var(--fg); letter-spacing: 0.3px; }
-.key { font-family: var(--font-mono); color: var(--text-dim); }
+
+/* overflow-wrap sits on .key alone, and both halves of that are deliberate.
+   The longest label — "Allow private peer addresses
+   (allow_private_peer_addresses)" — had a min-content width of 216px in this
+   190px column, because the parenthesised TOML key is a single unbreakable
+   token. A flex item cannot shrink below min-content, so .labelRow overflowed
+   and pushed its help button 47.7px into the value column, where it landed
+   entirely inside the <select> and stopped receiving clicks at all (#361).
+
+   `anywhere` rather than `break-word`: only `anywhere` counts toward
+   min-content sizing, so only it shrinks the flex item's automatic minimum.
+   `break-word` would rewrap the glyphs and leave min-content at 216px, and
+   the button would still escape.
+
+   Scoped to .key rather than .label so the break can only ever land inside a
+   machine-readable identifier, never mid-word in the prose beside it. */
+.key {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
 
 .value { display: flex; flex-direction: column; gap: 4px; }
 
