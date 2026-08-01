@@ -600,6 +600,10 @@ func main() {
 	// soulClient != nil block above: upload history is rows already written,
 	// not a live capability, so it stays readable with the native client off.
 	uploadHistoryFn := st.UploadHistory
+	// Same reasoning as uploadHistoryFn just above: the marker only needs
+	// rows already written, not a live capability, so it stays wired outside
+	// the soulClient != nil block (issue #366).
+	uploadHistoryMarkFn := st.UploadHistoryMaxID
 	markReadFn := func(ctx context.Context, username string) (int, error) {
 		n, err := st.MarkConversationRead(ctx, username, time.Now())
 		return int(n), err
@@ -667,6 +671,7 @@ func main() {
 		RescanShares:              rescanSharesFn,
 		Uploads:                   uploadsFn,
 		UploadHistory:             uploadHistoryFn,
+		UploadHistoryMark:         uploadHistoryMarkFn,
 		Throughput:                throughputFn,
 		StartSearch:               searches.Start,
 		SearchSnapshot:            searches.Snapshot,

@@ -462,6 +462,12 @@ type ServerDeps struct {
 	// unconditionally: the rows are already in the database, so they stay
 	// readable with the native backend switched off. nil answers 503.
 	UploadHistory UploadHistoryFunc
+	// UploadHistoryMark supplies GET /api/stream's hub with upload_history's
+	// cheap monotonic marker (issue #366), folded into the same fingerprint
+	// that drives `event: invalidate` — see UploadHistoryMarkFunc. nil (as in
+	// every existing test's ServerDeps) means a finished upload never
+	// triggers an invalidation, the pre-#366 behaviour.
+	UploadHistoryMark UploadHistoryMarkFunc
 	// Throughput supplies the Overview view's live directional throughput
 	// series served at /api/charts. nil (the non-native backends, or tests that
 	// don't care) yields empty arrays rather than omitting either field.

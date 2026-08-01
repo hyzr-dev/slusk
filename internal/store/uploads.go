@@ -87,6 +87,19 @@ func (s *Store) UploadHistory(ctx context.Context, limit int, beforeID int64) ([
 	return out, rows.Err()
 }
 
+// UploadHistoryMaxID returns upload_history's highest row id, or 0 when the
+// table is empty. Backs observ.UploadHistoryMarkFunc (issue #366): id is an
+// identity primary key with no secondary index (see migration
+// 0010_upload_history.sql), so MAX(id) is answered from the index alone —
+// cheap enough to poll on GET /api/stream's correlation tick.
+func (s *Store) UploadHistoryMaxID(ctx context.Context) (int64, error) {
+	var maxID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM upload_history`).Scan(&maxID); err != nil {
+		return 0, fmt.Errorf("upload history max id: %w", err)
+	}
+	return maxID, nil
+}
+
 // PruneUploadHistory deletes upload_history rows whose upload finished longer
 // ago than uploadHistoryRetention.
 func (s *Store) PruneUploadHistory(ctx context.Context, now time.Time) error {

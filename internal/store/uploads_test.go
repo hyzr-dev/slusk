@@ -121,6 +121,48 @@ func TestUploadHistoryKeysetPagination(t *testing.T) {
 	}
 }
 
+// TestUploadHistoryMaxID proves the marker GET /api/stream folds into
+// `event: invalidate` (issue #366) reads 0 on an empty table and the highest
+// row id — not the row count, not the most recently inserted id in a
+// different sense — once rows exist.
+func TestUploadHistoryMaxID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	maxID, err := s.UploadHistoryMaxID(ctx)
+	if err != nil {
+		t.Fatalf("UploadHistoryMaxID (empty table): %v", err)
+	}
+	if maxID != 0 {
+		t.Fatalf("maxID = %d, want 0 for an empty table", maxID)
+	}
+
+	started := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
+	for i := range 3 {
+		recordTestUpload(t, s, core.UploadHistoryEntry{
+			Username: "alice", Filename: `Music\a.flac`, Status: core.UploadCompleted,
+			StartedAt: started, FinishedAt: started.Add(time.Duration(i) * time.Second),
+		})
+	}
+	rows, err := s.UploadHistory(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("UploadHistory: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	// Newest-first (id DESC, see UploadHistory), so the highest id is rows[0].
+	want := rows[0].ID
+
+	maxID, err = s.UploadHistoryMaxID(ctx)
+	if err != nil {
+		t.Fatalf("UploadHistoryMaxID: %v", err)
+	}
+	if maxID != want {
+		t.Fatalf("maxID = %d, want %d (the highest inserted row id)", maxID, want)
+	}
+}
+
 // TestPruneUploadHistoryDeletesOnlyOldRows asserts retention is keyed on
 // finished_at and spares anything inside the window.
 func TestPruneUploadHistoryDeletesOnlyOldRows(t *testing.T) {

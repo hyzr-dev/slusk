@@ -1107,3 +1107,23 @@ export interface SearchPayload {
   expired?: boolean;
   error?: string;
 }
+
+/**
+ * GET /api/stream's `event: invalidate` JSON body — internal/observ/
+ * stream.go invalidatePayload (issue #275, broadened to upload_history by
+ * #366, split into independent per-endpoint flags by #371). `generation` is
+ * a monotonic-ish counter useful for logging/tests, not something this app
+ * branches on. `jobs`/`uploads` are what api/stream.tsx's `invalidate`
+ * listener actually reads: which of GET /api/jobs and GET
+ * /api/uploads/history would now answer differently for SOMEONE, not
+ * necessarily this connection. Neither key is ever absent on the wire (see
+ * invalidatePayload's Go-side doc comment for why false is exactly as
+ * meaningful as true here) — `event.data` is parsed with `as
+ * InvalidatePayload` rather than validated, so this type is a claim about
+ * the wire shape, not a runtime guarantee.
+ */
+export interface InvalidatePayload {
+  generation: number;
+  jobs: boolean;
+  uploads: boolean;
+}

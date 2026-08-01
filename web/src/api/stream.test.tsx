@@ -621,12 +621,19 @@ describe('StreamProvider', () => {
   // page queries only, per decision 6 — a bare `invalidateQueries({
   // queryKey: queryKeys.jobs })` would also match jobDetail(id) and
   // jobEvents(id), forcing a detail refetch that #274 deliberately removed.
-  it('refetches the jobs page on an invalidate event', () => {
+  //
+  // Also covers the #371 fix directly: a jobs-only frame (`uploads: false`)
+  // must NOT invalidate queryKeys.uploadHistory — the defect this change
+  // exists to close (see the `invalidate` listener's doc comment in
+  // stream.tsx and useUploadHistory's in queries.ts for why that query's own
+  // design depends on it).
+  it('refetches the jobs page, and only the jobs page, on a jobs-only invalidate event', () => {
     const queryClient = new QueryClient();
     const pageKey = queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS);
     const detailKey = queryKeys.jobDetail(1);
     queryClient.setQueryData(pageKey, { jobs: [], total: 0, facets: null });
     queryClient.setQueryData(detailKey, { job: { id: 1 }, attempts: [] });
+    queryClient.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={['/jobs/1']}>
@@ -635,13 +642,14 @@ describe('StreamProvider', () => {
       </QueryClientProvider>,
     );
     // onopen's own invalidation already ran on mount (it invalidates
-    // queryKeys.jobs unconditionally) — reset both queries' invalidated
+    // queryKeys.jobs unconditionally) — reset every query's invalidated
     // state so this test only observes the `invalidate` listener's own
     // effect.
     void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
     void queryClient.getQueryCache().find({ queryKey: detailKey })?.setState({ isInvalidated: false });
+    void queryClient.getQueryCache().find({ queryKey: queryKeys.uploadHistory })?.setState({ isInvalidated: false });
 
-    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 1, jobs: true, uploads: false }));
 
     expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(true);
     // Decision 6's whole point: a mounted jobDetail query must NOT be
@@ -649,6 +657,41 @@ describe('StreamProvider', () => {
     // prefix, and #274 deliberately turned off its own poll because the
     // stream's `detail` field already keeps it live.
     expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
+    // The #371 regression guard: `uploads: false` on this frame must leave
+    // upload history untouched.
+    expect(queryClient.getQueryState(queryKeys.uploadHistory)?.isInvalidated).toBe(false);
+  });
+
+  // internal/observ TestStreamHubUploadMarkAloneBumpsGeneration's client-side
+  // counterpart (issue #366): an uploads-only invalidate event must refetch
+  // upload history. Also covers the #371 fix's mirror image: it must NOT
+  // invalidate the jobs page (`jobs: false`) — a finished upload has nothing
+  // to do with GET /api/jobs.
+  it('refetches upload history, and only upload history, on an uploads-only invalidate event', () => {
+    const queryClient = new QueryClient();
+    const pageKey = queryKeys.jobsPage(DEFAULT_JOB_PAGE_PARAMS);
+    queryClient.setQueryData(pageKey, { jobs: [], total: 0, facets: null });
+    queryClient.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
+    void queryClient.getQueryCache().find({ queryKey: queryKeys.uploadHistory })?.setState({ isInvalidated: false });
+
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 1, jobs: false, uploads: true }));
+
+    expect(queryClient.getQueryState(queryKeys.uploadHistory)?.isInvalidated).toBe(true);
+    // The #371 regression guard: `jobs: false` on this frame must leave the
+    // jobs page untouched — this is exactly the busy-system cost this fix
+    // removes (an upload finishing must not re-fetch every loaded page of
+    // upload history's OWN infinite query either, but that is covered by
+    // TanStack's own invalidateQueries semantics once the jobs half is no
+    // longer wrongly folded in).
+    expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(false);
   });
 
   // Helper to stub document.hidden for the visibility-gated invalidate tests
@@ -684,9 +727,29 @@ describe('StreamProvider', () => {
     void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
 
     setDocumentHidden(true);
-    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 1, jobs: true, uploads: false }));
 
     expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(false);
+  });
+
+  // The same guard covers upload history (issue #366): a parked tab must not
+  // pick up 4 refetches/minute for a view it likely doesn't even have open.
+  it('does not invalidate upload history on an invalidate event while the tab is hidden', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: queryKeys.uploadHistory })?.setState({ isInvalidated: false });
+
+    setDocumentHidden(true);
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 1, jobs: false, uploads: true }));
+
+    expect(queryClient.getQueryState(queryKeys.uploadHistory)?.isInvalidated).toBe(false);
   });
 
   // The other half of the same guard: a visible tab must still invalidate
@@ -706,7 +769,7 @@ describe('StreamProvider', () => {
     void queryClient.getQueryCache().find({ queryKey: pageKey })?.setState({ isInvalidated: false });
 
     setDocumentHidden(false);
-    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 1, jobs: true, uploads: false }));
 
     expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(true);
   });
