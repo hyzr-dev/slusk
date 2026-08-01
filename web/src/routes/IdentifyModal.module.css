@@ -36,6 +36,14 @@
 
 .spacer { flex: 1; }
 
+/* min-width/min-height give the button a 24x24 hit area for WCAG 2.5.8. The
+   glyph's size is unchanged, but as the last flex item its box grows
+   leftward, so it shifts a few px toward the panel's centre — expected, not
+   a bug. .caretButton in Jobs/Peers solves the same requirement with a
+   24x24 ::after overlay instead; that pattern exists there because those
+   buttons sit beside another hit target in a tight row, where growing the
+   real box would overlap it. Here the button is alone in the header with
+   .spacer absorbing the slack, so growing the real box is simpler. */
 .closeButton {
   background: transparent;
   border: none;
@@ -43,6 +51,11 @@
   font-size: 14px;
   cursor: pointer;
   padding: 2px 4px;
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .closeButton:hover { color: var(--fg); }
