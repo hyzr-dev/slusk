@@ -633,8 +633,17 @@ describe('lidarrAddAvailability', () => {
     expect(lidarrAddAvailability(true, { known: true, inLibrary: true }, { known: true, inLibrary: true })).toBe('inLibrary');
   });
 
-  it('is offerAdd when both lookups succeeded and the album is not in the library', () => {
+  it('is offerAdd only when the ARTIST is absent, since that is all the add creates', () => {
     expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: true, inLibrary: false })).toBe('offerAdd');
+  });
+
+  // Reported from the lab: right after adding an artist, re-opening Identify
+  // offered to add it again. EnsureArtist only ever creates an artist —
+  // Lidarr materialises the albums itself, asynchronously — so with the
+  // artist already present the button does nothing at all. Keying the
+  // decision on the album asked a question the add flow cannot answer.
+  it('is artistInLibrary, not offerAdd, when the artist is there but the album is not', () => {
+    expect(lidarrAddAvailability(true, { known: true, inLibrary: false }, { known: true, inLibrary: true })).toBe('artistInLibrary');
   });
 });
 
@@ -655,6 +664,31 @@ describe('IdentifyModal — Lidarr add-artist flow (#331)', () => {
   it('names only the album when the artist is already in Lidarr', async () => {
     await selectWithLidarrStatus({ known: true, inLibrary: false }, artistMatch({ inLibrary: true }));
     expect(screen.getByText(t.search.identify.lidarrAlbumMissing)).toBeInTheDocument();
+  });
+
+  // The render-level half of the artistInLibrary case: no add button at all,
+  // because EnsureArtist would find the artist already there and change
+  // nothing. Offering it invites the user to press a button that does not act.
+  it('offers no add path when the artist is already in Lidarr but the album is not', async () => {
+    const { onConfirm } = await selectWithLidarrStatus(
+      { known: true, inLibrary: false },
+      artistMatch({ inLibrary: true }),
+    );
+    expect(screen.queryByRole('button', { name: t.search.identify.addToLidarr })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: t.search.identify.downloadAnyway })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.search.identify.confirm })).toBeInTheDocument();
+    // And it still forwards the MBID: the album row can appear before the
+    // download finishes, which is when the import step resolves it.
+    fireEvent.click(screen.getByRole('button', { name: t.search.identify.confirm }));
+    expect(onConfirm).toHaveBeenCalledWith(expect.objectContaining({ albumMbid: 'al1' }));
+  });
+
+  // The copy must not promise an outcome the lookup cannot support: a user
+  // saw this line and the album imported anyway, because Lidarr filled in the
+  // discography while the download was still running.
+  it('does not claim the download will go unimported when only the album is missing', () => {
+    expect(t.search.identify.lidarrAlbumMissing).not.toMatch(/won't be imported/i);
+    expect(t.search.identify.lidarrArtistAndAlbumMissing).toMatch(/won't be imported/i);
   });
 
   it('hides the add path and shows the "no artist ID" explanation when the result has no artistId', async () => {

@@ -616,8 +616,8 @@ export const t = {
     identify: {
       // Trigger button in SearchResultCard's actions row. Deliberately does
       // not say "import" — the app can enqueue a download but can never
-      // promise Lidarr will pick it up (see lidarrUnknown/lidarrNotInLibrary
-      // below).
+      // promise Lidarr will pick it up (see lidarrUnknown and the two
+      // *Missing lines below).
       button: 'Identify & download',
       identified: '✓ Identified',
       // The dialog's own header label — deliberately its own entry rather
@@ -713,7 +713,16 @@ export const t = {
       // absent artist implies an absent album. These name which of the three
       // real situations holds, and each states the import consequence once.
       lidarrInLibrary: 'IN LIDARR LIBRARY — matched download will be imported',
-      lidarrAlbumMissing: "ALBUM NOT IN LIDARR — download won't be imported",
+      // Deliberately conditional, unlike the artist-and-album line below. When
+      // the artist IS in Lidarr, the album row can still appear on its own:
+      // Lidarr materialises a discography asynchronously, and the import step
+      // resolves the album when the download finishes, not now. A user hit
+      // exactly this — the modal said the album was missing and it imported
+      // anyway. Promising it "won't be imported" would be inventing a
+      // certainty the lookup cannot support.
+      lidarrAlbumMissing: 'ALBUM NOT IN LIDARR — imports only if Lidarr adds it in time',
+      // No such hedge here: with the artist absent too, nothing is going to
+      // create either of them between now and the end of the download.
       lidarrArtistAndAlbumMissing: "ARTIST & ALBUM NOT IN LIDARR — download won't be imported",
       lidarrUnknown: 'LIDARR STATUS UNKNOWN — service unreachable',
       back: '‹ Back',

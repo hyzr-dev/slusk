@@ -181,9 +181,27 @@ export function lidarrLine(
  *    already exists, so adding is not offered. Download-anyway only.
  *  - 'inLibrary': both are already known and the album is in the library —
  *    the brief is explicit that no extra question is asked here.
- *  - 'offerAdd': the only case where both paths are shown side by side.
+ *  - 'artistInLibrary': the artist is there but this album is not. Adding is
+ *    deliberately NOT offered, because the add flow only ever creates an
+ *    *artist* (app.LidarrLibrary.EnsureArtist) — Lidarr materialises the
+ *    albums itself, asynchronously, from that artist's discography. With the
+ *    artist already present the button would do nothing at all, which is
+ *    exactly what a user reported seeing right after adding one: the album
+ *    row had not appeared yet, so the old album-keyed rule offered to add an
+ *    artist that was already there. Download-only.
+ *  - 'offerAdd': the artist is genuinely absent, so there is something to
+ *    add. The only case where both paths are shown side by side.
+ *
+ * Note the ordering: the decision is keyed on the *artist*, because that is
+ * what the add actually creates. Keying it on the album asked a question the
+ * flow cannot answer.
  */
-export type LidarrAddAvailability = 'noArtistId' | 'unknown' | 'inLibrary' | 'offerAdd';
+export type LidarrAddAvailability =
+  | 'noArtistId'
+  | 'unknown'
+  | 'inLibrary'
+  | 'artistInLibrary'
+  | 'offerAdd';
 
 export function lidarrAddAvailability(
   hasArtistId: boolean,
@@ -193,6 +211,7 @@ export function lidarrAddAvailability(
   if (!hasArtistId) return 'noArtistId';
   if (!album?.known || !artist?.known) return 'unknown';
   if (album.inLibrary) return 'inLibrary';
+  if (artist.inLibrary) return 'artistInLibrary';
   return 'offerAdd';
 }
 
