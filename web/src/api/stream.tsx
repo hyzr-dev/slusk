@@ -378,19 +378,23 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       });
     });
 
-    // `event: invalidate` (issue #275): the backend's own fingerprint of the
-    // jobs table says GET /api/jobs would now answer differently for SOMEONE
-    // (not necessarily this connection), so refetch the PAGE queries. Scoped
-    // to `queryKeys.jobs` entries whose second key segment is 'page' —
-    // deliberately NOT a bare `invalidateQueries({ queryKey: queryKeys.jobs
-    // })`, which also prefixes jobDetail(id) = ['jobs', id, 'detail'] and
-    // jobEvents(id): forcing every mounted job-detail view to refetch on
-    // every page-level change would reintroduce the extra REST call issue
-    // #274 deliberately removed by setting useJobDetail's refetchInterval to
-    // false (the stream's own `detail` field already keeps it live). Also
-    // deliberately NOT queryKeys.charts (its own independent poll; this
-    // fingerprint says nothing about search passes) and NOT queryKeys.live
-    // (the stream's own cache, not a REST query).
+    // `event: invalidate` (issue #275, broadened by #366): the backend's own
+    // fingerprint says GET /api/jobs and/or GET /api/uploads/history would now
+    // answer differently for SOMEONE (not necessarily this connection), so
+    // refetch both. The jobs half is scoped to `queryKeys.jobs` entries whose
+    // second key segment is 'page' — deliberately NOT a bare
+    // `invalidateQueries({ queryKey: queryKeys.jobs })`, which also prefixes
+    // jobDetail(id) = ['jobs', id, 'detail'] and jobEvents(id): forcing every
+    // mounted job-detail view to refetch on every page-level change would
+    // reintroduce the extra REST call issue #274 deliberately removed by
+    // setting useJobDetail's refetchInterval to false (the stream's own
+    // `detail` field already keeps it live). Also deliberately NOT
+    // queryKeys.charts (its own independent poll; this fingerprint says
+    // nothing about search passes) and NOT queryKeys.live (the stream's own
+    // cache, not a REST query). queryKeys.uploadHistory needs no predicate —
+    // it is its own top-level key with no children (see its declaration
+    // comment in queries.ts), so invalidating it whole never risks over-
+    // reaching the way a bare queryKeys.jobs invalidation would.
     //
     // Skipped entirely while `document.hidden`: `invalidateQueries` refetches
     // an active query regardless of tab visibility, unlike `refetchInterval`
@@ -401,6 +405,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     // refetchOnWindowFocus (queries.ts) is the other half of this contract:
     // it's what makes returning to the tab refetch immediately rather than
     // waiting out JOBS_INTERVAL's safety-net floor for the skipped signal.
+    // The same guard applies to queryKeys.uploadHistory: there is no separate
+    // reasoning for the upload-history half to poll a backgrounded tab any
+    // more eagerly than the jobs half does.
     source.addEventListener('invalidate', () => {
       if (document.hidden) return;
       // The payload (internal/observ's invalidatePayload) carries only a
@@ -413,6 +420,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
         queryKey: queryKeys.jobs,
         predicate: (q) => q.queryKey[1] === 'page',
       });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.uploadHistory });
     });
 
     // `event: search` (issue #58): folds one manual search session's group

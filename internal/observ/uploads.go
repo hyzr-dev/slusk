@@ -103,6 +103,26 @@ const defaultUploadHistoryLimit = 50
 // after it is switched off.
 type UploadHistoryFunc func(ctx context.Context, limit int, beforeID int64) ([]core.UploadHistoryEntry, error)
 
+// UploadHistoryMarkFunc reports a cheap monotonic marker of the
+// upload_history table — its highest row id, or 0 when the table is empty.
+// GET /api/stream's hub folds it into the same fingerprint that drives
+// `event: invalidate` (issue #366, see internal/observ/stream.go's
+// invalidationFingerprint), so a finished upload reaches an open Shares view
+// without the client polling for it.
+//
+// Deliberately a pull, not a push from the upload sink: observ receives
+// every other input the same way (see stream.go's package comment), and the
+// one function this serves does not justify making it the first component
+// that can be told about a change rather than discovering one on its own
+// schedule. max(id) on a BIGINT identity primary key is an index scan (see
+// internal/store's UploadHistoryMaxID), so polling it on the existing
+// correlation tick is effectively free.
+//
+// Nil is a no-op — the marker contributes nothing to the fingerprint and a
+// finished upload simply never triggers an invalidation, which is the
+// pre-#366 behaviour.
+type UploadHistoryMarkFunc func(ctx context.Context) (int64, error)
+
 // uploadHistoryDTO is the JSON shape of one row in GET /api/uploads/history.
 //
 // Filename is the virtual share path and Detail a short fixed reason string,

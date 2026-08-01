@@ -651,6 +651,26 @@ describe('StreamProvider', () => {
     expect(queryClient.getQueryState(detailKey)?.isInvalidated).toBe(false);
   });
 
+  // internal/observ TestStreamHubUploadMarkAloneBumpsGeneration's client-side
+  // counterpart (issue #366): an invalidate event must also refetch the
+  // upload history, not just the jobs page.
+  it('refetches upload history on an invalidate event', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: queryKeys.uploadHistory })?.setState({ isInvalidated: false });
+
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+
+    expect(queryClient.getQueryState(queryKeys.uploadHistory)?.isInvalidated).toBe(true);
+  });
+
   // Helper to stub document.hidden for the visibility-gated invalidate tests
   // below. jsdom's `document.hidden` is a getter with no setter by default,
   // so it must be redefined via Object.defineProperty; configurable: true
@@ -687,6 +707,26 @@ describe('StreamProvider', () => {
     act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
 
     expect(queryClient.getQueryState(pageKey)?.isInvalidated).toBe(false);
+  });
+
+  // The same guard covers upload history (issue #366): a parked tab must not
+  // pick up 4 refetches/minute for a view it likely doesn't even have open.
+  it('does not invalidate upload history on an invalidate event while the tab is hidden', () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(queryKeys.uploadHistory, { pages: [{ uploads: [], hasMore: false }], pageParams: [0] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/']}>
+          <StreamProvider>{null}</StreamProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    void queryClient.getQueryCache().find({ queryKey: queryKeys.uploadHistory })?.setState({ isInvalidated: false });
+
+    setDocumentHidden(true);
+    act(() => MockEventSource.instances[0].emit('invalidate', { generation: 3 }));
+
+    expect(queryClient.getQueryState(queryKeys.uploadHistory)?.isInvalidated).toBe(false);
   });
 
   // The other half of the same guard: a visible tab must still invalidate

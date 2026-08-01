@@ -349,6 +349,18 @@ type jobsFingerprint struct {
 // also moves Retries and UpdatedAt), and CreatedAt/NextAttemptAt/NotBefore/
 // FailedAt/Year/Tracks/Format are display-only or move together with a field
 // already included.
+// invalidationFingerprint is the combined summary of everything that can
+// trigger `event: invalidate` (issue #275, broadened by #366): the jobs
+// table's page-membership-relevant fields (jobsFingerprint, see
+// computeJobsFingerprint) plus upload_history's cheap monotonic marker (see
+// UploadHistoryMarkFunc). A comparable value type, same as jobsFingerprint
+// alone used to be, so `!=` still detects a change in either half without
+// retaining any per-row state.
+type invalidationFingerprint struct {
+	jobs       jobsFingerprint
+	uploadMark int64
+}
+
 func computeJobsFingerprint(views []core.JobView) jobsFingerprint {
 	h := fnv.New64a()
 	var buf []byte
@@ -758,23 +770,30 @@ type streamHub struct {
 	// compared tick to tick, at file granularity, to trigger the
 	// event-driven refresh below.
 	matchedFiles map[liveMatchedFileKey]struct{}
-	// jobsFingerprint/hasFingerprint/jobsGeneration implement issue #275's
-	// page-invalidation signal. hasFingerprint distinguishes "never
-	// refreshed" from "refreshed to the zero-job fingerprint" so the very
-	// first refresh after process start never bumps jobsGeneration (belt and
+	// uploadHistoryMark reports upload_history's cheap monotonic marker (issue
+	// #366), folded into lastFingerprint below alongside the jobs table's own
+	// fingerprint — see invalidationFingerprint and UploadHistoryMarkFunc. Nil
+	// (the pre-#366 default) contributes nothing, and a finished upload never
+	// triggers an invalidation.
+	uploadHistoryMark UploadHistoryMarkFunc
+	// lastFingerprint/hasFingerprint/generation implement issue #275's
+	// page-invalidation signal, broadened by #366 to cover upload_history too
+	// — see invalidationFingerprint. hasFingerprint distinguishes "never
+	// refreshed" from "refreshed to the zero-value fingerprint" so the very
+	// first refresh after process start never bumps generation (belt and
 	// braces with subscribe's own lastSeenGeneration initialization below —
 	// keeping both makes the invariant local to refreshCorrelation instead of
-	// depending on call-site reasoning three functions away). jobsGeneration
-	// is a monotonic COUNTER, not a dirty flag: a subscriber's own
+	// depending on call-site reasoning three functions away). generation is a
+	// monotonic COUNTER, not a dirty flag: a subscriber's own
 	// lastSeenGeneration/lastInvalidateAt (see streamSubscriber) compares
-	// against it directly, which is what lets a generation bump that occurs
-	// inside a subscriber's throttle window still fire the moment the window
-	// elapses (see tick) — a dirty flag cleared by the first subscriber to
-	// see it would let a second subscriber, still inside ITS OWN window,
-	// silently miss the same change.
-	lastFingerprint jobsFingerprint
+	// against it directly, which is what lets a bump that occurs inside a
+	// subscriber's throttle window still fire the moment the window elapses
+	// (see tick) — a dirty flag cleared by the first subscriber to see it
+	// would let a second subscriber, still inside ITS OWN window, silently
+	// miss the same change.
+	lastFingerprint invalidationFingerprint
 	hasFingerprint  bool
-	jobsGeneration  uint64
+	generation      uint64
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -782,7 +801,7 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, searchDelta SearchDeltaFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, searchDelta SearchDeltaFunc, uploadHistoryMark UploadHistoryMarkFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
 	return &streamHub{
 		jobs:                jobs,
 		liveTransfers:       liveTransfers,
@@ -790,6 +809,7 @@ func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput Thr
 		transferBytes:       transferBytes,
 		jobDetail:           jobDetail,
 		searchDelta:         searchDelta,
+		uploadHistoryMark:   uploadHistoryMark,
 		failedRetryAfter:    failedRetryAfter,
 		maxCandidates:       maxCandidates,
 		tickInterval:        tickInterval,
@@ -976,6 +996,7 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	// silently losing it (finding C1).
 	previousBytes := h.bytesSnapshot()
 	previousDetails := h.detailsSnapshot()
+	previousMark := h.markSnapshot()
 	details := h.fetchDetails(ctx, detailIDs, previousDetails)
 	idx := newLiveTransferIndex(live)
 
@@ -1022,9 +1043,12 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	// #275): a failed h.jobs call already leaves this function's other
 	// caches untouched by that early return, and putting the fingerprint
 	// update in the same critical section gets the identical guarantee for
-	// free, with no new branch. Never compute this from a partial or
-	// fallback value.
-	fp := computeJobsFingerprint(views)
+	// free, with no new branch. The jobs half is never computed from a
+	// partial or fallback value; the upload half (issue #366) degrades to
+	// previousMark on a nil UploadHistoryMarkFunc or a failed call — see
+	// fetchUploadMark — rather than inventing a sentinel that would look
+	// like a change.
+	fp := invalidationFingerprint{jobs: computeJobsFingerprint(views), uploadMark: h.fetchUploadMark(ctx, previousMark)}
 
 	h.corrMu.Lock()
 	h.correlation = corr
@@ -1035,10 +1059,26 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	if !h.hasFingerprint {
 		h.hasFingerprint = true
 	} else if fp != h.lastFingerprint {
-		h.jobsGeneration++
+		h.generation++
 	}
 	h.lastFingerprint = fp
 	h.corrMu.Unlock()
+}
+
+// fetchUploadMark calls uploadHistoryMark best-effort (issue #366): a nil
+// func or a failed call both return previous unchanged rather than inventing
+// a sentinel that would look like a change — the upload half's counterpart
+// to "a failed h.jobs call leaves the caches untouched"
+// (TestStreamHubFailedJobsFetchLeavesGenerationUntouched).
+func (h *streamHub) fetchUploadMark(ctx context.Context, previous int64) int64 {
+	if h.uploadHistoryMark == nil {
+		return previous
+	}
+	mark, err := h.uploadHistoryMark(ctx)
+	if err != nil {
+		return previous
+	}
+	return mark
 }
 
 // detailsSnapshot returns the whole cached detail map. tick takes it once per
@@ -1078,6 +1118,17 @@ func (h *streamHub) bytesSnapshot() map[int64]map[string]int64 {
 	return h.bytesByCandidate
 }
 
+// markSnapshot returns the upload component of the last-committed
+// invalidation fingerprint (issue #366) — the same corrMu-guarded snapshot
+// pattern as bytesSnapshot/detailsSnapshot above, so refreshCorrelation can
+// fall back to it on a nil or failed UploadHistoryMarkFunc (see
+// fetchUploadMark) instead of losing the upload half of the fingerprint.
+func (h *streamHub) markSnapshot() int64 {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.lastFingerprint.uploadMark
+}
+
 // viewsSnapshot returns the whole cached viewByJob map (see streamHub's doc
 // comment) without copying — like detailsSnapshot, it's replaced wholesale
 // by refreshCorrelation and never mutated in place.
@@ -1087,13 +1138,14 @@ func (h *streamHub) viewsSnapshot() map[int64]core.JobView {
 	return h.viewByJob
 }
 
-// generationSnapshot returns the hub's current jobsGeneration (issue #275).
-// Read under corrMu, same lock as every other snapshot in this file, and
-// before h.mu is ever taken (see scopedJobIDs).
+// generationSnapshot returns the hub's current generation (issue #275,
+// broadened by #366 to also cover upload_history — see
+// invalidationFingerprint). Read under corrMu, same lock as every other
+// snapshot in this file, and before h.mu is ever taken (see scopedJobIDs).
 func (h *streamHub) generationSnapshot() uint64 {
 	h.corrMu.RLock()
 	defer h.corrMu.RUnlock()
-	return h.jobsGeneration
+	return h.generation
 }
 
 // matchedFilesSnapshot returns the cached live-matched-file set (see
@@ -1740,7 +1792,7 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 // tests can use short durations instead of the real cadences; NewServer's
 // call site passes the real constants.
 func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval, invalidateInterval time.Duration) {
-	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.SearchDelta, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.SearchDelta, deps.UploadHistoryMark, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {
