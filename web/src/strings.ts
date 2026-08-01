@@ -762,13 +762,6 @@ export const t = {
       noUsableProfiles: 'No quality or metadata profile is configured in Lidarr — check its settings there.',
       qualityProfileLabel: 'Quality profile',
       metadataProfileLabel: 'Metadata profile',
-      monitorLabel: 'Monitor',
-      monitorAlbum: 'Just this album',
-      monitorAll: 'Entire discography',
-      // Shown only when "Entire discography" is selected — a plain warning,
-      // not hidden in a tooltip, since it changes Lidarr's behaviour beyond
-      // this one release.
-      monitorAllWarning: 'Lidarr will begin searching for everything this artist has released.',
       addSubmit: 'Add to Lidarr & download',
       addCancel: 'Cancel',
       addSubmitting: 'adding to lidarr…',
@@ -782,24 +775,6 @@ export const t = {
       // it's offered as the next step rather than only "check Lidarr".
       addUncertain:
         'Could not confirm whether the artist was added to Lidarr — it may have succeeded. Check Lidarr, or try again; retrying is safe.',
-      // Per-albumMonitorState copy (see AddLidarrArtistResult). None of these
-      // are failures — the artist was created — so each states plainly what
-      // is and is not known, never inventing a cause it can't confirm.
-      albumMonitorNotVisibleYet: "Lidarr hadn't finished refreshing the artist yet, so this album isn't monitored.",
-      albumMonitorReverted: "Lidarr's own refresh reset the album's monitoring after the add — it didn't stick.",
-      albumMonitorUnknown: 'Could not confirm whether the album is now monitored. Check Lidarr directly.',
-      // Shown alongside an albumMonitorState line whenever the ARTIST itself
-      // isn't monitored — a separate fact from the album's own state (issue
-      // #331 review): this is the real state after a retry of an add that had
-      // silently landed, where Lidarr already knows the artist but never
-      // monitored it.
-      artistNotMonitored: 'The artist is in Lidarr but not monitored, so Lidarr will not act on this.',
-      // Trailing sentence for the partial-success notice, shared by every
-      // non-fully-monitored outcome (issue #331 review, requires an explicit
-      // Continue click rather than proceeding silently, so the user actually
-      // sees it before the modal closes).
-      addPartialProceeds: 'The download will proceed anyway.',
-      continue: 'Continue',
     },
   },
   chat: {

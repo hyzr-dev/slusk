@@ -593,9 +593,16 @@ func (c *Client) recheckArtistCreated(ctx context.Context, foreignArtistID strin
 // Verified by hand against Lidarr 3.1.0.4875
 // (.lidarr-endpoints-verified.md): addOptions.monitor is inert on this
 // version - "none", "all" and "latest" all produced 0 monitored albums, and
-// sending "monitored": true at create time does not survive either. Real
-// monitoring intent must be expressed afterward through SetArtistMonitored
-// and MonitorAlbums, never through this call's request body.
+// sending "monitored": true at create time does not survive either.
+//
+// That inertness no longer matters, because this request body is now the
+// whole monitoring story: app.LidarrLibrary adds the artist and then
+// monitors nothing at all. A monitored album with no files lands in Lidarr's
+// wanted/missing list, which pipeline.WantedSync polls, and it then creates
+// a second job racing the manual download for the same album into the same
+// folder - measured three seconds apart in the PR lab. Do not "fix" this by
+// applying monitoring after the create; see internal/app/lidarr_library.go's
+// package doc comment.
 //
 // On a transport error (including a timeout on addArtistHTTP), the create
 // may have landed anyway - see addArtistHTTP's doc comment - so AddArtist
@@ -672,6 +679,11 @@ func (c *Client) AddArtist(ctx context.Context, req core.AddArtistRequest) (core
 // body risks silently dropping fields Lidarr expects to see on update;
 // round-tripping avoids needing to know its full shape. Expects HTTP 202,
 // verified against Lidarr 3.1.0.4875 (.lidarr-endpoints-verified.md).
+//
+// Nothing in slskdarr calls this: the "add to Lidarr" flow monitors nothing
+// (see internal/app/lidarr_library.go's package doc comment). It stays
+// because internal/lidarr is a client library - removing a working wire
+// method is a separate decision from removing its one caller.
 func (c *Client) SetArtistMonitored(ctx context.Context, artistID int64, monitored bool) error {
 	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/artist/%d", c.baseURL, artistID), nil)
@@ -715,10 +727,11 @@ func (c *Client) SetArtistMonitored(ctx context.Context, artistID int64, monitor
 }
 
 // MonitorAlbums sets the monitored flag on a batch of album ids in one call
-// (issue #331) - the same call serves both "monitor just this album" and
-// "monitor the whole discography", the caller just passes a different slice.
-// Expects HTTP 202, verified against Lidarr 3.1.0.4875
+// (issue #331). Expects HTTP 202, verified against Lidarr 3.1.0.4875
 // (.lidarr-endpoints-verified.md).
+//
+// Nothing in slskdarr calls this - see SetArtistMonitored's doc comment for
+// why it stays anyway.
 func (c *Client) MonitorAlbums(ctx context.Context, albumIDs []int64, monitored bool) error {
 	body := map[string]any{"albumIds": albumIDs, "monitored": monitored}
 	b, err := json.Marshal(body)
@@ -776,10 +789,13 @@ func (c *Client) AlbumsByArtist(ctx context.Context, artistID int64) ([]core.Lid
 	return out, nil
 }
 
-// RunningCommands lists Lidarr's queued and in-flight commands (issue #331),
-// used to wait out the asynchronous RefreshArtist run that follows AddArtist
-// before applying monitoring - see app.LidarrLibrary.waitForIdle and
-// testenv/seed_lidarr.py's wait_for_idle, which this mirrors.
+// RunningCommands lists Lidarr's queued and in-flight commands (issue #331) -
+// the asynchronous RefreshArtist run that follows AddArtist shows up here, as
+// testenv/seed_lidarr.py's wait_for_idle relies on.
+//
+// Nothing in slskdarr calls this: the add flow no longer waits out that
+// refresh, because it no longer applies monitoring the refresh could revert.
+// See SetArtistMonitored's doc comment for why it stays anyway.
 func (c *Client) RunningCommands(ctx context.Context) ([]core.LidarrCommand, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/command", nil)
 	if err != nil {

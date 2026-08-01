@@ -9,11 +9,9 @@ import {
   useLidarrArtistStatus,
 } from '../api/queries';
 import type {
-  AddLidarrArtistResult,
   LidarrAddOptions,
   LidarrArtistMatch,
   LidarrMatch,
-  LidarrMonitorChoice,
   MusicBrainzEdition,
   MusicBrainzSearchResult,
 } from '../api/types';
@@ -237,22 +235,16 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
   // The "add to Lidarr" sub-flow (issue #331), only ever reachable from the
   // 'offerAdd' case of lidarrAddAvailability. 'closed' is the two-button
   // choice (addToLidarr vs downloadAnyway); 'open' is the root
-  // folder/profile/monitor form.
+  // folder/profile form. The add never monitors anything — see
+  // internal/app/lidarr_library.go — so the form has no monitoring choice and
+  // the 201 carries no monitoring facts to report.
   const [addFlow, setAddFlow] = useState<'closed' | 'open'>('closed');
   const [addOptions, setAddOptions] = useState<LidarrAddOptions | undefined>(undefined);
   const [addOptionsFailed, setAddOptionsFailed] = useState(false);
   const [rootFolderPath, setRootFolderPath] = useState<string | undefined>(undefined);
   const [qualityProfileId, setQualityProfileId] = useState<number | undefined>(undefined);
   const [metadataProfileId, setMetadataProfileId] = useState<number | undefined>(undefined);
-  const [monitorChoice, setMonitorChoice] = useState<LidarrMonitorChoice>('album');
   const [addSubmitError, setAddSubmitError] = useState<string | undefined>(undefined);
-  // Set once POST /api/lidarr/artists succeeds with something short of full
-  // monitoring (artistMonitored: false, or albumMonitorState other than
-  // 'monitored') — see addPartialNoteFor. None of these are a failure (see
-  // AddLidarrArtistResult's doc comment), so this is rendered as a one-line
-  // notice with its own Continue button rather than proceeding straight to
-  // onConfirm, so the user actually sees it before the modal closes.
-  const [addPartialNote, setAddPartialNote] = useState<string | undefined>(undefined);
 
   const identifySearch = useIdentifySearch();
   const identifyEditions = useIdentifyEditions();
@@ -388,12 +380,10 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     setRootFolderPath(undefined);
     setQualityProfileId(undefined);
     setMetadataProfileId(undefined);
-    setMonitorChoice('album');
     setAddSubmitError(undefined);
-    setAddPartialNote(undefined);
   }
 
-  // Opens the root-folder/profile/monitor form and loads its options on
+  // Opens the root-folder/profile form and loads its options on
   // first entry only — reopening after a Cancel reuses what's already
   // fetched rather than refetching.
   async function openAddFlow() {
@@ -431,50 +421,18 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
     setMetadataProfileId(metadata);
   }
 
-  // Composes the partial-success notice from the two independent facts a
-  // 201 can carry short of full success (review item 5/6): artistMonitored
-  // is a fact about the ARTIST, albumMonitorState about the specific album,
-  // and either can be the "off" one regardless of the other — a retry of an
-  // add that had silently landed can find the artist already unmonitored
-  // even though this album's own state resolves to 'monitored'.
-  function addPartialNoteFor(result: AddLidarrArtistResult): string {
-    const parts: string[] = [];
-    if (!result.artistMonitored) parts.push(t.search.identify.artistNotMonitored);
-    switch (result.albumMonitorState) {
-      case 'notVisibleYet':
-        parts.push(t.search.identify.albumMonitorNotVisibleYet);
-        break;
-      case 'reverted':
-        parts.push(t.search.identify.albumMonitorReverted);
-        break;
-      case 'unknown':
-        parts.push(t.search.identify.albumMonitorUnknown);
-        break;
-      case 'monitored':
-        break;
-    }
-    parts.push(t.search.identify.addPartialProceeds);
-    return parts.join(' ');
-  }
-
   async function submitAddArtist() {
     if (!selectedResult?.artistId || !rootFolderPath || !qualityProfileId || !metadataProfileId) return;
     setAddSubmitError(undefined);
     try {
-      const result = await addLidarrArtist.mutateAsync({
+      await addLidarrArtist.mutateAsync({
         artistMbid: selectedResult.artistId,
         artistName: canonicalArtistOf(selectedResult) ?? '',
-        albumMbid: selectedResult.id,
         rootFolderPath,
         qualityProfileId,
         metadataProfileId,
-        monitor: monitorChoice,
       });
-      if (result.artistMonitored && result.albumMonitorState === 'monitored') {
-        confirm();
-      } else {
-        setAddPartialNote(addPartialNoteFor(result));
-      }
+      confirm();
     } catch (err) {
       // A 502 { code: "addUncertain" } means the add may or may not have
       // happened server-side — a genuinely different fact from every other
@@ -745,7 +703,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                   artist and album lookups succeeded. Neither path is
                   demoted: "download anyway" renders as a real button, not a
                   footnote. */}
-              {availability === 'offerAdd' && addFlow === 'closed' && !addPartialNote && (
+              {availability === 'offerAdd' && addFlow === 'closed' && (
                 <div className={styles.actions}>
                   <Button variant="ghost" onClick={() => setState('suggestions')}>{t.search.identify.back}</Button>
                   <span className={styles.spacer} />
@@ -761,7 +719,7 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                 </div>
               )}
 
-              {availability === 'offerAdd' && addFlow === 'open' && !addPartialNote && (
+              {availability === 'offerAdd' && addFlow === 'open' && (
                 <div className={styles.addForm}>
                   {!addOptions && !addOptionsFailed && (
                     <div className={styles.centered}>
@@ -835,33 +793,6 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                         <div className={styles['tone-bad']}>{t.search.identify.noUsableProfiles}</div>
                       )}
 
-                      <div className={styles.field}>
-                        <span className={styles.fieldLabel} id="identify-monitor-label">{t.search.identify.monitorLabel}</span>
-                        <div role="radiogroup" aria-labelledby="identify-monitor-label">
-                          <label className={styles.radioRow}>
-                            <input
-                              type="radio"
-                              name="lidarr-monitor"
-                              checked={monitorChoice === 'album'}
-                              onChange={() => setMonitorChoice('album')}
-                            />
-                            {t.search.identify.monitorAlbum}
-                          </label>
-                          <label className={styles.radioRow}>
-                            <input
-                              type="radio"
-                              name="lidarr-monitor"
-                              checked={monitorChoice === 'all'}
-                              onChange={() => setMonitorChoice('all')}
-                            />
-                            {t.search.identify.monitorAll}
-                          </label>
-                        </div>
-                        {monitorChoice === 'all' && (
-                          <div className={styles['tone-dim']}>{t.search.identify.monitorAllWarning}</div>
-                        )}
-                      </div>
-
                       {addSubmitError && <div className={styles['tone-bad']}>{addSubmitError}</div>}
 
                       <div className={styles.actions}>
@@ -878,18 +809,6 @@ export default function IdentifyModal({ group, onClose, onConfirm }: Props) {
                     </>
                   )}
                 </div>
-              )}
-
-              {addPartialNote && (
-                <>
-                  <div className={styles.statusLines}>
-                    <div className={styles['tone-dim']}>{addPartialNote}</div>
-                  </div>
-                  <div className={styles.actions}>
-                    <span className={styles.spacer} />
-                    <Button variant="primary" onClick={() => confirm()}>{t.search.identify.continue}</Button>
-                  </div>
-                </>
               )}
 
               {availability !== 'offerAdd' && (

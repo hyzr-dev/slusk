@@ -346,16 +346,35 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// Completeness is judged against the smallest valid edition
 	// (MinTrackCount, cached by Discovery from Lidarr's release list): with
 	// release switching enabled, a candidate matching any real edition is a
-	// full album. Fall back to the live canonical total only when the band was
-	// never cached (0) — e.g. a job searched before the band existed.
+	// full album. When the band was never cached (0) — every manual job, since
+	// only Discovery caches it, plus any job searched before the band existed
+	// — read the release list live rather than asking AlbumStatus.
+	//
+	// AlbumStatus is the wrong question here twice over. It reports the
+	// *currently selected* release's track count, so a legitimate download of
+	// one edition is measured against a different one: a real manual job was
+	// rejected "covered 10/21" for a ten-track album whose selected release
+	// was the twenty-one-track 2xCD, and Lidarr then never got to switch
+	// release, because switching happens during the import this gate refused
+	// to start. And it reports 0 for an unmonitored album with no files yet,
+	// which would turn the gate into a no-op instead of a stricter check.
+	// The release list answers both correctly and is unaffected by monitoring.
 	minRequired := job.MinTrackCount
 	if minRequired == 0 {
-		_, total, err := m.p.Music.AlbumStatus(ctx, job.LidarrAlbumID)
+		releases, err := m.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
 		if err != nil {
-			m.log().Error("album status failed", "album_job", job.ID, "err", err)
-			return m.escalateIfStuck(ctx, job, cand, names, "album status check failed", now)
+			m.log().Error("album releases lookup failed", "album_job", job.ID, "err", err)
+			return m.escalateIfStuck(ctx, job, cand, names, "album releases lookup failed", now)
 		}
-		minRequired = total
+		minRequired, _ = trackBand(releases)
+		if minRequired == 0 {
+			// No release carries a usable track count, so there is no
+			// expectation to measure against. Say so rather than letting a
+			// gate that could not be evaluated read as a gate that passed;
+			// Lidarr still has the final word on the import itself.
+			m.log().Warn("no usable track count on any release, skipping the coverage gate",
+				"album_job", job.ID, "releases", len(releases))
+		}
 	}
 	if coverage(importable) < minRequired {
 		// A source that can't complete any valid edition is rejected outright
@@ -526,7 +545,16 @@ func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Ca
 		}
 		return nil
 	}
-	if present >= total {
+	// total > 0 for the same reason albumAlreadyComplete requires it, and it
+	// is not hypothetical: Lidarr reports statistics.trackCount as 0 for an
+	// album that is unmonitored and has no files yet, which is precisely the
+	// state a manual job's album sits in between submitting the import and
+	// Lidarr finishing it. Without this guard that reads as 0 >= 0, and the
+	// job would announce "import confirmed, completed (0/0 present)", mark
+	// itself DONE and delete the download folder having imported nothing.
+	// A total that stays 0 is not success, it is an answer we do not have
+	// yet — let ImportConfirmTimeout below decide when to give up.
+	if total > 0 && present >= total {
 		confirmedDetail := fmt.Sprintf("import confirmed, completed (%d/%d present)", present, total)
 		m.log().Info(confirmedDetail, "album_job", job.ID)
 		m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, confirmedDetail, now)

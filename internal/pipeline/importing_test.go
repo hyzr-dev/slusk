@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -156,7 +157,9 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
 		},
-		albumTotal: 2, // only 1 track ID covered, out of 2 in the release
+		// The coverage gate reads the release list, not AlbumStatus: only 1
+		// track ID is covered, out of the 2 on the smallest valid edition.
+		albumReleases: []core.AlbumRelease{{TrackCount: 2}},
 	}
 	peers := &fakeSearcher{}
 	p, st := newImportingParams(t, music, peers)
@@ -185,6 +188,64 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 	}
 }
 
+// TestImportingCoverageUsesReleaseBandNotSelectedRelease reproduces a real lab
+// failure: Leprous' "Melodies of Atonement" was downloaded as the ten-track
+// edition, Lidarr's selected release was the twenty-one-track 2xCD, and the
+// gate rejected it "covered 10/21". The download was a complete, valid
+// edition; measuring it against a different one was the bug.
+//
+// It is also self-defeating. Lidarr switches release during import when the
+// files match another edition better (slskdarr sends
+// disableReleaseSwitching:false, and the lab confirmed Lidarr swapped 21→10 on
+// its own once it saw these files) — but that happens during the import this
+// gate refused to start, so the gate guaranteed the outcome it was measuring.
+//
+// AlbumStatus is deliberately given the misleading answer here: the test
+// passes only if the gate never asks it.
+func TestImportingCoverageUsesReleaseBandNotSelectedRelease(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	items := make([]core.ImportItem, 0, 10)
+	files := make([]core.CandidateFile, 0, 10)
+	for i := 1; i <= 10; i++ {
+		items = append(items, core.ImportItem{
+			ID: int64(i), Path: fmt.Sprintf("/music/complete/A/%02d.mp3", i),
+			Importable: true, TrackIDs: []int64{int64(100 + i)},
+		})
+		files = append(files, core.CandidateFile{Filename: fmt.Sprintf(`A\%02d.mp3`, i), Size: 10})
+	}
+	music := &fakeMusic{
+		manualImportItems: items,
+		// The selected release, as AlbumStatus would report it. Using this as
+		// the requirement is what produced "covered 10/21".
+		albumTotal: 21,
+		// Lidarr's real release list for this album, measured in the lab.
+		albumReleases: []core.AlbumRelease{
+			{TrackCount: 10}, {TrackCount: 10}, {TrackCount: 11},
+			{TrackCount: 10}, {TrackCount: 21},
+		},
+		albumByForeignID:      core.LidarrAlbum{ID: 900, ArtistID: 7},
+		albumByForeignIDFound: true,
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	const mbid = "cc85e277-7bbc-4da5-9ee9-b0b4d40f025d"
+	jobID, _ := seedImportingManualJob(t, st, "bob", mbid, files, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(music.executedItems) != 10 {
+		ev := lastJobEvent(t, st, jobID)
+		t.Fatalf("expected all 10 files imported against the smallest valid edition, got %d executed; last event: %s / %s",
+			len(music.executedItems), ev.Event, ev.Detail)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("nothing was rejected, so no folder should have been cleaned: %+v", peers.deletedFolders)
+	}
+}
+
 // TestImportingIncompleteCoverageKeepsManualJobFiles is the same rejection as
 // the test above, on a manual job (issue #59) — and the folder must survive it.
 //
@@ -202,7 +263,8 @@ func TestImportingIncompleteCoverageKeepsManualJobFiles(t *testing.T) {
 		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
 		},
-		albumTotal:            2, // the user took 1 track of a 2-track release
+		// Smallest valid edition is 2 tracks; the user took 1 of them.
+		albumReleases:         []core.AlbumRelease{{TrackCount: 2}},
 		albumByForeignID:      core.LidarrAlbum{ID: 900, ArtistID: 7},
 		albumByForeignIDFound: true,
 	}
@@ -607,6 +669,48 @@ func TestImportingHappyPathSubmitsThenConfirmsToDone(t *testing.T) {
 	assertCandidateNoLongerActive(t, st, jobID)
 	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventAttemptSucceeded {
 		t.Errorf("last event after tick 2 = %v, want %v", ev.Event, core.EventAttemptSucceeded)
+	}
+}
+
+// TestImportingConfirmTreatsZeroTotalAsUnknownNotComplete: Lidarr reports
+// statistics.trackCount as 0 for an album that is unmonitored and has no files
+// yet (measured in the lab), which is exactly the state a manual job's album
+// sits in between submitting the import and Lidarr finishing it. An unguarded
+// `present >= total` reads that as 0 >= 0 and announces success.
+//
+// The failure this prevents is the worst shape available: the job would log
+// "import confirmed, completed (0/0 present)", mark itself DONE, and delete
+// the download folder — reporting an import that never happened and destroying
+// the evidence. A total of 0 is an answer we do not have yet, not a complete
+// album; the confirm timeout is what decides when to give up.
+func TestImportingConfirmTreatsZeroTotalAsUnknownNotComplete(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{albumTotal: 0, albumPresent: 0}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, candID := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+	if err := st.MarkImportSubmitted(ctx, candID, now); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now.Add(time.Second)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateImporting {
+		t.Fatalf("job state = %v, want still IMPORTING — 0/0 is not a confirmed import", got)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("nothing was confirmed, so no folder should have been cleaned: %+v", peers.deletedFolders)
+	}
+
+	// And it must not wait forever either: the existing timeout still applies.
+	if err := m.Tick(ctx, now.Add(p.ImportConfirmTimeout+time.Second)); err != nil {
+		t.Fatalf("Tick past timeout: %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("job state = %v, want SELECTING — an import that never confirms must still time out", got)
 	}
 }
 

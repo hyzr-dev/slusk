@@ -536,7 +536,7 @@ func main() {
 	}
 	lidarrArtistStatusFn := observ.LidarrArtistStatusFunc(lidarrLibrary.ArtistStatus)
 	lidarrAddOptionsFn := observ.LidarrAddOptionsFunc(lidarrLibrary.AddOptions)
-	lidarrAddArtistFn := observ.LidarrAddArtistFunc(lidarrLibrary.AddArtistAndMonitor)
+	lidarrAddArtistFn := observ.LidarrAddArtistFunc(lidarrLibrary.EnsureArtist)
 	if soulClient != nil {
 		sharesFn = func() observ.ShareStatsReport {
 			report := soulClient.ShareReport()

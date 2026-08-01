@@ -913,40 +913,26 @@ export interface LidarrAddOptions {
   metadataProfiles: LidarrProfile[];
 }
 
-/** POST /api/lidarr/artists' `monitor` field — "album" for just the release that prompted the add, "all" for the whole discography. */
-export type LidarrMonitorChoice = 'album' | 'all';
-
-/** POST /api/lidarr/artists request body — internal/observ/lidarr.go addArtistRequest. */
+/**
+ * POST /api/lidarr/artists request body — internal/observ/lidarr.go
+ * addArtistRequest. It carries no album id and no monitoring choice: the add
+ * only ensures the artist exists in the library, unmonitored. Monitoring an
+ * album with no files puts it in Lidarr's wanted/missing list, which the
+ * backend's own WantedSync polls, producing a duplicate job racing the manual
+ * download — see internal/app/lidarr_library.go.
+ */
 export interface AddLidarrArtistRequest {
   artistMbid: string;
   artistName: string;
-  albumMbid: string;
   rootFolderPath: string;
   qualityProfileId: number;
   metadataProfileId: number;
-  monitor: LidarrMonitorChoice;
 }
 
 /**
- * `albumMonitorState` values for AddLidarrArtistResult, in the order
- * IdentifyModal treats them as increasingly uncertain:
- *  - 'monitored': the album is confirmed monitored — the ordinary case.
- *  - 'notVisibleYet': the artist was created but Lidarr had not finished
- *    refreshing it yet, so the album could not be monitored.
- *  - 'reverted': the album was monitored immediately after the add, but
- *    Lidarr's own refresh then reset it — it did not stick.
- *  - 'unknown': the monitoring state could not be confirmed at all. This is
- *    NOT a failure and must never be rendered as one — see IdentifyModal's
- *    copy for this case.
- */
-export type LidarrAlbumMonitorState = 'monitored' | 'notVisibleYet' | 'reverted' | 'unknown';
-
-/**
  * POST /api/lidarr/artists' 201 response — internal/observ/lidarr.go
- * addArtistResultDTO. Neither `artistMonitored: false` nor any
- * `albumMonitorState` other than 'monitored' is a failure — the artist (and
- * usually the album) were still created; see IdentifyModal's per-state copy
- * for what each combination means to the user.
+ * addArtistResultDTO. `alreadyInLibrary` means the artist was already there
+ * and was reused untouched, not that anything failed.
  *
  * A 502 response to this same endpoint, with `{"code": "addUncertain"}` in
  * its ApiErrorBody, is a different case again: the add may or may not have
@@ -956,9 +942,6 @@ export type LidarrAlbumMonitorState = 'monitored' | 'notVisibleYet' | 'reverted'
 export interface AddLidarrArtistResult {
   artistId: number;
   alreadyInLibrary: boolean;
-  /** Whether the artist is monitored in Lidarr now. */
-  artistMonitored: boolean;
-  albumMonitorState: LidarrAlbumMonitorState;
 }
 
 /**
