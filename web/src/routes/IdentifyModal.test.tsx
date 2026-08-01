@@ -155,6 +155,17 @@ describe('parseFolderGuess', () => {
     });
   });
 
+  // #355 follow-up: path.Dir of a slashless path returns "." (not ""), which
+  // is what the server sends when a peer shares the release folder at the
+  // top of their share with no artist directory above it. "." is just as
+  // useless an artist guess as the year it would replace.
+  it('keeps the year as artist when the peer shares the album at the share root (parent ".")', () => {
+    expect(parseFolderGuess(group({ title: '1984 - Ride The Lightning', parent: '.' }))).toEqual({
+      artist: '1984',
+      album: 'Ride The Lightning',
+    });
+  });
+
   it('uses the parent even when it looks unhelpful, same as the no-separator case', () => {
     expect(parseFolderGuess(group({ title: '1984 - Ride The Lightning', parent: 'Soulseek - Share' }))).toEqual({
       artist: 'Soulseek - Share',

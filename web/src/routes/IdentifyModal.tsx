@@ -48,7 +48,13 @@ const YEAR_RE = /^\d{4}$/;
  * ("Soulseek - Share"); it is still no worse a guess than a year, and it is
  * only ever a prefilled, editable, explicitly-labelled-GUESSED value. If
  * there is no parent to fall back on, the year is kept rather than left
- * blank — still editable, still labelled, and no worse than before.
+ * blank — still editable, still labelled, and no worse than before. A
+ * `parent` of "." also counts as "no parent": the server derives it as
+ * `path.Base(path.Dir(dir))` (internal/app/search.go), and Go's `path.Dir`
+ * returns "." rather than "" for a slashless path — the case where the
+ * peer shares the release folder at the top level of their share, with no
+ * artist directory above it. Using "." as the artist would be strictly
+ * worse than keeping the year.
  */
 export function parseFolderGuess(group: SearchGroup): { artist: string; album: string } {
   let stripped = group.title.trim();
@@ -61,7 +67,9 @@ export function parseFolderGuess(group: SearchGroup): { artist: string; album: s
   if (dashIdx > 0) {
     const candidateArtist = stripped.slice(0, dashIdx).trim();
     const album = stripped.slice(dashIdx + 3).trim();
-    if (YEAR_RE.test(candidateArtist) && group.parent.trim()) {
+    const parent = group.parent.trim();
+    const hasUsableParent = parent !== '' && parent !== '.';
+    if (YEAR_RE.test(candidateArtist) && hasUsableParent) {
       return { artist: group.parent, album };
     }
     return { artist: candidateArtist, album };
