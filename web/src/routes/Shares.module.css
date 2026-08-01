@@ -269,7 +269,17 @@
 
 .historyExpansionRows { display: flex; flex-direction: column; gap: 3px; }
 .historyExpansionRow { display: flex; gap: 10px; }
-.historyExpansionKey { color: var(--text-dim); width: 64px; letter-spacing: 0.4px; }
+/* flex-shrink: 0 with a min-width rather than a fixed width: the labels are
+   translatable prose and the longest one ("transferred") already overruns
+   64px, which silently ran the label into its value — the key kept its box
+   and the text spilled out of it. A floor keeps the values aligned in the
+   common case without letting a longer word collide. */
+.historyExpansionKey {
+  color: var(--text-dim);
+  min-width: 64px;
+  flex: 0 0 auto;
+  letter-spacing: 0.4px;
+}
 .historyExpansionValue { color: var(--dim); }
 
 /* Diagnostics, not content: one step below the expansion's other rows and
