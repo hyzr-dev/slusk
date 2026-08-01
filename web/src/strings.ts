@@ -501,7 +501,14 @@ export const t = {
     historyHideDetails: 'Hide details',
     // Expansion labels (issue #371): size and finished-at move off the row
     // and behind the caret, alongside the existing detail line.
-    historySizeLabel: 'size',
+    //
+    // historySizeLabel says "transferred", not "size" (issue #366/#371
+    // review, FIX 6): the value behind it is `transferred(entry)`, which on
+    // an aborted row is sent-of-total, not the file's size — "size" reads as
+    // a claim about the whole file even though the row visibly stopped
+    // partway through. Matches JobExpansion's own transferredLabel for the
+    // same field on the download side.
+    historySizeLabel: 'transferred',
     historyFinishedLabel: 'finished',
   },
   // Manual Soulseek search (issue #58). See docs/design/

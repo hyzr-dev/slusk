@@ -52,8 +52,12 @@ function renderHistory(client: QueryClient) {
 // Finds the caret toggle button for a row by its accessible name — both the
 // "show" and "hide" labels are valid names depending on expanded state, so
 // this tries both rather than hardcoding one.
+//
+// Selects by class, not role: UploadHistory.tsx deliberately carries no
+// role="row"/"cell" (issue #366/#371 review, FIX 5) — this is a flex-wrap
+// list with no column geometry to describe, unlike Jobs.tsx's grid.
 function caretFor(filename: string): HTMLElement {
-  const row = screen.getByText(filename).closest('[role="row"]');
+  const row = screen.getByText(filename).closest('[class*="historyRow"]');
   if (!row) throw new Error(`no row found for ${filename}`);
   return within(row as HTMLElement).getByRole('button');
 }

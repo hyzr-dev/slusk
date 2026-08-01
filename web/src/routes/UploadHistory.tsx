@@ -13,12 +13,6 @@ import styles from './Shares.module.css';
 
 const DASH = '—';
 
-// The row's own cell count (state tag, filename+caret, peer, speed), for the
-// expansion's single-cell aria-colspan — mirrors Jobs.tsx's JobExpansion
-// wrapper, see JobRowImpl's comment on why a row with a single cell in an
-// N-column table has to say so.
-const HISTORY_COLUMNS = 4;
-
 // Only one hue in the whole list, and it is on the rows worth noticing.
 // 'completed' is the overwhelming majority — painting it --ok would make the
 // panel a wall of green and cost the hue exactly the scarcity that makes it
@@ -62,25 +56,30 @@ interface HistoryRowProps {
 // speed stay on the row — the fields worth scanning a long list for — while
 // size, finished-at and the failure detail move behind the caret, following
 // Jobs.tsx's JobRowImpl expansion idiom.
+//
+// No role="table"/"row"/"cell" here (issue #366/#371 review, FIX 5) — unlike
+// Jobs.tsx's grid, this list has no column geometry to describe: it is a
+// flex-wrap line whose fields break onto a second line at narrow widths, it
+// has no header row (Jobs.tsx pairs its grid roles with a row of
+// role="columnheader"s; this list never did), and origin/main never had
+// table roles here either. Plain markup with no implicit ARIA role is the
+// correct read for a list whose rows cannot stay column-aligned once they
+// wrap.
 function HistoryRow({ entry, expanded, onToggle }: HistoryRowProps) {
   const expansionId = `upload-history-expansion-${entry.id}`;
   return (
     <Fragment>
       <div
-        role="row"
         className={`${styles.historyRow} ${expanded ? styles.historyRowExpanded : ''}`}
         onClick={() => onToggle(entry.id)}
       >
         <div className={styles.historyLine}>
-          <div role="cell" className={styles.historyHead}>
+          <div className={styles.historyHead}>
             <span className={`${tagStyles.tag} ${TONE[entry.status]}`}>{t.uploads.historyStatus[entry.status]}</span>
             {/* The 24x24 hit area (Jobs.module.css's .caretButton, #222) is
                 centred on the glyph and out of flow, so the row keeps its
-                height and the filename keeps its position. This button sits
-                inside a role="cell" wrapper — see JobRowImpl's .albumCell
-                comment for why that wrapper, not the button, becomes the grid
-                item, and verify the hit target in a browser; jsdom cannot
-                fail on it. */}
+                height and the filename keeps its position. Verify the hit
+                target in a browser; jsdom cannot fail on it. */}
             <button
               type="button"
               className={styles.historyCaretButton}
@@ -98,10 +97,10 @@ function HistoryRow({ entry, expanded, onToggle }: HistoryRowProps) {
             </button>
             <span className={styles.uploadFile} title={entry.filename}>{formatVirtualPath(entry.filename)}</span>
           </div>
-          <span role="cell" className={styles.historyPeer}>
+          <span className={styles.historyPeer}>
             {t.uploads.toPeerPrefix} <span className={styles.mono}>{entry.username}</span>
           </span>
-          <span role="cell" className={styles.historySpeed}>
+          <span className={styles.historySpeed}>
             {/* formatSpeed already answers '—' for 0, which is what a
                 rejected row's avgBytesPerSecond is; no guard needed here. */}
             {formatSpeed(entry.avgBytesPerSecond)}
@@ -109,10 +108,8 @@ function HistoryRow({ entry, expanded, onToggle }: HistoryRowProps) {
         </div>
       </div>
       {expanded && (
-        <div id={expansionId} role="row" className={styles.historyExpansionWrap}>
-          {/* One cell spanning every column on the row above — an expansion
-              is a row in the table, not a sibling of it. */}
-          <div role="cell" aria-colspan={HISTORY_COLUMNS} className={styles.historyExpansionBody}>
+        <div id={expansionId} className={styles.historyExpansionWrap}>
+          <div className={styles.historyExpansionBody}>
             <div className={styles.historyExpansionRows}>
               <div className={styles.historyExpansionRow}>
                 <span className={styles.historyExpansionKey}>{t.uploads.historySizeLabel}</span>
@@ -150,7 +147,7 @@ export default function UploadHistory() {
       <QueryNotice phase={phase} />
       {hasData(phase) && entries.length === 0 && <EmptyState message={t.uploads.historyEmpty} />}
       {hasData(phase) && entries.length > 0 && (
-        <div role="table">
+        <div>
           {entries.map((e) => (
             <HistoryRow key={e.id} entry={e} expanded={expandedId === e.id} onToggle={toggleExpanded} />
           ))}

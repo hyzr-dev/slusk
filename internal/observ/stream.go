@@ -6,12 +6,14 @@
 // (recent directional throughput samples, sent only to a subscriber that
 // opted in with ?throughput=1 — issue #265), `event: search` (group deltas
 // for one manual search session, sent only to a subscriber that opted in with
-// ?search=<id> — issue #58), and `event: invalidate` (a bare monotonic
-// generation number telling every subscriber that GET /api/jobs would now
-// return different pages/facets/sort order for SOMEONE, not necessarily this
-// connection — issue #275). `event: invalidate` carries NO page data of its
-// own: the chain still begins with a GET, same as #161 established: the
-// stream tells a subscriber WHEN to refetch, never WHAT to render. Splitting
+// ?search=<id> — issue #58), and `event: invalidate` (a monotonic generation
+// number plus two flags telling every subscriber that GET /api/jobs and/or
+// GET /api/uploads/history would now answer differently for SOMEONE, not
+// necessarily this connection — issue #275, broadened to upload_history by
+// #366 and split into independent per-endpoint flags by #371). `event:
+// invalidate` carries NO page data of its own: the chain still begins with a
+// GET, same as #161 established: the stream tells a subscriber WHEN to
+// refetch (and now which of two REST resources), never WHAT to render. Splitting
 // these onto separate events, rather than folding throughput's series, a
 // search's groups or the invalidation signal into every `live` frame, is what
 // lets a subscriber with no sparkline or search view on screen (Jobs,
@@ -114,15 +116,22 @@ const streamHeartbeatInterval = 15 * time.Second
 
 // streamInvalidateInterval is the minimum gap between two `event: invalidate`
 // frames on one connection (issue #275). Deliberately equal to the original
-// /api/jobs poll cadence it replaces, so a foreground tab can never receive
-// more invalidations than the polling it removes would have cost requests —
-// the win is that an idle system now fires ZERO invalidations instead of one
-// poll every 15s. That ceiling argument covers a foreground tab; a
-// backgrounded one is handled separately (web/src/api/stream.tsx's
-// `invalidate` listener skips refetching entirely while `document.hidden`,
-// since `invalidateQueries` — unlike `refetchInterval` — ignores tab
-// visibility and would otherwise turn a previously request-free idle
-// background tab into one costing up to 4 requests/minute).
+// /api/jobs poll cadence it replaces, so on the jobs half a foreground tab
+// can never receive more invalidations than the polling it removes would
+// have cost requests — the win is that an idle system now fires ZERO
+// invalidations instead of one poll every 15s. That ceiling argument holds
+// exactly for the jobs half, which did replace a 15s poll; it does NOT hold
+// for the upload-history half added by #366 — useUploadHistory (queries.ts)
+// never polled at all, so for that half this signal is pure addition, not a
+// replacement, and #371 split Jobs/Uploads into independent flags on
+// invalidatePayload specifically so a jobs-only bump no longer forces a
+// refetch of upload history's infinite query on every page a user has
+// scrolled through (see invalidatePayload's doc comment). A backgrounded tab
+// is handled separately either way (web/src/api/stream.tsx's `invalidate`
+// listener skips refetching entirely while `document.hidden`, since
+// `invalidateQueries` — unlike `refetchInterval` — ignores tab visibility
+// and would otherwise turn a previously request-free idle background tab
+// into one costing requests).
 const streamInvalidateInterval = 15 * time.Second
 
 // streamFetchTimeout bounds each tick's calls into deps.LiveTransfers,
@@ -192,17 +201,34 @@ type throughputPayload struct {
 }
 
 // invalidatePayload is the JSON body of every `event: invalidate` SSE frame
-// (issue #275). Unlike livePayload/throughputPayload it carries no page data
-// at all — the client's only correct reaction is to refetch GET /api/jobs
-// itself (see web/src/api/stream.tsx), so the chain still begins with a GET,
-// exactly as #161 established. Generation is included rather than sending an
-// empty frame because writeEvent has no empty-body mode (an "empty" event
-// would marshal as `data: null`, reading as a bug in a network log), and
-// because a strictly-increasing number is what lets a test prove
-// generation-counter semantics — a second invalidation carrying a higher
-// Generation than the first — rather than merely observing two frames exist.
+// (issue #275, broadened by #366/#371). It still carries no PAGE data — the
+// client's only correct reaction to a flag being set is to refetch the REST
+// endpoint that flag names (see web/src/api/stream.tsx), so the chain still
+// begins with a GET, exactly as #161 established. Generation is included
+// rather than sending an empty frame because writeEvent has no empty-body
+// mode (an "empty" event would marshal as `data: null`, reading as a bug in
+// a network log), and because a strictly-increasing number is what lets a
+// test prove generation-counter semantics — a second invalidation carrying a
+// higher Generation than the first — rather than merely observing two frames
+// exist. It is the SUM of jobsGeneration and uploadsGeneration at send time
+// (see streamHub), so it stays informational/monotonic-ish for a log or a
+// test without being the thing either side actually branches on.
+//
+// Jobs and Uploads are what the client actually reads (issue #371 review):
+// which of GET /api/jobs and GET /api/uploads/history would now answer
+// differently for SOMEONE, not necessarily this connection. Neither is
+// omitempty — false is exactly as meaningful as true here (a subscriber
+// whose jobs-table half never moved must NOT refetch it just because its
+// upload-history half did), so the key must always be present rather than
+// vanishing on the zero value, same reasoning as Generation's own
+// not-omitempty (see TestStreamHubNoInvalidateOnFirstRefresh and its upload
+// counterpart). At least one of the two is always true whenever a frame is
+// sent at all — tick only calls sendLatestInvalidate when jobsChanged ||
+// uploadsChanged — so a client is never left to interpret "both false".
 type invalidatePayload struct {
 	Generation uint64 `json:"generation"`
+	Jobs       bool   `json:"jobs"`
+	Uploads    bool   `json:"uploads"`
 }
 
 // searchPayload is the JSON body of every `event: search` SSE frame (issue
@@ -288,10 +314,12 @@ func projectJobCorrelation(views []core.JobView) []jobCorrelation {
 // table's page-membership-relevant fields (issue #275), used by
 // refreshCorrelation to notice when GET /api/jobs would return different
 // pages/facets/sort order for ANY subscriber, without keeping any per-job
-// state around to compare against — the fingerprint itself is the only
-// retained state, at a fixed 16 bytes (int + uint64, no padding) regardless
-// of job count. That is the direct answer to jobCorrelation's stated
-// constraint (#161 review,
+// state around to compare against — jobsFingerprint's own footprint is a
+// fixed 16 bytes (int + uint64, no padding) regardless of job count, and
+// stays that shape however much else the hub retains alongside it (the
+// upload marker, the two generation counters — see invalidationFingerprint
+// and streamHub's jobsGeneration/uploadsGeneration fields). That is the
+// direct answer to jobCorrelation's stated constraint (#161 review,
 // #258, #268) about not retaining per-job state for the process lifetime.
 //
 // count is carried independently of sum so a shrinking set is caught even
@@ -302,6 +330,23 @@ func projectJobCorrelation(views []core.JobView) []jobCorrelation {
 type jobsFingerprint struct {
 	count int
 	sum   uint64 // wrapping sum of per-job fnv64a hashes
+}
+
+// invalidationFingerprint is the combined summary of everything that can
+// trigger `event: invalidate` (issue #275, broadened by #366): the jobs
+// table's page-membership-relevant fields (jobsFingerprint, see
+// computeJobsFingerprint) plus upload_history's cheap monotonic marker (see
+// UploadHistoryMarkFunc). refreshCorrelation compares each half
+// INDEPENDENTLY against the previous fingerprint (see jobsGeneration/
+// uploadsGeneration on streamHub below) — a jobs-only change must bump only
+// jobsGeneration, never uploadsGeneration, or a subscriber with nothing but
+// Shares' upload-history view open would refetch on every jobs-table change
+// (issue #371 review). This type exists only to carry both halves through
+// refreshCorrelation's single critical section together; nothing compares an
+// invalidationFingerprint value as a whole any more.
+type invalidationFingerprint struct {
+	jobs       jobsFingerprint
+	uploadMark int64
 }
 
 // computeJobsFingerprint hashes the fields of each core.JobView that can move
@@ -349,18 +394,6 @@ type jobsFingerprint struct {
 // also moves Retries and UpdatedAt), and CreatedAt/NextAttemptAt/NotBefore/
 // FailedAt/Year/Tracks/Format are display-only or move together with a field
 // already included.
-// invalidationFingerprint is the combined summary of everything that can
-// trigger `event: invalidate` (issue #275, broadened by #366): the jobs
-// table's page-membership-relevant fields (jobsFingerprint, see
-// computeJobsFingerprint) plus upload_history's cheap monotonic marker (see
-// UploadHistoryMarkFunc). A comparable value type, same as jobsFingerprint
-// alone used to be, so `!=` still detects a change in either half without
-// retaining any per-row state.
-type invalidationFingerprint struct {
-	jobs       jobsFingerprint
-	uploadMark int64
-}
-
 func computeJobsFingerprint(views []core.JobView) jobsFingerprint {
 	h := fnv.New64a()
 	var buf []byte
@@ -672,19 +705,35 @@ type streamSubscriber struct {
 	// them.
 	lastDownloadThroughputAt time.Time
 	lastUploadThroughputAt   time.Time
-	// lastSeenGeneration/lastInvalidateAt are the throttle state issue #275's
-	// decision 3 requires: lastSeenGeneration alone would let a bump at t+1s
-	// fire immediately; lastInvalidateAt alone would let a stale generation
-	// fire at t+invalidateInterval for a change this subscriber's own connect
-	// GET already saw. Both are needed together — see subscribe's and tick's
-	// doc comments for how each is set. lastSeenGeneration only advances on
-	// an actual send (not merely on observing a bump), which is exactly why
-	// an unsent bump inside the throttle window is never lost: the condition
-	// in tick stays true until the window elapses, then fires immediately —
-	// the behavior decision 3 rejected a dirty flag in favor of a counter to
-	// get.
-	lastSeenGeneration uint64
-	lastInvalidateAt   time.Time
+	// lastSeenJobsGeneration/lastSeenUploadsGeneration/lastInvalidateAt are
+	// the throttle state issue #275's decision 3 requires, broadened by #366/
+	// #371 to two independent counters instead of one: a lastSeen* alone
+	// would let a bump at t+1s fire immediately; lastInvalidateAt alone would
+	// let a stale generation fire at t+invalidateInterval for a change this
+	// subscriber's own connect GET already saw. All three are needed
+	// together — see subscribe's and tick's doc comments for how each is
+	// set. Splitting lastSeenGeneration into a jobs half and an uploads half,
+	// rather than keeping one shared counter, is what lets tick tell a
+	// jobs-only change from an uploads-only one and set only the matching
+	// flag on invalidatePayload (issue #371 review: folding both into one
+	// counter meant ANY jobs-table change also invalidated
+	// queryKeys.uploadHistory, defeating that query's own deliberately-no-
+	// refetchInterval design — see useUploadHistory's doc comment). The
+	// throttle window itself (lastInvalidateAt) stays shared: it bounds how
+	// often THIS CONNECTION emits a frame at all, not which half caused it.
+	//
+	// Each lastSeen* only advances on an actual send (not merely on
+	// observing a bump), which is exactly why an unsent bump inside the
+	// throttle window is never lost: the condition in tick stays true until
+	// the window elapses, then fires immediately — the behavior decision 3
+	// rejected a dirty flag in favor of a counter to get. That holds
+	// independently for each half: a jobs bump and an uploads bump that both
+	// land inside the same throttle window are each still reported (their
+	// own flag true) on the single frame the window's elapse produces,
+	// rather than only the half that happened to bump last.
+	lastSeenJobsGeneration    uint64
+	lastSeenUploadsGeneration uint64
+	lastInvalidateAt          time.Time
 	// searchID is the ?search=<id> scope (empty for none — issue #58).
 	// Never mutated after subscribe(), like jobID/jobIDs above.
 	searchID string
@@ -776,24 +825,40 @@ type streamHub struct {
 	// (the pre-#366 default) contributes nothing, and a finished upload never
 	// triggers an invalidation.
 	uploadHistoryMark UploadHistoryMarkFunc
-	// lastFingerprint/hasFingerprint/generation implement issue #275's
-	// page-invalidation signal, broadened by #366 to cover upload_history too
-	// — see invalidationFingerprint. hasFingerprint distinguishes "never
-	// refreshed" from "refreshed to the zero-value fingerprint" so the very
-	// first refresh after process start never bumps generation (belt and
-	// braces with subscribe's own lastSeenGeneration initialization below —
+	// lastFingerprint/hasFingerprint/jobsGeneration/uploadsGeneration
+	// implement issue #275's page-invalidation signal, broadened by #366 to
+	// cover upload_history too (see invalidationFingerprint) and by #371 to
+	// track the two halves as INDEPENDENT counters rather than one shared
+	// one. hasFingerprint distinguishes "never refreshed" from "refreshed to
+	// the zero-value fingerprint" so the very first refresh after process
+	// start never bumps either counter (belt and braces with subscribe's own
+	// lastSeenJobsGeneration/lastSeenUploadsGeneration initialization below —
 	// keeping both makes the invariant local to refreshCorrelation instead of
-	// depending on call-site reasoning three functions away). generation is a
-	// monotonic COUNTER, not a dirty flag: a subscriber's own
-	// lastSeenGeneration/lastInvalidateAt (see streamSubscriber) compares
-	// against it directly, which is what lets a bump that occurs inside a
-	// subscriber's throttle window still fire the moment the window elapses
-	// (see tick) — a dirty flag cleared by the first subscriber to see it
-	// would let a second subscriber, still inside ITS OWN window, silently
-	// miss the same change.
-	lastFingerprint invalidationFingerprint
-	hasFingerprint  bool
-	generation      uint64
+	// depending on call-site reasoning three functions away).
+	//
+	// jobsGeneration bumps only when fp.jobs differs from the previous
+	// fingerprint's jobs half; uploadsGeneration bumps only when fp.uploadMark
+	// differs, independently — never both incrementing off a single "the
+	// combined fingerprint changed" test, which was the pre-#371 design and
+	// is exactly the bug this split fixes: a subscriber watching only
+	// upload history was invalidated by every unrelated jobs-table change,
+	// because the two halves shared one counter with no way to tell a
+	// caller which half actually moved.
+	//
+	// Each is a monotonic COUNTER, not a dirty flag: a subscriber's own
+	// lastSeenJobsGeneration/lastSeenUploadsGeneration/lastInvalidateAt (see
+	// streamSubscriber) compares against them directly, which is what lets a
+	// bump that occurs inside a subscriber's throttle window still fire the
+	// moment the window elapses (see tick) — a dirty flag cleared by the
+	// first subscriber to see it would let a second subscriber, still
+	// inside ITS OWN window, silently miss the same change. Do not collapse
+	// these back into a single tick-to-tick "what changed this tick" flag;
+	// that reintroduces the exact bug #275 decision 3 rejected a dirty flag
+	// to avoid, just scoped per-half instead of globally.
+	lastFingerprint   invalidationFingerprint
+	hasFingerprint    bool
+	jobsGeneration    uint64
+	uploadsGeneration uint64
 
 	mu     sync.Mutex
 	subs   map[uint64]*streamSubscriber
@@ -1056,10 +1121,21 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	h.detailByJob = details
 	h.viewByJob = viewByJob
 	h.matchedFiles = liveMatchedFileSet(corr, idx)
+	// Each half is compared, and bumped, INDEPENDENTLY of the other (issue
+	// #371) — never `if fp != h.lastFingerprint { bump both }`, which is
+	// the single-counter design that let an upload-only change invalidate
+	// every jobs-table subscriber and vice versa. See jobsGeneration/
+	// uploadsGeneration's doc comment above for why this must stay two
+	// separate comparisons rather than being "simplified" back to one.
 	if !h.hasFingerprint {
 		h.hasFingerprint = true
-	} else if fp != h.lastFingerprint {
-		h.generation++
+	} else {
+		if fp.jobs != h.lastFingerprint.jobs {
+			h.jobsGeneration++
+		}
+		if fp.uploadMark != h.lastFingerprint.uploadMark {
+			h.uploadsGeneration++
+		}
 	}
 	h.lastFingerprint = fp
 	h.corrMu.Unlock()
@@ -1138,14 +1214,23 @@ func (h *streamHub) viewsSnapshot() map[int64]core.JobView {
 	return h.viewByJob
 }
 
-// generationSnapshot returns the hub's current generation (issue #275,
-// broadened by #366 to also cover upload_history — see
-// invalidationFingerprint). Read under corrMu, same lock as every other
-// snapshot in this file, and before h.mu is ever taken (see scopedJobIDs).
-func (h *streamHub) generationSnapshot() uint64 {
+// jobsGenerationSnapshot returns the hub's current jobs-table generation
+// (issue #275). Read under corrMu, same lock as every other snapshot in this
+// file, and before h.mu is ever taken (see scopedJobIDs).
+func (h *streamHub) jobsGenerationSnapshot() uint64 {
 	h.corrMu.RLock()
 	defer h.corrMu.RUnlock()
-	return h.generation
+	return h.jobsGeneration
+}
+
+// uploadsGenerationSnapshot is jobsGenerationSnapshot's sibling for
+// upload_history's half of the invalidation signal (issue #366, split from
+// jobsGeneration by #371 — see jobsGeneration/uploadsGeneration's doc
+// comment on streamHub for why the two must stay independent).
+func (h *streamHub) uploadsGenerationSnapshot() uint64 {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.uploadsGeneration
 }
 
 // matchedFilesSnapshot returns the cached live-matched-file set (see
@@ -1232,15 +1317,17 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 		lastInvalidateAt: now,
 		// Read AFTER refreshCorrelation above, so a generation bump that
 		// happened as part of THIS subscriber's own synchronous refresh is
-		// already reflected and never fires a redundant invalidation later.
+		// already reflected and never fires a redundant invalidation later —
+		// for BOTH halves independently (issue #371).
 		//
 		// Known benign race: a correlationTick on the shared broadcaster
-		// goroutine can bump the generation between this read and this
+		// goroutine can bump either generation between this read and this
 		// subscriber's registration under h.mu below, so the new subscriber
 		// may still get one invalidation at t+invalidateInterval for a
 		// change its own connect GET already covered. One extra refetch,
 		// bounded by the throttle — not worth widening a lock to close.
-		lastSeenGeneration: h.generationSnapshot(),
+		lastSeenJobsGeneration:    h.jobsGenerationSnapshot(),
+		lastSeenUploadsGeneration: h.uploadsGenerationSnapshot(),
 	}
 	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 
@@ -1379,8 +1466,10 @@ func (h *streamHub) tick(ctx context.Context) {
 	// tick must never acquire corrMu while holding h.mu (see scopedJobIDs).
 	details := h.detailsSnapshot()
 	// Snapshotted alongside the others, under the same corrMu-before-h.mu
-	// ordering (issue #275).
-	gen := h.generationSnapshot()
+	// ordering (issue #275), as two independent values (issue #371 — see
+	// jobsGeneration/uploadsGeneration's doc comment on streamHub).
+	jobsGen := h.jobsGenerationSnapshot()
+	uploadsGen := h.uploadsGenerationSnapshot()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1408,24 +1497,42 @@ func (h *streamHub) tick(ctx context.Context) {
 			sendLatest(sub.ch, payload)
 		}
 
-		// `event: invalidate` (issue #275) — deliberately BEFORE the
-		// wantThroughput guard below: that guard only exists to skip building
-		// the throughput event for a subscriber that never asked for it, and
-		// putting this block after it would mean every non-Overview
-		// subscriber (every wantThroughput=false connection) silently never
-		// gets an invalidation at all.
+		// `event: invalidate` (issue #275, split into two independent
+		// counters by #371) — deliberately BEFORE the wantThroughput guard
+		// below: that guard only exists to skip building the throughput
+		// event for a subscriber that never asked for it, and putting this
+		// block after it would mean every non-Overview subscriber (every
+		// wantThroughput=false connection) silently never gets an
+		// invalidation at all.
 		//
-		// `!=` rather than `>`: the hub's generation only ever increases, so
-		// this is the same test without depending on that invariant holding
-		// forever. lastSeenGeneration advances only on an actual send below,
-		// never merely on observing a bump, which is exactly why a
-		// generation bump inside this subscriber's throttle window is never
-		// lost (issue #275 decision 3, rejecting a dirty flag): the
-		// condition here stays true across ticks until the window elapses,
-		// then fires on the very next tick.
-		if gen != sub.lastSeenGeneration && now.Sub(sub.lastInvalidateAt) >= h.invalidateInterval {
-			sendLatestInvalidate(sub.invalidateCh, invalidatePayload{Generation: gen})
-			sub.lastSeenGeneration = gen
+		// `!=` rather than `>` for each half: the hub's generations only
+		// ever increase, so this is the same test without depending on that
+		// invariant holding forever. Each lastSeen* advances only on an
+		// actual send below, never merely on observing a bump, which is
+		// exactly why a generation bump inside this subscriber's throttle
+		// window is never lost (issue #275 decision 3, rejecting a dirty
+		// flag): the condition here stays true across ticks until the
+		// window elapses, then fires on the very next tick — independently
+		// for each half, so a jobs bump and an uploads bump landing in the
+		// same window are both still reported, not just whichever bumped
+		// last (see TestStreamHubBothGenerationBumpsInsideThrottleWindowAreNotLost).
+		//
+		// jobsChanged/uploadsChanged, not the fact that SOME generation
+		// moved, is what decides Jobs/Uploads on the payload below — this is
+		// the fix for the #371 review finding: folding both halves into one
+		// counter made every jobs-table change also invalidate
+		// queryKeys.uploadHistory client-side (see invalidatePayload's doc
+		// comment and web/src/api/stream.tsx's `invalidate` listener).
+		jobsChanged := jobsGen != sub.lastSeenJobsGeneration
+		uploadsChanged := uploadsGen != sub.lastSeenUploadsGeneration
+		if (jobsChanged || uploadsChanged) && now.Sub(sub.lastInvalidateAt) >= h.invalidateInterval {
+			sendLatestInvalidate(sub.invalidateCh, invalidatePayload{
+				Generation: jobsGen + uploadsGen,
+				Jobs:       jobsChanged,
+				Uploads:    uploadsChanged,
+			})
+			sub.lastSeenJobsGeneration = jobsGen
+			sub.lastSeenUploadsGeneration = uploadsGen
 			sub.lastInvalidateAt = now
 		}
 

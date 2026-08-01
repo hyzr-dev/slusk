@@ -9,6 +9,7 @@ import { useLocation } from 'react-router-dom';
 import { mergeThroughputSamples, queryKeys, replaceSearchGroups } from './queries';
 import type {
   ChartsReport,
+  InvalidatePayload,
   LivePayload,
   ScopedLivePayload,
   SearchPayload,
@@ -193,16 +194,19 @@ export function useSearchStream(id: string | undefined): void {
  * `live`, needs no read-time pick between a REST value and a streamed one.
  *
  * The last named event on this connection — see internal/observ/stream.go's
- * package comment — is `event: invalidate` (issue #275), which is not a
- * fifth scope axis alongside the four above: it carries no page data at all
- * and every connection receives it, unconditionally, regardless of which of
- * the other four scopes (if any) it was opened with. It exists so a
- * Jobs/Overview-style page can stop
- * polling GET /api/jobs on a fixed timer and instead refetch only when the
- * backend's own fingerprint of the jobs table says something worth
- * refetching happened — see the `invalidate` listener below and
- * JOBS_INTERVAL's doc comment in queries.ts for why the poll survives
- * anyway, as a safety net rather than the primary freshness mechanism.
+ * package comment — is `event: invalidate` (issue #275, broadened to
+ * upload_history by #366), which is not a fifth scope axis alongside the
+ * four above: it carries no page data at all and every connection receives
+ * it, unconditionally, regardless of which of the other four scopes (if
+ * any) it was opened with. It exists so a Jobs/Overview-style page can stop
+ * polling GET /api/jobs on a fixed timer, and Shares' upload-history view
+ * can skip polling entirely, refetching only when the backend's own
+ * fingerprint says something worth refetching happened — INDEPENDENTLY per
+ * resource (issue #371's `jobs`/`uploads` flags — see the `invalidate`
+ * listener below for why folding both into one undifferentiated signal was
+ * a bug, not a simplification) — see JOBS_INTERVAL's doc comment in
+ * queries.ts for why the jobs poll survives anyway, as a safety net rather
+ * than the primary freshness mechanism.
  */
 export function StreamProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -378,11 +382,14 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       });
     });
 
-    // `event: invalidate` (issue #275, broadened by #366): the backend's own
-    // fingerprint says GET /api/jobs and/or GET /api/uploads/history would now
-    // answer differently for SOMEONE (not necessarily this connection), so
-    // refetch both. The jobs half is scoped to `queryKeys.jobs` entries whose
-    // second key segment is 'page' — deliberately NOT a bare
+    // `event: invalidate` (issue #275, broadened by #366, split into
+    // independent per-endpoint flags by #371): the backend's own fingerprint
+    // says GET /api/jobs and/or GET /api/uploads/history would now answer
+    // differently for SOMEONE (not necessarily this connection). Which one
+    // (or both) is exactly what the payload's `jobs`/`uploads` flags say —
+    // see below for why this must read them rather than refetching both
+    // unconditionally. The jobs half is scoped to `queryKeys.jobs` entries
+    // whose second key segment is 'page' — deliberately NOT a bare
     // `invalidateQueries({ queryKey: queryKeys.jobs })`, which also prefixes
     // jobDetail(id) = ['jobs', id, 'detail'] and jobEvents(id): forcing every
     // mounted job-detail view to refetch on every page-level change would
@@ -408,19 +415,29 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     // The same guard applies to queryKeys.uploadHistory: there is no separate
     // reasoning for the upload-history half to poll a backgrounded tab any
     // more eagerly than the jobs half does.
-    source.addEventListener('invalidate', () => {
+    source.addEventListener('invalidate', (event) => {
       if (document.hidden) return;
-      // The payload (internal/observ's invalidatePayload) carries only a
-      // generation number, useful in a test to distinguish two invalidations
-      // — nothing here reads it, so there is no corresponding frontend type
-      // (see the Go wire test plus stream.test.tsx's literal
-      // `{ generation: 3 }` for what pins the contract instead). Any receipt
-      // of this event means "refetch", full stop.
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.jobs,
-        predicate: (q) => q.queryKey[1] === 'page',
-      });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.uploadHistory });
+      // Read the flags rather than treating "any receipt of this event"
+      // as "refetch everything" (issue #371 review): the backend folded
+      // jobs-table and upload-history changes into a single generation
+      // counter until #371, which meant ANY jobs-table change also
+      // invalidated queryKeys.uploadHistory — an infinite query that
+      // TanStack refetches for EVERY loaded page on invalidation, so a user
+      // paged deep into Shares' upload history re-issued that many requests
+      // every ~15s on a busy system, directly contradicting
+      // useUploadHistory's own "deliberately no refetchInterval" design
+      // (see its doc comment in queries.ts). Each flag now maps to exactly
+      // the REST resource it names, and only that one is refetched.
+      const payload = JSON.parse((event as MessageEvent<string>).data) as InvalidatePayload;
+      if (payload.jobs) {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.jobs,
+          predicate: (q) => q.queryKey[1] === 'page',
+        });
+      }
+      if (payload.uploads) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.uploadHistory });
+      }
     });
 
     // `event: search` (issue #58): folds one manual search session's group

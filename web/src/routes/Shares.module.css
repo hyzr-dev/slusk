@@ -238,12 +238,23 @@
 
 .historyCaret { color: var(--text-dim); font-size: 9px; }
 
+/* flex: 0 0 auto sizes each to its content at ordinary widths, same as
+   before, but WITHOUT white-space: nowrap (issue #366/#371 review, FIX 6):
+   a Soulseek username has no length limit slskdarr controls, and nowrap on a
+   flex item with no min-width:0 lets it overflow past the row's edge rather
+   than wrap — exactly the #215 "clipped content is unreachable" failure
+   .historyLine's own flex-wrap already exists to avoid one level up.
+   overflow-wrap:anywhere breaks a single unbroken long token (a username
+   with no spaces) rather than leaving it to overflow untouched the way
+   normal word-wrapping would. */
 .historyPeer, .historySpeed {
   flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
   font-size: 10.5px;
   color: var(--text-dim);
   letter-spacing: 0.3px;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .historyExpansionWrap { border-bottom: 1px solid var(--line-inner); }

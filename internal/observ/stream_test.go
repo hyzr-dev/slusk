@@ -529,18 +529,21 @@ func TestThroughputPayloadExactBidirectionalJSON(t *testing.T) {
 }
 
 // TestInvalidatePayloadExactBidirectionalJSON pins the wire shape of
-// `event: invalidate` (issue #275), matching the convention of
+// `event: invalidate` (issue #275, broadened to `jobs`/`uploads` flags by
+// #371), matching the convention of
 // TestLivePayloadExactBidirectionalJSON/TestThroughputPayloadExactBidirectionalJSON:
-// the field is `generation`, and it is NOT omitempty — a generation of 0 is
-// meaningful (see TestStreamHubNoInvalidateOnFirstRefresh), so the key must
-// always be present rather than vanishing on the zero value.
+// none of the three fields is omitempty — a generation of 0 is meaningful
+// (see TestStreamHubNoInvalidateOnFirstRefresh), and `jobs`/`uploads` being
+// false is exactly as meaningful as true (see invalidatePayload's doc
+// comment) — so every key must always be present rather than vanishing on
+// its zero value.
 func TestInvalidatePayloadExactBidirectionalJSON(t *testing.T) {
-	payload := invalidatePayload{Generation: 3}
+	payload := invalidatePayload{Generation: 3, Jobs: true, Uploads: false}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	want := `{"generation":3}`
+	want := `{"generation":3,"jobs":true,"uploads":false}`
 	if string(body) != want {
 		t.Errorf("invalidate JSON = %s\nwant           = %s", body, want)
 	}
@@ -978,18 +981,18 @@ func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
 		t.Fatalf("first refresh must not invalidate, got %+v", got)
 	default:
 	}
-	if hub.generationSnapshot() != 0 {
-		t.Fatalf("jobsGeneration = %d, want 0 after only the first refresh", hub.generationSnapshot())
+	if hub.jobsGenerationSnapshot() != 0 {
+		t.Fatalf("jobsGeneration = %d, want 0 after only the first refresh", hub.jobsGenerationSnapshot())
 	}
 }
 
 // TestStreamHubFreshSubscriberGetsNoImmediateInvalidate proves subscribe's
 // two initial values together (issue #275, decision 3): lastInvalidateAt =
 // now, so the client's own onopen refetch isn't immediately followed by a
-// redundant server-sent one, AND lastSeenGeneration = h.generationSnapshot()
-// (read AFTER subscribe's own synchronous refresh), so a subscriber that
-// connects when jobsGeneration is already > 0 doesn't treat that pre-existing
-// generation as unseen.
+// redundant server-sent one, AND lastSeenJobsGeneration =
+// h.jobsGenerationSnapshot() (read AFTER subscribe's own synchronous
+// refresh), so a subscriber that connects when jobsGeneration is already > 0
+// doesn't treat that pre-existing generation as unseen.
 //
 // An interval of time.Hour (the original version of this test) makes the
 // throttle condition (`now.Sub(lastInvalidateAt) >= invalidateInterval`)
@@ -997,7 +1000,7 @@ func TestStreamHubNoInvalidateOnFirstRefresh(t *testing.T) {
 // not actually fail under either mutation it claimed to guard: this uses a
 // short interval and ticks past it with the generation already primed to a
 // nonzero value BEFORE subscribing, so only a correctly-initialized
-// lastSeenGeneration keeps the subscriber silent once the window elapses.
+// lastSeenJobsGeneration keeps the subscriber silent once the window elapses.
 func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 	jobsFn, setTitle, _ := newInvalidateFixture()
 	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, nil, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 30*time.Millisecond)
@@ -1008,8 +1011,8 @@ func TestStreamHubFreshSubscriberGetsNoImmediateInvalidate(t *testing.T) {
 	hub.correlationTick(context.Background())
 	setTitle("B")
 	hub.correlationTick(context.Background())
-	if hub.generationSnapshot() != 1 {
-		t.Fatalf("jobsGeneration = %d, want 1 before subscribing", hub.generationSnapshot())
+	if hub.jobsGenerationSnapshot() != 1 {
+		t.Fatalf("jobsGeneration = %d, want 1 before subscribing", hub.jobsGenerationSnapshot())
 	}
 
 	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
@@ -1073,8 +1076,8 @@ func TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost(t *testing.T) {
 	hub.correlationTick(context.Background())
 	setTitle("C")
 	hub.correlationTick(context.Background())
-	if hub.generationSnapshot() != 2 {
-		t.Fatalf("jobsGeneration = %d, want 2 after two distinct changes", hub.generationSnapshot())
+	if hub.jobsGenerationSnapshot() != 2 {
+		t.Fatalf("jobsGeneration = %d, want 2 after two distinct changes", hub.jobsGenerationSnapshot())
 	}
 
 	hub.tick(context.Background())
@@ -1096,6 +1099,62 @@ func TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost(t *testing.T) {
 	}
 }
 
+// TestStreamHubBothGenerationBumpsInsideThrottleWindowAreNotLost is
+// TestStreamHubGenerationBumpInsideThrottleWindowIsNotLost's #371 sibling:
+// a jobs bump and an uploads bump landing in the same subscriber's throttle
+// window must BOTH still be reported once the window elapses, not just
+// whichever one happened to be the latest to move its own counter. This is
+// the direct test that jobsChanged/uploadsChanged in tick are each computed
+// against this subscriber's OWN lastSeen* watermark (set once, at send
+// time), not against "what moved on this particular tick" — the same
+// dirty-flag trap issue #275 decision 3 already rejected for the single-
+// counter design, reintroduced per-half if tick instead diffed tick-to-tick.
+func TestStreamHubBothGenerationBumpsInsideThrottleWindowAreNotLost(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	markFn, setMark, _ := newUploadMarkFixture(1)
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, markFn, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, 50*time.Millisecond)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
+	defer hub.unsubscribe(id)
+
+	// The jobs bump lands first, well inside the throttle window...
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("must not invalidate before the throttle window elapses, got %+v", got)
+	default:
+	}
+
+	// ...and the uploads bump lands second, also still inside the window.
+	setMark(2)
+	hub.correlationTick(context.Background())
+	if hub.jobsGenerationSnapshot() != 1 || hub.uploadsGenerationSnapshot() != 1 {
+		t.Fatalf("jobsGeneration=%d uploadsGeneration=%d, want 1 and 1 after one change each",
+			hub.jobsGenerationSnapshot(), hub.uploadsGenerationSnapshot())
+	}
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		t.Fatalf("must not invalidate before the throttle window elapses, got %+v", got)
+	default:
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		if !got.Jobs {
+			t.Error("Jobs = false, want true: the jobs bump inside the window must not be lost")
+		}
+		if !got.Uploads {
+			t.Error("Uploads = false, want true: the uploads bump inside the window must not be lost")
+		}
+	default:
+		t.Fatal("must invalidate exactly once carrying both flags")
+	}
+}
+
 // TestStreamHubFailedJobsFetchLeavesGenerationUntouched proves
 // refreshCorrelation's existing early return on a failed h.jobs call also
 // protects the fingerprint/generation state (issue #275): a transient
@@ -1108,8 +1167,8 @@ func TestStreamHubFailedJobsFetchLeavesGenerationUntouched(t *testing.T) {
 
 	setErr(fmt.Errorf("boom"))
 	hub.correlationTick(context.Background())
-	if hub.generationSnapshot() != 0 {
-		t.Fatalf("jobsGeneration = %d, want 0 after a failed fetch", hub.generationSnapshot())
+	if hub.jobsGenerationSnapshot() != 0 {
+		t.Fatalf("jobsGeneration = %d, want 0 after a failed fetch", hub.jobsGenerationSnapshot())
 	}
 
 	hub.tick(context.Background())
@@ -1162,8 +1221,8 @@ func TestStreamHubUploadMarkAloneBumpsGeneration(t *testing.T) {
 
 	setMark(2)
 	hub.correlationTick(context.Background())
-	if hub.generationSnapshot() != 1 {
-		t.Fatalf("generation = %d, want 1 after the upload marker alone changed", hub.generationSnapshot())
+	if hub.uploadsGenerationSnapshot() != 1 {
+		t.Fatalf("uploadsGeneration = %d, want 1 after the upload marker alone changed", hub.uploadsGenerationSnapshot())
 	}
 
 	time.Sleep(2 * time.Millisecond)
@@ -1173,8 +1232,58 @@ func TestStreamHubUploadMarkAloneBumpsGeneration(t *testing.T) {
 		if got.Generation != 1 {
 			t.Errorf("Generation = %d, want 1", got.Generation)
 		}
+		// The #371 fix's whole point: an upload-only change must set Uploads
+		// and leave Jobs false, so a client scoped only to the jobs page
+		// (queryKeys.jobs, predicate q.queryKey[1]==='page') never refetches
+		// off this frame.
+		if got.Jobs {
+			t.Error("Jobs = true, want false: nothing about the jobs table changed")
+		}
+		if !got.Uploads {
+			t.Error("Uploads = false, want true: the upload marker changed")
+		}
 	default:
 		t.Fatal("a changed upload marker alone must produce an invalidate frame")
+	}
+}
+
+// TestStreamHubJobsOnlyChangeLeavesUploadsFlagFalse is
+// TestStreamHubUploadMarkAloneBumpsGeneration's mirror image (issue #371
+// review): a jobs-only change, with a real (unchanged) upload marker wired
+// in, must set Jobs and leave Uploads false — the direct regression test for
+// the defect this fix exists to close: folding both halves into one
+// generation counter meant ANY jobs-table change also invalidated
+// useUploadHistory's infinite query, re-fetching every page a user had
+// scrolled through in Shares on a busy system (see invalidatePayload's doc
+// comment and useUploadHistory's doc comment in web/src/api/queries.ts).
+func TestStreamHubJobsOnlyChangeLeavesUploadsFlagFalse(t *testing.T) {
+	jobsFn, setTitle, _ := newInvalidateFixture()
+	markFn, _, _ := newUploadMarkFixture(5) // never changes in this test
+	hub := newStreamHub(jobsFn, noopLiveTransfers, noopThroughput, noopTransferBytes, nil, nil, markFn, testFailedRetryAfter, testMaxCandidates, time.Hour, time.Hour, time.Millisecond)
+	id, _, _, ich, _, _, _, _ := hub.subscribe(context.Background(), 0, nil, false, "")
+	defer hub.unsubscribe(id)
+
+	setTitle("B")
+	hub.correlationTick(context.Background())
+	if hub.jobsGenerationSnapshot() != 1 {
+		t.Fatalf("jobsGeneration = %d, want 1 after the job title alone changed", hub.jobsGenerationSnapshot())
+	}
+	if hub.uploadsGenerationSnapshot() != 0 {
+		t.Fatalf("uploadsGeneration = %d, want 0: the upload marker never changed", hub.uploadsGenerationSnapshot())
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	hub.tick(context.Background())
+	select {
+	case got := <-ich:
+		if !got.Jobs {
+			t.Error("Jobs = false, want true: the job title changed")
+		}
+		if got.Uploads {
+			t.Error("Uploads = true, want false: nothing about upload_history changed")
+		}
+	default:
+		t.Fatal("a changed job title must produce an invalidate frame")
 	}
 }
 
@@ -1196,8 +1305,8 @@ func TestStreamHubUnchangedUploadMarkProducesNoInvalidate(t *testing.T) {
 		t.Fatalf("nothing changed, must not invalidate, got %+v", got)
 	default:
 	}
-	if hub.generationSnapshot() != 0 {
-		t.Fatalf("generation = %d, want 0", hub.generationSnapshot())
+	if hub.uploadsGenerationSnapshot() != 0 {
+		t.Fatalf("uploadsGeneration = %d, want 0", hub.uploadsGenerationSnapshot())
 	}
 }
 
@@ -1214,8 +1323,8 @@ func TestStreamHubFailedUploadMarkFetchLeavesGenerationUntouched(t *testing.T) {
 
 	setErr(fmt.Errorf("boom"))
 	hub.correlationTick(context.Background())
-	if hub.generationSnapshot() != 0 {
-		t.Fatalf("generation = %d, want 0 after a failed marker fetch", hub.generationSnapshot())
+	if hub.uploadsGenerationSnapshot() != 0 {
+		t.Fatalf("uploadsGeneration = %d, want 0 after a failed marker fetch", hub.uploadsGenerationSnapshot())
 	}
 
 	hub.tick(context.Background())
@@ -1267,8 +1376,8 @@ func TestStreamHubNoInvalidateOnFirstRefreshWithUploadMark(t *testing.T) {
 		t.Fatalf("first refresh must not invalidate, got %+v", got)
 	default:
 	}
-	if hub.generationSnapshot() != 0 {
-		t.Fatalf("generation = %d, want 0 after only the first refresh", hub.generationSnapshot())
+	if hub.uploadsGenerationSnapshot() != 0 {
+		t.Fatalf("uploadsGeneration = %d, want 0 after only the first refresh", hub.uploadsGenerationSnapshot())
 	}
 }
 
@@ -2286,10 +2395,12 @@ func TestStreamEndpointFedByOwnCorrelationRefresh(t *testing.T) {
 }
 
 // TestStreamEndpointWritesInvalidateEvent is the only test in this file
-// pinning the literal wire bytes for `event: invalidate` (issue #275): the
-// event name and the `generation` JSON key are exactly what
-// web/src/api/stream.tsx depends on, so a rename either side would otherwise
-// not be caught until the frontend silently stopped refetching.
+// pinning the literal wire bytes for `event: invalidate` (issue #275, jobs/
+// uploads flags added by #371): the event name and the `generation`/`jobs`/
+// `uploads` JSON keys are exactly what web/src/api/stream.tsx depends on, so
+// a rename either side would otherwise not be caught until the frontend
+// silently stopped refetching. This fixture only ever changes the job
+// title, so `jobs` is always the one that comes back true.
 func TestStreamEndpointWritesInvalidateEvent(t *testing.T) {
 	deps := testServerDeps(prometheus.NewRegistry())
 	var mu sync.Mutex
@@ -2318,7 +2429,7 @@ func TestStreamEndpointWritesInvalidateEvent(t *testing.T) {
 	title = "B"
 	mu.Unlock()
 
-	waitForBody(t, rec, "event: invalidate\ndata: {\"generation\":1}\n\n")
+	waitForBody(t, rec, "event: invalidate\ndata: {\"generation\":1,\"jobs\":true,\"uploads\":false}\n\n")
 	cancel()
 	<-done
 }
