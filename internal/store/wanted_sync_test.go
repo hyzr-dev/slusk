@@ -217,10 +217,13 @@ func TestSyncWantedJobsEmptyInputChangesNothing(t *testing.T) {
 // SyncWantedJobs: it is never cancelled by a snapshot that omits it, never
 // revived (it can't be FAILED-and-in-wantedIDs since it was never wanted),
 // and never metadata-refreshed. This is the key correctness guarantee behind
-// bypassing WantedSync for manually created jobs (issue #155): every
-// SQL predicate here compares lidarr_album_id with `= ANY`/`<> ALL`, both of
-// which are NULL (never TRUE) for a NULL lidarr_album_id, so the row is
-// structurally excluded rather than needing an explicit guard.
+// bypassing WantedSync for manually created jobs (issue #155). Under the
+// normal invariant (a manual job's lidarr_album_id stays NULL), the
+// `= ANY`/`<> ALL` predicates already exclude the row structurally, since
+// both are NULL (never TRUE) against a NULL lidarr_album_id - but that
+// invariant was briefly broken for real in #59, which is why every predicate
+// also carries an explicit `source = 'lidarr'` guard (#369, pinned by the
+// four invariant-violating tests below) rather than relying on NULL alone.
 func TestSyncWantedJobsIgnoresManualJobs(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -356,17 +359,9 @@ func TestSyncWantedJobsRevivePredicateExcludesInvariantViolatingManualJob(t *tes
 	// about to appear in a wanted snapshot. CreateManualJob never does this;
 	// only a bug (as in #59) can produce it.
 	const collidingID int64 = 4242
-	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
-		t.Fatal(err)
-	}
+	breakManualJobInvariant(t, s, manual.ID, collidingID)
 
-	var candidatesBefore, transfersBefore int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersBefore); err != nil {
-		t.Fatal(err)
-	}
+	candidatesBefore, transfersBefore := countWantedSyncChildren(t, s, manual.ID)
 	if candidatesBefore == 0 || transfersBefore == 0 {
 		t.Fatalf("test setup: manual job has no children (candidates=%d transfers=%d)", candidatesBefore, transfersBefore)
 	}
@@ -382,13 +377,7 @@ func TestSyncWantedJobsRevivePredicateExcludesInvariantViolatingManualJob(t *tes
 	}
 	assertWantedSyncState(t, s, manual.ID, core.StateFailed)
 
-	var candidatesAfter, transfersAfter int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersAfter); err != nil {
-		t.Fatal(err)
-	}
+	candidatesAfter, transfersAfter := countWantedSyncChildren(t, s, manual.ID)
 	if candidatesAfter != candidatesBefore || transfersAfter != transfersBefore {
 		t.Errorf("manual job children were deleted: candidates %d->%d, transfers %d->%d", candidatesBefore, candidatesAfter, transfersBefore, transfersAfter)
 	}
@@ -414,14 +403,9 @@ func TestSyncWantedJobsReenterPredicateExcludesInvariantViolatingManualJob(t *te
 
 	// Invariant violation, same as above.
 	const collidingID int64 = 4243
-	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
-		t.Fatal(err)
-	}
+	breakManualJobInvariant(t, s, manual.ID, collidingID)
 
-	var candidatesBefore int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
-		t.Fatal(err)
-	}
+	candidatesBefore, _ := countWantedSyncChildren(t, s, manual.ID)
 	if candidatesBefore == 0 {
 		t.Fatal("test setup: manual job has no candidate")
 	}
@@ -434,10 +418,7 @@ func TestSyncWantedJobsReenterPredicateExcludesInvariantViolatingManualJob(t *te
 	}
 	assertWantedSyncState(t, s, manual.ID, core.StateCancelled)
 
-	var candidatesAfter int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
-		t.Fatal(err)
-	}
+	candidatesAfter, _ := countWantedSyncChildren(t, s, manual.ID)
 	if candidatesAfter != candidatesBefore {
 		t.Errorf("manual job candidates were deleted: %d -> %d", candidatesBefore, candidatesAfter)
 	}
@@ -460,9 +441,7 @@ func TestSyncWantedJobsMetadataPredicatesExcludeInvariantViolatingManualJobs(t *
 		t.Fatalf("CreateManualJob: %v", err)
 	}
 	const backfillID int64 = 4244
-	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, backfillID, backfillTarget.ID); err != nil {
-		t.Fatal(err)
-	}
+	breakManualJobInvariant(t, s, backfillTarget.ID, backfillID)
 
 	// Refresh target: manual job forced into WANTED. There is no manual-job
 	// API that produces this state; it only exists here to exercise the
@@ -525,16 +504,11 @@ func TestUpsertWantedJobIgnoresInvariantViolatingManualRow(t *testing.T) {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
 	const collidingID int64 = 4246
-	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
-		t.Fatal(err)
-	}
+	breakManualJobInvariant(t, s, manual.ID, collidingID)
 
-	var candidatesBefore, transfersBefore int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersBefore); err != nil {
-		t.Fatal(err)
+	candidatesBefore, transfersBefore := countWantedSyncChildren(t, s, manual.ID)
+	if candidatesBefore == 0 || transfersBefore == 0 {
+		t.Fatalf("test setup: manual job has no children (candidates=%d transfers=%d)", candidatesBefore, transfersBefore)
 	}
 
 	got, err := s.UpsertWantedJob(ctx, collidingID, now.Add(time.Hour))
@@ -548,16 +522,86 @@ func TestUpsertWantedJobIgnoresInvariantViolatingManualRow(t *testing.T) {
 		t.Errorf("returned job id = %d, same as colliding manual job", got.ID)
 	}
 
-	var candidatesAfter, transfersAfter int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersAfter); err != nil {
-		t.Fatal(err)
-	}
+	candidatesAfter, transfersAfter := countWantedSyncChildren(t, s, manual.ID)
 	if candidatesAfter != candidatesBefore || transfersAfter != transfersBefore {
 		t.Errorf("manual job children changed: candidates %d->%d, transfers %d->%d", candidatesBefore, candidatesAfter, transfersBefore, transfersAfter)
 	}
+}
+
+// TestUpsertWantedJobReenterDoesNotWipeInvariantViolatingManualChildren covers
+// the `reentered > 0` branch of UpsertWantedJob (the transfers/candidates
+// DELETE at ~665/~670 in pipeline.go), which
+// TestUpsertWantedJobIgnoresInvariantViolatingManualRow cannot reach: that
+// test's manual job sits in DOWNLOADING, so the re-enter UPDATE (gated on
+// state = CANCELLED) affects zero rows and the DELETEs never run. Reaching
+// them needs a second, real source='lidarr' row sharing the same
+// lidarr_album_id and sitting in CANCELLED, so UpsertWantedJob's re-enter
+// path actually fires - only then do the DELETEs' `source = 'lidarr'` guard
+// (#369) matter: without it, the subquery would also pick up the
+// invariant-violating manual row by lidarr_album_id alone and wipe its
+// children too.
+func TestUpsertWantedJobReenterDoesNotWipeInvariantViolatingManualChildren(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	const collidingID int64 = 4247
+	breakManualJobInvariant(t, s, manual.ID, collidingID)
+
+	// A real Lidarr job for the same album, put in CANCELLED so the
+	// re-enter path in the next UpsertWantedJob call actually fires.
+	lidarrJob, err := s.UpsertWantedJob(ctx, collidingID, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob (create lidarr job): %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, lidarrJob.ID, core.StateCancelled, now); err != nil {
+		t.Fatal(err)
+	}
+
+	candidatesBefore, transfersBefore := countWantedSyncChildren(t, s, manual.ID)
+	if candidatesBefore == 0 || transfersBefore == 0 {
+		t.Fatalf("test setup: manual job has no children (candidates=%d transfers=%d)", candidatesBefore, transfersBefore)
+	}
+
+	if _, err := s.UpsertWantedJob(ctx, collidingID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpsertWantedJob (re-enter): %v", err)
+	}
+
+	// The re-enter path must have fired on the lidarr job, not the manual one.
+	assertWantedSyncState(t, s, lidarrJob.ID, core.StateWanted)
+	assertWantedSyncState(t, s, manual.ID, core.StateDownloading)
+
+	candidatesAfter, transfersAfter := countWantedSyncChildren(t, s, manual.ID)
+	if candidatesAfter != candidatesBefore || transfersAfter != transfersBefore {
+		t.Errorf("manual job children were deleted: candidates %d->%d, transfers %d->%d", candidatesBefore, candidatesAfter, transfersBefore, transfersAfter)
+	}
+}
+
+// breakManualJobInvariant writes a state CreateManualJob can never produce: a
+// non-NULL lidarr_album_id on a manual (source='manual') row. It exists only
+// so the invariant-violating tests above and below can reproduce the #59
+// scenario that motivated the #369 source = 'lidarr' guards.
+func breakManualJobInvariant(t *testing.T, s *Store, jobID, albumID int64) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, albumID, jobID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countWantedSyncChildren(t *testing.T, s *Store, jobID int64) (candidates, transfers int) {
+	t.Helper()
+	if err := s.db.QueryRowContext(context.Background(), `SELECT count(*) FROM candidates WHERE album_job_id = $1`, jobID).Scan(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(context.Background(), `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, jobID).Scan(&transfers); err != nil {
+		t.Fatal(err)
+	}
+	return candidates, transfers
 }
 
 func seedWantedSyncChild(t *testing.T, s *Store, jobID int64, now time.Time, filename string) int64 {

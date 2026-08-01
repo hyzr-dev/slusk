@@ -458,7 +458,7 @@ func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now 
 
 // ReviveFailedJobs returns FAILED jobs with failed_at < cutoff AND album still
 // in wantedIDs to WANTED with retries=0, empty_searches=0, not_before=NULL,
-// failed_at=NULL. This is dead code in production (SyncWantedJobs inlines the
+// failed_at=NULL. No production caller today (SyncWantedJobs inlines the
 // same revive as a CTE), but it must not diverge from that live copy, so the
 // source = 'lidarr' guard is kept here too.
 func (s *Store) ReviveFailedJobs(ctx context.Context, wantedIDs []int64, cutoff time.Time, now time.Time) (int, error) {
