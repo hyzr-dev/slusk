@@ -322,6 +322,244 @@ func TestSyncWantedJobsRollsBackWholeReconciliation(t *testing.T) {
 	}
 }
 
+// The four tests below deliberately violate the source/lidarr_album_id
+// invariant that CreateManualJob normally upholds (a manual job's
+// lidarr_album_id is always NULL) by writing a non-NULL value onto a manual
+// row via raw SQL. That invariant was briefly broken for real during issue
+// #59, and when it was, WantedSync predicates that matched on bare
+// lidarr_album_id (with no source filter) treated the manual row as a Lidarr
+// job — reviving/re-entering it and deleting its candidates and transfers
+// (issue #369). These tests pin the predicates themselves, not the
+// invariant, so they must keep passing even if the invariant is ever broken
+// again.
+
+// TestSyncWantedJobsRevivePredicateExcludesInvariantViolatingManualJob covers
+// the "revived" CTE in SyncWantedJobs: a manual job stuck in FAILED with an
+// old failed_at must not be revived just because some other code path wrote
+// a wanted lidarr_album_id onto it.
+func TestSyncWantedJobsRevivePredicateExcludesInvariantViolatingManualJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-30 * 24 * time.Hour)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, manual.ID, cutoff.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invariant violation: give the manual job a lidarr_album_id that is
+	// about to appear in a wanted snapshot. CreateManualJob never does this;
+	// only a bug (as in #59) can produce it.
+	const collidingID int64 = 4242
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var candidatesBefore, transfersBefore int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersBefore); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesBefore == 0 || transfersBefore == 0 {
+		t.Fatalf("test setup: manual job has no children (candidates=%d transfers=%d)", candidatesBefore, transfersBefore)
+	}
+
+	_, revived, err := s.SyncWantedJobs(ctx,
+		[]core.WantedRelease{{ID: collidingID, Title: "wanted", ArtistName: "artist", ReleaseDate: "2026-01-01", ArtistID: 1}},
+		cutoff, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	if revived != 0 {
+		t.Fatalf("revived = %d, want 0 (manual job must not be revived)", revived)
+	}
+	assertWantedSyncState(t, s, manual.ID, core.StateFailed)
+
+	var candidatesAfter, transfersAfter int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersAfter); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesAfter != candidatesBefore || transfersAfter != transfersBefore {
+		t.Errorf("manual job children were deleted: candidates %d->%d, transfers %d->%d", candidatesBefore, candidatesAfter, transfersBefore, transfersAfter)
+	}
+}
+
+// TestSyncWantedJobsReenterPredicateExcludesInvariantViolatingManualJob
+// covers the "reentered" CTE: a manual job stuck in CANCELLED must not be
+// reset to WANTED (with its children wiped) by an invariant-violating
+// lidarr_album_id.
+func TestSyncWantedJobsReenterPredicateExcludesInvariantViolatingManualJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, manual.ID, core.StateCancelled, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invariant violation, same as above.
+	const collidingID int64 = 4243
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var candidatesBefore int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesBefore == 0 {
+		t.Fatal("test setup: manual job has no candidate")
+	}
+
+	_, _, err = s.SyncWantedJobs(ctx,
+		[]core.WantedRelease{{ID: collidingID, Title: "wanted", ArtistName: "artist", ReleaseDate: "2026-01-01", ArtistID: 1}},
+		now.Add(-30*24*time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+	assertWantedSyncState(t, s, manual.ID, core.StateCancelled)
+
+	var candidatesAfter int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesAfter != candidatesBefore {
+		t.Errorf("manual job candidates were deleted: %d -> %d", candidatesBefore, candidatesAfter)
+	}
+}
+
+// TestSyncWantedJobsMetadataPredicatesExcludeInvariantViolatingManualJobs
+// covers both metadata statements: the WANTED-state refresh and the
+// past-WANTED backfill must not touch a manual job's title/artist_name even
+// when it carries an invariant-violating, wanted lidarr_album_id.
+func TestSyncWantedJobsMetadataPredicatesExcludeInvariantViolatingManualJobs(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// Backfill target: manual job with empty metadata, left in its natural
+	// post-creation state (past WANTED - CreateManualJob starts DOWNLOADING).
+	backfillTarget, err := s.CreateManualJob(ctx, "", "", "peer1", "",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	const backfillID int64 = 4244
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, backfillID, backfillTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refresh target: manual job forced into WANTED. There is no manual-job
+	// API that produces this state; it only exists here to exercise the
+	// refresh predicate, alongside the same lidarr_album_id violation.
+	refreshTarget, err := s.CreateManualJob(ctx, "old title", "old artist", "peer1", "",
+		[]ManualJobFile{{Filename: "manual2.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	const refreshID int64 = 4245
+	refreshUpdatedAt := now
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1, state = $2, updated_at = $3 WHERE id = $4`,
+		refreshID, string(core.StateWanted), refreshUpdatedAt, refreshTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	releases := []core.WantedRelease{
+		{ID: backfillID, Title: "snapshot title", ArtistName: "snapshot artist", ReleaseDate: "2026-01-01", ArtistID: 1},
+		{ID: refreshID, Title: "new title", ArtistName: "new artist", ReleaseDate: "2026-02-01", ArtistID: 2},
+	}
+	if _, _, err := s.SyncWantedJobs(ctx, releases, now.Add(-30*24*time.Hour), now.Add(time.Hour)); err != nil {
+		t.Fatalf("SyncWantedJobs: %v", err)
+	}
+
+	var backfillTitle, backfillArtist string
+	if err := s.db.QueryRowContext(ctx, `SELECT title, artist_name FROM album_jobs WHERE id = $1`, backfillTarget.ID).Scan(&backfillTitle, &backfillArtist); err != nil {
+		t.Fatal(err)
+	}
+	if backfillTitle != "" || backfillArtist != "" {
+		t.Errorf("backfill target metadata = %q/%q, want empty (untouched)", backfillTitle, backfillArtist)
+	}
+
+	var refreshTitle, refreshArtist string
+	var refreshGotUpdated time.Time
+	if err := s.db.QueryRowContext(ctx, `SELECT title, artist_name, updated_at FROM album_jobs WHERE id = $1`, refreshTarget.ID).
+		Scan(&refreshTitle, &refreshArtist, &refreshGotUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if refreshTitle != "old title" || refreshArtist != "old artist" {
+		t.Errorf("refresh target metadata = %q/%q, want unchanged old title/artist", refreshTitle, refreshArtist)
+	}
+	if !refreshGotUpdated.Equal(refreshUpdatedAt) {
+		t.Errorf("refresh target updated_at = %v, want unchanged %v", refreshGotUpdated, refreshUpdatedAt)
+	}
+}
+
+// TestUpsertWantedJobIgnoresInvariantViolatingManualRow covers
+// UpsertWantedJob: when a manual row carries an invariant-violating
+// lidarr_album_id equal to the id being upserted, the function must still
+// return the (newly inserted) lidarr-sourced row and must not touch the
+// manual row's children.
+func TestUpsertWantedJobIgnoresInvariantViolatingManualRow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+	if err != nil {
+		t.Fatalf("CreateManualJob: %v", err)
+	}
+	const collidingID int64 = 4246
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET lidarr_album_id = $1 WHERE id = $2`, collidingID, manual.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var candidatesBefore, transfersBefore int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.UpsertWantedJob(ctx, collidingID, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if got.Source != core.SourceLidarr {
+		t.Errorf("returned job source = %q, want %q", got.Source, core.SourceLidarr)
+	}
+	if got.ID == manual.ID {
+		t.Errorf("returned job id = %d, same as colliding manual job", got.ID)
+	}
+
+	var candidatesAfter, transfersAfter int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM candidates WHERE album_job_id = $1`, manual.ID).Scan(&candidatesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id = $1)`, manual.ID).Scan(&transfersAfter); err != nil {
+		t.Fatal(err)
+	}
+	if candidatesAfter != candidatesBefore || transfersAfter != transfersBefore {
+		t.Errorf("manual job children changed: candidates %d->%d, transfers %d->%d", candidatesBefore, candidatesAfter, transfersBefore, transfersAfter)
+	}
+}
+
 func seedWantedSyncChild(t *testing.T, s *Store, jobID int64, now time.Time, filename string) int64 {
 	t.Helper()
 	var candidateID int64

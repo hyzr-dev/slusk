@@ -436,8 +436,9 @@ func (s *Store) AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to c
 
 // CancelJobsNotWanted cancels every non-pipeline-terminal Lidarr job whose
 // album is absent from wantedIDs. Returns count. The source = 'lidarr'
-// predicate is explicit so an empty wantedIDs never cancels manual jobs (whose
-// lidarr_album_id is NULL, making `<> ALL($6)` true for any array).
+// predicate is explicit rather than relying on lidarr_album_id being NULL for
+// manual jobs (see #369 — that invariant was briefly broken once and a
+// NULL-reliant predicate would have matched a manual job).
 func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, updated_at = $2
@@ -457,11 +458,13 @@ func (s *Store) CancelJobsNotWanted(ctx context.Context, wantedIDs []int64, now 
 
 // ReviveFailedJobs returns FAILED jobs with failed_at < cutoff AND album still
 // in wantedIDs to WANTED with retries=0, empty_searches=0, not_before=NULL,
-// failed_at=NULL.
+// failed_at=NULL. This is dead code in production (SyncWantedJobs inlines the
+// same revive as a CTE), but it must not diverge from that live copy, so the
+// source = 'lidarr' guard is kept here too.
 func (s *Store) ReviveFailedJobs(ctx context.Context, wantedIDs []int64, cutoff time.Time, now time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
-		 WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5)`,
+		 WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5) AND source = 'lidarr'`,
 		string(core.StateWanted), now, string(core.StateFailed), cutoff, wantedIDs)
 	if err != nil {
 		return 0, fmt.Errorf("revive failed jobs: %w", err)
@@ -535,7 +538,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 			UPDATE album_jobs AS jobs
 			SET state = $6, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $7
 			FROM wanted
-			WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $8
+			WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $8 AND jobs.source = 'lidarr'
 			RETURNING jobs.id
 		), deleted_transfers AS (
 			DELETE FROM transfers AS transfers USING candidates, reentered
@@ -560,7 +563,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 		SET title = wanted.title, artist_name = wanted.artist_name,
 			release_date = wanted.release_date, artist_id = wanted.artist_id, updated_at = $6
 		FROM wanted
-		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $7`,
+		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state = $7 AND jobs.source = 'lidarr'`,
 		append(inputArgs, now, string(core.StateWanted))...); err != nil {
 		return 0, 0, fmt.Errorf("sync wanted jobs: refresh metadata: %w", err)
 	}
@@ -573,7 +576,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 		SET title = wanted.title, artist_name = wanted.artist_name,
 			release_date = wanted.release_date, artist_id = wanted.artist_id
 		FROM wanted
-		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state <> $6
+		WHERE jobs.lidarr_album_id = wanted.lidarr_album_id AND jobs.state <> $6 AND jobs.source = 'lidarr'
 		  AND (jobs.title = '' OR jobs.artist_name = '' OR jobs.release_date = '' OR jobs.artist_id = 0)`,
 		append(inputArgs, string(core.StateWanted))...); err != nil {
 		return 0, 0, fmt.Errorf("sync wanted jobs: backfill metadata: %w", err)
@@ -597,7 +600,7 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 	if err := tx.QueryRowContext(ctx, `WITH revived AS (
 			UPDATE album_jobs
 			SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
-			WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5::bigint[])
+			WHERE state = $3 AND failed_at < $4 AND lidarr_album_id = ANY($5::bigint[]) AND source = 'lidarr'
 			RETURNING id
 		), deleted_transfers AS (
 			DELETE FROM transfers AS transfers USING candidates, revived
@@ -646,7 +649,7 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	// Re-enter a re-wanted CANCELLED job with a clean slate.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE album_jobs SET state = $1, retries = 0, empty_searches = 0, not_before = NULL, failed_at = NULL, updated_at = $2
-		 WHERE lidarr_album_id = $3 AND state = $4`,
+		 WHERE lidarr_album_id = $3 AND state = $4 AND source = 'lidarr'`,
 		string(core.StateWanted), now, lidarrAlbumID, string(core.StateCancelled))
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: %w", err)
@@ -659,12 +662,12 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 		// Wipe the stale cycle's candidates+transfers for the same ownership/FK
 		// and clean-slate reason as RetryFailedJob.
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1))`,
+			`DELETE FROM transfers WHERE candidate_id IN (SELECT id FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1 AND source = 'lidarr'))`,
 			lidarrAlbumID); err != nil {
 			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete transfers: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1)`,
+			`DELETE FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1 AND source = 'lidarr')`,
 			lidarrAlbumID); err != nil {
 			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete candidates: %w", err)
 		}
@@ -674,7 +677,7 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 	var state, source string
 	err = tx.QueryRowContext(ctx,
 		`SELECT id, COALESCE(lidarr_album_id, 0), state, candidates_tried, next_attempt_at, created_at, updated_at, artist_id, retries, empty_searches, not_before, failed_at, source, album_mbid
-		 FROM album_jobs WHERE lidarr_album_id = $1`, lidarrAlbumID).
+		 FROM album_jobs WHERE lidarr_album_id = $1 AND source = 'lidarr'`, lidarrAlbumID).
 		Scan(&j.ID, &j.LidarrAlbumID, &state, &j.CandidatesTried, &j.NextAttemptAt, &j.CreatedAt, &j.UpdatedAt, &j.ArtistID, &j.Retries, &j.EmptySearches, &j.NotBefore, &j.FailedAt, &source, &j.AlbumMBID)
 	if err != nil {
 		return core.AlbumJob{}, fmt.Errorf("read job: %w", err)
