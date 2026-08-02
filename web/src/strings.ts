@@ -222,7 +222,17 @@ export const t = {
     retry: 'Retry',
     parkedExplanation:
       'Repeated backend disappearance exhausted transfer retries, so automation stopped. Retry discards prior candidates and transfers, then starts a fresh search and download cycle.',
-    forceSearch: 'Force search',
+    // 'Force search' used to double as both "re-run the automated pipeline"
+    // and (implicitly) "search manually" — issue #376 split those into two
+    // distinct actions, so this one is named for what it actually does:
+    // Store.ForceSearchJob discards prior candidates and transfers, resets
+    // retries/empty_searches/not_before, and puts the job back through
+    // Discovery from scratch — not a resend of the same candidates.
+    forceSearch: 'Re-run pipeline',
+    // Navigates to the search page pre-filled with the job's artist/album
+    // (issue #376) — a manual, user-driven Soulseek search, distinct from
+    // forceSearch above which re-runs the automated pipeline.
+    manualSearch: 'Manual search',
     delete: 'Delete',
     deleteConfirm: 'Click again to delete',
     // Upper-cased here rather than in CSS — see SectionHeader.
@@ -233,7 +243,7 @@ export const t = {
     noCandidate: 'No candidate yet.',
     cancelFailed: 'Could not cancel the job. It may already have finished.',
     retryFailed: 'Could not retry the job. Only failed or parked jobs can be retried.',
-    forceSearchFailed: 'Could not force a search. The job may already be active.',
+    forceSearchFailed: 'Could not re-run the pipeline. The job may already be active.',
     deleteFailed: 'Could not delete the job. It may currently be importing.',
     sleepingUntil: (time: string) => `Sleeping until ${time}`,
     candidates: (tried: number, max: number) => `${tried} of ${max} candidates tried`,
@@ -317,7 +327,7 @@ export const t = {
     // mutations the row itself won't visibly reflect before the next poll.
     retryFlash: (id: number) => `retried #${id}`,
     cancelFlash: (id: number) => `cancelled #${id}`,
-    forceSearchFlash: (id: number) => `search forced for #${id}`,
+    forceSearchFlash: (id: number) => `pipeline re-run queued for #${id}`,
     deleteFlash: (id: number) => `deleted #${id}`,
   },
   events: {

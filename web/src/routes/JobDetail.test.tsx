@@ -138,6 +138,64 @@ describe('force search visibility', () => {
   });
 });
 
+// Manual search (issue #376): a plain <Link>, not a click handler, so
+// artist + album is built into the href itself — visible and testable
+// without simulating a click, and it keeps middle-click/open-in-new-tab
+// working the way a real link does.
+describe('manual search link', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  it('links to /search?q= with the artist and album, url-encoded, not the year', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      makeDetail({ artist: 'Sigur Rós', title: 'Ágætis byrjun & Friends', year: 1999 }),
+    );
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    const link = screen.getByRole('link', { name: t.jobs.manualSearch });
+    const expectedQuery = encodeURIComponent('Sigur Rós Ágætis byrjun & Friends');
+    expect(link).toHaveAttribute('href', `/search?q=${expectedQuery}`);
+    expect(link.getAttribute('href')).not.toContain('1999');
+  });
+
+  // POST /api/jobs never validates title/artist, and a manual job's artist
+  // is whatever the search page posted — group.parent, the peer's parent
+  // DIRECTORY name, which can be "". Without a guard the link would still
+  // render, pointed at `/search?q=%20`, and pressing Search would silently
+  // do nothing (runSearch's `if (!trimmed) return`).
+  it('drops the empty artist rather than leaving a leading space in the query', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(
+      queryKeys.jobDetail(1),
+      makeDetail({ artist: '', title: 'Ágætis byrjun' }),
+    );
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    const link = screen.getByRole('link', { name: t.jobs.manualSearch });
+    expect(link).toHaveAttribute('href', `/search?q=${encodeURIComponent('Ágætis byrjun')}`);
+  });
+
+  it('renders no link at all when both artist and title are empty', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ artist: '', title: '' }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByRole('link', { name: t.jobs.manualSearch })).not.toBeInTheDocument();
+  });
+});
+
 describe('delete action', () => {
   it('requires a second click before firing the delete request', async () => {
     const fetchMock = vi.fn(() => new Promise(() => {}));

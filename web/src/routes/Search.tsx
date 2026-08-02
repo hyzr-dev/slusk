@@ -1,5 +1,6 @@
 import type { FormEvent } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { useCreateJob, useSearchSession, useStartSearch, useStopSearch } from '../api/queries';
 import { useSearchStream } from '../api/stream';
@@ -83,7 +84,15 @@ function messageForDownloadError(err: unknown): string {
 }
 
 export default function Search() {
-  const [query, setQuery] = useState('');
+  const [searchParams] = useSearchParams();
+  // Lazy initializer, not a useEffect: this must run exactly once at mount
+  // (navigating here from a job's "Manual search" link, issue #376, is a
+  // fresh mount of this route under BrowserRouter) and pre-fill the box
+  // without ever overwriting what the user is typing — an effect keyed on
+  // searchParams would clobber `query` on every re-render that still carries
+  // the same ?q=. The search itself never starts automatically; ?q= only
+  // seeds the input.
+  const [query, setQuery] = useState(() => searchParams.get('q') ?? '');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [searchId, setSearchId] = useState<string | undefined>(undefined);
   const [startError, setStartError] = useState<string | undefined>(undefined);
