@@ -17,7 +17,7 @@ make build     # builds the web UI, then the Go binary
 make ui        # web UI only (npm ci + vite build → internal/observ/web/dist)
 make test      # go test ./... && npm test
 make dev       # vite dev server
-go test ./...            # ~717 tests; run this before claiming anything works
+go test ./...            # run this before claiming anything works
 go test ./... -race      # required for anything touching concurrency
 ```
 
@@ -68,11 +68,21 @@ cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test a
   issues or PRs.
 - `testenv/.env` and `testenv/runtime/` are gitignored and hold real credentials.
 
-The observable surfaces are the dashboard on `:9090`, `/status`, `/api/events` (plain
-JSON, polled — there is no SSE anywhere yet; that is #161) and the Postgres
-database — `album_jobs` is the pipeline's only contact surface between modules,
-so `SELECT state, count(*) FROM album_jobs GROUP BY state` is a literal snapshot
-of the state machine, and `job_events` is the per-job history.
+The observable surfaces are the dashboard on `:9090`, `/status`, two separate HTTP
+endpoints that both carry job data, and the Postgres database.
+
+- `/api/stream` is server-sent events (`internal/observ/stream.go`, issue #161): live
+  per-job frames, throughput samples, manual-search deltas, and an `invalidate` signal
+  that tells subscribers *when* to refetch, never what to render. The frontend consumes
+  it with one shared `EventSource` in `web/src/api/stream.tsx`.
+- `/api/events` is still plain polled JSON, and always was — it backs the event
+  timeline. The stream did not replace it; it was added alongside.
+
+In the database, `album_jobs` is the only contact surface *between the pipeline's
+stages* — no stage imports another. It is not the only boundary in the system: the SSE
+layer is the second contact surface, the one facing the frontend. `SELECT state,
+count(*) FROM album_jobs GROUP BY state` is a literal snapshot of the state machine, and
+`job_events` is the per-job history.
 
 ## Running the UI against the lab
 
@@ -186,8 +196,12 @@ internal/soulseek/   native Soulseek protocol client (server, peer, distributed,
 internal/slskd/      slskd HTTP adapter (alternative download backend)
 internal/lidarr/     Lidarr HTTP adapter
 internal/matcher/    candidate ranking
-internal/observ/     HTTP server: /metrics, /status, dashboard APIs, embedded UI
-internal/app/        use cases shared between HTTP and pipeline (Jobs.Cancel etc.)
+internal/observ/     HTTP server: /metrics, /status, /api/stream (SSE), dashboard
+                     APIs, embedded UI
+internal/app/        transport-neutral services between the store and the HTTP edge;
+                     owns the manual, user-triggered state transitions where pipeline
+                     owns the automatic ones — a sibling of pipeline over the same
+                     table, not code shared with it
 web/                 React SPA source, built into internal/observ/web/dist
 ```
 
