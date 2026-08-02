@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useJobDetail, useJobEvents } from '../api/queries';
-import type { JobState, TransferDetail } from '../api/types';
+import type { JobSource, JobState, TransferDetail } from '../api/types';
 import JobActions from '../components/JobActions';
 import ParkedExplanation from '../components/ParkedExplanation';
 import EmptyState from '../components/tui/EmptyState';
@@ -56,6 +56,11 @@ export default function JobDetail() {
   const job = detailReady ? detail?.job : undefined;
 
   const actionState: JobState = job?.state ?? 'WANTED';
+  // Same shape as actionState: JobActions renders before the job has loaded,
+  // so it needs a stand-in. 'lidarr' is the permissive one — it offers Force
+  // search for the fraction of a second before the real source arrives,
+  // rather than hiding a button that then pops into existence.
+  const actionSource: JobSource = job?.source ?? 'lidarr';
   const parkedState = job?.state === 'PARKED' ? 'PARKED' : undefined;
 
   // A notBefore in the past has no display relevance.
@@ -113,7 +118,12 @@ export default function JobDetail() {
       <ParkedExplanation state={parkedState} className={styles.failReason} />
 
       <div className={styles.actionsWrap}>
-        <JobActions jobId={id} state={actionState} onDeleted={() => navigate('/jobs')} />
+        <JobActions
+          jobId={id}
+          state={actionState}
+          source={actionSource}
+          onDeleted={() => navigate('/jobs')}
+        />
       </div>
 
       <SectionHeader label={t.jobs.attemptHistory} />

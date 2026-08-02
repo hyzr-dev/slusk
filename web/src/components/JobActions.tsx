@@ -6,7 +6,7 @@ import {
   useRetryJob,
 } from '../api/queries';
 import { ApiError } from '../api/client';
-import type { JobState } from '../api/types';
+import type { JobSource, JobState } from '../api/types';
 import { useFlash } from './chrome/FlashContext';
 import Button from './tui/Button';
 import { t } from '../strings';
@@ -15,6 +15,9 @@ import styles from './JobActions.module.css';
 interface Props {
   jobId: number;
   state: JobState;
+  /** Which pipeline created the job. Only Force search reads it — see
+   * canForceSearch. */
+  source: JobSource;
   /** Called after a successful delete, so the caller can collapse/navigate away. */
   onDeleted?: () => void;
 }
@@ -45,7 +48,7 @@ function serverMessage(error: unknown, fallback: string): string {
 // page (issue #60), so the backend's validity rules (which actions are legal
 // for which state) are interpreted in exactly one place instead of drifting
 // between the two call sites.
-export default function JobActions({ jobId, state, onDeleted }: Props) {
+export default function JobActions({ jobId, state, source, onDeleted }: Props) {
   const cancel = useCancelJob(jobId);
   const retry = useRetryJob(jobId);
   const forceSearch = useForceSearchJob(jobId);
@@ -74,6 +77,12 @@ export default function JobActions({ jobId, state, onDeleted }: Props) {
 
   const canRetry = isRetryEligible(state);
   const canCancel = !TERMINAL_STATES.includes(state);
+  // A manual job has no lidarr_album_id, so there is nothing for a search to
+  // be about; app.Jobs.ForceSearch rejects it with ErrJobNotSearchable (issue
+  // #347). Hiding the button is the honest form of a 409 that can never not
+  // happen — unlike the state-driven guards above, no retry or state change
+  // can ever make this one legal.
+  const canForceSearch = source !== 'manual';
 
   return (
     <div>
@@ -87,13 +96,15 @@ export default function JobActions({ jobId, state, onDeleted }: Props) {
             {t.jobs.retry}
           </Button>
         )}
-        <Button
-          variant="ghost"
-          disabled={forceSearch.isPending}
-          onClick={() => forceSearch.mutate(undefined, { onSuccess: () => flash(t.jobs.forceSearchFlash(jobId)) })}
-        >
-          {t.jobs.forceSearch}
-        </Button>
+        {canForceSearch && (
+          <Button
+            variant="ghost"
+            disabled={forceSearch.isPending}
+            onClick={() => forceSearch.mutate(undefined, { onSuccess: () => flash(t.jobs.forceSearchFlash(jobId)) })}
+          >
+            {t.jobs.forceSearch}
+          </Button>
+        )}
         {canCancel && (
           <Button
             variant="ghost"

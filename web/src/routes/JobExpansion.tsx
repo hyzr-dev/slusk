@@ -130,7 +130,12 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
       </div>
 
       <div className={styles.actionsRow}>
-        <JobActions jobId={job.id} state={job.state} onDeleted={onCollapse} />
+        <JobActions
+          jobId={job.id}
+          state={job.state}
+          source={job.source}
+          onDeleted={onCollapse}
+        />
       </div>
     </div>
   );
