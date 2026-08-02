@@ -11,9 +11,10 @@ Use the `tea` CLI for all operations. **Never `gh`** — there is no GitHub remo
   The flag is `--description` / `-d`, *not* `--body`. Write multi-line bodies to a temp
   file first; shell quoting of long markdown through `-d` is a reliable way to lose it.
 - **Read an issue**: `tea issues <n> --comments --output json`
-- **List issues**: `tea issues list --state open --output json`, with `--labels`,
-  `--milestones`, `--author`, `--assignee` as filters. Add
+- **List issues**: `tea issues list --state open --limit 200 --output json`, with
+  `--labels`, `--milestones`, `--author`, `--assignee` as filters. Add
   `--fields index,title,state,labels,body,comments` to widen the default field set.
+  **Always pass `--limit`** — see the pagination trap below.
 - **Comment**: `tea comment <n> "..."` (shorthand for `tea comments add`).
 - **Apply / remove labels**: `tea issues edit <n> --add-labels "..."` /
   `--remove-labels "..."`. Plural. Comma-separated, no repeated flags.
@@ -22,6 +23,14 @@ Use the `tea` CLI for all operations. **Never `gh`** — there is no GitHub remo
 
 ## Traps that have each cost a round
 
+- **`tea issues list` silently stops at 30.** There is no truncation notice, no total
+  count, and no next-page hint — a backlog of 46 returns 30 rows that look complete.
+  Every conclusion drawn from an unlimited list is therefore suspect: a triage session
+  reported "30 open issues" and only discovered the other 16 when an issue it had just
+  labelled failed to appear in the listing. Pass `--limit 200` (or higher than the
+  backlog can plausibly be) on every `list`, and treat a result of exactly 30 as a
+  truncation until proven otherwise. `--labels` filters page independently, so a
+  filtered list can surface issues the unfiltered one omits.
 - **`tea pulls create` uses the currently checked-out branch as the PR head**, not the
   branch named elsewhere. Always pass `--head` explicitly, then verify with
   `tea pulls <n> --output json`.
