@@ -32,16 +32,15 @@ type ManualJobFile struct {
 // so the Downloading module picks it up with no SELECTING step. It does NOT
 // take the activation advisory lock and does NOT enforce the MaxActive cap:
 // a manual job is an explicit user request and is created unconditionally
-// (issue #155). Its lidarr_album_id is NULL and source is 'manual', so
-// WantedSync never touches it (see the partial unique index on album_jobs).
+// (issue #155). Its lidarr_album_id is NULL and source is 'manual'.
+// WantedSync's predicates all filter on source = 'lidarr' explicitly (#369),
+// so they never touch this row even if lidarr_album_id were ever non-NULL.
 //
 // albumMBID is the MusicBrainz release-group id the user identified the
 // download against, or "" if they chose not to. It is the wire's only album
 // identity for a manual job (see core.AlbumJob.AlbumMBID) - lidarr_album_id
 // stays NULL for the job's whole life. Importing resolves albumMBID through
-// AlbumByForeignID on each tick and never writes the answer back, which is
-// what keeps the invariant above ("WantedSync never touches it") true even
-// after a manual job has been matched to a real Lidarr album (issue #59).
+// AlbumByForeignID on each tick and never writes the answer back (issue #59).
 //
 // Returns ErrRemoteFileBusy if another live candidate already owns a (peer,
 // filename) pair among files.

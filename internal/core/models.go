@@ -53,11 +53,11 @@ type AlbumJob struct {
 	// It is the wire-stable identity a manual job carries in place of
 	// LidarrAlbumID, which stays 0 for a manual job for the job's whole life.
 	// Importing resolves AlbumMBID through lidarr.Client.AlbumByForeignID on
-	// every tick and deliberately never writes the answer back: a non-NULL
-	// lidarr_album_id is precisely what marks a job as WantedSync's to
-	// cancel and revive (see the resolve comment in pipeline.Importing.Tick).
-	// A Lidarr-sourced job never sets this - it already has a real
-	// LidarrAlbumID from WantedSync.
+	// every tick and deliberately never writes the answer back: source =
+	// 'lidarr' is what marks a job as WantedSync's to cancel and revive (see
+	// the resolve comment in pipeline.Importing.Tick), and writing a
+	// LidarrAlbumID here would not change that. A Lidarr-sourced job never
+	// sets this - it already has a real LidarrAlbumID from WantedSync.
 	AlbumMBID string
 	// Year, Tracks and Format are candidate metadata captured at the
 	// SELECTING -> DOWNLOADING transition (ActivateCandidateWithTransfers),

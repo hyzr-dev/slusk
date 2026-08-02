@@ -155,16 +155,16 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 		//
 		// The resolved id is deliberately NOT written back to the job row.
 		// album_jobs.lidarr_album_id means "this job came from Lidarr's
-		// wanted list", and several WantedSync predicates key on it with no
-		// source filter (see store.SyncWantedJobs' revive and re-enter CTEs)
-		// precisely because a manual job's is guaranteed NULL. Caching a
-		// resolved id there would make a failed manual job look revivable to
-		// WantedSync, which would reset it to WANTED and delete the very
-		// candidate rows RetryManualJob needs (hardening those predicates so
-		// they never depend on this invariant is tracked as #369). Re-resolving costs one library
-		// lookup per tick on a job that is importing anyway, and in exchange
-		// a Lidarr album that was deleted and re-added is picked up on the
-		// next tick instead of stranding the job on a stale id.
+		// wanted list", so writing one onto a manual job puts two rows in the
+		// table claiming the same album - which the partial unique index
+		// cannot prevent, since it only covers source = 'lidarr'. WantedSync's
+		// predicates survive that today because #369 made every one of them
+		// filter on source explicitly, but the ambiguity is still real for
+		// anything that reads the column as an album identity.
+		// Re-resolving costs one library lookup per tick on a job that is
+		// importing anyway, and in exchange a Lidarr album that was deleted
+		// and re-added is picked up on the next tick instead of stranding the
+		// job on a stale id.
 		resolved, ok, err := m.resolveAlbumID(ctx, job, cand, now)
 		if err != nil {
 			return err
