@@ -137,17 +137,27 @@ tea issues <n> --comments --output json
 tea pulls create --head <branch> --base main --title "..." --description "$(cat body.md)"
 ```
 
-Three traps that have each cost a round:
+**Read `docs/agents/issue-tracker.md` before any tracker operation.** It carries the full
+command vocabulary and three traps that have each cost a round — the `--head` flag being
+ignored, `Closes #N` in backticks not closing anything, and `tea pulls merge` returning a
+body-less 405 when `main` has moved.
 
-- **`tea pulls create` uses your currently checked-out branch as the PR head**, not the
-  branch you name elsewhere. Always pass `--head` explicitly and verify afterwards with
-  `tea pulls <n> --output json`.
-- **`Closes #N` inside backticks does not auto-close the issue.** Gitea only parses the
-  keyword in plain text.
-- **`tea pulls merge` failing with `"failed to merge PR, is it still open?"` is a raw
-  405 with the body swallowed.** It almost always means `main` moved and auto-merge no
-  longer applies — check `mergeable` in `tea pulls <n> --output json` before anything
-  else. Trying a different `--style` never helps.
+## Agent skills
+
+### Issue tracker
+
+Gitea on `gitea.shcizo.se`, driven through the `tea` CLI — never `gh`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, both created lazily. See
+`docs/agents/domain.md`.
 
 ## Git conventions
 
