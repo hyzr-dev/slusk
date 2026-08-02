@@ -358,6 +358,35 @@ describe('row expansion', () => {
     expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
   });
 
+  // The expansion row reads its source from the row's own job prop, not from
+  // the detail fetch. Force search is hidden for a manual job because
+  // app.Jobs.ForceSearch can only answer ErrJobNotSearchable (#347, #352);
+  // the Lidarr case is asserted too so the guard can't silently become
+  // unconditional.
+  it('hides Force search on a manual job in the list expansion', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    renderJobs([makeJob({ id: 1, source: 'manual' })], client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+
+    expect(screen.queryByRole('button', { name: t.jobs.forceSearch })).not.toBeInTheDocument();
+    // The state-driven actions are untouched by the source guard.
+    expect(screen.getByRole('button', { name: t.jobs.cancel })).toBeInTheDocument();
+  });
+
+  it('keeps Force search on a Lidarr job in the list expansion', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail());
+    renderJobs([makeJob({ id: 1, source: 'lidarr' })], client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
+
+    expect(screen.getByRole('button', { name: t.jobs.forceSearch })).toBeInTheDocument();
+  });
+
   // The row itself stays clickable for mouse users, and the toggle button must
   // not double-toggle by letting its own click bubble up to that same handler.
   it('toggles from a click on an ordinary cell, and the toggle button does not double-fire', () => {

@@ -105,6 +105,39 @@ describe('retry visibility', () => {
   });
 });
 
+// Force search is the one action gated on source rather than state (issue
+// #352): app.Jobs.ForceSearch rejects a manual job with ErrJobNotSearchable
+// (#347) because it has no lidarr_album_id to search for. Both directions are
+// asserted — a test that only checked the manual case would still pass if the
+// button were dropped for every job.
+describe('force search visibility', () => {
+  function seed(client: QueryClient, source: Job['source']) {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    client.setQueryData(queryKeys.jobDetail(1), makeDetail({ state: 'FAILED', status: 'failed', source }));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+  }
+
+  it('hides Force search when detail.job is manual-sourced', () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seed(client, 'manual');
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByRole('button', { name: t.jobs.forceSearch })).not.toBeInTheDocument();
+    // The state-driven actions are untouched by the source guard.
+    expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
+  });
+
+  it('shows Force search when detail.job is Lidarr-sourced', () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    seed(client, 'lidarr');
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByRole('button', { name: t.jobs.forceSearch })).toBeInTheDocument();
+  });
+});
+
 describe('delete action', () => {
   it('requires a second click before firing the delete request', async () => {
     const fetchMock = vi.fn(() => new Promise(() => {}));
