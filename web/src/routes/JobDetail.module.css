@@ -18,6 +18,13 @@
 
 .actionsWrap { padding: 14px 16px; border-bottom: 1px solid var(--line); }
 
+/* Layered on top of Button.module.css's .btn/.ghost (issue #376): those
+   classes only ever styled a <button> before, so they carry no opinion on
+   an anchor's own defaults (underline, inline layout) — this resets exactly
+   those two so the "Manual search" link sits flush in the JobActions row
+   instead of reading as a plain hyperlink. Same trick as .back above. */
+.manualSearchLink { display: inline-block; text-decoration: none; }
+
 .attempt { padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 11.5px; }
 .attempt:last-child { border-bottom: none; }
 

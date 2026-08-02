@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useState } from 'react';
 import {
   useCancelJob,
@@ -15,11 +16,16 @@ import styles from './JobActions.module.css';
 interface Props {
   jobId: number;
   state: JobState;
-  /** Which pipeline created the job. Only Force search reads it — see
+  /** Which pipeline created the job. Only Re-run pipeline reads it — see
    * canForceSearch. */
   source: JobSource;
   /** Called after a successful delete, so the caller can collapse/navigate away. */
   onDeleted?: () => void;
+  /** Extra control rendered in the left-hand group, alongside Retry/Re-run
+   * pipeline/Cancel and before the spacer that pushes Delete right. Only the
+   * job detail page fills this (issue #376) — the Jobs list expansion row
+   * (JobExpansion.tsx) never passes it, so it stays absent there. */
+  extra?: ReactNode;
 }
 
 // Cancel is hidden for these. Store.prepareJobCancellation updates
@@ -48,7 +54,7 @@ function serverMessage(error: unknown, fallback: string): string {
 // page (issue #60), so the backend's validity rules (which actions are legal
 // for which state) are interpreted in exactly one place instead of drifting
 // between the two call sites.
-export default function JobActions({ jobId, state, source, onDeleted }: Props) {
+export default function JobActions({ jobId, state, source, onDeleted, extra }: Props) {
   const cancel = useCancelJob(jobId);
   const retry = useRetryJob(jobId);
   const forceSearch = useForceSearchJob(jobId);
@@ -114,6 +120,7 @@ export default function JobActions({ jobId, state, source, onDeleted }: Props) {
             {t.jobs.cancel}
           </Button>
         )}
+        {extra}
         <span className={styles.spacer} />
         <Button
           variant="danger"

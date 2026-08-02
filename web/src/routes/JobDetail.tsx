@@ -8,6 +8,7 @@ import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice'
 import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
+import buttonStyles from '../components/tui/Button.module.css';
 import table from '../components/Table.module.css';
 import {
   basename,
@@ -67,6 +68,28 @@ export default function JobDetail() {
   const sleepingUntil =
     job?.notBefore && new Date(job.notBefore) > new Date() ? job.notBefore : '';
 
+  // Artist + album, not year (issue #376) — the search box is a free-text
+  // Soulseek query, and a year narrows it in a way that can hide the exact
+  // match a manual search is meant to find.
+  //
+  // POST /api/jobs never validates title/artist, and a manual job's artist
+  // is whatever the search page posted — `identity?.artist ?? group.parent`,
+  // the peer's parent DIRECTORY name (Search.tsx), which can be "". Joining
+  // blindly would leave a lone leading space and, when both fields are
+  // empty, a query of nothing but a space: the box looks empty, the user
+  // presses Search, and runSearch's `if (!trimmed) return` swallows it with
+  // no feedback at all. So build the query from only the non-empty, trimmed
+  // parts, and skip the link entirely once nothing is left to search for —
+  // it matters most here because Manual search is a manual job's only
+  // search action (Re-run pipeline is hidden for them, issue #352).
+  const manualSearchQuery = [job?.artist, job?.title]
+    .map((s) => s?.trim() ?? '')
+    .filter(Boolean)
+    .join(' ');
+  const manualSearchTarget = manualSearchQuery
+    ? `/search?q=${encodeURIComponent(manualSearchQuery)}`
+    : '';
+
   return (
     <>
       <Link to="/jobs" className={styles.back}>{t.jobs.back}</Link>
@@ -123,6 +146,16 @@ export default function JobDetail() {
           state={actionState}
           source={actionSource}
           onDeleted={() => navigate('/jobs')}
+          extra={
+            job && manualSearchQuery && (
+              <Link
+                to={manualSearchTarget}
+                className={`${buttonStyles.btn} ${buttonStyles.ghost} ${styles.manualSearchLink}`}
+              >
+                {t.jobs.manualSearch}
+              </Link>
+            )
+          }
         />
       </div>
 

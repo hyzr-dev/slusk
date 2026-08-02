@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WireSearchGroup, WireSearchSession } from '../api/types';
 import { t } from '../strings';
@@ -43,11 +43,11 @@ function wireSession(overrides: Partial<WireSearchSession> = {}): WireSearchSess
   };
 }
 
-function renderSearch(client?: QueryClient) {
+function renderSearch(client?: QueryClient, path = '/') {
   const qc = client ?? new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[path]}>
         <Search />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -74,6 +74,83 @@ describe('idle state', () => {
     const input = screen.getByRole('textbox', { name: t.search.queryLabel });
     fireEvent.change(input, { target: { value: 'radiohead' } });
     expect(screen.getByRole('textbox', { name: t.search.queryLabel })).toHaveValue('radiohead');
+  });
+
+  // Issue #376: arriving from a job's "Manual search" link pre-fills the box
+  // from ?q= but must NOT start a search — the user still has to press
+  // Search. `fetchMock` is stubbed and asserted un-called, but that assertion
+  // is only meaningful once the microtask queue has had a chance to run: an
+  // auto-search would go through useStartSearch's mutate(), and React Query
+  // awaits onMutate before invoking the mutation fn, so the POST — if one
+  // happened — would not land until a later microtask, not synchronously
+  // after render(). The flush below (and the queryLabel assertion, which
+  // itself needs an act()-wrapped flush to observe the lazy-initialized
+  // value) gives any such call a chance to happen before the negative
+  // assertion runs.
+  it('pre-fills the query from ?q= without starting a search', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderSearch(undefined, '/?q=Miles%20Davis%20Kind%20of%20Blue');
+
+    expect(screen.getByRole('textbox', { name: t.search.queryLabel })).toHaveValue(
+      'Miles Davis Kind of Blue',
+    );
+    expect(screen.queryByRole('list')).not.toBeInTheDocument();
+
+    // Flush pending microtasks/timers so a hypothetical auto-search's
+    // mutate() would have reached fetch by now.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Issue #376: the box is seeded from ?q= via useState's lazy initializer,
+  // not a useEffect keyed on searchParams. `useSearchParams()`'s return
+  // value is memoized by react-router on `location.search`, so a re-render
+  // alone never changes its identity — the discriminating case is a real
+  // navigation that changes the URL while Search stays mounted (Search
+  // itself is rendered unconditionally here, not behind a <Route>, so a
+  // navigation elsewhere in the tree re-renders it without remounting it).
+  // A `useEffect(() => setQuery(searchParams.get('q') ?? ''), [searchParams])`
+  // would re-run on exactly that navigation and clobber whatever the user
+  // has since typed; the lazy initializer never looks at searchParams again
+  // after mount, so it can't.
+  it('keeps a typed-over value through a navigation that changes the URL, not what that URL now says', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    function Harness() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button type="button" onClick={() => navigate('/?q=Someone%20Elses%20Query')}>
+            navigate elsewhere
+          </button>
+          <Search />
+        </>
+      );
+    }
+
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })}>
+        <MemoryRouter initialEntries={['/?q=Miles%20Davis%20Kind%20of%20Blue']}>
+          <Harness />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const input = screen.getByRole('textbox', { name: t.search.queryLabel });
+    expect(input).toHaveValue('Miles Davis Kind of Blue');
+
+    fireEvent.change(input, { target: { value: 'Radiohead In Rainbows' } });
+    expect(input).toHaveValue('Radiohead In Rainbows');
+
+    fireEvent.click(screen.getByRole('button', { name: 'navigate elsewhere' }));
+
+    expect(screen.getByRole('textbox', { name: t.search.queryLabel })).toHaveValue(
+      'Radiohead In Rainbows',
+    );
   });
 });
 
