@@ -5,7 +5,7 @@ ui:
 	cd web && npm ci && npm run build
 
 build: ui
-	go build -o slskdarr ./cmd/slskdarr
+	go build -o slusk ./cmd/slusk
 
 dev:
 	cd web && npm run dev

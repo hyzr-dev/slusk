@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Go module path: `github.com/samuelenocsson/slskdarr`. Go 1.26. No cgo.
+- Go module path: `github.com/samuelenocsson/slusk`. Go 1.26. No cgo.
 - All exported functions/methods get a doc comment.
 - `store` is the only package that runs SQL; `slskd`/`lidarr` mirror their APIs and import no internal package except via return types; `engine` owns its consumer-defined port interfaces.
 - Prose in this plan is Swedish context; all code, identifiers, paths, and commit messages are English.
@@ -641,7 +641,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestJobsInStateAndCooldown(t *testing.T) {
@@ -728,7 +728,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 const jobSelect = `SELECT id, lidarr_album_id, state, candidates_tried, next_attempt_at, created_at, updated_at FROM album_jobs`
@@ -942,8 +942,8 @@ In `internal/engine/ports.go`, add (keep existing `PeerNetwork`/`JobStore`; exte
 ```go
 import (
 	// ...existing...
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
+	"github.com/samuelenocsson/slusk/internal/lidarr"
+	"github.com/samuelenocsson/slusk/internal/matcher"
 )
 
 // MusicSource is the slice of the Lidarr client the discoverer needs.
@@ -1118,10 +1118,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/lidarr"
+	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/samuelenocsson/slusk/internal/slskd"
 )
 
 // --- fakes ---
@@ -1255,8 +1255,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/lidarr"
 )
 
 // DiscovererParams configures a Discoverer.
@@ -1526,7 +1526,7 @@ git commit -m "feat(engine): Discoverer state machine (search, enqueue, verify, 
 **Files:**
 - Modify: `internal/engine/engine.go`
 - Test: `internal/engine/engine_test.go`
-- Modify: `cmd/slskdarr/main.go`
+- Modify: `cmd/slusk/main.go`
 - Modify: `config.example.toml`
 
 **Interfaces:**
@@ -1624,7 +1624,7 @@ Expected: PASS (all).
 
 - [ ] **Step 5: Wire main.go**
 
-In `cmd/slskdarr/main.go`, construct the Lidarr client, matcher, and discoverer, and pass the discoverer into the engine. After the existing `reconciler` construction add:
+In `cmd/slusk/main.go`, construct the Lidarr client, matcher, and discoverer, and pass the discoverer into the engine. After the existing `reconciler` construction add:
 ```go
 	lidarrClient := lidarr.New(cfg.Lidarr.URL, cfg.Lidarr.APIKey)
 	scorer := matcher.NewWeighted(cfg.Engine.Weights, cfg.Engine.MinBitrate)
@@ -1640,7 +1640,7 @@ In `cmd/slskdarr/main.go`, construct the Lidarr client, matcher, and discoverer,
 		Logger:           logger,
 	})
 ```
-and add `Discoverer: discoverer,` to the `engine.Params` literal. Add `"github.com/samuelenocsson/slskdarr/internal/lidarr"` and `"github.com/samuelenocsson/slskdarr/internal/matcher"` to the imports.
+and add `Discoverer: discoverer,` to the `engine.Params` literal. Add `"github.com/samuelenocsson/slusk/internal/lidarr"` and `"github.com/samuelenocsson/slusk/internal/matcher"` to the imports.
 
 - [ ] **Step 6: Update config.example.toml**
 

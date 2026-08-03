@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newIdentifyTestHandler(reg *prometheus.Registry, search IdentifySearchFunc, albumEditions IdentifyAlbumEditionsFunc, albumLidarr IdentifyAlbumLidarrStatusFunc) http.Handler {

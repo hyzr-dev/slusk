@@ -28,7 +28,7 @@ import (
 // "%04d_description_destructive.sql". They are discovered like any other
 // migration but are never applied by Migrate/OpenContext's automatic path;
 // they must be applied explicitly via ApplyDestructive, e.g. by running
-// `slskdarr -migrate-destructive`.
+// `slusk -migrate-destructive`.
 //
 // This replaces the old approach of re-running the entire schema.sql on
 // every startup with no version tracking: each migration now runs at most
@@ -136,7 +136,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 // ApplyDestructive applies every embedded destructive migration not yet
 // recorded in schema_migrations, logging each one it applies. Unlike
 // Migrate, this is never called automatically from OpenContext - it must be
-// invoked explicitly (see `slskdarr -migrate-destructive`).
+// invoked explicitly (see `slusk -migrate-destructive`).
 func ApplyDestructive(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	return migrateFromFS(ctx, db, migrationsFS, "migrations", true, logger)
 }

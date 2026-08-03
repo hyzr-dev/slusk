@@ -1,8 +1,8 @@
-# slskdarr Dashboard (Overview + Queue) Implementation Plan
+# slusk Dashboard (Overview + Queue) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a real, data-backed web dashboard (Overview + Queue views) to slskdarr, served from the existing `observ.Server`, with a Cancel action wired to the real engine.
+**Goal:** Add a real, data-backed web dashboard (Overview + Queue views) to slusk, served from the existing `observ.Server`, with a Cancel action wired to the real engine.
 
 **Architecture:** Extend `internal/observ` (currently `/metrics` + `/status`) with `GET /`, `GET /dashboard.js`, `GET /api/jobs`, and `POST /api/jobs/{id}/cancel`. `observ` stays a leaf package — it takes new `JobsFunc`/`CancelFunc` closures from `main.go`, which has access to `store` and the `slskd` client. A new `internal/store/dashboard.go` adds a `ListJobsWithTransfer` join query and a `core.JobView` read-only projection. `album_jobs` gets two new cached columns (`title`, `artist_name`) filled in by the discoverer.
 
@@ -35,7 +35,7 @@
 - Create: `internal/observ/web/dashboard.js` — polling/rendering script (embedded)
 - Create: `internal/observ/web.go` — `//go:embed web` + template parsing + handler funcs for `/`, `/dashboard.js`
 - Modify: `internal/observ/observ_test.go` — update `NewServer` calls for the new signature; add tests for `/api/jobs` and `/api/jobs/{id}/cancel`
-- Modify: `cmd/slskdarr/main.go` — build `jobsFn`/`cancelFn` closures over `st` and `peers`, pass to `observ.NewServer`
+- Modify: `cmd/slusk/main.go` — build `jobsFn`/`cancelFn` closures over `st` and `peers`, pass to `observ.NewServer`
 
 ---
 
@@ -419,7 +419,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
@@ -580,7 +580,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // jobViewSelect joins each non-cancelled album_job with its most recent
@@ -723,7 +723,7 @@ package observ
 import (
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestDashboardStatus(t *testing.T) {
@@ -801,7 +801,7 @@ Create `internal/observ/status.go`:
 // machine (internal/core.AlbumJobState has 10 states; the dashboard needs 5).
 package observ
 
-import "github.com/samuelenocsson/slskdarr/internal/core"
+import "github.com/samuelenocsson/slusk/internal/core"
 
 // dashboardStatus derives the dashboard's coarse status label for a job view.
 func dashboardStatus(v core.JobView) string {
@@ -912,7 +912,7 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 }
 ```
 
-Add `"errors"` and `"github.com/samuelenocsson/slskdarr/internal/core"` to the test file's imports.
+Add `"errors"` and `"github.com/samuelenocsson/slusk/internal/core"` to the test file's imports.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -921,7 +921,7 @@ Expected: FAIL — compile error, `NewServer` takes 2 args not 4, `jobDTO`/`canc
 
 - [ ] **Step 3: Implement the DTO, JobsFunc, CancelFunc placeholder type, and the route**
 
-Edit `internal/observ/observ.go`. Add imports `"strconv"`, `"github.com/samuelenocsson/slskdarr/internal/core"`. Add types and update `NewServer`:
+Edit `internal/observ/observ.go`. Add imports `"strconv"`, `"github.com/samuelenocsson/slusk/internal/core"`. Add types and update `NewServer`:
 
 ```go
 // jobDTO is the JSON shape served at /api/jobs — a flattened, display-ready
@@ -1026,16 +1026,16 @@ Expected: PASS (all tests, including the two new ones and the two fixed ones)
 
 - [ ] **Step 6: Update main.go's NewServer call to compile**
 
-`cmd/slskdarr/main.go:79` currently calls `observ.NewServer(reg, statusFn)`. This will fail to compile until Task 8 adds the `jobsFn`/`cancelFn` closures. For now, add temporary inline closures so the build is green after this task — Task 8 replaces them with the real implementations:
+`cmd/slusk/main.go:79` currently calls `observ.NewServer(reg, statusFn)`. This will fail to compile until Task 8 adds the `jobsFn`/`cancelFn` closures. For now, add temporary inline closures so the build is green after this task — Task 8 replaces them with the real implementations:
 
 ```go
 jobsFn := func(ctx context.Context) ([]core.JobView, error) { return st.ListJobsWithTransfer(ctx) }
 cancelFn := func(ctx context.Context, jobID int64) (observ.CancelResultPlaceholder, error) { return 0, nil } // replaced in Task 8
 ```
 
-Actually — do not use a placeholder type that doesn't exist. Instead, in this step only add the real `jobsFn` (which is simple and fully specified now) and leave `cancelFn` as `nil`-safe by deferring this whole main.go edit to Task 8, where both closures are written together with the full cancel logic. **Skip editing main.go in this task.** Confirm `cmd/slskdarr` currently fails to build (expected, temporary) and note it will be fixed in Task 8:
+Actually — do not use a placeholder type that doesn't exist. Instead, in this step only add the real `jobsFn` (which is simple and fully specified now) and leave `cancelFn` as `nil`-safe by deferring this whole main.go edit to Task 8, where both closures are written together with the full cancel logic. **Skip editing main.go in this task.** Confirm `cmd/slusk` currently fails to build (expected, temporary) and note it will be fixed in Task 8:
 
-Run: `go build ./... 2>&1 | grep slskdarr` — expect an error on `cmd/slskdarr/main.go` about `not enough arguments in call to observ.NewServer`. This is expected and resolved in Task 8; do not fix it here.
+Run: `go build ./... 2>&1 | grep slusk` — expect an error on `cmd/slusk/main.go` about `not enough arguments in call to observ.NewServer`. This is expected and resolved in Task 8; do not fix it here.
 
 - [ ] **Step 7: Commit**
 
@@ -1044,7 +1044,7 @@ git add internal/observ/observ.go internal/observ/observ_test.go
 git commit -m "feat(observ): add GET /api/jobs endpoint"
 ```
 
-Note: `cmd/slskdarr` will not build until Task 8. This is intentional — `internal/observ` is fully tested and correct in isolation via `go test ./internal/observ/...`.
+Note: `cmd/slusk` will not build until Task 8. This is intentional — `internal/observ` is fully tested and correct in isolation via `go test ./internal/observ/...`.
 
 ---
 
@@ -1190,11 +1190,11 @@ git commit -m "feat(observ): add POST /api/jobs/{id}/cancel endpoint"
 ## Task 8: Wire real jobsFn/cancelFn in main.go
 
 **Files:**
-- Modify: `cmd/slskdarr/main.go`
+- Modify: `cmd/slusk/main.go`
 
 **Interfaces:**
 - Consumes: `store.Store.ListJobsWithTransfer`, `store.Store.JobWithTransfer`, `store.Store.AdvanceJobState` (all pre-existing or from Task 4), `slskd.Client.Cancel` (pre-existing, `internal/slskd/client.go:188`), `observ.JobsFunc`, `observ.CancelFunc`, `cancelResultOK`/`cancelResultNotFound`/`cancelResultFailed` (Task 6/7 — note these are unexported in `observ`, so `main.go` cannot construct them directly; see Step 1).
-- Produces: a building, fully-wired `cmd/slskdarr` binary.
+- Produces: a building, fully-wired `cmd/slusk` binary.
 
 - [ ] **Step 1: Export cancel result constants from observ**
 
@@ -1212,7 +1212,7 @@ git commit -m "refactor(observ): export CancelResult type and constants"
 
 - [ ] **Step 2: Write the cancelFn closure in main.go**
 
-Edit `cmd/slskdarr/main.go`. Add `"github.com/samuelenocsson/slskdarr/internal/core"` to imports. Replace the `statusFn`-and-server block (currently lines 72-79) with:
+Edit `cmd/slusk/main.go`. Add `"github.com/samuelenocsson/slusk/internal/core"` to imports. Replace the `statusFn`-and-server block (currently lines 72-79) with:
 
 ```go
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
@@ -1261,7 +1261,7 @@ Expected: PASS across all packages
 - [ ] **Step 5: Commit**
 
 ```bash
-git add cmd/slskdarr/main.go
+git add cmd/slusk/main.go
 git commit -m "feat(cmd): wire dashboard jobsFn/cancelFn into observ server"
 ```
 
@@ -1293,7 +1293,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestRootServesDashboardHTML(t *testing.T) {
@@ -1423,7 +1423,7 @@ Create `internal/observ/web/dashboard.html`. This is the real page shell — dar
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>slskdarr</title>
+<title>slusk</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -1474,7 +1474,7 @@ Create `internal/observ/web/dashboard.html`. This is the real page shell — dar
     <div class="brand">
       <div class="brand-mark">sl</div>
       <div>
-        <div style="font-weight:600;">slskdarr</div>
+        <div style="font-weight:600;">slusk</div>
         <div style="font-size:11px;color:#5f6672;">Lidarr → slskd</div>
       </div>
     </div>
@@ -1559,7 +1559,7 @@ func dashboardJSHandler(w http.ResponseWriter, r *http.Request) {
 Create `internal/observ/web/dashboard.js` with a minimal stub (Task 10 replaces this with the real polling logic):
 
 ```js
-console.log("slskdarr dashboard loading");
+console.log("slusk dashboard loading");
 ```
 
 - [ ] **Step 6: Register the routes**
@@ -1752,7 +1752,7 @@ Expected: no errors, all tests pass (the embed doesn't care about JS content, ju
 This step has no automated test — follow it exactly and report the actual observed results, not an assumption of success:
 
 1. Ensure a config file exists (copy `config.example.toml` if needed) pointing at a real or dev slskd/Lidarr, or a store path you can seed manually.
-2. Run: `go run ./cmd/slskdarr -config <path-to-config>`
+2. Run: `go run ./cmd/slusk -config <path-to-config>`
 3. In a browser, open `http://<observ.listen_addr>/`
 4. Confirm the page loads with the dark theme, sidebar, and "Översikt"/"Kö" nav buttons.
 5. Confirm stat cards render (even if all zero on an empty store).
@@ -1799,5 +1799,5 @@ git commit -m "docs: add dashboard verification to smoke test"
 
 - **Spec coverage:** Overview view (stat cards + active downloads list) → Tasks 6, 9, 10. Queue view (table, search, expand, Cancel) → Tasks 6, 7, 9, 10. Schema/title-artist caching → Tasks 1-3. `ListJobsWithTransfer` → Task 4. Served from existing `observ.Server` → Tasks 6-9 all extend `internal/observ`, no new server/port. No new deps, no build step → Task 9 deliberately uses a static embedded file instead of `html/template` data-binding, since the page needs no server-side data holes (all data is client-fetched JSON) — this is a simplification over the design doc's literal "Go html/template" phrasing but satisfies its actual intent (server-embedded, no build step) and was flagged inline in Task 9 Step 4 rather than silently deviating.
 - **Deferred-per-spec items confirmed absent from this plan:** Hälsa view, Inställningar view, Filer/Historik detail, Retry/Tvinga sökning actions, per-row orphaned detail — none appear in any task above, matching the design doc's explicit out-of-scope list.
-- **Known intentional temporary breakage:** `cmd/slskdarr` does not build between Task 6 and Task 8 (Task 6 changes `observ.NewServer`'s signature; Task 8 updates the only caller). This is flagged explicitly in Task 6 Step 6 so the executing agent doesn't mistake it for a real bug. Task 8 Step 3 confirms the build is green again.
+- **Known intentional temporary breakage:** `cmd/slusk` does not build between Task 6 and Task 8 (Task 6 changes `observ.NewServer`'s signature; Task 8 updates the only caller). This is flagged explicitly in Task 6 Step 6 so the executing agent doesn't mistake it for a real bug. Task 8 Step 3 confirms the build is green again.
 - **Type/signature consistency check:** `core.JobView` (Task 4) is used identically in Tasks 5, 6, 7, 8. `dashboardStatus(v core.JobView) string` (Task 5) is called from `toJobDTO` (Task 6) with no signature drift. `CancelResult`/`CancelResultOK`/`CancelResultNotFound`/`CancelResultFailed` are introduced unexported in Task 6, used unexported through Task 7, then exported in Task 8 Step 1 with every reference updated in the same step — no task after Task 8 uses the lowercase names.

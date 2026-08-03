@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/app"
+	"github.com/samuelenocsson/slusk/internal/app"
 )
 
 // LidarrArtistStatusFunc reports the read-only Lidarr library status for a
@@ -210,7 +210,7 @@ func registerLidarrLibrary(mux *http.ServeMux, artistStatus LidarrArtistStatusFu
 			return
 		}
 
-		// The server's WriteTimeout (30s, see cmd/slskdarr/main.go) exists to
+		// The server's WriteTimeout (30s, see cmd/slusk/main.go) exists to
 		// bound ordinary request handlers, but EnsureArtist can exceed it on a
 		// first-time add: a live probe against Lidarr 3.1.0.4875 measured POST
 		// /artist alone taking over 30s while it fetched the artist's metadata

@@ -27,7 +27,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // DefaultBaseURL is MusicBrainz's public API root.
@@ -112,7 +112,7 @@ func New(baseURL, contact string, opts ...Option) *Client {
 // userAgent builds the identifying User-Agent MusicBrainz's usage policy
 // requires: "application/version (contact)".
 func (c *Client) userAgent() string {
-	return fmt.Sprintf("slskdarr/1.0 (%s)", c.contact)
+	return fmt.Sprintf("slusk/1.0 (%s)", c.contact)
 }
 
 // get performs a rate-limited, cached GET against reqURL and decodes the JSON

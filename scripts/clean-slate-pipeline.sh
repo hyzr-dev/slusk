@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Empties slskdarr's pipeline tables ahead of the pipeline-state-machine
+# Empties slusk's pipeline tables ahead of the pipeline-state-machine
 # deploy (see docs/superpowers/specs/2026-07-06-pipeline-state-machine-design.md).
 #
 # Wipes:  album_jobs, candidate_attempts, candidates, transfers, job_events
@@ -12,9 +12,9 @@
 #
 # Usage:
 #   scripts/clean-slate-pipeline.sh "$DSN"
-#   DSN=postgres://slskdarr:...@host:5432/slskdarr scripts/clean-slate-pipeline.sh
+#   DSN=postgres://slusk:...@host:5432/slusk scripts/clean-slate-pipeline.sh
 #
-# Run while slskdarr is STOPPED. Requires psql.
+# Run while slusk is STOPPED. Requires psql.
 
 set -eu
 

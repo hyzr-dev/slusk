@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
 )
 
 func TestCantConnectToPeerDeserializeServerTokenOnly(t *testing.T) {

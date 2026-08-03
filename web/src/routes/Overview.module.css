@@ -34,7 +34,7 @@
 }
 
 /* Shared by the TRANSFERS header row and every transfer row so their
-   columns always line up (mock, docs/design/slskdarr-tui.dc.html:102). */
+   columns always line up (mock, docs/design/slusk-tui.dc.html:102). */
 .transferGrid {
   display: grid;
   /* SIZE is 92px, not the mock's 84px: the mock's formatter rounded to whole

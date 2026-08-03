@@ -40,7 +40,7 @@ file_count = 1.0
 known_user = 0.6
 
 [store]
-dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable"
 
 [observ]
 listen_addr = "127.0.0.1:9090"

@@ -8,7 +8,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // transferDetailDTO is one file transfer within an attempt, as shown in the

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/soulseek"
 )
 
 type fakeShareRescanner struct {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // SelectingStore is the slice of the store Selecting needs. It embeds

@@ -5,7 +5,7 @@ api_key = "CHANGEME"
 [slskd]
 url = "http://slskd:5030"
 api_key = "CHANGEME"
-# slskdarr cleans up after itself in slskd: it deletes each search once its
+# slusk cleans up after itself in slskd: it deletes each search once its
 # responses are harvested, and removes download records once they reach a
 # terminal state. As a backstop for anything left behind by a crash between
 # harvest and delete, enable slskd's own retention in its config (slskd.yml),
@@ -31,7 +31,7 @@ stall_timeout = "5m"
 search_timeout = "20s"
 min_bitrate = 192
 # Max files handed to one candidate's peer at once. The budget is per candidate,
-# so two jobs using the same peer each get their own. slskdarr records a whole
+# so two jobs using the same peer each get their own. slusk records a whole
 # album up front but sends only this many files at a time, releasing more as each
 # finishes. Enqueuing a whole album at once can trip peers' per-user queued-
 # megabyte limit and make a complete source look incomplete. Keep it low.
@@ -103,7 +103,7 @@ known_user = 1.0
 [store]
 # PostgreSQL connection string. The schema is created automatically on startup;
 # the database and user must already exist.
-dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable"
 
 [observ]
 # /healthz, /readyz, the dashboard shell, and /api/auth/* are public. Every
@@ -146,7 +146,7 @@ slskd_complete_dir = "/music/slskd-downloads"
 # username = "CHANGEME"
 # password = "CHANGEME"
 #
-# listen_addr is where slskdarr listens for incoming peer connections and is
+# listen_addr is where slusk listens for incoming peer connections and is
 # what gets advertised to the server after login - there is no separate
 # "advertised port" concept, so other peers must be able to reach this port
 # directly. With Docker port mapping, the published host port MUST equal the
@@ -157,18 +157,18 @@ slskd_complete_dir = "/music/slskd-downloads"
 # a slot; additional requests wait in a bounded global FIFO queue.
 # upload_slots = 2
 #
-# The central server supplies the raw IP:port slskdarr dials for each peer,
+# The central server supplies the raw IP:port slusk dials for each peer,
 # so it is treated as untrusted input. Loopback and link-local addresses are
 # always refused. RFC 1918 / ULA private addresses are refused too, unless
 # you set this - needed if you actually have Soulseek peers on your own LAN.
 # allow_private_peer_addresses = false
 #
-# Optional: run behind gluetun with VPN port forwarding. At startup slskdarr
+# Optional: run behind gluetun with VPN port forwarding. At startup slusk
 # asks gluetun's control server for the currently forwarded port and listens
 # on it instead - the port part of listen_addr above is ignored (its host is
 # still used); startup waits and retries with backoff until gluetun reports a
 # nonzero port. The Docker port-mapping caveat on listen_addr above does not
-# apply here, since with gluetun you run slskdarr with
+# apply here, since with gluetun you run slusk with
 # network_mode: service:gluetun (see docker-compose.example.yml) rather than
 # publishing a port of its own.
 # [soulseek.gluetun]

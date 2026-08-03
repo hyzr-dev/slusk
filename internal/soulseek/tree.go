@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 const (

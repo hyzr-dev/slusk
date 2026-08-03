@@ -25,7 +25,7 @@ export type LoginMode = 'login' | 'setup';
 
 /**
  * The login card and, with `mode="setup"`, the first-run account-creation
- * card — one component per docs/design/slskdarr-login.dc.html, which draws
+ * card — one component per docs/design/slusk-login.dc.html, which draws
  * both as the same 340px bordered panel with a different header/fields/button.
  * Rendered by AuthGate (App.tsx) in place of the router outlet, so it owns
  * the page's only <h1> rather than reusing SectionHeader's <h2> (that

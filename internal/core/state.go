@@ -1,4 +1,4 @@
-// Package core holds the domain types shared across slskdarr. It imports no
+// Package core holds the domain types shared across slusk. It imports no
 // other internal package so every other package may depend on it freely.
 package core
 
@@ -60,7 +60,7 @@ func (s AlbumJobState) PipelineTerminal() bool {
 	return s == StateDone || s == StateCancelled || s == StateFailed || s == StateNotImported
 }
 
-// TransferState mirrors slskd's transfer states, plus STALLED which slskdarr
+// TransferState mirrors slskd's transfer states, plus STALLED which slusk
 // derives itself from lack of byte progress.
 type TransferState string
 

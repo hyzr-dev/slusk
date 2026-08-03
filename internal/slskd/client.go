@@ -1,5 +1,5 @@
 // Package slskd is a thin REST client for slskd. It mirrors slskd's API and
-// returns its own types; it knows nothing about slskdarr's database or job
+// returns its own types; it knows nothing about slusk's database or job
 // states. The engine defines the narrow interface it consumes from this client.
 package slskd
 
@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 const (
@@ -318,7 +318,7 @@ func (c *Client) Cancel(ctx context.Context, username, id string) error {
 // Unlike Cancel — which only cancels a still-active transfer and leaves the
 // terminal record behind — Remove is for a transfer that has already reached a
 // terminal state: it deletes the leftover record so slskd's transfer list does
-// not accumulate every download slskdarr has ever made.
+// not accumulate every download slusk has ever made.
 func (c *Client) Remove(ctx context.Context, username, id string) error {
 	path := fmt.Sprintf("/api/v0/transfers/downloads/%s/%s?remove=true", url.PathEscape(username), url.PathEscape(id))
 	return c.do(ctx, http.MethodDelete, path, nil, nil)

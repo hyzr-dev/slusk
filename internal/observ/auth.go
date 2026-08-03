@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/app"
+	"github.com/samuelenocsson/slusk/internal/app"
 )
 
 // maxAuthRequestBytes bounds the raw POST /api/auth/{setup,login} request
@@ -72,7 +72,7 @@ type sessionResponse struct {
 
 // registerAuth wires the four public auth endpoints onto mux. tokenAuth is
 // deliberately the TOKEN-ONLY authenticator (see NewTokenAuthenticator, not
-// the AnyOf-combined one cmd/slskdarr/main.go wraps the rest of the handler
+// the AnyOf-combined one cmd/slusk/main.go wraps the rest of the handler
 // with) so GET /api/auth/session can tell "authenticated by the machine
 // token" (username stays null) apart from "authenticated by a browser
 // session" (username is populated, checked separately via sessionUser

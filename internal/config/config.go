@@ -213,7 +213,7 @@ func (p *PipelineConfig) applyDefaults() {
 // StoreConfig is the persistent store configuration.
 type StoreConfig struct {
 	// DSN is the PostgreSQL connection string, e.g.
-	// postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable
+	// postgres://slusk:password@postgres:5432/slusk?sslmode=disable
 	DSN string `toml:"dsn"`
 }
 
@@ -286,7 +286,7 @@ type SoulseekConfig struct {
 	ServerAddress string `toml:"server_address"`
 	Username      string `toml:"username"`
 	Password      string `toml:"password"`
-	// ListenAddr is the host:port slskdarr listens on for incoming peer
+	// ListenAddr is the host:port slusk listens on for incoming peer
 	// connections, advertised to the server after login. Defaults to
 	// 0.0.0.0:2234 when the section is enabled and this is blank. Peers must
 	// be able to reach this port: with Docker port mapping, the published

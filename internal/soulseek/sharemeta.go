@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
 )
 
 // ShareFileMeta is one file's cached technical metadata, keyed by its local

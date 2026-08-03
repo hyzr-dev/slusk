@@ -1,11 +1,11 @@
-/* Palette from the TUI design mock (docs/design/slskdarr-tui.dc.html, the
+/* Palette from the TUI design mock (docs/design/slusk-tui.dc.html, the
    rootStyle object). The mock has no per-status hue: queued, active and
    importing all render in --fg/--dim, and only OK and error carry a color.
    The status colors that used to live here were retired with that decision —
    see docs/superpowers/specs/2026-07-25-tui-reskin-design.md. */
 :root {
   --bg: #08090a;
-  /* Card surface for the 27 July TUI restyle (docs/design/slskdarr-tui.dc.html,
+  /* Card surface for the 27 July TUI restyle (docs/design/slusk-tui.dc.html,
      commit 688d52c): panels now stand free on --bg, separated by gap rather
      than by the dividing lines the previous idiom used, so this needs its
      own token distinct from --bg. */
@@ -39,7 +39,7 @@
   --line2: #252b30;
   /* Divider between rows *inside* a panel, one step quieter than --line so a
      dense table's internal rules recede against the panel's own border
-     (docs/design/slskdarr-tui.dc.html uses this raw hex for every
+     (docs/design/slusk-tui.dc.html uses this raw hex for every
      `border-bottom` within a table body). Named here for the same reason as
      the scroll colours below: a hex sitting in a .module.css is invisible to
      any check that reasons about the palette. */

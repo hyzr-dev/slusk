@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/soulseek"
 )
 
 // uploadHistoryStore is the narrow slice of *store.Store uploadSink needs, so

@@ -1,5 +1,5 @@
 /* First modal in this codebase (issue #321) — see the mock's identifyOpen
-   block, docs/design/slskdarr-tui.dc.html. Separation from the page comes
+   block, docs/design/slusk-tui.dc.html. Separation from the page comes
    from the scrim and the border alone: CLAUDE.md's "recesses, never
    elevates" rule means no shadow and no blur here, ever. */
 .scrim {

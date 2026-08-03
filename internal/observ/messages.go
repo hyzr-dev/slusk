@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // maxThreadLimit caps the page size GET /api/messages/{username} will honor,

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // fakeMusicBrainz is a MusicBrainzSearcher test double.

@@ -17,11 +17,11 @@ type Authenticator interface {
 
 // sessionCookieName is the browser session cookie set by POST
 // /api/auth/setup and /login and cleared by /logout (issue #279).
-const sessionCookieName = "slskdarr_session"
+const sessionCookieName = "slusk_session"
 
 // SessionLookupFunc resolves a raw session-cookie token to whether it
 // currently authenticates a user. Backed by app.Auth.SessionUser via
-// cmd/slskdarr/main.go; a func type rather than an interface so this package
+// cmd/slusk/main.go; a func type rather than an interface so this package
 // still never needs to import internal/app or internal/store (see
 // search.go's note on the same convention). A lookup error is treated
 // identically to "not found" - Authenticate fails closed on a transient
@@ -31,7 +31,7 @@ type SessionLookupFunc func(r *http.Request, token string) bool
 // TokenAuthenticator authenticates the configured bearer/Basic token alone
 // (machine access - curl, Prometheus, the Vite dev proxy). It knows nothing
 // about session cookies - see SessionAuthenticator and AnyOf for how
-// cmd/slskdarr/main.go combines the two, and ServerDeps.TokenAuth's doc
+// cmd/slusk/main.go combines the two, and ServerDeps.TokenAuth's doc
 // comment for why GET /api/auth/session specifically needs the token-only
 // instance rather than the combined one.
 //
@@ -67,7 +67,7 @@ func (a *TokenAuthenticator) Authenticate(r *http.Request) bool {
 	return ok && matches
 }
 
-// SessionAuthenticator authenticates a request by its slskdarr_session
+// SessionAuthenticator authenticates a request by its slusk_session
 // cookie alone (browser form login, issue #279). It knows nothing about the
 // bearer/Basic token - see TokenAuthenticator and AnyOf.
 type SessionAuthenticator struct {
@@ -192,7 +192,7 @@ func ProtectPrivateEndpoints(next http.Handler, auth Authenticator) http.Handler
 			// every install that ever used the pre-#279 prompt. Basic is still
 			// ACCEPTED for machine callers - curl -u sends it preemptively and
 			// never needs the challenge.
-			w.Header().Add("WWW-Authenticate", `Bearer realm="slskdarr"`)
+			w.Header().Add("WWW-Authenticate", `Bearer realm="slusk"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -232,7 +232,7 @@ func sameOriginMutation(r *http.Request) bool {
 // requestScheme determines the scheme (http/https) this request actually
 // arrived over: the connection's own TLS state, overridden by a single
 // trusted X-Forwarded-Proto header (config.example.toml documents that the
-// reverse proxy in front of slskdarr must discard any client-supplied
+// reverse proxy in front of slusk must discard any client-supplied
 // X-Forwarded-Proto and set exactly one trusted value). ok is false when
 // X-Forwarded-Proto is present but malformed - comma-separated (e.g. a
 // two-hop proxy chain each appending its own value, such as "https,https")

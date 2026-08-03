@@ -3,7 +3,7 @@
 // current active/queued upload entries, and GET /api/uploads/history pages the
 // persisted record of finished uploads (issue #325). observ deliberately does
 // not import internal/soulseek - UploadsFunc declares its own transport-level
-// types, and cmd/slskdarr/main.go adapts between the two (see
+// types, and cmd/slusk/main.go adapts between the two (see
 // soulseek.Client.UploadReport).
 package observ
 
@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // UploadEntry is one upload in an UploadReport: either currently streaming

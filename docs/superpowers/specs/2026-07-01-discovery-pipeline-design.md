@@ -1,8 +1,8 @@
-# slskdarr — discovery-pipeline (designdokument)
+# slusk — discovery-pipeline (designdokument)
 
 **Datum:** 2026-07-01
 **Status:** Godkänd design, ej påbörjad implementation
-**Bygger på:** v1 (se `2026-07-01-slskdarr-design.md`), som är mergat till `main`
+**Bygger på:** v1 (se `2026-07-01-slusk-design.md`), som är mergat till `main`
 **Omfattning:** En egen spec→plan→implement-cykel för Lidarr discovery→search→select→download→verify→import.
 
 ---
@@ -173,7 +173,7 @@ Alla context-aware; ingen annan modul rör SQL.
   `MusicSource` (Lidarr) + utökad slskd-port (`Search`/`Enqueue`); `JobStore` växer med §8.
   `Run` får en andra ticker på `LidarrPoll`. Nya metrics: searches issued, matches found,
   imports ok/rejected, candidates exhausted.
-- **`cmd/slskdarr/main.go`:** wire in `Discoverer` (Lidarr-klient + store + slskd + matcher) och
+- **`cmd/slusk/main.go`:** wire in `Discoverer` (Lidarr-klient + store + slskd + matcher) och
   starta discovery-loopen.
 
 ---

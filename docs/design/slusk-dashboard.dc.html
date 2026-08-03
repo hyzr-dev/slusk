@@ -32,7 +32,7 @@
     <div style="display:flex;align-items:center;gap:11px;padding:18px 18px 16px;">
       <div style="width:34px;height:34px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14px;color:#08130d;letter-spacing:-0.5px;">sl</div>
       <div style="line-height:1.1;">
-        <div style="font-weight:600;font-size:15px;color:#e7e9ee;letter-spacing:-0.2px;">slskdarr</div>
+        <div style="font-weight:600;font-size:15px;color:#e7e9ee;letter-spacing:-0.2px;">slusk</div>
         <div style="font-size:11px;color:#5f6672;font-family:'IBM Plex Mono',monospace;margin-top:2px;">Lidarr → Soulseek</div>
       </div>
     </div>
@@ -63,7 +63,7 @@
           <span style="font-family:'IBM Plex Mono',monospace;color:#5f6672;font-size:11px;">{{ d.meta }}</span>
         </div>
       </sc-for>
-      <div style="font-size:10.5px;color:#4a505b;font-family:'IBM Plex Mono',monospace;margin-top:2px;">slskdarr v1.0.0-rc2</div>
+      <div style="font-size:10.5px;color:#4a505b;font-family:'IBM Plex Mono',monospace;margin-top:2px;">slusk v1.0.0-rc2</div>
     </div>
   </aside>
 
@@ -98,7 +98,7 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--stalled)" stroke-width="2" stroke-linecap="round"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg>
       <div style="flex:1;">
         <div style="font-size:13px;font-weight:600;color:#e8d9b8;">Konfigurationen är ofullständig</div>
-        <div style="font-size:12px;color:#b09a6e;margin-top:1px;">Soulseek-anslutningen behöver testas och inga delade mappar är verifierade. slskdarr kör i begränsat läge.</div>
+        <div style="font-size:12px;color:#b09a6e;margin-top:1px;">Soulseek-anslutningen behöver testas och inga delade mappar är verifierade. slusk kör i begränsat läge.</div>
       </div>
       <button onClick="{{ goSetup }}" style="padding:7px 13px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.14);color:var(--stalled);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(224,167,64,0.22);">Öppna setup</button>
     </div>
@@ -737,7 +737,7 @@
         </sc-for>
         <span style="font-size:12px;color:#8a919d;margin-left:6px;font-family:'IBM Plex Mono',monospace;">{{ setupDoneCount }}/3 klara</span>
       </div>
-      <div style="font-size:13px;color:#6b7280;margin-bottom:18px;text-wrap:pretty;max-width:520px;">slskdarr validerar din konfigurationsfil. Fyll i värdena där och testa varje anslutning här — inget skrivs tillbaka från UI:t.</div>
+      <div style="font-size:13px;color:#6b7280;margin-bottom:18px;text-wrap:pretty;max-width:520px;">slusk validerar din konfigurationsfil. Fyll i värdena där och testa varje anslutning här — inget skrivs tillbaka från UI:t.</div>
 
       <div style="display:flex;flex-direction:column;gap:14px;">
         <sc-for list="{{ setupSteps }}" as="st" hint-placeholder-count="3">
@@ -1258,10 +1258,10 @@ class Component extends DCLogic {
       dh('Share-indexering', !s.shareEmpty, s.shareEmpty?'Inga shares':'Indexerad', s.shareEmpty?'Inga delade mappar — du kan bli blockerad':'61k filer · 2.1 TB delas', s.shareEmpty?'—':'senast 12 min sedan')
     ];
     const metricTiles=[
-      {key:'slskdarr_reconcile_total', value:s.reconcileTotal, label:'reconcile-pass körda'},
-      {key:'slskdarr_downloads_active', value:counts.active, label:'aktiva transfers'},
-      {key:'slskdarr_unknown_transfers', value:counts.orphaned, label:'transfers utan jobb'},
-      {key:'slskdarr_stalled_total', value:counts.stalled+counts.failed, label:'stalled / misslyckade'}
+      {key:'slusk_reconcile_total', value:s.reconcileTotal, label:'reconcile-pass körda'},
+      {key:'slusk_downloads_active', value:counts.active, label:'aktiva transfers'},
+      {key:'slusk_unknown_transfers', value:counts.orphaned, label:'transfers utan jobb'},
+      {key:'slusk_stalled_total', value:counts.stalled+counts.failed, label:'stalled / misslyckade'}
     ];
     const activeChart=this.buildArea(s.activeLive,{h:120,color:'var(--active)',fill:'rgba(76,141,255,0.13)',max:Math.max.apply(null,s.activeLive.concat([5]))});
     const reconcileChart=this.buildBars(s.passes.slice().reverse().map(p=>p.matched),{h:120,color:'var(--accent)',max:4});
@@ -1337,7 +1337,7 @@ class Component extends DCLogic {
       const showResult=done||failed;
       let resultBox='',resultGlyph='',resultTitle='',resultHint='',hasHint=false,hasFix=false,resultIcon='',resultTitleColor='';
       if (done){ resultBox='display:flex;align-items:center;gap:11px;margin-top:14px;padding:11px 13px;border-radius:9px;background:var(--done-bg);border:1px solid rgba(53,196,143,0.28);'; resultGlyph='✓'; resultIcon='display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--done);color:#08130d;font-size:12px;font-weight:700;flex:0 0 20px;'; resultTitle=d.k==='soulseek'?'Inloggad som '+s.setup.soulseek.user:'Anslutning lyckades'; resultTitleColor='var(--done)'; }
-      else if (failed){ resultBox='display:flex;align-items:flex-start;gap:11px;margin-top:14px;padding:12px 13px;border-radius:9px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);'; resultGlyph='!'; resultIcon='display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;'; resultTitle='Kunde inte nå Lidarr på '+s.setup.lidarr.url; resultTitleColor='#e8d9b8'; resultHint='Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686, inte 8687) och att Lidarr är igång och nåbar från slskdarr-containern.'; hasHint=true; hasFix=true; }
+      else if (failed){ resultBox='display:flex;align-items:flex-start;gap:11px;margin-top:14px;padding:12px 13px;border-radius:9px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);'; resultGlyph='!'; resultIcon='display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;'; resultTitle='Kunde inte nå Lidarr på '+s.setup.lidarr.url; resultTitleColor='#e8d9b8'; resultHint='Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686, inte 8687) och att Lidarr är igång och nåbar från slusk-containern.'; hasHint=true; hasFix=true; }
       const numDone=done; const numStyle=`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;flex:0 0 26px;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;${numDone?'background:var(--done);color:#08130d;':failed?'background:var(--orphaned-bg);color:var(--orphaned);border:1px solid rgba(229,89,93,0.4);':'background:#191d24;color:#8a919d;border:1px solid #2a2f39;'}`;
       return {...d, cardStyle:`background:#14171c;border:1px solid ${failed?'rgba(224,167,64,0.28)':'#21252e'};border-radius:11px;padding:16px 18px;`, numStyle, numContent:numDone?'✓':String(i+1), title:d.title, subtitle:d.subtitle, test:this.testStep(d.k), testing, btnLabel, btnStyle, fields:d.fields, showResult, resultBox, resultIcon, resultGlyph, resultTitle, resultTitleColor, hasHint, resultHint, hasFix};
     });
@@ -1485,12 +1485,12 @@ class Component extends DCLogic {
     };
     const s6=this.el([wrap('untested',testState('untested')),wrap('testing',testState('testing')),wrap('success',testState('success')),wrap('failed',testState('failed'))].join(''));
 
-    const errCard=`<div style="width:520px;display:flex;align-items:flex-start;gap:11px;padding:13px 15px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);"><span style="display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;">!</span><div style="flex:1;"><div style="font-size:12.5px;font-weight:600;color:#e8d9b8;">Kunde inte nå Lidarr på http://lidarr:8687</div><div style="font-size:12px;color:#b09a6e;margin-top:3px;text-wrap:pretty;">Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686) och att Lidarr är igång och nåbar från slskdarr-containern.</div></div><span style="padding:6px 11px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.13);color:var(--stalled);font-size:11.5px;font-weight:600;white-space:nowrap;">Testa igen</span></div>`;
+    const errCard=`<div style="width:520px;display:flex;align-items:flex-start;gap:11px;padding:13px 15px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.3);"><span style="display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:var(--stalled);color:#1a1305;font-size:13px;font-weight:700;flex:0 0 20px;margin-top:1px;">!</span><div style="flex:1;"><div style="font-size:12.5px;font-weight:600;color:#e8d9b8;">Kunde inte nå Lidarr på http://lidarr:8687</div><div style="font-size:12px;color:#b09a6e;margin-top:3px;text-wrap:pretty;">Adressen svarar inte. Kontrollera att porten är rätt (Lidarr använder normalt 8686) och att Lidarr är igång och nåbar från slusk-containern.</div></div><span style="padding:6px 11px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.13);color:var(--stalled);font-size:11.5px;font-weight:600;white-space:nowrap;">Testa igen</span></div>`;
     const s7=this.el(wrap('orsak + åtgärd', errCard));
 
     const emptyShare=`<div style="width:520px;display:flex;align-items:flex-start;gap:13px;padding:16px;border-radius:11px;background:var(--orphaned-bg);border:1px solid rgba(229,89,93,0.3);"><span style="color:var(--orphaned);font-size:18px;flex:0 0 auto;">⚠</span><div><div style="font-size:13px;font-weight:600;color:#f0c4c5;">Inga delade mappar konfigurerade</div><div style="font-size:12px;color:#c99a9c;margin-top:3px;text-wrap:pretty;">Utan shares betraktas du som leechare och peers kan strypa dina nedladdningar.</div></div></div>`;
     const emptySearch=`<div style="width:340px;padding:24px;border-radius:11px;border:1px dashed #23272f;text-align:center;"><div style="font-size:13px;color:#c8cdd5;font-weight:500;">Inga träffar</div><div style="font-size:12px;color:#6b7280;margin-top:4px;">Ingen peer delar detta just nu.</div></div>`;
-    const setupBanner=`<div style="width:520px;display:flex;align-items:center;gap:13px;padding:13px 16px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.32);"><span style="color:var(--stalled);font-size:16px;">⚠</span><div style="flex:1;"><div style="font-size:13px;font-weight:600;color:#e8d9b8;">Konfigurationen är ofullständig</div><div style="font-size:12px;color:#b09a6e;margin-top:1px;">slskdarr kör i begränsat läge.</div></div><span style="padding:7px 13px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.14);color:var(--stalled);font-size:12px;font-weight:600;">Öppna setup</span></div>`;
+    const setupBanner=`<div style="width:520px;display:flex;align-items:center;gap:13px;padding:13px 16px;border-radius:10px;background:var(--stalled-bg);border:1px solid rgba(224,167,64,0.32);"><span style="color:var(--stalled);font-size:16px;">⚠</span><div style="flex:1;"><div style="font-size:13px;font-weight:600;color:#e8d9b8;">Konfigurationen är ofullständig</div><div style="font-size:12px;color:#b09a6e;margin-top:1px;">slusk kör i begränsat läge.</div></div><span style="padding:7px 13px;border-radius:7px;border:1px solid rgba(224,167,64,0.4);background:rgba(224,167,64,0.14);color:var(--stalled);font-size:12px;font-weight:600;">Öppna setup</span></div>`;
     const loadingRow=`<div style="width:340px;display:flex;align-items:center;gap:11px;padding:16px;border-radius:11px;border:1px dashed #23272f;color:#6b7280;font-size:12.5px;justify-content:center;"><span style="width:14px;height:14px;border:2px solid #2a2f39;border-top-color:var(--accent);border-radius:50%;animation:slsk-spin .7s linear infinite;"></span>Frågar peers…</div>`;
     const s8=this.el([wrap('empty: shares',emptyShare),wrap('empty: sök',emptySearch),wrap('loading',loadingRow),wrap('banner: setup',setupBanner)].join(''));
 

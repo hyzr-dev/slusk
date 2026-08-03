@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // newSelectingParams builds SelectingParams over a fresh store-backed

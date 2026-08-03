@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
 )
 
 func TestSearchFramingAndRoundTrip(t *testing.T) {

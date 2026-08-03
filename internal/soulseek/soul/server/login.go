@@ -10,8 +10,8 @@ import (
 	"io"
 	"net"
 
-	soul "github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	soul "github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 const CodeLogin Code = 1

@@ -29,15 +29,15 @@ def main() -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
 
-    backend = value(env, "SLSKDARR_BACKEND", "soulseek")
+    backend = value(env, "SLUSK_BACKEND", "soulseek")
     slskd_listen = value(env, "SLSKD_LISTEN_PORT", "50300")
-    native_listen = value(env, "SLSKDARR_LISTEN_PORT", "50301")
+    native_listen = value(env, "SLUSK_LISTEN_PORT", "50301")
 
     services = [
         (
-            "slskdarr",
-            f"http://127.0.0.1:{value(env, 'SLSKDARR_PORT', '9090')}",
-            "Basic auth: any username, password = $SLSKDARR_OBSERV_TOKEN",
+            "slusk",
+            f"http://127.0.0.1:{value(env, 'SLUSK_PORT', '9090')}",
+            "Basic auth: any username, password = $SLUSK_OBSERV_TOKEN",
         ),
         (
             "Lidarr",
@@ -52,12 +52,12 @@ def main() -> int:
         (
             "Postgres",
             f"127.0.0.1:{value(env, 'POSTGRES_PORT', '15432')}",
-            "slskdarr / slskdarr-test, database slskdarr",
+            "slusk / slusk-test, database slusk",
         ),
     ]
     accounts = [
         ("slskd", value(env, "SLSKD_SOULSEEK_USERNAME", "<unset>"), slskd_listen),
-        ("slskdarr", value(env, "SLSKDARR_SOULSEEK_USERNAME", "<unset>"), native_listen),
+        ("slusk", value(env, "SLUSK_SOULSEEK_USERNAME", "<unset>"), native_listen),
     ]
 
     print("\nPR lab is ready.\n")
@@ -74,15 +74,15 @@ def main() -> int:
 
     print(
         f"""
-  Both clients log in, but SLSKDARR_BACKEND={backend} drives the pipeline jobs.
+  Both clients log in, but SLUSK_BACKEND={backend} drives the pipeline jobs.
   Ports {slskd_listen} and {native_listen} are published on all interfaces because Soulseek
   peers must connect inbound. Web and database ports are bound to loopback.
 
 Credentials stay in testenv/.env and are not printed here:
-  eval "$(grep '^SLSKDARR_OBSERV_TOKEN=' testenv/.env)"
+  eval "$(grep '^SLUSK_OBSERV_TOKEN=' testenv/.env)"
 
 Next
-  testenv/lab.sh logs slskdarr   follow the pipeline
+  testenv/lab.sh logs slusk      follow the pipeline
   testenv/lab.sh info            print this again
 """
     )

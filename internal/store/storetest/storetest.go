@@ -35,7 +35,7 @@ func Run(m *testing.M) int {
 	// Postgres (5432) or another test package's instance.
 	port = uint32(15432 + rand.Intn(10000))
 
-	dir, err := os.MkdirTemp("", "slskdarr-pgtest-*")
+	dir, err := os.MkdirTemp("", "slusk-pgtest-*")
 	if err != nil {
 		log.Printf("storetest: temp dir: %v", err)
 		return 1
@@ -71,7 +71,7 @@ func DSN(t testing.TB) string {
 	}
 	defer admin.Close()
 
-	name := fmt.Sprintf("slskdarr_test_%d", dbCount.Add(1))
+	name := fmt.Sprintf("slusk_test_%d", dbCount.Add(1))
 	if _, err := admin.Exec("CREATE DATABASE " + name); err != nil {
 		t.Fatalf("storetest: create database %s: %v", name, err)
 	}

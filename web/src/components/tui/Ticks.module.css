@@ -1,7 +1,7 @@
 .row { height: 100%; }
 
 /* The dense-tick track, now drawn as a single repeating gradient
-   (docs/design/slskdarr-tui.dc.html's `fill()` helper, commit 688d52c)
+   (docs/design/slusk-tui.dc.html's `fill()` helper, commit 688d52c)
    rather than one <span> per tick — see Ticks.tsx for why. */
 .track {
   position: relative;

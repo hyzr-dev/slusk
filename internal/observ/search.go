@@ -15,8 +15,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // StartSearchFunc starts a new manual search session (typically backed by

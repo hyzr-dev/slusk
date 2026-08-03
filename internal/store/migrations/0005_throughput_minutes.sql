@@ -2,7 +2,7 @@
 -- minute (issue #157): avg/max bytes-per-second and the peak number of
 -- concurrently active downloads observed during that minute, sampled by the
 -- native soulseek client's throughput meter (see soulseek.throughputMeter)
--- and drained by cmd/slskdarr's throughput recorder. Backs the Overview
+-- and drained by cmd/slusk's throughput recorder. Backs the Overview
 -- charts' throughput history. UNIQUE(minute) both prevents duplicate rows for
 -- the same minute and is the index Store.PruneThroughputMinutes' range scan
 -- uses, so no separate index is added. Pruned on the same fixed 30-day

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
 )
 
 // fakeShareMetaCache is a ShareMetaCache whose behaviour and call history are

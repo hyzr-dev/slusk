@@ -1,10 +1,10 @@
-name: ${COMPOSE_PROJECT_NAME:-slskdarr-pr-lab}
+name: ${COMPOSE_PROJECT_NAME:-slusk-pr-lab}
 
 services:
   volume-init:
     image: alpine:3.22
     # chmod -R, not plain chmod: an existing lab already holds album directories
-    # created by an older slskdarr uid, and those stay unwritable to Lidarr
+    # created by an older slusk uid, and those stay unwritable to Lidarr
     # otherwise. `lab.sh up` keeps state, so this has to heal in place.
     command: ["sh", "-c", "mkdir -p /music/slskd-downloads /music/library && chmod -R a+rwX /music/slskd-downloads /music/library"]
     volumes:
@@ -15,15 +15,15 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: slskdarr
-      POSTGRES_PASSWORD: slskdarr-test
-      POSTGRES_DB: slskdarr
+      POSTGRES_USER: slusk
+      POSTGRES_PASSWORD: slusk-test
+      POSTGRES_DB: slusk
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
     volumes:
       - postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U slskdarr -d slskdarr"]
+      test: ["CMD-SHELL", "pg_isready -U slusk -d slusk"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -73,7 +73,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  slskdarr:
+  slusk:
     build:
       context: ..
     # The image runs as distroless `nonroot` (uid 65532), but the native
@@ -86,17 +86,17 @@ services:
     environment:
       TZ: ${TZ:-Etc/UTC}
     ports:
-      - "127.0.0.1:${SLSKDARR_PORT:-9090}:9090"
-      - "${SLSKDARR_LISTEN_PORT:-50301}:${SLSKDARR_LISTEN_PORT:-50301}"
+      - "127.0.0.1:${SLUSK_PORT:-9090}:9090"
+      - "${SLUSK_LISTEN_PORT:-50301}:${SLUSK_LISTEN_PORT:-50301}"
     volumes:
-      - ./runtime/slskdarr/config.toml:/config/config.toml:ro
+      - ./runtime/slusk/config.toml:/config/config.toml:ro
       - downloads:/music/slskd-downloads
       - music:/music/library
       # Read-only on purpose, and deliberately NOT /music/library: that path is
       # Lidarr's root folder, so the lab imports test albums into it. Pointing a
       # real music directory there would let a destructive test environment
-      # write into it. Mounted only on slskdarr, which just needs to read.
-      - ${SLSKDARR_SHARE_DIR:-./share}:/music/share:ro
+      # write into it. Mounted only on slusk, which just needs to read.
+      - ${SLUSK_SHARE_DIR:-./share}:/music/share:ro
     depends_on:
       postgres:
         condition: service_healthy

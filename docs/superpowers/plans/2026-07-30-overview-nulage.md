@@ -637,7 +637,7 @@ git commit -m "feat(store): let a caller skip the facet and count queries (#287)
 
 **Files:**
 - Modify: `internal/observ/observ.go` — `PagedJobsQuery` (rad 202-216), `parsePagedJobsQuery` (rad 757-823)
-- Modify: `cmd/slskdarr/main.go` — `pagedJobsFn` (rad 271-296)
+- Modify: `cmd/slusk/main.go` — `pagedJobsFn` (rad 271-296)
 - Test: `internal/observ/observ_test.go`
 
 **Interfaces:**
@@ -796,7 +796,7 @@ Lägg efter den befintliga `sort=transfer`/`dir=desc`-kontrollen:
 
 - [ ] **Step 5: Thread the new fields in main.go**
 
-I `cmd/slskdarr/main.go`, i `pagedJobsFn`, utöka `store.DashboardJobsQuery`-literalen:
+I `cmd/slusk/main.go`, i `pagedJobsFn`, utöka `store.DashboardJobsQuery`-literalen:
 
 ```go
 	pagedJobsFn := func(ctx context.Context, query observ.PagedJobsQuery) (observ.PagedJobsResult, error) {
@@ -827,7 +827,7 @@ Expected: PASS. Endast de kända bruskandidaterna får fallera (#171, #250).
 
 ```bash
 gofmt -l . && go vet ./...
-git add internal/observ/observ.go internal/observ/observ_test.go cmd/slskdarr/main.go
+git add internal/observ/observ.go internal/observ/observ_test.go cmd/slusk/main.go
 git commit -m "feat(observ): accept the inflight, finished, recent and facets parameters (#287)"
 ```
 
@@ -1077,7 +1077,7 @@ Byt kommentaren ovanför `TRANSFER_PAGE_SIZE` (rad 17-25):
 
 ```tsx
 // Rows in the TRANSFERS panel — matches the mock
-// (docs/design/slskdarr-tui.dc.html:105) rather than the full jobs list.
+// (docs/design/slusk-tui.dc.html:105) rather than the full jobs list.
 // Selection, ordering and this row count are all server-side (issue #268):
 // filter=inflight is every job the pipeline holds a MaxActive slot for —
 // state DOWNLOADING or IMPORTING (issue #287 widened this from the old

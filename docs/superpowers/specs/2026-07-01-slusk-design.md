@@ -1,4 +1,4 @@
-# slskdarr — designdokument
+# slusk — designdokument
 
 **Datum:** 2026-07-01
 **Status:** Godkänd design, ej påbörjad implementation
@@ -8,7 +8,7 @@
 
 ## 1. Syfte och bakgrund
 
-slskdarr är en brygga mellan **Lidarr** och **slskd** (Soulseek): den bevakar Lidarrs
+slusk är en brygga mellan **Lidarr** och **slskd** (Soulseek): den bevakar Lidarrs
 lista över efterfrågade/saknade album, söker efter dem på Soulseek via slskd:s REST-API,
 väljer bästa träff, laddar ner den, och lämnar tillbaka de färdiga filerna till Lidarr
 för import.
@@ -168,7 +168,7 @@ Princip: **beroenden pekar inåt mot datamodellen, aldrig utåt mot omvärlden.*
 inget om databasen; databasen vet inget om HTTP; kärnlogiken beror bara på interfaces.
 
 ```
-cmd/slskdarr/main.go        — wiring: läs config, öppna DB, starta daemon, hantera signaler
+cmd/slusk/main.go        — wiring: läs config, öppna DB, starta daemon, hantera signaler
 internal/
   core/                     — domäntyper: AlbumJob, CandidateAttempt, Transfer, tillstånd
   config/                   — strict parsing, en enda Config-struct

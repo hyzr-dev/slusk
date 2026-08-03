@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // WantedSource is the slice of WantedSync that Discovery needs: the most
@@ -360,7 +360,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	// band. Making this second Lidarr endpoint a hard dependency of all
 	// discovery would mean a 404 on some deployed Lidarr version (this
 	// endpoint's shape is unverified, see lidarr.Client.AlbumTracks) silently
-	// stops slskdarr searching for everything. The directory-only half of the
+	// stops slusk searching for everything. The directory-only half of the
 	// relevance gate still fixes issue #316 on its own, so losing
 	// track-title evidence only makes the gate slightly less precise, not
 	// inert.

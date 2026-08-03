@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newLidarrLibraryTestHandler(reg *prometheus.Registry, artistStatus LidarrArtistStatusFunc, addOptions LidarrAddOptionsFunc, addArtist LidarrAddArtistFunc) http.Handler {
@@ -292,7 +292,7 @@ func TestPostLidarrArtistsQueryInvalidDoesNotGuessAField(t *testing.T) {
 }
 
 // TestPostLidarrArtistsSurvivesServerWriteTimeout is a regression test for
-// issue #331's backend review blocker: cmd/slskdarr/main.go sets the shared
+// issue #331's backend review blocker: cmd/slusk/main.go sets the shared
 // server's WriteTimeout to 30s, and EnsureArtist can exceed
 // that on a first-time add. httptest.NewServer (used by every other test in
 // this file) sets no WriteTimeout at all, which is exactly why a live probe

@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // Weights are the tunable scoring weights the matcher ranks candidates by.
 // Field names mirror config.Weights, which config.Load populates from TOML;
-// the caller (cmd/slskdarr) converts config.Weights into a Weights value at
+// the caller (cmd/slusk) converts config.Weights into a Weights value at
 // NewWeighted, so the matcher package has no dependency on internal/config.
 type Weights struct {
 	Format      float64

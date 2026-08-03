@@ -99,7 +99,7 @@ func TestReleaseGroupSearchQueryFuzzyWithMetacharacters(t *testing.T) {
 func TestSearchReleaseGroups(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("User-Agent"); got == "" || got == "slskdarr/1.0 ()" {
+		if got := r.Header.Get("User-Agent"); got == "" || got == "slusk/1.0 ()" {
 			t.Errorf("User-Agent not identifying: %q", got)
 		}
 		gotQuery = r.URL.Query().Get("query")

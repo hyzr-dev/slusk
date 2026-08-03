@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 // buildGetPeerAddressFrame builds a raw server.GetPeerAddress payload (code,

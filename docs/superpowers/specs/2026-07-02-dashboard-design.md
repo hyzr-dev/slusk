@@ -1,10 +1,10 @@
-# slskdarr Dashboard — Design
+# slusk Dashboard — Design
 
 ## Context
 
-slskdarr is currently a headless daemon: `cmd/slskdarr/main.go` wires config, store, engine, and an `observ.Server` that exposes `/metrics` (Prometheus) and `/status` (a small JSON summary). There is no HTTP UI at all.
+slusk is currently a headless daemon: `cmd/slusk/main.go` wires config, store, engine, and an `observ.Server` that exposes `/metrics` (Prometheus) and `/status` (a small JSON summary). There is no HTTP UI at all.
 
-A Claude Design mockup, `Slskdarr Dashboard.dc.html` (imported from `claude.ai/design/p/9085f510-06a3-4d25-b01d-f992601dd938`), specifies a 4-view dark-themed dashboard: **Översikt** (overview stats + active downloads + recent reconcile passes), **Kö** (queue table with expandable rows: peer/transfer info, files, history, retry/force-search/cancel/remove actions), **Hälsa** (health metric tiles + sparkline/line charts), **Inställningar** (Lidarr/slskd connection + engine settings editor). The mockup uses fake in-browser simulated data (`setInterval` ticking progress) in a Claude-internal "DC" component format — it exists purely as a visual/interaction reference, not code to port directly.
+A Claude Design mockup, `Slusk Dashboard.dc.html` (imported from `claude.ai/design/p/9085f510-06a3-4d25-b01d-f992601dd938`), specifies a 4-view dark-themed dashboard: **Översikt** (overview stats + active downloads + recent reconcile passes), **Kö** (queue table with expandable rows: peer/transfer info, files, history, retry/force-search/cancel/remove actions), **Hälsa** (health metric tiles + sparkline/line charts), **Inställningar** (Lidarr/slskd connection + engine settings editor). The mockup uses fake in-browser simulated data (`setInterval` ticking progress) in a Claude-internal "DC" component format — it exists purely as a visual/interaction reference, not code to port directly.
 
 This design covers a first real implementation: **Översikt + Kö only**, backed by live data from `internal/store`, served from the existing `observ.Server`.
 

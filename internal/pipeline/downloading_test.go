@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/slskd"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // newDownloadingParams builds DownloadingParams over a fresh store-backed

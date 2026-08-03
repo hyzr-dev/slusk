@@ -68,9 +68,9 @@
       "number": 69,
       "kind": "feature",
       "prodImpact": "none",
-      "impactEvidence": "sdk/ does not exist (ls sdk -> \"No such file or directory\") and cmd/slskdarr/main.go currently wires concrete types directly (imports internal/lidarr, internal/matcher, internal/slskd, internal/soulseek, internal/store at cmd/slskdarr/main.go:21-30). This is a pure architecture/design proposal for a future extension SDK — nothing in the running instance is affected by its absence; it changes no runtime behaviour until someone implements it.",
+      "impactEvidence": "sdk/ does not exist (ls sdk -> \"No such file or directory\") and cmd/slusk/main.go currently wires concrete types directly (imports internal/lidarr, internal/matcher, internal/slskd, internal/soulseek, internal/store at cmd/slusk/main.go:21-30). This is a pure architecture/design proposal for a future extension SDK — nothing in the running instance is affected by its absence; it changes no runtime behaviour until someone implements it.",
       "touches": [
-        "cmd/slskdarr/main.go"
+        "cmd/slusk/main.go"
       ],
       "frontend": false,
       "effort": "L",
@@ -136,7 +136,7 @@
         "internal/soulseek/shares.go",
         "internal/soulseek/soul/peer/sharedfilelistrequest.go",
         "internal/soulseek/soul/peer/sharedfileistresponse.go",
-        "cmd/slskdarr/main.go",
+        "cmd/slusk/main.go",
         "config.example.toml"
       ],
       "frontend": false,
@@ -279,11 +279,11 @@
       "number": 186,
       "kind": "techdebt",
       "prodImpact": "degraded",
-      "impactEvidence": "internal/store/messages.go:68-83 RecordIncomingMessage inserts every incoming Soulseek private message unconditionally (no per-peer cap, no rate limit); cmd/slskdarr/messages.go:48 calls it for every message the native client accepts from any peer with no sender filtering. internal/soulseek/messages.go:34,55 only bound a single message body (64KiB) and the in-memory ack queue (256) - neither limits rows persisted to Postgres. #183/#193 are merged to main, so this is live in prod: any Soulseek peer can send unlimited messages and each is durably written to private_messages with no retention or count cap - migration 0006_private_messages.sql own comment explicitly rules out pruning.",
+      "impactEvidence": "internal/store/messages.go:68-83 RecordIncomingMessage inserts every incoming Soulseek private message unconditionally (no per-peer cap, no rate limit); cmd/slusk/messages.go:48 calls it for every message the native client accepts from any peer with no sender filtering. internal/soulseek/messages.go:34,55 only bound a single message body (64KiB) and the in-memory ack queue (256) - neither limits rows persisted to Postgres. #183/#193 are merged to main, so this is live in prod: any Soulseek peer can send unlimited messages and each is durably written to private_messages with no retention or count cap - migration 0006_private_messages.sql own comment explicitly rules out pruning.",
       "touches": [
         "internal/store/messages.go",
         "internal/soulseek/messages.go",
-        "cmd/slskdarr/messages.go",
+        "cmd/slusk/messages.go",
         "internal/store/migrations/0006_private_messages.sql"
       ],
       "frontend": false,
@@ -302,13 +302,13 @@
       "number": 192,
       "kind": "bug",
       "prodImpact": "none",
-      "impactEvidence": "testenv/compose.yml is the local PR-lab stack only (slskdarr service context: ..), never deployed to production. The lidarr service (testenv/compose.yml:27-40) has no healthcheck and slskdarr depends_on entry for it (testenv/compose.yml:93-95) is looser than the postgres entry which correctly uses service_healthy.",
+      "impactEvidence": "testenv/compose.yml is the local PR-lab stack only (slusk service context: ..), never deployed to production. The lidarr service (testenv/compose.yml:27-40) has no healthcheck and slusk depends_on entry for it (testenv/compose.yml:93-95) is looser than the postgres entry which correctly uses service_healthy.",
       "touches": [
         "testenv/compose.yml"
       ],
       "frontend": false,
       "effort": "S",
-      "reproCheck": "./testenv/lab.sh reset then ./testenv/lab.sh logs slskdarr - look for an ERROR reaching Lidarr on :8686 in the first ~15s before slskdarr own retry recovers on the next tick.",
+      "reproCheck": "./testenv/lab.sh reset then ./testenv/lab.sh logs slusk - look for an ERROR reaching Lidarr on :8686 in the first ~15s before slusk own retry recovers on the next tick.",
       "statedBlockers": [],
       "concurrency": false,
       "digest": "f5d286219dea5a0346070fcd439b5e9012102002849cc736d6b0cf66ff5b0437"
@@ -387,12 +387,12 @@
       "number": 238,
       "kind": "feature",
       "prodImpact": "none",
-      "impactEvidence": "No misbehavior to point at: cmd/slskdarr/main.go:520-534 leaves sendMessageFn nil when soulClient is nil (slskd backend), and observ/messages.go's serveSendMessage returns a deliberate 503 for that case (covered by TestSendMessageEndpointNilSendReturns503 in internal/observ/messages_test.go). Incoming messages are persisted only via cmd/slskdarr/messages.go's messageSink, wired at cmd/slskdarr/main.go:164 solely inside the native-soulClient construction block. Nothing behaves worse than designed for this backend — the capability is simply absent, which is the current documented state (see #183 scoping it to native only), not a regression.",
+      "impactEvidence": "No misbehavior to point at: cmd/slusk/main.go:520-534 leaves sendMessageFn nil when soulClient is nil (slskd backend), and observ/messages.go's serveSendMessage returns a deliberate 503 for that case (covered by TestSendMessageEndpointNilSendReturns503 in internal/observ/messages_test.go). Incoming messages are persisted only via cmd/slusk/messages.go's messageSink, wired at cmd/slusk/main.go:164 solely inside the native-soulClient construction block. Nothing behaves worse than designed for this backend — the capability is simply absent, which is the current documented state (see #183 scoping it to native only), not a regression.",
       "touches": [
         "internal/slskd/client.go",
         "internal/pipeline/ports.go",
-        "cmd/slskdarr/main.go",
-        "cmd/slskdarr/messages.go",
+        "cmd/slusk/main.go",
+        "cmd/slusk/messages.go",
         "internal/store/messages.go"
       ],
       "frontend": false,
@@ -659,10 +659,10 @@
       "number": 293,
       "kind": "test",
       "prodImpact": "none",
-      "impactEvidence": "cmd/slskdarr/main.go:271-280 is the mapping in question, read in full: every PagedJobsQuery field (Page, Sort, Dir, Filter, Source, Query, PageSize, SkipFacets) is currently passed through correctly, and Now is freshly set via time.Now() on every call, not cached. No defect exists in the running code today; the issue is entirely about the absence of a test that would catch a future regression in this closure. No test in cmd/slskdarr/*_test.go exercises pagedJobsFn.",
+      "impactEvidence": "cmd/slusk/main.go:271-280 is the mapping in question, read in full: every PagedJobsQuery field (Page, Sort, Dir, Filter, Source, Query, PageSize, SkipFacets) is currently passed through correctly, and Now is freshly set via time.Now() on every call, not cached. No defect exists in the running code today; the issue is entirely about the absence of a test that would catch a future regression in this closure. No test in cmd/slusk/*_test.go exercises pagedJobsFn.",
       "touches": [
-        "cmd/slskdarr/main.go",
-        "cmd/slskdarr/main_test.go"
+        "cmd/slusk/main.go",
+        "cmd/slusk/main_test.go"
       ],
       "frontend": false,
       "effort": "S",
@@ -690,9 +690,9 @@
       "number": 295,
       "kind": "bug",
       "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/strings.ts:328 labels status.active as a distinct peer count (\"downloading from ${peers} peers\"), but cmd/slskdarr/main.go:258 sets Active = len(st.ActiveTransfers(ctx)) — a count of active file transfers (internal/store/jobs.go:278), not distinct peers or albums. Display-only mislabeling; the number itself is correct and nothing downstream (pipeline, Prometheus DownloadsActive at internal/pipeline/downloading.go:230, which is a separate stats.Adopted value) consumes the wrong semantics as fact.",
+      "impactEvidence": "web/src/strings.ts:328 labels status.active as a distinct peer count (\"downloading from ${peers} peers\"), but cmd/slusk/main.go:258 sets Active = len(st.ActiveTransfers(ctx)) — a count of active file transfers (internal/store/jobs.go:278), not distinct peers or albums. Display-only mislabeling; the number itself is correct and nothing downstream (pipeline, Prometheus DownloadsActive at internal/pipeline/downloading.go:230, which is a separate stats.Adopted value) consumes the wrong semantics as fact.",
       "touches": [
-        "cmd/slskdarr/main.go",
+        "cmd/slusk/main.go",
         "web/src/routes/Overview.tsx",
         "web/src/strings.ts"
       ],
@@ -739,7 +739,7 @@
         "internal/store/uploads.go",
         "internal/observ/uploads.go",
         "internal/observ/server.go",
-        "cmd/slskdarr/soulseek.go",
+        "cmd/slusk/soulseek.go",
         "config.example.toml"
       ],
       "frontend": false,

@@ -2,7 +2,7 @@
 // #160): GET /api/shares reports aggregate + per-folder statistics, POST
 // /api/shares/rescan triggers a background re-index. observ deliberately
 // does not import internal/soulseek - SharesFunc/RescanSharesFunc declare
-// their own transport-level types, and cmd/slskdarr/main.go adapts between
+// their own transport-level types, and cmd/slusk/main.go adapts between
 // the two (see soulseek.ShareReport / soulseek.TriggerRescanShares).
 package observ
 

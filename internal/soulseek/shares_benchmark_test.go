@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/peer"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
 )
 
 var benchmarkShareSnapshotMatches []peer.File

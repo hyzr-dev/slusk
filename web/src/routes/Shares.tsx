@@ -15,7 +15,7 @@ import UploadsPanel from './UploadsPanel';
 
 // The header's INDEXED reading turns --bad once the last scan is at least
 // this old, matching the mock's treatment of an overdue index
-// (docs/design/slskdarr-tui.dc.html:~430). No scan having ever completed is
+// (docs/design/slusk-tui.dc.html:~430). No scan having ever completed is
 // at least as stale as one, so it gets the same treatment. This is a
 // report-level timestamp (SharesReport.indexedAt) — ShareFolder carries no
 // per-folder equivalent, so it belongs only in the summary line, not in the

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 const testFailedRetryAfter = time.Hour

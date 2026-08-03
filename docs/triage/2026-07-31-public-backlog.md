@@ -133,7 +133,7 @@ rangordningen bor i vågorna.
 | 332 | bug | cosmetic | S | Öppna Overview, titta på TRANSFERS när SIZE visar t.ex. `340.1 MB` | `Overview.module.css`, `format.ts`, `Overview.tsx` |
 | 331 | feature | none | L | — | `lidarr/client.go`, `app/jobs.go`, `observ.go`, `store/pipeline.go`, `config*.toml`, `Search.tsx`, `SearchResultCard.tsx` |
 | 326 | feature | none | M | — | `Shares.tsx`, `UploadHistory.tsx`, `queries.ts`, `strings.ts`, `Shares.module.css` |
-| 325 | feature | none | L | — | `soulseek/uploads.go`, `client.go`, `0010_upload_history.sql`, `store/uploads.go`, `observ/uploads.go`, `server.go`, `cmd/slskdarr/soulseek.go`, `config.example.toml` |
+| 325 | feature | none | L | — | `soulseek/uploads.go`, `client.go`, `0010_upload_history.sql`, `store/uploads.go`, `observ/uploads.go`, `server.go`, `cmd/slusk/soulseek.go`, `config.example.toml` |
 | 321 | feature | none | L | — | `musicbrainz/client.go`, `discovery.go`, `lidarr/client.go`, `config.go`, `config.example.toml`, `Search.tsx`, `SearchResultCard.tsx`, `queries.ts`, `types.ts` |
 | 279 | feature | none | L | — | `observ/security.go`, `observ/config.go`, `server.go`, `Settings.tsx`, `types.ts` |
 | 99 | techdebt | none | S | Läs `downloads.go:940-1025` — är ctx plumbad är issuen stale | *(tom)* |

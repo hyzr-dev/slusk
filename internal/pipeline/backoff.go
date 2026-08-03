@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // nextBackoff returns base * 2^retries, capped at maxBackoff. retries is the

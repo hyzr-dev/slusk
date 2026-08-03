@@ -3,7 +3,7 @@ import styles from './Page.module.css';
 
 /**
  * The per-view shell introduced by the 27 July TUI restyle
- * (docs/design/slskdarr-tui.dc.html, commit 688d52c): every route now owns
+ * (docs/design/slusk-tui.dc.html, commit 688d52c): every route now owns
  * its own padded, gap-separated column instead of rendering flush against
  * `<main>`, which keeps `padding: 0` (Layout.module.css) for exactly this
  * reason — double-padding would shift every panel a second time.

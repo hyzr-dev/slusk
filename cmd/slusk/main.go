@@ -1,4 +1,4 @@
-// Command slskdarr is the daemon entrypoint: it loads config, opens the store,
+// Command slusk is the daemon entrypoint: it loads config, opens the store,
 // wires the clients and the pipeline modules, starts the observability
 // server, and runs until it receives SIGINT/SIGTERM (graceful shutdown via
 // context cancellation).
@@ -19,17 +19,17 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/config"
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/lidarr"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/musicbrainz"
-	"github.com/samuelenocsson/slskdarr/internal/observ"
-	"github.com/samuelenocsson/slskdarr/internal/pipeline"
-	"github.com/samuelenocsson/slskdarr/internal/slskd"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/config"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/lidarr"
+	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/samuelenocsson/slusk/internal/musicbrainz"
+	"github.com/samuelenocsson/slusk/internal/observ"
+	"github.com/samuelenocsson/slusk/internal/pipeline"
+	"github.com/samuelenocsson/slusk/internal/slskd"
+	"github.com/samuelenocsson/slusk/internal/soulseek"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // peerBackend combines the three port interfaces every peer-facing pipeline
@@ -93,7 +93,7 @@ func ensureWritableDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	probe, err := os.CreateTemp(dir, ".slskdarr-write-probe-*")
+	probe, err := os.CreateTemp(dir, ".slusk-write-probe-*")
 	if err != nil {
 		return err
 	}
@@ -758,7 +758,7 @@ func main() {
 		}()
 	}
 
-	logger.Info("slskdarr started", "status_addr", cfg.Observ.ListenAddr)
+	logger.Info("slusk started", "status_addr", cfg.Observ.ListenAddr)
 	outcome := runRuntime(restartCtx, srv, listener, runner, lifecycleShutdownTimeout)
 	// runRuntime may return on an abnormal exit (runner or HTTP server
 	// stopping without a signal) while restartCtx is still live, which would
@@ -775,11 +775,11 @@ func main() {
 	shutdownSoulseek(logger, soulCancel, soulDone, throughputDone, lifecycleShutdownTimeout)
 	closeErr := closeStoreAfterRuntime(outcome, st.Close)
 	if outcome.err != nil || closeErr != nil {
-		logger.Error("slskdarr stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,
+		logger.Error("slusk stopped with error", "runtime_err", outcome.err, "close_store_err", closeErr,
 			"store_close_safe", outcome.storeCloseSafe)
 		os.Exit(1)
 	}
-	logger.Info("slskdarr stopped cleanly")
+	logger.Info("slusk stopped cleanly")
 }
 
 // buildAppConfig renders the settings view's read model from the loaded
@@ -1055,7 +1055,7 @@ func runRuntime(ctx context.Context, srv *http.Server, listener net.Listener, ru
 // runHealthcheck loads the config to find the observ listener, then GETs its
 // own /healthz and returns nil only on a 200 response. Wildcard listeners are
 // probed on the matching loopback family; specific listeners retain their
-// configured host. This is invoked as `slskdarr --healthcheck` by the
+// configured host. This is invoked as `slusk --healthcheck` by the
 // Dockerfile's HEALTHCHECK, since the distroless runtime image has no shell,
 // curl, or wget for Docker to exec directly.
 func runHealthcheck(configPath string) error {

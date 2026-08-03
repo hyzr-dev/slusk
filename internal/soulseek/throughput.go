@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // throughputWindow is how many 1-second core.ThroughputSample readings
@@ -166,7 +166,7 @@ func (m *throughputMeter) Samples() core.ThroughputSeries {
 // TakeThroughputMinutes drains and returns every pending completed minute,
 // oldest first. When includePartial is true, the in-flight (not-yet-closed)
 // minute accumulator is also closed and appended first — the shutdown path
-// (see the throughput recorder's ctx.Done branch in cmd/slskdarr/soulseek.go)
+// (see the throughput recorder's ctx.Done branch in cmd/slusk/soulseek.go)
 // so a partial minute's samples are not silently lost when the process stops
 // mid-minute.
 //

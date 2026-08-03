@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // currentCandidateOrder is the ORDER BY that picks the one candidate of

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bygg om hela React-SPA:n till terminalidiomet i `docs/design/slskdarr-tui.dc.html`, utan backend-ändringar.
+**Goal:** Bygg om hela React-SPA:n till terminalidiomet i `docs/design/slusk-tui.dc.html`, utan backend-ändringar.
 
 **Architecture:** Tokenlagret skrivs om till mockens palett; `Layout.tsx` delas i TopBar / SideNav / StatusBar; nya delade primitiver under `components/tui/` (`Ticks`, `Tag`, `SectionHeader`, `Button`, `Chip`, `EmptyState`) ersätter `ProgressBar`, `StatusPill`, `StatCard`, `SourceBadge` och `PageHeading`; varje vy byggs om mot dessa primitiver med oförändrad datahämtning.
 
@@ -41,7 +41,7 @@
 - [ ] **Step 1: Ersätt `web/src/styles/tokens.css`**
 
 ```css
-/* Palette from the TUI design mock (docs/design/slskdarr-tui.dc.html, the
+/* Palette from the TUI design mock (docs/design/slusk-tui.dc.html, the
    rootStyle object). The mock has no per-status hue: queued, active and
    importing all render in --fg/--dim, and only OK and error carry a color.
    The status colors that used to live here were retired with that decision —
@@ -1728,14 +1728,14 @@ En `SectionHeader` med etiketten METRICS och meta `prometheus`, följd av sex ra
 
 | Nyckel | Källa |
 |---|---|
-| `slskdarr_downloads_active` | `status.active` |
-| `slskdarr_downloads_queued` | `status.queued` |
-| `slskdarr_downloads_stalled` | `status.stalled` |
-| `slskdarr_unknown_transfers` | `status.orphaned` |
-| `slskdarr_uploads_active` | `uploads.active` från `useUploads()` |
-| `slskdarr_shared_files` | `shares.files` från `useShares()` |
+| `slusk_downloads_active` | `status.active` |
+| `slusk_downloads_queued` | `status.queued` |
+| `slusk_downloads_stalled` | `status.stalled` |
+| `slusk_unknown_transfers` | `status.orphaned` |
+| `slusk_uploads_active` | `uploads.active` från `useUploads()` |
+| `slusk_shared_files` | `shares.files` från `useShares()` |
 
-Mockens `slskdarr_reconcile_total` är utelämnad: `ChartsReport` bär bara de 20 senaste passen, inte en total sedan start, och `passes.length` är alltså inte den siffran.
+Mockens `slusk_reconcile_total` är utelämnad: `ChartsReport` bär bara de 20 senaste passen, inte en total sedan start, och `passes.length` är alltså inte den siffran.
 
 **Verifiera varje nyckelnamn mot `internal/observ` innan raden skrivs.** Kör `grep -rn "prometheus.NewGauge\|prometheus.NewCounter\|Name:" internal/observ/` och använd de namn som faktiskt exporteras. En rad märkt med ett metriknamn som inte finns i `/metrics` är påhittad, och en användare som kopierar den in i en Grafana-query får ingen data och ingen förklaring. Finns ingen motsvarande metrik för en rad, ta bort raden i stället för att uppfinna ett namn.
 
@@ -1842,7 +1842,7 @@ Mockens inledning är falsk hos oss och skrivs om:
 ```ts
   setup: {
     title: 'GUIDED SETUP',
-    // The mock says slskdarr never writes the config file. That stopped being
+    // The mock says slusk never writes the config file. That stopped being
     // true with issue #134 — the Config view writes it. This copy points there
     // instead of describing a workflow we no longer have.
     intro:

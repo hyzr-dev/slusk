@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // ErrUserNotFound is returned by UserByName and SessionUser when no matching,
@@ -147,7 +147,7 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash []byte) error {
 
 // DeleteExpiredSessions removes every session whose expires_at has passed,
 // returning the number of rows deleted. Intended to run periodically (see
-// cmd/slskdarr/main.go) so user_sessions doesn't grow unbounded with expired
+// cmd/slusk/main.go) so user_sessions doesn't grow unbounded with expired
 // rows over a daemon's lifetime.
 func (s *Store) DeleteExpiredSessions(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE expires_at <= now()`)

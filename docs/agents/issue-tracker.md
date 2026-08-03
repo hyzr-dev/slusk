@@ -1,6 +1,6 @@
 # Issue tracker: Gitea
 
-Issues and PRDs for this repo live in Gitea at `gitea.shcizo.se:2223/shcizo/slskdarr`.
+Issues and PRDs for this repo live in Gitea at `gitea.shcizo.se:2223/shcizo/slusk`.
 Use the `tea` CLI for all operations. **Never `gh`** — there is no GitHub remote.
 
 `tea` infers the repo from the `origin` remote when run inside the clone.

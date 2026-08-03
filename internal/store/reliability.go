@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // RecordAttemptOutcome upserts a peer's global (known_users) reliability row,

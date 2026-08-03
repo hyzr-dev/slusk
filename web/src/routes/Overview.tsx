@@ -16,7 +16,7 @@ import { t } from '../strings';
 import styles from './Overview.module.css';
 
 // Rows in the TRANSFERS panel — matches the mock
-// (docs/design/slskdarr-tui.dc.html:105) rather than the full jobs list.
+// (docs/design/slusk-tui.dc.html:105) rather than the full jobs list.
 // Selection, ordering and this row count are all server-side (issue #268):
 // filter=inflight is every job the pipeline holds a MaxActive slot for —
 // state DOWNLOADING or IMPORTING (issue #287 widened this from the old

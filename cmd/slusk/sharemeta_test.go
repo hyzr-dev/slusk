@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/soulseek"
 )
 
 // fakeShareMetaStore is a shareMetaStore whose behaviour and call history are

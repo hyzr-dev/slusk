@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newSearchTestHandler(reg *prometheus.Registry, start StartSearchFunc, snapshot SearchSnapshotFunc, stop StopSearchFunc) http.Handler {
@@ -249,7 +249,7 @@ func TestSearchMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "http://example.com/api/search", strings.NewReader(`{"query":"q"}`))
 			switch tt.auth {
 			case "basic":
-				req.SetBasicAuth("slskdarr", testAuthToken)
+				req.SetBasicAuth("slusk", testAuthToken)
 			case "bearer":
 				req.Header.Set("Authorization", "Bearer "+testAuthToken)
 			default:
