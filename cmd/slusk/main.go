@@ -19,17 +19,17 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/samuelenocsson/slusk/internal/app"
-	"github.com/samuelenocsson/slusk/internal/config"
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/lidarr"
-	"github.com/samuelenocsson/slusk/internal/matcher"
-	"github.com/samuelenocsson/slusk/internal/musicbrainz"
-	"github.com/samuelenocsson/slusk/internal/observ"
-	"github.com/samuelenocsson/slusk/internal/pipeline"
-	"github.com/samuelenocsson/slusk/internal/slskd"
-	"github.com/samuelenocsson/slusk/internal/soulseek"
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/config"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/lidarr"
+	"github.com/hyzr-dev/slusk/internal/matcher"
+	"github.com/hyzr-dev/slusk/internal/musicbrainz"
+	"github.com/hyzr-dev/slusk/internal/observ"
+	"github.com/hyzr-dev/slusk/internal/pipeline"
+	"github.com/hyzr-dev/slusk/internal/slskd"
+	"github.com/hyzr-dev/slusk/internal/soulseek"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // peerBackend combines the three port interfaces every peer-facing pipeline

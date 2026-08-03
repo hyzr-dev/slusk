@@ -7,8 +7,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 // Code GetPeerAddress.

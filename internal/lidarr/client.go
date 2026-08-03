@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // Client talks to a Lidarr instance.

@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
 )
 
 // peerArtistDTO is one peer's reliability history for a single artist.

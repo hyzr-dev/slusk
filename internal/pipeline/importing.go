@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // ImportingStore is the slice of the store Importing needs. Declared here (Go

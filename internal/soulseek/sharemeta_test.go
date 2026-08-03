@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
 )
 
 // flacBytes returns a synthetic minimal FLAC file: signature, a single

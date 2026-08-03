@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/distributed"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
 )
 
 const (

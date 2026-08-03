@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
 )
 
 // buildFrame builds a raw wire frame: a little-endian uint32 size followed by

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func shareMeta(path string, size int64, mod time.Time, bitrate, duration uint32) core.ShareFileMeta {

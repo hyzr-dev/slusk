@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newMessagesTestHandler(reg *prometheus.Registry, conversations ConversationsFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc, presence ...ConversationPresenceFunc) http.Handler {

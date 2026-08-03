@@ -74,7 +74,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // streamInterval is how often the shared broadcaster ticks and considers

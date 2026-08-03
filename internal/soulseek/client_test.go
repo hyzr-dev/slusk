@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/distributed"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/server"
 )
 
 // --- wire-format helpers, built directly against encoding/binary rather

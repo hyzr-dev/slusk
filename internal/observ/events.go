@@ -6,7 +6,7 @@ package observ
 import (
 	"context"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // eventsLimitDefault and eventsLimitMax bound the "limit" query parameter on

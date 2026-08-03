@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // Weights are the tunable scoring weights the matcher ranks candidates by.

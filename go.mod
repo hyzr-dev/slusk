@@ -1,4 +1,4 @@
-module github.com/samuelenocsson/slusk
+module github.com/hyzr-dev/slusk
 
 go 1.26.3
 

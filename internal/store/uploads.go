@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // uploadHistoryRetention bounds how long upload_history rows are kept;

@@ -5,8 +5,8 @@ package file
 import (
 	"io"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 // ConnectionType represents the type of file 'F' connection.

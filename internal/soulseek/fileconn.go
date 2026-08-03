@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/file"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/file"
 )
 
 // progressReader wraps an F connection's socket for reading file data,

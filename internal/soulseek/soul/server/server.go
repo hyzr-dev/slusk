@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 // Code represents the type of server message.

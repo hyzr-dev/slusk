@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // chartsHourBuckets is the fixed number of hourly buckets the completed-by-

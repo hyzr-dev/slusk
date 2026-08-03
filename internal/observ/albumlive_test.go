@@ -3,7 +3,7 @@ package observ
 import (
 	"testing"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestETASecondsTableCases(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/soulseek"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/soulseek"
 )
 
 // incomingMessageStore is the narrow slice of *store.Store messageSink needs,

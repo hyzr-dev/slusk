@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestRecordSearchPassRoundTripNewestFirstWithLimit(t *testing.T) {

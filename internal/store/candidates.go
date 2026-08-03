@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // NewCandidate is one ranked Soulseek user to cache for a job, as produced by

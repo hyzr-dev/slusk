@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/matcher"
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // WantedSource is the slice of WantedSync that Discovery needs: the most

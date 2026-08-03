@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // newActiveCandidate creates a WANTED job, caches a single NEW candidate for

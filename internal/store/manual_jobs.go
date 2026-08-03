@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // ErrRemoteFileBusy is returned by CreateManualJob when another live

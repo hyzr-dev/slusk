@@ -12,7 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func newUploadHistoryTestHandler(reg *prometheus.Registry, history UploadHistoryFunc) http.Handler {

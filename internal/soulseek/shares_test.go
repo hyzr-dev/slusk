@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/distributed"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/server"
 )
 
 func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {

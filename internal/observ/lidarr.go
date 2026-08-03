@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/app"
 )
 
 // LidarrArtistStatusFunc reports the read-only Lidarr library status for a
