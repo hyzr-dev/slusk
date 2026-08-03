@@ -11,6 +11,9 @@ run it.
 It also works the other way round: search Soulseek yourself from the dashboard, pick the
 peer and the files, and let the same pipeline download them.
 
+And it gives back: slusk shares folders and uploads to other peers itself, though you
+have to switch it on — see [Sharing and uploads](#sharing-and-uploads).
+
 Installing it is a compose file and a config file. `docker-compose.example.yml` brings
 its own Postgres along, so there is no database to set up separately.
 
@@ -264,6 +267,27 @@ MusicBrainz id attached at creation. If there is no id, or Lidarr doesn't know t
 release, the job ends as `NOT_IMPORTED` and the files stay on disk for you to deal with.
 The dashboard can add an *artist* to Lidarr for you, but nothing in the manual flow
 creates library entries on its own.
+
+## Sharing and uploads
+
+slusk uploads. It shares the folders you configure back to the network, answers browse
+and search requests from other peers, and serves files with real upload slots and a
+queue.
+Sharing is opt-in, and nothing is shared until you configure it — until then slusk tells
+the server you are sharing nothing.
+
+The dashboard's settings page is the way to add a folder. If the config file is mounted
+read-only, add it there instead:
+
+```toml
+[[soulseek.shared_folders]]
+name = "Library"
+path = "/music/library"
+```
+
+Shares are scanned at startup. After adding or removing files on disk, rescan without a
+restart with `SIGHUP` or `POST /api/shares/rescan`. The dashboard's shares and uploads
+pages show what is indexed, what peers are pulling right now, and what has been uploaded.
 
 ## Architecture
 
