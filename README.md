@@ -13,6 +13,25 @@ peer and the files, and let the same pipeline download them.
 
 Licensed under [AGPL-3.0-or-later](LICENSE).
 
+## Screenshots
+
+![The overview: wanted albums reconciled against Soulseek, with live transfer progress](docs/images/dashboard-overview.png)
+
+Every album slusk is working on, what state it is in, and how each transfer is doing.
+
+![A single job: the candidate that was picked, its files, and the ones not tried yet](docs/images/job-detail.png)
+
+One job in detail. The peer that was picked, every file it is pulling, and the other
+candidates still in reserve if this one gives up.
+
+![The peers list, scored by how reliably each one has delivered](docs/images/peers.png)
+
+Who slusk has downloaded from, and how well that went. This history feeds back into
+picking the next candidate.
+
+Peer names in these screenshots are pseudonymised — they are other people's Soulseek
+accounts, and they have not agreed to appear here. Everything else is a real run.
+
 ## How it compares to soularr + slskd
 
 [soularr](https://github.com/mrusse/soularr) solves the same problem and is the reason
