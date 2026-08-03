@@ -65,3 +65,25 @@ Everything belonging to one feature — its handlers, its rules, its payload sha
 kept together rather than split across a layer per concern. A slice owns what it
 publishes and what it serves.
 _Avoid_: module (too general here), feature folder, vertical
+
+### Access
+
+Two unrelated credentials reach the same endpoints, so a bare "token" is always
+ambiguous — name which one.
+
+**Session**:
+A person's proven login, held as an opaque value in their browser and as a row the
+server owns. It belongs to the one account and can be revoked. Never say "session
+token" for it — that invites the assumption it is signed, which it is not (ADR-0001).
+_Avoid_: token, JWT, auth token
+
+**Machine token**:
+The optional shared secret in `observ.auth_token`, for callers that are not a browser —
+curl, Prometheus, the Vite dev proxy. It proves no identity and belongs to no account.
+_Avoid_: API key, password, token
+
+**Setup**:
+The one-time creation of the only account, offered while none exists and closed
+permanently once one does. There is deliberately no second account and no password
+change; recovery means deleting the account and doing setup again.
+_Avoid_: registration, sign-up, onboarding

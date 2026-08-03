@@ -14,8 +14,8 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 
 This is a **single-context** repo. `docs/superpowers/{plans,specs}/` and `docs/design/`
 already exist and are *not* domain docs — don't read them as a glossary or as ADRs.
-`CONTEXT.md` and `docs/adr/` don't exist yet; proceed silently and let
-`/domain-modeling` create them lazily.
+`CONTEXT.md` and `docs/adr/` both exist and are the domain docs; read them per the
+section above.
 
 ## File structure
 
