@@ -3,6 +3,9 @@ name: Build and deploy
 # Triggered by a v* tag push (created by release.yml). Builds and pushes the
 # image to ghcr.io, then tells the homelab updater to redeploy it.
 #
+# This deploys to the maintainer's own instance only — the canary. Nothing a
+# stranger runs moves until promote.yml is dispatched by hand.
+#
 # The build runs in Gitea but publishes to GitHub's registry, so the login uses a
 # GitHub account and a classic PAT with write:packages held in GHCR_TOKEN — not
 # gitea.actor or PACKAGES_TOKEN, which belong to the Gitea registry this no longer
@@ -38,9 +41,12 @@ jobs:
           # the running container can say which release it is.
           build-args: |
             VERSION=${{ gitea.ref_name }}
+          # :latest is deliberately absent — it names the latest *promoted* build
+          # and moves only when promote.yml is dispatched by hand. Every build
+          # from main lands on :edge instead. See docs/adr/0003-promote-by-digest.md.
           tags: |
             ghcr.io/hyzr-dev/slusk:${{ gitea.ref_name }}
-            ghcr.io/hyzr-dev/slusk:latest
+            ghcr.io/hyzr-dev/slusk:edge
 
   deploy:
     runs-on: ubuntu-latest

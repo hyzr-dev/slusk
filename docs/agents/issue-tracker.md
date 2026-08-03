@@ -41,11 +41,12 @@ Use the `tea` CLI for all operations. **Never `gh`** — there is no GitHub remo
   applies — check `mergeable` in `tea pulls <n> --output json` first. A different
   `--style` never helps.
 
-## Merging a PR is a production deploy
+## Merging a PR deploys to the canary
 
 `main` auto-tags and auto-deploys on `feat:` / `fix:` / breaking-change commits. There is
-no staging step, so closing a ticket by merging is an outward-facing action — see the
-deploy table in `CLAUDE.md` and verify in `testenv/` first.
+no staging step, so closing a ticket by merging puts the change on the maintainer's live
+instance — see the deploy table in `CLAUDE.md` and verify in `testenv/` first. It does
+*not* reach anyone else: `:latest` moves only when `promote.yml` is dispatched by hand.
 
 ## Pull requests as a triage surface
 

@@ -87,3 +87,25 @@ The one-time creation of the only account, offered while none exists and closed
 permanently once one does. There is deliberately no second account and no password
 change; recovery means deleting the account and doing setup again.
 _Avoid_: registration, sign-up, onboarding
+
+### Delivery
+
+Building a version, running it, and releasing it are three separate events. A single
+word for "it shipped" hides which one happened.
+
+**Canary**:
+The maintainer's own instance — the only one running builds before anyone else does. It
+holds a real library and real Soulseek accounts, so it is production for exactly one
+person and is allowed to break. It is the sole detector of faults that only appear under
+real use.
+_Avoid_: staging, test instance, dev (none of them run real data)
+
+**Edge**:
+Every build from `main`, promoted or not, published as `:edge`. What the canary runs.
+_Avoid_: nightly, unstable, dev build
+
+**Promoted**:
+A version whose digest `:latest` points at, chosen by hand after it has proven itself on
+the canary. The receipt is a `promoted/vX.Y.Z` tag. Promotion re-points an existing
+image; it never produces a new one.
+_Avoid_: released, stable, published (a build is published the moment it exists)
