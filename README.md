@@ -29,18 +29,6 @@ than its reputation.
 | Processes | slskd, plus soularr's own interval loop and its web UI | one binary and a Postgres |
 | Licence | GPL-3.0 | AGPL-3.0-or-later |
 
-Where soularr is ahead, or where slusk costs you something:
-
-- **soularr is proven and slusk is not.** soularr has been run by a lot of people for a
-  long time. slusk has not.
-- **Postgres is a real dependency.** soularr needs a `config.ini` and a place to run.
-  slusk needs a database, which is more to operate and more to back up.
-- **slusk's Soulseek client is young.** slskd has years of use behind it; slusk's own
-  protocol implementation does not, and it is the path this README recommends.
-- **A manual download still imports only into an album Lidarr already knows.** slusk
-  will download anything you point it at, but importing it needs the release to exist in
-  your Lidarr library first.
-
 ## Setup
 
 ### Prerequisites
