@@ -467,31 +467,44 @@ func TestDownloadRejectsOutOfRangeFileSizeWithoutLeakingFileConn(t *testing.T) {
 	}
 }
 
-// TestDownloadCancelAbortsActiveStream is the regression guard for issue #99:
-// Cancel used to mark the transfer TransferCancelled but let the in-flight
-// streamFile run on until completion or idle timeout, holding the F connection
-// and its inbound lease. Here the fake peer streams half the payload and then
-// deliberately stalls, holding its end open; Cancel must close the client's
-// side of the F connection promptly (long before the 60s idle timeout set
-// below), the transfer must stay TransferCancelled - not flip to
-// Errored/Completed - and the ".part" file must remain for Remove.
-func TestDownloadCancelAbortsActiveStream(t *testing.T) {
-	const filename = `Artist - Album\02 Track.flac`
-	payload := bytes.Repeat([]byte("soulseek-cancel-payload-"), 100)
+// stalledDownload is a client holding one download whose fake peer has streamed
+// half the payload and then stopped, keeping its end of the F connection open.
+// It is the shared fixture for the two issue-#99 abort guards below: both need
+// a stream that is demonstrably in flight and that cannot finish on its own, so
+// that the client aborting it is the only thing that can close the F
+// connection.
+type stalledDownload struct {
+	client *Client
+	// id is the transfer's registry id, as returned by Enqueue.
+	id string
+	// filename is the peer-side share path the download was enqueued for.
+	filename string
+	// fconnClosed is closed by the fake peer once the client tears down the
+	// stalled F connection - the observable proof that the stream was aborted
+	// rather than left running to the idle timeout.
+	fconnClosed <-chan struct{}
+}
+
+// startStalledDownload drives a native download over real loopback TCP (the
+// same harness TestDownloadEndToEndQueuePositionAndCompletion uses) up to the
+// point where half the payload has landed on disk and the peer has gone quiet,
+// then returns with the stream still open. The client's file idle timeout is
+// set far longer than any caller's deadline, so an F connection that does close
+// can only have been closed by the client.
+func startStalledDownload(t *testing.T, filename string, transferToken soul.Token) *stalledDownload {
+	t.Helper()
+	payload := bytes.Repeat([]byte("soulseek-abort-payload-"), 100)
 	size := int64(len(payload))
 	half := size / 2
-	const transferToken = soul.Token(9002)
 
 	peerLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for fake peer: %v", err)
 	}
-	defer peerLn.Close()
+	t.Cleanup(func() { _ = peerLn.Close() })
 	peerAddr := peerLn.Addr().(*net.TCPAddr)
 
 	var listenAddr string
-	// Closed by the fake peer once its stalled F connection is torn down by
-	// the client - the observable proof that Cancel aborted the stream.
 	fconnClosed := make(chan struct{})
 
 	go func() {
@@ -614,8 +627,9 @@ func TestDownloadCancelAbortsActiveStream(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	// Wait until the stream is demonstrably in flight (half the payload
-	// landed) before cancelling mid-stream.
+	// Return only once the stream is demonstrably in flight (half the payload
+	// landed), so the caller's Cancel/Remove genuinely lands mid-stream rather
+	// than before it started.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if time.Now().After(deadline) {
@@ -637,16 +651,51 @@ func TestDownloadCancelAbortsActiveStream(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if err := c.Cancel(context.Background(), "friend", id); err != nil {
+	return &stalledDownload{client: c, id: id, filename: filename, fconnClosed: fconnClosed}
+}
+
+// awaitAbortedFileConn fails the test unless the fake peer observed the client
+// closing the stalled F connection within 3s of the abort - far short of the
+// 60s idle timeout startStalledDownload configures, so only a deliberate abort
+// can explain it.
+func (s *stalledDownload) awaitAbortedFileConn(t *testing.T, after string) {
+	t.Helper()
+	select {
+	case <-s.fconnClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the F connection was not closed within 3s of %s; the stream kept running", after)
+	}
+}
+
+// awaitReleasedInboundLease fails the test unless every inbound lease is back
+// in the pool within a second. c.inboundSlots holds one token per live lease,
+// so it must drain to empty once the aborted stream's F connection is gone -
+// the lease is what search handshakes contend with (issue #99).
+func (s *stalledDownload) awaitReleasedInboundLease(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for len(s.client.inboundSlots) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(s.client.inboundSlots); got != 0 {
+		t.Errorf("inboundSlots still holds %d lease(s) after the abort — F connection leaked", got)
+	}
+}
+
+// TestDownloadCancelAbortsActiveStream is the regression guard for issue #99:
+// Cancel used to mark the transfer TransferCancelled but let the in-flight
+// streamFile run on until completion or idle timeout, holding the F connection
+// and its inbound lease. Cancel must close the client's side of the F
+// connection promptly, the transfer must stay TransferCancelled - not flip to
+// Errored/Completed - and the ".part" file must remain for Remove.
+func TestDownloadCancelAbortsActiveStream(t *testing.T) {
+	s := startStalledDownload(t, `Artist - Album\02 Track.flac`, soul.Token(9002))
+	c := s.client
+
+	if err := c.Cancel(context.Background(), "friend", s.id); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-
-	select {
-	case <-fconnClosed:
-		// Cancel tore down the F connection while the peer was stalling.
-	case <-time.After(3 * time.Second):
-		t.Fatal("the F connection was not closed within 3s of Cancel; the stream kept running")
-	}
+	s.awaitAbortedFileConn(t, "Cancel")
 
 	// The state must remain TransferCancelled - give the orchestration
 	// goroutine time to run its post-stream branches, then confirm nothing
@@ -658,7 +707,7 @@ func TestDownloadCancelAbortsActiveStream(t *testing.T) {
 	}
 	var final core.RemoteTransfer
 	for _, tr := range list {
-		if tr.ID == id {
+		if tr.ID == s.id {
 			final = tr
 		}
 	}
@@ -666,11 +715,62 @@ func TestDownloadCancelAbortsActiveStream(t *testing.T) {
 		t.Fatalf("state after Cancel = %q (failure=%q), want %q", final.State, final.Failure, core.TransferCancelled)
 	}
 
-	destPath := downloadDestPath(c.cfg.DownloadDir, filename)
+	destPath := downloadDestPath(c.cfg.DownloadDir, s.filename)
 	if _, err := os.Stat(destPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat dest after cancel: err = %v, want os.ErrNotExist", err)
 	}
 	if _, err := os.Stat(destPath + ".part"); err != nil {
 		t.Errorf("stat .part after cancel: %v, want it left in place for Remove", err)
 	}
+	s.awaitReleasedInboundLease(t)
+}
+
+// TestDownloadRemoveAbortsActiveStream is the Remove half of issue #99. Remove
+// aborts the stream through the same watcher Cancel does, but it also
+// deregisters the transfer, which is what makes its state write worth asserting
+// separately: the transfer is gone from ListDownloads, so the only way to see
+// whether the abort scribbled a spurious "download interrupted" error onto an
+// already-removed object is to hold the *transfer directly.
+//
+// The transfer must end TransferCancelled, matching Cancel - a Remove is a
+// deliberate user action, not a download that errored - and no ".part" may
+// survive it.
+func TestDownloadRemoveAbortsActiveStream(t *testing.T) {
+	s := startStalledDownload(t, `Artist - Album\03 Track.flac`, soul.Token(9003))
+	c := s.client
+
+	// Grab the transfer before Remove deregisters it; nothing reachable through
+	// the client's public surface can observe it afterwards.
+	tr := c.downloads.lookupByID(s.id)
+	if tr == nil {
+		t.Fatalf("lookupByID(%s) before Remove = nil, want the in-flight transfer", s.id)
+	}
+
+	if err := c.Remove(context.Background(), "friend", s.id); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	s.awaitAbortedFileConn(t, "Remove")
+
+	// Let the orchestration goroutine run its post-stream branches before
+	// reading the state it would have written.
+	time.Sleep(100 * time.Millisecond)
+	tr.mu.Lock()
+	state, failure := tr.state, tr.failure
+	tr.mu.Unlock()
+	if state != core.TransferCancelled {
+		t.Errorf("state after Remove = %q (failure=%q), want %q — the abort wrote a status onto a deregistered transfer", state, failure, core.TransferCancelled)
+	}
+
+	if got := c.downloads.lookupByID(s.id); got != nil {
+		t.Errorf("lookupByID(%s) after Remove = %v, want nil", s.id, got)
+	}
+
+	destPath := downloadDestPath(c.cfg.DownloadDir, s.filename)
+	if _, err := os.Stat(destPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat dest after remove: err = %v, want os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat .part after remove: err = %v, want os.ErrNotExist — Remove must leave no partial behind", err)
+	}
+	s.awaitReleasedInboundLease(t)
 }

@@ -684,6 +684,21 @@ func (c *Client) Remove(ctx context.Context, username, id string) error {
 	if tr == nil {
 		return fmt.Errorf("remove download %s: %w", id, core.ErrRemoteNotFound)
 	}
+	// Mark the transfer cancelled before invoking tr.cancel(), for the same
+	// reason and with the same happens-before guarantee Cancel relies on (see
+	// its comment above). Without this, a Remove during an active stream leaves
+	// runDownload's ctx.Done() branch nothing to find, so finishInterrupted
+	// takes its errored path and writes TransferErrored ("download interrupted")
+	// onto a transfer this call has already deregistered - a status nothing can
+	// read back, logged as a download failure although the operator asked for
+	// the removal (issue #99).
+	tr.mu.Lock()
+	if tr.state != core.TransferCompleted {
+		// A download that already finished keeps its successful terminal state,
+		// exactly as in Cancel; Remove forgets the transfer either way.
+		tr.state = core.TransferCancelled
+	}
+	tr.mu.Unlock()
 	if tr.cancel != nil {
 		tr.cancel()
 	}
