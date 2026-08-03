@@ -28,8 +28,13 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # org and stays private even when the repo is public, which surfaces as an auth
 # error on `docker pull` rather than as a visibility problem.
 LABEL org.opencontainers.image.source="https://github.com/hyzr-dev/slusk"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
 COPY --from=build /out/slusk /usr/local/bin/slusk
+# The AGPL requires the licence text to travel with the work, and pushing an
+# image conveys it. distroless has no package manager to carry a copyright file,
+# so the plain text ships alongside the binary.
+COPY --from=build /src/LICENSE /usr/local/share/slusk/LICENSE
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/slusk", "--config", "/config/config.toml"]
 

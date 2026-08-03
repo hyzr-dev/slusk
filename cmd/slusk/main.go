@@ -1,3 +1,19 @@
+// slusk — a bridge between Lidarr and Soulseek.
+// Copyright (C) 2026 hyzr-dev
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // Command slusk is the daemon entrypoint: it loads config, opens the store,
 // wires the clients and the pipeline modules, starts the observability
 // server, and runs until it receives SIGINT/SIGTERM (graceful shutdown via
