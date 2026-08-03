@@ -6,16 +6,19 @@
 #
 # docker-compose.yml is gitignored, so your copy (and any local edits to it)
 # stays out of the repo. Every deployment variant this project supports is a
-# commented block at the bottom of this file: external Postgres, an existing
-# arr network, gluetun with VPN port forwarding, and building from source.
+# commented block at the bottom of this file: the slskd backend, external
+# Postgres, an existing arr network, gluetun with VPN port forwarding, and
+# building from source.
 #
 # State lives in PostgreSQL, which this file bundles — slusk itself keeps no
 # data volume, so it needs no writable state mount of its own.
 #
-# With the default slskd backend, slusk needs no media mount: it only hands
-# Lidarr a path to import from. With pipeline.backend = "soulseek" (the native
-# backend) it downloads the files itself and needs a WRITABLE volume at
-# paths.slskd_complete_dir; the slskd backend only ever reads that path.
+# This file is written for pipeline.backend = "soulseek", the native client and
+# what config.example.toml ships. There is no default backend - the key is
+# required (#396) - so the two example files are kept in step deliberately. With
+# the native backend slusk downloads the files itself and needs a WRITABLE volume
+# at paths.slskd_complete_dir, plus its peer port published. Both are uncommented
+# below. If you run the slskd backend instead, see the option block at the bottom.
 # Named Soulseek shares are scanned and served read-only; mount only those roots
 # and use their in-container paths in [[soulseek.shared_folders]].
 
@@ -70,12 +73,23 @@ services:
       # all. The Postgres image chowns slusk-pgdata itself, so nothing here
       # needs an init service any more - only this bind mount can bite.
       - ./config:/config
-      # Required with pipeline.backend = "soulseek": the native backend writes
+      # REQUIRED with pipeline.backend = "soulseek": the native backend writes
       # completed downloads here itself, so this must be WRITABLE by the
       # PUID:PGID above and match paths.slskd_complete_dir in config.toml. Share
       # it with Lidarr at the path Lidarr expects so import works end to end.
-      # Not needed with the default slskd backend (which only reads that path).
-      # - /host/downloads:/music/slskd-downloads
+      # (With the slskd backend this path is only ever read - see the option
+      # block at the bottom.)
+      #
+      # CHANGE /host/downloads to your real path. There is no sensible default:
+      # it has to be a path Lidarr can see too. create_host_path is false on
+      # purpose, so an unedited path fails the `up` with a clear message instead
+      # of Docker silently creating a root-owned directory the non-root
+      # container above cannot write to.
+      - type: bind
+        source: /host/downloads
+        target: /music/slskd-downloads
+        bind:
+          create_host_path: false
       # Optional named Soulseek share; keep it read-only and ensure the
       # configured non-root PUID:PGID can read every shared file.
       # - /host/music:/shares/music:ro
@@ -90,12 +104,13 @@ services:
       # it, but must preserve Host and replace any client X-Forwarded-Proto with
       # exactly one trusted http/https value.
       - "127.0.0.1:9090:9090"
-      # Soulseek peer listener; uncomment when [soulseek] is enabled in
-      # config.toml. The published host port MUST equal the container port
-      # (soulseek.listen_addr's port) - there is no separate "advertised
-      # port" concept, so a mismatched mapping would advertise a port peers
-      # can't actually reach.
-      # - "2234:2234"
+      # Soulseek peer listener, required by the native backend: peers must be
+      # able to open connections TO you. The published host port MUST equal the
+      # container port (soulseek.listen_addr's port) - there is no separate
+      # "advertised port" concept, so a mismatched mapping would advertise a
+      # port nobody can reach. Comment this out with the slskd backend, or when
+      # routing Soulseek through gluetun (see the option block at the bottom).
+      - "2234:2234"
 
     # The image ships a HEALTHCHECK (see Dockerfile) that polls the reconcile
     # loop's own liveness at /healthz, not just "is the process alive" — a hung
@@ -116,6 +131,25 @@ volumes:
 # :latest. To update:
 #   docker compose pull && docker compose up -d
 
+# --- Option: use the slskd backend instead of the native client ---
+# Worth choosing if you already run slskd and want to keep it. slusk's slskd
+# adapter is experimental: it does everything the pipeline asks of it, but it
+# carries a fraction of the test coverage and the pre-merge lab does not
+# exercise it by default. In config.toml set pipeline.backend = "slskd" and fill
+# in the [slskd] section (both are in config.example.toml's own option block at
+# the bottom); the [soulseek] section then becomes optional.
+#
+# Above, in the slusk service:
+#   - the /music/slskd-downloads bind can become read-only (:ro), since slskd
+#     does the downloading and slusk only reads the finished folder. It still
+#     has to match paths.slskd_complete_dir and be visible to Lidarr.
+#   - remove the "2234:2234" port; slusk opens no peer listener in this mode.
+#
+# Note that [soulseek] is still worth configuring under this backend: shares,
+# private messaging and uploads are driven by the native client regardless of
+# which backend does the searching, so they stay switched off without it - and
+# in that case keep the peer port published after all.
+
 # --- Option: build from source instead of pulling ---
 # Replace the `image:` line on the slusk service with `build: .` and run
 # `docker compose up -d --build`. Needed on architectures the published image
@@ -132,10 +166,10 @@ volumes:
 # If slskd/lidarr are services in the SAME compose project, put slusk on their
 # network and use service-name URLs in config.toml (http://lidarr:8686, etc.):
 #   networks: [arr]
-# The slskd service itself is optional when pipeline.backend = "soulseek" in
-# config.toml: nothing in the pipeline talks to it in that mode, so it can be
-# omitted from this compose project entirely (Lidarr's network access is
-# still required).
+# With pipeline.backend = "soulseek" - what this file and config.example.toml
+# are set up for - nothing in the pipeline talks to slskd, so that service can
+# be omitted from the project entirely. Lidarr's network access is still
+# required either way.
 # networks:
 #   arr:
 #     external: true
