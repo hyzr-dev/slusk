@@ -3,9 +3,10 @@
 A bridge between [Lidarr](https://lidarr.audio/) and [Soulseek](https://www.slsknet.org/).
 
 slusk polls Lidarr for wanted albums, searches Soulseek for them, downloads the
-candidates that look best, and hands finished albums back to Lidarr for import. It can
-talk to Soulseek through [slskd](https://github.com/slskd/slskd), or connect to the
-Soulseek network directly with its own client and skip slskd entirely.
+candidates that look best, and hands finished albums back to Lidarr for import. It speaks
+the Soulseek protocol itself, so it needs no
+[slskd](https://github.com/slskd/slskd) — though it can still drive one if you already
+run it.
 
 It also works the other way round: search Soulseek yourself from the dashboard, pick the
 peer and the files, and let the same pipeline download them.
@@ -21,7 +22,7 @@ than its reputation.
 | | soularr + slskd | slusk |
 |---|---|---|
 | Pipeline state | re-derived from Lidarr and slskd on every run; nothing tracks a transfer the script itself was watching when it died | a state machine in Postgres (`album_jobs`), so a restart picks up in-flight jobs instead of stranding them |
-| Soulseek client | slskd required | slskd by default, or a native Go client that needs no slskd at all |
+| Soulseek client | slskd required | its own Soulseek client, no slskd needed; slskd still supported for those already running it |
 | Dashboard | edits the config, tails the log, lists failed imports; job and transfer state you watch in slskd's UI | jobs, candidates, peers, events, throughput and writable settings in one place |
 | Candidate choice | sequential filters plus a filename-similarity ratio | weighted scoring over format, bitrate, file count and peer reliability, including a decayed per-artist history of which peers actually delivered |
 | Manual downloads | none; Lidarr's wanted list is the only input | search Soulseek yourself, pick the peer and files, optionally identify the result against MusicBrainz first |
@@ -34,8 +35,8 @@ Where soularr is ahead, or where slusk costs you something:
   long time. slusk has not.
 - **Postgres is a real dependency.** soularr needs a `config.ini` and a place to run.
   slusk needs a database, which is more to operate and more to back up.
-- **The native Soulseek backend is experimental.** It is being tuned against real
-  traffic. slskd remains the default and the fallback that works.
+- **slusk's Soulseek client is young.** slskd has years of use behind it; slusk's own
+  protocol implementation does not, and it is the path this README recommends.
 - **A manual download still imports only into an album Lidarr already knows.** slusk
   will download anything you point it at, but importing it needs the release to exist in
   your Lidarr library first.
@@ -84,11 +85,22 @@ Keep `config/config.toml` out of source control. It holds API keys.
 
 `pipeline.backend` decides how slusk reaches Soulseek:
 
-- `"slskd"` (default) — slskd does the searching and transferring. The `[slskd]` section
-  is required; `[soulseek]` is not.
-- `"soulseek"` — slusk's own client connects to the Soulseek server directly. The
-  `[slskd]` section becomes unnecessary and `[soulseek]` becomes required. This backend
-  is experimental.
+- `"soulseek"` — **the recommended setting.** slusk's own client connects to the
+  Soulseek server directly and no slskd is involved at all. Requires a `[soulseek]`
+  section; the `[slskd]` section becomes unnecessary.
+- `"slskd"` — slskd does the searching and transferring. Requires the `[slskd]` section.
+  Worth choosing if you already run slskd and want to keep it.
+
+`pipeline.backend` still defaults to `"slskd"` when the key is absent, so set it
+explicitly.
+
+The native client is the newer of the two and the one under active development — it is
+also what this project's own pre-merge test lab exercises by default, so in practice it
+sees more real Soulseek traffic than the slskd path does. The slskd adapter is a much
+smaller, more static piece of code: it does everything the pipeline asks of it, but it
+carries a fraction of the test coverage and gets no new feature work. Neither of those
+is a claim that the native client is finished; it is the honest ordering of which path
+is better exercised.
 
 With the native backend, slusk writes the completed downloads itself, so
 `paths.slskd_complete_dir` must be a **writable** volume shared with Lidarr at the path

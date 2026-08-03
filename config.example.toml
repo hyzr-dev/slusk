@@ -22,8 +22,12 @@ api_key = "CHANGEME"
 # the Soulseek server). Setting this to "soulseek" makes the whole [slskd]
 # section above optional, since nothing in the pipeline talks to it anymore -
 # but a configured [soulseek] section below becomes required instead. The
-# native backend is experimental while it's being tuned against production
-# traffic; slskd remains the default and the safe fallback.
+# "soulseek" is the recommended setting: it is the newer client, the one under
+# active development, and the one testenv/ exercises by default, so it sees more
+# real traffic before merge than the slskd path does. The slskd adapter is a much
+# smaller, more static piece of code - it does everything the pipeline asks of it,
+# but on a fraction of the test coverage. Choose it if you already run slskd.
+# This key still defaults to "slskd" when absent, so set it explicitly.
 # backend = "slskd"
 max_candidates_per_album = 5
 transfer_deadline = "30m"
