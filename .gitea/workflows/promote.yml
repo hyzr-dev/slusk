@@ -1,0 +1,160 @@
+name: Promote
+
+# Moves :latest onto an already-built image, by hand.
+#
+# Every merge to main builds :vX.Y.Z and :edge and deploys to the maintainer's own
+# instance — the canary. Nothing a stranger runs changes until this workflow is
+# dispatched. Promotion re-points :latest at the *same digest* that has been running
+# on the canary; it never rebuilds, because a rebuild resolves a fresh base image and
+# re-runs `npm ci`, producing a different artifact and voiding the soak.
+# See docs/adr/0003-promote-by-digest.md.
+#
+# Rollback is this same workflow with a lower version. When the target is not newer
+# than the current promoted version, the GitHub release is skipped: a release is a
+# forward-facing announcement and cannot express "I withdrew something". Say that in
+# the broken version's existing release instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to promote, e.g. v1.4.2 (blank = latest v* tag)"
+        required: false
+        default: ""
+
+env:
+  IMAGE: ghcr.io/hyzr-dev/slusk
+  MIRROR: hyzr-dev/slusk
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "Release Bot"
+          git config user.email "noreply@shcizo.se"
+
+      - name: Resolve target and direction
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          TARGET="${{ gitea.event.inputs.version }}"
+          if [ -z "$TARGET" ]; then
+            TARGET=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+            echo "No version given — defaulting to the latest tag: ${TARGET}"
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${TARGET}" >/dev/null; then
+            echo "::error::No such tag: ${TARGET}"
+            exit 1
+          fi
+
+          # Annotated tags only: a lightweight tag inherits its target commit's date,
+          # so creatordate would order the receipts by when the code was written
+          # rather than by when it was promoted — and after a rollback those two
+          # orders disagree, which is exactly when this lookup matters.
+          CURRENT=$(git for-each-ref --sort=-creatordate --count=1 \
+            --format='%(refname:strip=3)' 'refs/tags/promoted/*')
+
+          if [ -z "$CURRENT" ]; then
+            # First promotion: no receipt to measure against. Use the tag preceding
+            # the target so the changelog covers one release rather than all history.
+            PREV=$(git tag --list 'v*' --sort=-v:refname | grep -A1 -x "$TARGET" | tail -n1)
+            [ "$PREV" = "$TARGET" ] && PREV=""
+            echo "No promoted/* receipt yet — first promotion."
+            DIRECTION="forward"
+          else
+            PREV="$CURRENT"
+            if [ "$TARGET" = "$CURRENT" ]; then
+              DIRECTION="same"
+            elif [ "$(printf '%s\n%s\n' "$CURRENT" "$TARGET" | sort -V | tail -n1)" = "$TARGET" ]; then
+              DIRECTION="forward"
+            else
+              DIRECTION="rollback"
+            fi
+          fi
+
+          echo "current=${CURRENT:-<none>} target=${TARGET} direction=${DIRECTION}"
+          {
+            echo "target=${TARGET}"
+            echo "previous=${PREV}"
+            echo "current=${CURRENT}"
+            echo "direction=${DIRECTION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: shcizo
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Point :latest at the promoted digest
+        run: |
+          set -euo pipefail
+          TARGET="${{ steps.resolve.outputs.target }}"
+          # Registry-side manifest copy: no layers move, no builder runs, and the
+          # digest behind :latest becomes byte-identical to the canary's.
+          docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${TARGET}"
+          docker buildx imagetools inspect "${IMAGE}:latest" | head -n 3
+
+      - name: Record the promotion
+        run: |
+          set -euo pipefail
+          TARGET="${{ steps.resolve.outputs.target }}"
+          git tag -f -a "promoted/${TARGET}" "${TARGET}" -m "Promoted ${TARGET} to :latest"
+          git push -f origin "promoted/${TARGET}"
+
+      - name: Announce on the public mirror
+        if: steps.resolve.outputs.direction == 'forward'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          TARGET="${{ steps.resolve.outputs.target }}"
+          PREV="${{ steps.resolve.outputs.previous }}"
+
+          # jq builds the request body: the notes are multi-line and must be escaped.
+          # Fail loudly rather than POSTing something malformed if the image lacks it.
+          command -v jq >/dev/null || { echo "::error::jq missing on the runner"; exit 1; }
+
+          API="https://api.github.com/repos/${MIRROR}"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" "${API}/releases/tags/${TARGET}")
+          if [ "$CODE" = "200" ]; then
+            echo "Release ${TARGET} already exists on the mirror — nothing to announce."
+            exit 0
+          fi
+
+          # The range is previous-promoted..target, not one version bump: :latest can
+          # jump several versions at once, and that jump is what a user actually takes.
+          RANGE="${TARGET}"
+          [ -n "$PREV" ] && RANGE="${PREV}..${TARGET}"
+          NOTES=$(git log ${RANGE} --no-merges --format='%s' \
+            | grep -E '^(feat|fix)(\([^)]+\))?!?:|BREAKING[ -]CHANGE' \
+            | sed 's/^/- /' || true)
+          [ -z "$NOTES" ] && NOTES="- No user-facing changes recorded."
+
+          BODY=$(printf '%s\n\n---\n\nPromoted from the maintainer'"'"'s instance, where this exact image has been running.\nBuilds from `main` land on `%s:edge` if you want them sooner.' "$NOTES" "$IMAGE")
+
+          jq -n --arg tag "$TARGET" --arg name "$TARGET" --arg body "$BODY" \
+            '{tag_name: $tag, name: $name, body: $body}' \
+            | curl -sS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -d @- "${API}/releases" -o /dev/null -w 'release create: %{http_code}\n'
+
+      - name: Summary
+        run: |
+          echo "Promoted ${{ steps.resolve.outputs.target }} to :latest (${{ steps.resolve.outputs.direction }})."
+          echo "Previous promoted: ${{ steps.resolve.outputs.current }}"

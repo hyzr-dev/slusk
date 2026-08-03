@@ -23,22 +23,41 @@ go test ./... -race      # required for anything touching concurrency
 
 `go vet ./...` and `gofmt -l .` should both be clean.
 
-## Merging to main deploys to production
+## Merging to main deploys to the canary
 
 This is the single most important thing to know about this repo.
 
 `.gitea/workflows/release.yml` runs on every push to `main`, reads conventional commit
 prefixes since the last tag, and pushes a new `v*` tag. That tag triggers `deploy.yml`,
-which builds and pushes the image and tells the homelab updater to redeploy.
+which builds the image, publishes it as `:vX.Y.Z` and `:edge`, and tells the homelab
+updater to redeploy **the maintainer's own instance**.
 
 | Prefix | Effect |
 |---|---|
-| `feat:` | minor bump → **deploys to prod within minutes** |
-| `fix:` | patch bump → **deploys to prod within minutes** |
-| `!:` or `BREAKING CHANGE` | major bump → deploys |
-| `chore:`, `docs:`, `ci:`, `refactor:`, `style:`, `test:` | no bump, no deploy |
+| `feat:` | minor bump → **live on the canary within minutes** |
+| `fix:` | patch bump → **live on the canary within minutes** |
+| `!:` or `BREAKING CHANGE` | major bump → live on the canary |
+| `chore:`, `docs:`, `ci:`, `refactor:`, `style:`, `test:` | no bump, no build |
 
-There is no staging step. "Merge it and see" is a production action.
+There is still no staging step, and the canary is not a test rig: it runs a real music
+library against real Soulseek accounts, and it is deliberately allowed to break. "Merge
+it and see" remains a production action — just a production of one.
+
+Other people's instances do not move on a merge. `:latest` names the newest **promoted**
+build and is repointed only by `promote.yml`, dispatched by hand from the Gitea Actions
+UI with a version input. Promotion re-points `:latest` at the digest already running on
+the canary — it never rebuilds — pushes a `promoted/vX.Y.Z` receipt tag, and creates a
+GitHub release on the public `hyzr-dev/slusk` mirror. Rollback is the same workflow with
+a lower version; it skips the release. See `docs/adr/0003-promote-by-digest.md`.
+
+Two consequences worth carrying into every change:
+
+- The release notes on a promotion are the **only** channel to the people running slusk.
+  A change that adds a required config key stops their container from starting, and
+  nothing else will warn them.
+- Promoting is a judgement call about whether the canary looks healthy, and health here
+  means `album_jobs` still moving — not that the process is up. A build can run for days
+  and import nothing.
 
 ## The local PR lab is the substitute for staging
 

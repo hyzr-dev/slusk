@@ -125,10 +125,14 @@ services:
 volumes:
   slusk-pgdata:
 
-# --- Option: pin a release instead of tracking :latest ---
-# SLUSK_TAG=v1.2.3 in the environment or a .env file next to this file. Images
-# are published to ghcr.io/hyzr-dev/slusk on every v* tag, as :vX.Y.Z and
-# :latest. To update:
+# --- Option: pick an update channel, or pin a release ---
+# SLUSK_TAG in the environment or a .env file next to this file selects the tag.
+# Images are published to ghcr.io/hyzr-dev/slusk:
+#   latest   the newest promoted build — it ran on the maintainer's own instance
+#            before it moved here. The default.
+#   edge     every build from main, promoted or not. Newer, less soaked.
+#   vX.Y.Z   one exact build, pinned forever.
+# To update:
 #   docker compose pull && docker compose up -d
 
 # --- Option: use the slskd backend instead of the native client ---

@@ -164,6 +164,29 @@ network. The proxy must preserve `Host`, discard any client-supplied
 `X-Forwarded-Proto`, and set exactly one trusted value; that header also decides whether
 the session cookie is marked `Secure`.
 
+### 6. Updating
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Images live at `ghcr.io/hyzr-dev/slusk` and come in two channels:
+
+| Tag | What it is |
+|---|---|
+| `latest` | the newest build that has been **promoted** — it ran on the maintainer's own instance first. The default, and what you want. |
+| `edge` | every build from `main`, promoted or not. Newer, less soaked. |
+| `vX.Y.Z` | one exact build, pinned forever. |
+
+`latest` therefore lags `edge`, on purpose. Set `SLUSK_TAG=edge` in a `.env` file next
+to your compose file if you want changes as they land — worth doing if you have reported
+a bug and want to check the fix, less so otherwise.
+
+Read the [release notes](https://github.com/hyzr-dev/slusk/releases) before a
+`latest` upgrade. Config validation is strict: a release that adds a required key will
+stop the container from starting until you add it, and the notes are where that is
+announced.
+
 ### Running the native backend behind gluetun
 
 Soulseek needs peers to be able to open connections *to* you, which is the awkward part
