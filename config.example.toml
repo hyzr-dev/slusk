@@ -1,195 +1,267 @@
+# config.toml for slusk — copy this to config/config.toml and fill in the
+# CHANGEME values.
+#
+# The file is in three parts:
+#
+#   PART 1  REQUIRED. Every key here must be present. slusk has no silent
+#           defaults for them and will not start without them.
+#   PART 2  OPTIONAL. Commented out, each with its default shown. Leave them
+#           commented to take the default — that way a future release can
+#           improve the default and you inherit it. Uncomment only what you
+#           want to override.
+#   PART 3  Option blocks: the slskd backend, VPN port forwarding, shares,
+#           MusicBrainz. Each is off until you uncomment it.
+#
+# Configuration is strict: slusk rejects unknown keys at startup with
+# `unknown config keys: ...`, so a typo in a key name stops the container
+# rather than being quietly ignored.
+#
+# Note what strictness does NOT catch. It checks that a value is present and
+# well-formed, not that it is meaningful — a leftover CHANGEME is a non-empty
+# string and passes validation happily. slusk will start and then fail at
+# login. Fill every CHANGEME in before the first start.
+#
+# This file is set up for pipeline.backend = "soulseek", and
+# docker-compose.example.yml matches it. Keep the two in step if you change
+# the backend.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 1 — REQUIRED
+# ─────────────────────────────────────────────────────────────────────────────
+
 [lidarr]
 url = "http://lidarr:8686"
 api_key = "CHANGEME"
 
-[slskd]
-url = "http://slskd:5030"
-api_key = "CHANGEME"
-# slusk cleans up after itself in slskd: it deletes each search once its
-# responses are harvested, and removes download records once they reach a
-# terminal state. As a backstop for anything left behind by a crash between
-# harvest and delete, enable slskd's own retention in its config (slskd.yml),
-# e.g. retention.search and retention.transfers.* (minutes).
-
 [pipeline]
-# The matcher/transfer knobs below (through min_bitrate and
-# [pipeline.weights]) are mandatory, same as they were under the old [engine]
-# section. Everything else in [pipeline] is optional; an absent key uses the
-# default shown.
+# Which peer backend drives the pipeline: "soulseek" (the native client, built
+# into slusk, connecting directly to the Soulseek server) or "slskd" (the slskd
+# daemon). There is deliberately no default — this decides which client
+# performs every search and transfer, which is too consequential to inherit
+# from a key you never wrote.
 #
-# REQUIRED. Which peer backend drives the pipeline: "soulseek" (the native
-# internal/soulseek client, connecting directly to the Soulseek server) or
-# "slskd" (the slskd daemon). There is deliberately no default - this decides
-# which client performs every search and transfer, which is too consequential
-# to inherit from a key you never wrote.
+# "soulseek" is the recommended setting. It is the client under active
+# development and the one this project's pre-merge lab exercises by default, so
+# it sees more real Soulseek traffic before merge than the slskd path does.
+# That is not a claim that it is finished — it is the honest ordering of which
+# path is better exercised.
 #
-# "soulseek" is the recommended setting: it is the client under active
-# development, and the one testenv/ exercises by default, so it sees more real
-# traffic before merge than the slskd path does. It makes the whole [slskd]
-# section above unnecessary, since nothing in the pipeline talks to it anymore,
-# and makes a configured [soulseek] section below required instead.
-#
-# "slskd" keeps the slskd daemon doing the searching and transferring. Choose it
-# if you already run one. slusk's slskd adapter is experimental: it does
-# everything the pipeline asks of it, but it is a small, static piece of code on
-# a fraction of the test coverage, and the lab does not exercise it by default.
+# For "slskd", see the option block in PART 3.
 backend = "soulseek"
+
+# How many ranked search results are cached per album search.
 max_candidates_per_album = 5
+# How long a single file transfer may run before it is considered overdue.
 transfer_deadline = "30m"
+# How long a transfer may go without byte progress before it counts as stalled.
 stall_timeout = "5m"
+# How long a single Soulseek search waits for results.
 search_timeout = "20s"
+# Candidate files below this bitrate (kbps) are rejected.
 min_bitrate = 192
 # Max files handed to one candidate's peer at once. The budget is per candidate,
 # so two jobs using the same peer each get their own. slusk records a whole
-# album up front but sends only this many files at a time, releasing more as each
-# finishes. Enqueuing a whole album at once can trip peers' per-user queued-
-# megabyte limit and make a complete source look incomplete. Keep it low.
+# album up front but sends only this many files at a time, releasing more as
+# each finishes. Enqueuing a whole album at once can trip peers' per-user
+# queued-megabyte limit and make a complete source look incomplete. Keep it low.
 max_inflight_per_peer = 3
-# How many times a download rejected for a transient reason (e.g. a peer's
-# "Too many megabytes" queue limit) is re-queued before it is given up on.
-# The file waits in the pending pool and is resent once the peer's queue drains,
-# instead of failing the whole candidate. Permanent reasons ("File not shared",
-# "Banned") are never retried. 0 disables retries (optional; defaults to 0).
-max_transfer_retries = 3
-#
-# Global cap on jobs in DOWNLOADING and IMPORTING. SELECTING uses no slot.
-# Default 30.
-max_active = 30
-# Failed search cycles allowed before a job is given up on. An empty search or
-# exhausted cached set counts; candidate failures are free. Default 10.
-max_retries = 10
-# Base for exponential search-retry backoff. The first delay is twice this
-# value. Default 15m.
-backoff_base = "15m"
-# Upper bound on exponential backoff growth. Default 24h.
-backoff_cap = "24h"
-# How long the whole cached candidate set remains eligible before it expires
-# and the job resets to WANTED for a fresh search. Default 24h.
-candidate_ttl = "24h"
-# How long a permanently failed job waits before being revived for another
-# attempt. Default 720h.
-failed_revive_after = "720h"
-# Maximum time an IMPORTING job may remain without progress in pre-submit
-# verification due to repeated verification failures or anomalies; after that,
-# the current candidate is failed and the next is tried. Default 1h.
-stuck_after = "1h"
-# Upper bound on a single pipeline tick's total execution time. Default 5m.
-tick_timeout = "5m"
-# How long an import may sit unconfirmed (Lidarr's ManualImport command is
-# async) before it's treated as failed and rotated to the next candidate.
-# Default 3m.
-import_confirm_timeout = "3m"
-# How often the wanted list is refreshed from Lidarr. Default 15m.
-wanted_sync_interval = "15m"
-# How often the discovery phase runs. Default 30s.
-discovery_interval = "30s"
-# How often the selecting phase runs. Default 10s.
-selecting_interval = "10s"
-# How often the downloading phase runs. Default 15s.
-downloading_interval = "15s"
-# How often the importing phase runs. Default 30s.
-importing_interval = "30s"
-# Upper bound on Lidarr's manualimport folder scan, which parses audio tags
-# per file and legitimately runs far longer than a normal API call on large
-# folders (box sets, deluxe editions). Default 10m.
-manual_import_timeout = "10m"
-# How long the importing phase waits before re-attempting a failed
-# manualimport folder scan on the same job, so a slow-scanning folder is not
-# hammered every importing_interval until stuck_after. Default 5m.
-import_retry_cooldown = "5m"
 
+# Scoring weights for the matcher. Keep this section — an absent one is NOT
+# currently rejected, and every weight then defaults to zero, which makes the
+# matcher score every candidate identically and pick arbitrarily. There is no
+# warning when that happens (#405).
 [pipeline.weights]
 format = 1.0
 bitrate = 0.5
 reliability = 0.8
 file_count = 1.0
-# Weight for a peer's decayed known-good/known-bad history (per-artist,
-# falling back to global) - see internal/matcher/reliability_history.go. The
-# history factor is normalized to 0..1, so this is comparable in scale to the
-# other weights, not a multiplier on them.
+# Weight for a peer's decayed known-good/known-bad history (per-artist, falling
+# back to global) — see internal/matcher/reliability_history.go. The history
+# factor is normalized to 0..1, so this is comparable in scale to the other
+# weights, not a multiplier on them.
 known_user = 1.0
 
+[paths]
+# Where completed downloads land. With backend = "soulseek" slusk writes here
+# itself, so it must be WRITABLE and shared with Lidarr at the path Lidarr
+# expects. When a job exhausts its retry budget, whatever it left behind is
+# moved into the ".failed" subdirectory rather than left in the root for Lidarr
+# and the next job to scan. Nothing ever prunes that directory — clear it
+# yourself.
+slskd_complete_dir = "/music/slskd-downloads"
+
 [store]
-# PostgreSQL connection string. The schema is created automatically on startup;
-# the database and user must already exist.
+# PostgreSQL connection string. This default matches the Postgres that
+# docker-compose.example.yml bundles, so it needs no editing unless you point
+# slusk at your own instance. The schema is created and migrated automatically
+# on startup; the database and role must already exist.
 dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable"
 
 [observ]
-# /healthz, /readyz, the dashboard shell, and /api/auth/* are public. Every
-# other UI, API, and metrics request needs EITHER a valid browser session
-# (created by logging in through the dashboard - the first visit prompts to
-# create an account) OR this token. auth_token is now OPTIONAL: it exists for
-# machine/API access alongside the browser login (curl, Prometheus scraping,
-# the Vite dev proxy in `make dev`), not as the only way in. Leave it blank
-# to disable machine access entirely - if you have a Prometheus (or other
-# non-browser) scrape already configured against /metrics, blanking this on
-# an existing deployment will break it, since /metrics accepts no session
-# cookie. Generate one, for example, with:
-#   openssl rand -hex 32
-# API and Prometheus clients send: Authorization: Bearer <token>
-# Non-browser Basic-auth clients use any username and this token as the password.
-# Keep the token out of URLs and logs, and terminate TLS at a trusted reverse
-# proxy before exposing the listener beyond a trusted private network. The
-# proxy must preserve Host, discard any client X-Forwarded-Proto header, and
-# set exactly one trusted X-Forwarded-Proto value (http or https) - this also
-# controls whether the session cookie is marked Secure.
-auth_token = ""
 listen_addr = "0.0.0.0:9090"
-# Minimum log level: "debug", "info" (default), "warn", or "error". Use "debug"
-# to trace the native soulseek client's peer/transfer negotiation. Verbose.
-# log_level = "info"
 
-[paths]
-# When a job exhausts its retry budget, whatever it left behind here is moved
-# into the ".failed" subdirectory rather than left in the root for Lidarr and
-# the next job to scan. Nothing ever prunes that directory - clear it yourself.
-slskd_complete_dir = "/music/slskd-downloads"
-
-# A direct connection to the central Soulseek server, separate from the [slskd]
-# daemon. Required by the recommended pipeline.backend = "soulseek" above; with
-# backend = "slskd" the whole section is optional, and leaving it absent (or
-# every field blank) keeps the native client switched off. Note that it is worth
-# configuring even under backend = "slskd": shares, private messaging and uploads
-# are driven by this client, not by the backend choice, so they stay switched off
-# without it.
+# Required by backend = "soulseek": a direct connection to the central Soulseek
+# server. It is worth configuring even under backend = "slskd" — shares, private
+# messaging and uploads are driven by this client regardless of which backend
+# does the searching, so they stay switched off without it.
 [soulseek]
-server_address = "server.slsknet.org:2242"
 username = "CHANGEME"
 password = "CHANGEME"
-
-# listen_addr is where slusk listens for incoming peer connections and is
-# what gets advertised to the server after login - there is no separate
-# "advertised port" concept, so other peers must be able to reach this port
-# directly. With Docker port mapping, the published host port MUST equal the
-# container port (e.g. "2234:2234"), or use host networking instead.
+# Where slusk listens for incoming peer connections. This is also what gets
+# advertised to the server after login — there is no separate "advertised port"
+# concept, so other peers must be able to reach this port directly. With Docker
+# port mapping the published host port MUST equal the container port
+# (e.g. "2234:2234"), or use host networking instead. It is spelled out here,
+# rather than left to its default, precisely because the compose file has to
+# publish the matching port.
 listen_addr = "0.0.0.0:2234"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 2 — OPTIONAL. Commented out; each shows its default.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# [observ]
 #
-# Two upload slots are used by default. Negotiation and streaming both occupy
-# a slot; additional requests wait in a bounded global FIFO queue.
+# Machine/API credential, for clients that cannot hold a browser session: curl,
+# a Prometheus scrape, the Vite dev proxy in `make dev`. It is NOT the only way
+# in — /healthz, /readyz, the dashboard shell and /api/auth/* are public, and
+# everything else accepts a browser session created by logging in (the first
+# visit prompts to create the account). Leave it blank to disable machine
+# access entirely. Blanking it on an existing deployment breaks a configured
+# Prometheus scrape, since /metrics accepts no session cookie.
+#   Generate one with:  openssl rand -hex 32
+#   Send it as:  Authorization: Bearer <token>
+# Non-browser Basic-auth clients use any username and this token as the
+# password. Keep it out of URLs and logs, and terminate TLS at a trusted
+# reverse proxy before exposing the listener beyond a trusted private network.
+# The proxy must preserve Host, discard any client X-Forwarded-Proto header,
+# and set exactly one trusted value (http or https) — that also controls
+# whether the session cookie is marked Secure.
+# auth_token = ""
+#
+# Minimum log level: "debug", "info", "warn" or "error". Use "debug" to trace
+# the native client's peer/transfer negotiation. Verbose.
+# log_level = "info"
+
+# [pipeline] — scheduling and retry knobs. All of these have defaults.
+#
+# How many times a download rejected for a transient reason (e.g. a peer's
+# "Too many megabytes" queue limit) is re-queued before it is given up on. The
+# file waits in the pending pool and is resent once the peer's queue drains,
+# instead of failing the whole candidate. Permanent reasons ("File not shared",
+# "Banned") are never retried. 0 disables retries.
+# max_transfer_retries = 0
+#
+# Global cap on jobs in DOWNLOADING and IMPORTING. SELECTING uses no slot.
+# max_active = 30
+#
+# Failed search cycles allowed before a job is given up on. An empty search or
+# an exhausted cached set counts; candidate failures are free.
+# max_retries = 10
+#
+# Base for exponential search-retry backoff. The first delay is twice this.
+# backoff_base = "15m"
+#
+# Upper bound on exponential backoff growth.
+# backoff_cap = "24h"
+#
+# How long the whole cached candidate set stays eligible before it expires and
+# the job resets to WANTED for a fresh search.
+# candidate_ttl = "24h"
+#
+# How long a permanently failed job waits before being revived for another try.
+# failed_revive_after = "720h"
+#
+# Max time an IMPORTING job may sit without progress in pre-submit verification
+# due to repeated verification failures or anomalies; after that the current
+# candidate is failed and the next is tried.
+# stuck_after = "1h"
+#
+# Upper bound on a single pipeline tick's total execution time.
+# tick_timeout = "5m"
+#
+# How long an import may sit unconfirmed (Lidarr's ManualImport command is
+# async) before it is treated as failed and rotated to the next candidate.
+# import_confirm_timeout = "3m"
+#
+# Upper bound on Lidarr's manualimport folder scan, which parses audio tags per
+# file and legitimately runs far longer than a normal API call on large folders
+# (box sets, deluxe editions).
+# manual_import_timeout = "10m"
+#
+# How long the importing phase waits before re-attempting a failed manualimport
+# folder scan on the same job, so a slow-scanning folder is not hammered every
+# importing_interval until stuck_after.
+# import_retry_cooldown = "5m"
+#
+# How often each phase runs.
+# wanted_sync_interval = "15m"
+# discovery_interval = "30s"
+# selecting_interval = "10s"
+# downloading_interval = "15s"
+# importing_interval = "30s"
+
+# [soulseek] — the remaining knobs. Both have defaults.
+#
+# server_address = "server.slsknet.org:2242"
+#
+# Negotiation and streaming both occupy a slot; additional requests wait in a
+# bounded global FIFO queue.
 # upload_slots = 2
 #
-# The central server supplies the raw IP:port slusk dials for each peer,
-# so it is treated as untrusted input. Loopback and link-local addresses are
-# always refused. RFC 1918 / ULA private addresses are refused too, unless
-# you set this - needed if you actually have Soulseek peers on your own LAN.
+# The central server supplies the raw IP:port slusk dials for each peer, so it
+# is treated as untrusted input. Loopback and link-local addresses are always
+# refused. RFC 1918 / ULA private addresses are refused too, unless you set
+# this — needed if you actually have Soulseek peers on your own LAN.
 # allow_private_peer_addresses = false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 3 — Option blocks. Each is off until uncommented.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- Option: the slskd backend instead of the native client ---
+# Worth choosing if you already run slskd and want to keep it. slusk's slskd
+# adapter is experimental: it does everything the pipeline asks of it, but it is
+# a small, static piece of code on a fraction of the test coverage, and the
+# pre-merge lab does not exercise it by default.
 #
-# Optional: run behind gluetun with VPN port forwarding. At startup slusk
-# asks gluetun's control server for the currently forwarded port and listens
-# on it instead - the port part of listen_addr above is ignored (its host is
-# still used); startup waits and retries with backoff until gluetun reports a
-# nonzero port. The Docker port-mapping caveat on listen_addr above does not
-# apply here, since with gluetun you run slusk with
+# Set pipeline.backend = "slskd" in PART 1 and uncomment this section; both keys
+# are then required. The [soulseek] section becomes optional — but see the note
+# above it: shares, private messaging and uploads still need it.
+# docker-compose.example.yml has a matching option block.
+#
+# slusk cleans up after itself in slskd: it deletes each search once its
+# responses are harvested, and removes download records once they reach a
+# terminal state. As a backstop for anything left behind by a crash between
+# harvest and delete, enable slskd's own retention in slskd.yml — e.g.
+# retention.search and retention.transfers.* (minutes).
+#
+# [slskd]
+# url = "http://slskd:5030"
+# api_key = "CHANGEME"
+
+# --- Option: run behind gluetun with VPN port forwarding ---
+# At startup slusk asks gluetun's control server for the currently forwarded
+# port and listens on it instead — the port part of soulseek.listen_addr is
+# ignored (its host is still used); startup waits and retries with backoff until
+# gluetun reports a nonzero port. The Docker port-mapping caveat on listen_addr
+# does not apply here, since with gluetun you run slusk with
 # network_mode: service:gluetun (see docker-compose.example.yml) rather than
 # publishing a port of its own.
+#
 # [soulseek.gluetun]
 # control_url = "http://127.0.0.1:8000"
 # api_key = "CHANGEME"
-#
-# Shares use explicit public names so local host/container paths never appear
-# in browse/search results. Mount each path read-only. Shares are scanned at
+
+# --- Option: share folders back to the Soulseek network ---
+# Shares use explicit public names so local host/container paths never appear in
+# browse/search results. Mount each path read-only. Shares are scanned at
 # startup; after adding or removing files, atomically rescan with SIGHUP or
 # POST /api/shares/rescan.
+#
 # [[soulseek.shared_folders]]
 # name = "Music"
 # path = "/shares/music"
@@ -198,18 +270,19 @@ listen_addr = "0.0.0.0:2234"
 # name = "Live"
 # path = "/shares/live"
 
-# Optional: let a manual search result be identified against MusicBrainz
-# before download (issue #321), showing the canonical artist/album, a
-# complete-tracklist assessment against the chosen edition, and whether the
-# album is already in the Lidarr library. Leaving the whole section absent
-# (or every field blank) keeps it disabled and the /api/identify/* endpoints
-# answer "not enabled".
+# --- Option: identify manual search results against MusicBrainz ---
+# Lets a manual search result be identified before download (issue #321),
+# showing the canonical artist/album, a complete-tracklist assessment against
+# the chosen edition, and whether the album is already in the Lidarr library.
+# Leaving this absent keeps it disabled and the /api/identify/* endpoints answer
+# "not enabled".
 #
 # MusicBrainz allows one request per second and requires every client to
-# identify itself with contact info in its User-Agent - contact has no
-# default and is required once this section is enabled.
+# identify itself with contact info in its User-Agent — contact has no default
+# and is required once this section is enabled.
+#
 # [musicbrainz]
-# base_url = "https://musicbrainz.org"
 # contact = "you@example.com"
+# base_url = "https://musicbrainz.org"
 # timeout = "10s"
 # cache_ttl = "1h"

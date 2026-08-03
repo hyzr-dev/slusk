@@ -11,6 +11,9 @@ run it.
 It also works the other way round: search Soulseek yourself from the dashboard, pick the
 peer and the files, and let the same pipeline download them.
 
+Installing it is a compose file and a config file. `docker-compose.example.yml` brings
+its own Postgres along, so there is no database to set up separately.
+
 Licensed under [AGPL-3.0-or-later](LICENSE).
 
 ## Screenshots
@@ -45,7 +48,7 @@ than its reputation.
 | Dashboard | edits the config, tails the log, lists failed imports; job and transfer state you watch in slskd's UI | jobs, candidates, peers, events, throughput and writable settings in one place |
 | Candidate choice | sequential filters plus a filename-similarity ratio | weighted scoring over format, bitrate, file count and peer reliability, including a decayed per-artist history of which peers actually delivered |
 | Manual downloads | none; Lidarr's wanted list is the only input | search Soulseek yourself, pick the peer and files, optionally identify the result against MusicBrainz first |
-| Processes | slskd, plus soularr's own interval loop and its web UI | one binary and a Postgres |
+| Processes | slskd, plus soularr's own interval loop and its web UI | one binary, plus the Postgres the compose file brings with it |
 | Licence | GPL-3.0 | AGPL-3.0-or-later |
 
 ## Setup
@@ -66,9 +69,16 @@ mkdir -p config && cp config.example.toml config/config.toml
 ```
 
 `docker-compose.example.yml` is the only compose file in the repo, and every deployment
-variant it supports — external Postgres, an existing arr network, gluetun with VPN port
-forwarding, building from source — is a commented block at the bottom of it. Your
-`docker-compose.yml` copy is gitignored, so local edits stay yours.
+variant it supports — the slskd backend, external Postgres, an existing arr network,
+gluetun with VPN port forwarding, building from source — is a commented block at the
+bottom of it. Your `docker-compose.yml` copy is gitignored, so local edits stay yours.
+
+Both example files are set up for the native Soulseek backend, and they are meant to be
+read together: the download path and peer port in one have to match the other. There is
+one value you **must** edit in the compose file before the first start — the host side of
+the downloads bind mount, which has no sensible default because Lidarr has to be able to
+see it too. It is left pointing at `/host/downloads` and configured to fail the `up` with
+a clear message rather than let Docker quietly create it for you.
 
 `config/config.toml` must be a **directory** mount, not a single-file mount, if you want
 to edit settings from the dashboard: slusk writes the file back with an atomic rename,
@@ -77,14 +87,21 @@ works and simply makes settings read-only in the UI.
 
 ### 2. Fill in the config
 
-At minimum: `lidarr.url` and `lidarr.api_key`, the `[slskd]` section (or `[soulseek]`,
-see below), and `store.dsn`. The default DSN already matches the Postgres the compose
-file bundles.
+`config.example.toml` is in three parts. **Part 1 is everything that is required** — fill
+that in and you are done; the rest of the file is commented out and shows you what you
+could override, not what you have to. In practice that means your Lidarr URL and API key,
+your Soulseek credentials, and a download path Lidarr can also see. `store.dsn` already
+matches the Postgres the compose file brings, so leave it alone unless you point slusk at
+your own instance.
 
 **Configuration is strict.** slusk rejects unknown keys at startup with
 `unknown config keys: ...` and has no silent defaults for required fields. A typo in a
 key name stops the container rather than being quietly ignored. That is deliberate, and
 worth knowing before a startup failure looks like a bug.
+
+Strictness checks that a value is present and well-formed, not that it means anything. A
+leftover `CHANGEME` is a perfectly valid non-empty string, so slusk starts and then fails
+at login instead. Replace every one of them before the first start.
 
 Keep `config/config.toml` out of source control. It holds API keys.
 
@@ -92,12 +109,14 @@ Keep `config/config.toml` out of source control. It holds API keys.
 
 `pipeline.backend` decides how slusk reaches Soulseek:
 
-- `"soulseek"` — **the recommended setting.** slusk's own client connects to the
-  Soulseek server directly and no slskd is involved at all. Requires a `[soulseek]`
-  section; the `[slskd]` section becomes unnecessary.
+- `"soulseek"` — **the recommended setting, and what both example files ship.** slusk's
+  own client connects to the Soulseek server directly and no slskd is involved at all.
+  Requires a `[soulseek]` section; the `[slskd]` section becomes unnecessary, and is
+  commented out in the example accordingly.
 - `"slskd"` — slskd does the searching and transferring. Requires the `[slskd]` section.
   Worth choosing if you already run slskd and want to keep it. slusk's slskd adapter is
-  experimental.
+  experimental. Both example files carry a matching option block for it; switching means
+  uncommenting both, not just the config one.
 
 `pipeline.backend` is **required and has no default.** Leaving it out is a startup error,
 not a silent choice — it decides which client performs every search and transfer, which
