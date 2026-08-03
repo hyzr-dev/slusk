@@ -67,10 +67,12 @@ min_bitrate = 192
 # queued-megabyte limit and make a complete source look incomplete. Keep it low.
 max_inflight_per_peer = 3
 
-# Scoring weights for the matcher. Keep this section — an absent one is NOT
-# currently rejected, and every weight then defaults to zero, which makes the
-# matcher score every candidate identically and pick arbitrarily. There is no
-# warning when that happens (#405).
+# Scoring weights for the matcher. Every key here is optional and defaults to
+# the value shown, per key — omit the whole section and you get exactly these.
+# They are spelled out anyway because they are the knobs most worth tuning.
+#
+# A weight of 0 is a real setting, not an omission: it drops that signal out of
+# the ranking entirely. Write it explicitly and it is honoured (#405).
 [pipeline.weights]
 format = 1.0
 bitrate = 0.5
