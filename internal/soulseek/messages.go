@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/server"
 )
 
 // maxPrivateMessageBytes caps an outgoing private message. Enforced before any wire

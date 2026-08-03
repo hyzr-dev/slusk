@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 // Offset we send this to the uploading peer at the beginning of a ‘F’ connection, to tell them

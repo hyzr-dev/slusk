@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/app"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newSearchTestHandler(reg *prometheus.Registry, start StartSearchFunc, snapshot SearchSnapshotFunc, stop StopSearchFunc) http.Handler {

@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // detailWithTransfers builds a one-attempt JobDetailFunc whose single attempt

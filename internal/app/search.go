@@ -19,8 +19,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
 )
 
 // ErrSearchBusy is returned by Start when searchMaxSessions live

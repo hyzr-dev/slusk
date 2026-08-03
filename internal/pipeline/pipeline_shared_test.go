@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/store"
-	"github.com/samuelenocsson/slusk/internal/store/storetest"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 )
 
 // TestMain starts one embedded Postgres instance for this package's

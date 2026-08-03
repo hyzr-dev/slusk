@@ -22,7 +22,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 type tableSpec struct {

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newChartsTestHandler(reg *prometheus.Registry, charts ChartsFunc) http.Handler {

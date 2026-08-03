@@ -10,7 +10,7 @@ unmodified in this directory.
 ## Import rewrite
 
 All imports of `github.com/bh90210/soul` (and its subpackages) were
-mechanically rewritten to `github.com/samuelenocsson/slusk/internal/soulseek/soul`
+mechanically rewritten to `github.com/hyzr-dev/slusk/internal/soulseek/soul`
 so the vendored code compiles as part of this module. No package clauses or
 other code was changed as part of this rewrite.
 

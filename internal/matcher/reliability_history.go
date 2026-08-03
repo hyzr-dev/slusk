@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // reliabilityDecayTau is the exponential recency time constant used to fade a

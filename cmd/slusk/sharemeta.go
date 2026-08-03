@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/soulseek"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/soulseek"
 )
 
 // shareMetaStore is the narrow slice of *store.Store shareMetaCache needs, so

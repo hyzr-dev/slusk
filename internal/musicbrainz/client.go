@@ -27,7 +27,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // DefaultBaseURL is MusicBrainz's public API root.

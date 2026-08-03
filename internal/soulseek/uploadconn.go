@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/file"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/file"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
 )
 
 // errUploadTooSlow is returned by streamUploadConn when a peer sustains a

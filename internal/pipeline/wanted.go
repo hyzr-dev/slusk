@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // WantedMusicSource is the slice of the Lidarr client WantedSync needs. A

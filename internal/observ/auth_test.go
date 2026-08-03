@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/app"
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // fakeAuthStore is a minimal in-memory implementation of app.AuthStore, the

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // fakeLidarrLibraryClient is a LidarrLibraryClient test double.

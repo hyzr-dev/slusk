@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 const privateMessageSelect = `SELECT id, username, direction, body, server_message_id, is_admin, sent_at, received_at, read_at FROM private_messages`

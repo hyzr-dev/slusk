@@ -7,7 +7,7 @@
 package observ
 
 import (
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // maxETASeconds clamps etaSeconds so a momentary 1 B/s blip cannot render a

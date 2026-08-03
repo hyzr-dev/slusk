@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/hyzr-dev/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/app"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newIdentifyTestHandler(reg *prometheus.Registry, search IdentifySearchFunc, albumEditions IdentifyAlbumEditionsFunc, albumLidarr IdentifyAlbumLidarrStatusFunc) http.Handler {

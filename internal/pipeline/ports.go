@@ -8,7 +8,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // MusicSource is the slice of the Lidarr client the discoverer needs.

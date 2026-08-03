@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestCountJobsInStates(t *testing.T) {

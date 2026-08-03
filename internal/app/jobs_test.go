@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // storeErrJobImporting aliases store.ErrJobImporting at package scope: most

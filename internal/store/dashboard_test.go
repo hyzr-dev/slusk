@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func insertDashboardTestJob(t *testing.T, s *Store, lidarrID int64, source core.JobSource, state core.AlbumJobState, transferState core.TransferState, title, artist, peer string, retries int, at time.Time) int64 {

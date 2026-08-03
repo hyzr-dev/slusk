@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/samuelenocsson/slusk/internal/config"
+	"github.com/hyzr-dev/slusk/internal/config"
 )
 
 func main() {

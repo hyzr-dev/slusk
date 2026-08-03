@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/hyzr-dev/slusk/internal/app"
 )
 
 // maxAuthRequestBytes bounds the raw POST /api/auth/{setup,login} request

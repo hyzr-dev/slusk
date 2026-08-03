@@ -9,8 +9,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 func fileSearchResponseMandatoryPayload(t *testing.T) []byte {

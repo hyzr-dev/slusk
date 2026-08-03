@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/file"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/file"
 )
 
 // readSeeker hides bytes.Reader's WriteTo method so io.CopyN always drives

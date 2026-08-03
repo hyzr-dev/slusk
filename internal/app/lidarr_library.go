@@ -25,7 +25,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // ErrLidarrLibraryQueryInvalid is returned when a required argument is

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/config"
-	"github.com/samuelenocsson/slusk/internal/pipeline"
+	"github.com/hyzr-dev/slusk/internal/config"
+	"github.com/hyzr-dev/slusk/internal/pipeline"
 )
 
 type fakeConversationPresenceClient struct {

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // searchPassRetention bounds how long search_passes rows are kept;

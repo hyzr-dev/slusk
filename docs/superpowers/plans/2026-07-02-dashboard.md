@@ -419,7 +419,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestListJobsWithTransferIncludesJobsWithoutAttempt(t *testing.T) {
@@ -580,7 +580,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // jobViewSelect joins each non-cancelled album_job with its most recent
@@ -723,7 +723,7 @@ package observ
 import (
 	"testing"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestDashboardStatus(t *testing.T) {
@@ -801,7 +801,7 @@ Create `internal/observ/status.go`:
 // machine (internal/core.AlbumJobState has 10 states; the dashboard needs 5).
 package observ
 
-import "github.com/samuelenocsson/slusk/internal/core"
+import "github.com/hyzr-dev/slusk/internal/core"
 
 // dashboardStatus derives the dashboard's coarse status label for a job view.
 func dashboardStatus(v core.JobView) string {
@@ -912,7 +912,7 @@ func TestJobsEndpointReturns500OnStoreError(t *testing.T) {
 }
 ```
 
-Add `"errors"` and `"github.com/samuelenocsson/slusk/internal/core"` to the test file's imports.
+Add `"errors"` and `"github.com/hyzr-dev/slusk/internal/core"` to the test file's imports.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -921,7 +921,7 @@ Expected: FAIL — compile error, `NewServer` takes 2 args not 4, `jobDTO`/`canc
 
 - [ ] **Step 3: Implement the DTO, JobsFunc, CancelFunc placeholder type, and the route**
 
-Edit `internal/observ/observ.go`. Add imports `"strconv"`, `"github.com/samuelenocsson/slusk/internal/core"`. Add types and update `NewServer`:
+Edit `internal/observ/observ.go`. Add imports `"strconv"`, `"github.com/hyzr-dev/slusk/internal/core"`. Add types and update `NewServer`:
 
 ```go
 // jobDTO is the JSON shape served at /api/jobs — a flattened, display-ready
@@ -1212,7 +1212,7 @@ git commit -m "refactor(observ): export CancelResult type and constants"
 
 - [ ] **Step 2: Write the cancelFn closure in main.go**
 
-Edit `cmd/slusk/main.go`. Add `"github.com/samuelenocsson/slusk/internal/core"` to imports. Replace the `statusFn`-and-server block (currently lines 72-79) with:
+Edit `cmd/slusk/main.go`. Add `"github.com/hyzr-dev/slusk/internal/core"` to imports. Replace the `statusFn`-and-server block (currently lines 72-79) with:
 
 ```go
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
@@ -1293,7 +1293,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestRootServesDashboardHTML(t *testing.T) {

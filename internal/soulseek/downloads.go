@@ -18,9 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
 )
 
 // speedStaleAfter bounds how long a transfer's last-sampled speed is trusted

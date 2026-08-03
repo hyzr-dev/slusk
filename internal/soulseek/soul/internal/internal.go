@@ -10,7 +10,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
 )
 
 const (

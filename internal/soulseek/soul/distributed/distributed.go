@@ -8,9 +8,9 @@ package distributed
 import (
 	"io"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/peer"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/peer"
 )
 
 // ConnectionType represents the type of distributed 'D' connection.

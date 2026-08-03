@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // ErrJobNotFound is returned when a requested job does not exist.

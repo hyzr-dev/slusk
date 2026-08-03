@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 // FolderCleaner is the minimal slice of PeerSearcher that cleanupFolder needs:

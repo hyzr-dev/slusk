@@ -3,7 +3,7 @@ package server
 import (
 	"bytes"
 
-	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/internal"
 )
 
 const CodePrivateRoomCancelMembership Code = 136

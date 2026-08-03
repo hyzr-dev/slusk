@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slusk/internal/core"
-	"github.com/samuelenocsson/slusk/internal/matcher"
-	"github.com/samuelenocsson/slusk/internal/store"
+	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // lifecycleModules bundles every pipeline module driven by these tests, all
