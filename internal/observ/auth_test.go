@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // fakeAuthStore is a minimal in-memory implementation of app.AuthStore, the
@@ -114,7 +114,7 @@ func (s *fakeAuthStore) DeleteExpiredSessions(context.Context) (int64, error) {
 
 // newAuthTestHandler wires a real app.Auth (backed by fakeAuthStore) into a
 // full NewServer + ProtectPrivateEndpoints stack, exactly as
-// cmd/slskdarr/main.go wires the production one (tokenAuth/sessionAuth/AnyOf),
+// cmd/slusk/main.go wires the production one (tokenAuth/sessionAuth/AnyOf),
 // minus the token (auth is session-cookie-only in these tests unless
 // withToken is true).
 func newAuthTestHandler(t *testing.T, withToken bool) http.Handler {

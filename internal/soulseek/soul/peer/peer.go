@@ -12,8 +12,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 // ConnectionType represents the type of peer 'P' connection.

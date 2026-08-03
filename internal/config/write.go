@@ -203,11 +203,11 @@ func ApplySettings(path string, s Settings) error {
 
 // ProbeWritable reports whether the directory containing path currently
 // accepts writes, by creating and immediately removing a temp file in it —
-// the same technique cmd/slskdarr's ensureWritableDir uses for the download
+// the same technique cmd/slusk's ensureWritableDir uses for the download
 // directory. Used at startup to surface AppConfig.Writable to the settings
 // view without performing (and discarding) a real config write.
 func ProbeWritable(path string) bool {
-	f, err := os.CreateTemp(filepath.Dir(path), ".slskdarr-config-write-probe-*")
+	f, err := os.CreateTemp(filepath.Dir(path), ".slusk-config-write-probe-*")
 	if err != nil {
 		return false
 	}
@@ -685,7 +685,7 @@ func atomicWrite(path string, data []byte) error {
 		return fmt.Errorf("stat config: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".slskdarr-config-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".slusk-config-*.tmp")
 	if err != nil {
 		if isNotWritableErr(err) {
 			return ErrNotWritable

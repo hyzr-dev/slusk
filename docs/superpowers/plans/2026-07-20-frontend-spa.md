@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ersätt `dashboard.html` + `dashboard.js` med en React-SPA som bevarar allt
-nuvarande beteende, ritad enligt designprojektet "Slskdarr Dashboard Design".
+nuvarande beteende, ritad enligt designprojektet "Slusk Dashboard Design".
 
 **Architecture:** Frontend-källkod i `web/`, byggd med Vite till
 `internal/observ/web/dist/` som `go:embed` serverar. TanStack Query hanterar all
@@ -74,7 +74,7 @@ read-only config-endpoint.
 
 ```json
 {
-  "name": "slskdarr-web",
+  "name": "slusk-web",
   "private": true,
   "type": "module",
   "scripts": {
@@ -184,7 +184,7 @@ export default defineConfig({
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>slskdarr</title>
+<title>slusk</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -214,7 +214,7 @@ createRoot(document.getElementById('root')!).render(
 
 ```tsx
 export default function App() {
-  return <div>slskdarr</div>;
+  return <div>slusk</div>;
 }
 ```
 
@@ -232,10 +232,10 @@ en fil:
 ```html
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>slskdarr</title></head>
+<head><meta charset="utf-8"><title>slusk</title></head>
 <body style="font-family:sans-serif;background:#0b0d10;color:#dfe2e8;padding:2rem;">
 <h1>Frontend not built</h1>
-<p>Run <code>make ui</code> to build the web interface, then restart slskdarr.</p>
+<p>Run <code>make ui</code> to build the web interface, then restart slusk.</p>
 </body>
 </html>
 ```
@@ -258,7 +258,7 @@ ui:
 	cd web && npm ci && npm run build
 
 build: ui
-	go build -o slskdarr ./cmd/slskdarr
+	go build -o slusk ./cmd/slusk
 
 dev:
 	cd web && npm run dev
@@ -527,7 +527,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /internal/observ/web/dist ./internal/observ/web/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/slskdarr ./cmd/slskdarr
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/slusk ./cmd/slusk
 ```
 
 Notera: `vite.config.ts` skriver till `../internal/observ/web/dist`, vilket från
@@ -535,13 +535,13 @@ Notera: `vite.config.ts` skriver till `../internal/observ/web/dist`, vilket frå
 
 - [ ] **Step 2: Bygg imagen**
 
-Run: `docker build -t slskdarr:spa-test .`
+Run: `docker build -t slusk:spa-test .`
 Expected: Bygget lyckas. Node-steget kör `npm run build`; Go-steget kopierar in
 `dist` och kompilerar.
 
 - [ ] **Step 3: Verifiera att runtime-imagen inte innehåller Node**
 
-Run: `docker run --rm --entrypoint /usr/local/bin/slskdarr slskdarr:spa-test --help`
+Run: `docker run --rm --entrypoint /usr/local/bin/slusk slusk:spa-test --help`
 Expected: binärens hjälptext, inget Node-relaterat i imagen (distroless har ingen
 shell att inspektera med — att steget är `FROM gcr.io/distroless/static-debian12`
 och bara kopierar binären räcker som garanti).
@@ -808,7 +808,7 @@ Expected: PASS — samtliga tester.
 // This is i18n preparation, not i18n — see #86.
 export const t = {
   app: {
-    name: 'slskdarr',
+    name: 'slusk',
     tagline: 'Lidarr → Soulseek',
   },
   nav: {
@@ -1305,7 +1305,7 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <div>slskdarr</div>
+      <div>slusk</div>
     </QueryClientProvider>
   );
 }
@@ -2745,7 +2745,7 @@ I `internal/observ/observ.go`, lägg till parametern `config ConfigFunc` i
 	mux.Handle("/api/config", newConfigHandler(config))
 ```
 
-Uppdatera anropsplatsen i `cmd/slskdarr` så den skickar in en `ConfigFunc` byggd med
+Uppdatera anropsplatsen i `cmd/slusk` så den skickar in en `ConfigFunc` byggd med
 `NewAppConfig` från den inlästa TOML-konfigurationen.
 
 - [ ] **Step 5: Kör Go-testerna**
@@ -2878,7 +2878,7 @@ Expected: PASS
 
 - [ ] **Step 4: Manuell rökttest**
 
-Run: `make build && ./slskdarr --config config.toml`
+Run: `make build && ./slusk --config config.toml`
 
 Öppna `http://localhost:8080` och verifiera:
 - Sidan laddar, sidebaren visar sex poster.

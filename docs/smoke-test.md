@@ -1,6 +1,6 @@
-# slskdarr — manuell smök-test-checklista (skarp körning)
+# slusk — manuell smök-test-checklista (skarp körning)
 
-Kör igenom denna första gången du släpper slskdarr mot din riktiga Lidarr + slskd.
+Kör igenom denna första gången du släpper slusk mot din riktiga Lidarr + slskd.
 Syftet är att verifiera hela flödet **innan** du litar på auto-import. Ta det uppifrån
 och ner — varje fas bygger på den föregående.
 
@@ -14,11 +14,11 @@ Nyttiga kommandon (byt ut värden mot dina):
 ```bash
 STATUS=http://192.168.86.33:9090        # observ.listen_addr
 TOKEN='värdet-från-observ.auth_token'    # lägg aldrig token i URL/query
-PGDSN='postgres://slskdarr:password@localhost:5432/slskdarr'  # store.dsn
-docker logs -f slskdarr                 # strukturerad JSON-logg
+PGDSN='postgres://slusk:password@localhost:5432/slusk'  # store.dsn
+docker logs -f slusk                    # strukturerad JSON-logg
 curl -s $STATUS/healthz                 # publik, minimal liveness
 curl -s -H "Authorization: Bearer $TOKEN" $STATUS/status | jq
-curl -s -H "Authorization: Bearer $TOKEN" $STATUS/metrics | grep slskdarr
+curl -s -H "Authorization: Bearer $TOKEN" $STATUS/metrics | grep slusk
 psql "$PGDSN" -c 'SELECT id,lidarr_album_id,state,candidates_tried FROM album_jobs'
 ```
 (Distroless-imagen har ingen shell; kör `psql` från host mot Postgres-instansen,
@@ -33,10 +33,10 @@ eller `docker exec` in i Postgres-containern.)
       tyst defaulta). En listener utanför loopback ska dessutom vägra starta utan
       `observ.auth_token`; loopback-only (`127.0.0.1`/`::1`/`localhost`) får köras utan
       token för lokal utveckling.
-- [ ] Containern kör som **oprivilegierad UID** (`docker inspect slskdarr` → `User: nonroot`).
+- [ ] Containern kör som **oprivilegierad UID** (`docker inspect slusk` → `User: nonroot`).
 - [ ] Schemat skapas i Postgres-databasen vid start (`psql "$PGDSN" -c '\dt'` visar
       `album_jobs`, `candidates`, `transfers`, `job_events` m.fl.).
-- [ ] Loggen visar `slskdarr started` med rätt `status_addr`.
+- [ ] Loggen visar `slusk started` med rätt `status_addr`.
 - [ ] **Native backend (valfritt):** om du testar `pipeline.backend = "soulseek"` —
       bekräfta att `[soulseek]`-sektionen är ifylld (annars vägrar containern starta),
       att `$STATUS/status` visar `soulseek`-modulen i `moduleDetails` med `ready=true`
@@ -66,10 +66,10 @@ eller `docker exec` in i Postgres-containern.)
       stavningarna, och `/status.orphaned` behålls. En gammal dashboard eller klient
       måste uppgraderas tillsammans med servern; den kombinerade DB-migreringen
       förutsätter att ingen gammal binär fortfarande kör mot databasen.
-- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slskdarr_reconcile_total` (och ökar över tid).
+- [ ] `curl -H "Authorization: Bearer $TOKEN" $STATUS/metrics` innehåller `slusk_reconcile_total` (och ökar över tid).
 - [ ] Loggen visar **inga** `reconcile failed`/`discovery failed`-rader → Lidarr och slskd
       nås. (Om de syns: fel URL/API-nyckel i config.)
-- [ ] `slskdarr_unknown_transfers` speglar rimligt antal (dina ev. manuella slskd-nedladdningar
+- [ ] `slusk_unknown_transfers` speglar rimligt antal (dina ev. manuella slskd-nedladdningar
       räknas men rörs inte).
 
 ## Fas 3 — Första upptäckt → sökning → nedladdning
@@ -82,13 +82,13 @@ eller `docker exec` in i Postgres-containern.)
       `candidates`-tabellen). Så snart en kandidat väljs går jobbet vidare
       `SELECTING → DOWNLOADING`, och en/flera rader i `transfers` skapas.
       det autentiserade status-anropet ovan visar `active > 0`.
-- [ ] I slskd:s eget UI syns nedladdningarna starta (samma filer slskdarr enqueue:ade).
-- [ ] `slskdarr_downloads_active` > 0 i metrics.
+- [ ] I slskd:s eget UI syns nedladdningarna starta (samma filer slusk enqueue:ade).
+- [ ] `slusk_downloads_active` > 0 i metrics.
 
 ## Fas 4 — Kvalitetsgolv (proaktivt filter)
 
 - [ ] Välj ett album där Soulseek har både låg-bitrate MP3 (< `min_bitrate`) och FLAC.
-      Verifiera i loggen/DB att slskdarr valde en **kandidat över golvet** (FLAC eller
+      Verifiera i loggen/DB att slusk valde en **kandidat över golvet** (FLAC eller
       ≥192 kbps), inte skräpet. Justera `min_bitrate` i config om det inte matchar din profil.
 
 ## Fas 5 — ⚠️ Import-överlämningen (den overifierade biten)
@@ -131,7 +131,7 @@ Här vill jag att du tittar noga.
 ## Fas 7 — Restart-säkerhet (existensberättigandet)
 
 - [ ] Starta en nedladdning, vänta tills den är **mitt i** (`active`, byte-progress i slskd).
-- [ ] `docker restart slskdarr` (eller `kill` + starta om).
+- [ ] `docker restart slusk` (eller `kill` + starta om).
 - [ ] Efter omstart: loggen/`$STATUS/status` visar att downloading-modulen **adopterade** den
       pågående transfern (ingen ny enqueue, ingen orphan i slskd). Nedladdningen fortsätter.
 - [ ] Låt en transfer bli hängande förbi `transfer_deadline` → verifiera att downloading-modulens
@@ -168,6 +168,6 @@ Webb-gränsnittet är nu serverat från samma `observ`-server som `/status` och 
   - [ ] Ingen särskild logg-rad förväntas vid en lyckad avbrytning — endast om det underliggande slskd-anropet misslyckas loggas en varning.
 
 ## Om något fastnar
-Kolla i ordning: `docker logs slskdarr` (JSON, sök `err`) → autentiserat anrop till `$STATUS/status` →
+Kolla i ordning: `docker logs slusk` (JSON, sök `err`) → autentiserat anrop till `$STATUS/status` →
 `album_jobs.state` i DB → slskd:s eget transfer-UI → Lidarrs egen aktivitetslogg.
 Tillstånd lever i DB:n, så du kan alltid se exakt var ett jobb står.

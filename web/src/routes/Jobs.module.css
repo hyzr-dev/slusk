@@ -51,7 +51,7 @@
 }
 
 /* Shared by the header row and every job row so their columns always line
-   up (mock, docs/design/slskdarr-tui.dc.html:1050). */
+   up (mock, docs/design/slusk-tui.dc.html:1050). */
 .grid {
   display: grid;
   grid-template-columns: 28px minmax(0, 2fr) 116px 60px 148px 66px 44px 32px;

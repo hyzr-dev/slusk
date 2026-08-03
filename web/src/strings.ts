@@ -7,7 +7,7 @@ const CHAT_STATUS_OFFLINE = 'offline';
 
 export const t = {
   app: {
-    name: 'slskdarr',
+    name: 'slusk',
     tagline: 'Lidarr → Soulseek',
     mark: 'sl',
   },
@@ -38,7 +38,7 @@ export const t = {
     },
     jobs: {
       title: 'Jobs',
-      subtitle: 'Every album slskdarr is tracking, from queued to imported',
+      subtitle: 'Every album slusk is tracking, from queued to imported',
     },
     search: {
       title: 'Search',
@@ -64,13 +64,13 @@ export const t = {
     },
     setup: {
       title: 'Setup',
-      subtitle: 'slskdarr validates the config you already wrote — it never writes it',
+      subtitle: 'slusk validates the config you already wrote — it never writes it',
     },
     settings: {
       title: 'Config',
-      subtitle: 'Resolved runtime configuration, as slskdarr sees it',
+      subtitle: 'Resolved runtime configuration, as slusk sees it',
     },
-    // Not in the mock (docs/design/slskdarr-tui.dc.html drops both views),
+    // Not in the mock (docs/design/slusk-tui.dc.html drops both views),
     // but Events and Peers are still shipped — see Page.tsx's doc comment.
     // Titles/subtitles are invented here in the same voice as the rest of
     // this object rather than left unstyled.
@@ -80,7 +80,7 @@ export const t = {
     },
     peers: {
       title: 'Peers',
-      subtitle: 'Everyone slskdarr has downloaded from, ranked by reliability',
+      subtitle: 'Everyone slusk has downloaded from, ranked by reliability',
     },
   },
   chrome: {
@@ -265,7 +265,7 @@ export const t = {
     hideDetails: 'Hide details',
     moreFiles: (n: number) => `+${n} more files`,
     // FILES is the only titled column in the TUI expansion (mock,
-    // docs/design/slskdarr-tui.dc.html:190) — the meta column on the left has
+    // docs/design/slusk-tui.dc.html:190) — the meta column on the left has
     // no heading of its own.
     files: 'FILES',
     // The expansion's left-column meta tree (mock line ~1069): lowercase,
@@ -464,7 +464,7 @@ export const t = {
     reconcileRateMeta: 'matched / pass · 20',
     completedHeading: 'COMPLETED',
     completedMeta: 'cumulative · 24h',
-    // The mock's METRICS section names six slskdarr_* Prometheus metrics, but
+    // The mock's METRICS section names six slusk_* Prometheus metrics, but
     // only four exist in internal/observ and only two of those (reconcile_total,
     // album_releases_errors_total) are Prometheus-only with no JSON equivalent.
     // Rather than invent metric names for a row, these are human-readable
@@ -553,7 +553,7 @@ export const t = {
     historyFinishedLabel: 'finished',
   },
   // Manual Soulseek search (issue #58). See docs/design/
-  // slskdarr-dashboard.dc.html lines 336-520 for the visual spec this
+  // slusk-dashboard.dc.html lines 336-520 for the visual spec this
   // follows — translated to English (that mock is Swedish; strings.ts is
   // English throughout, unlike every other route in this file) and adapted
   // onto the TUI restyle's component vocabulary (Panel/Chip/QueryNotice/
@@ -859,7 +859,7 @@ export const t = {
   },
   setup: {
     title: 'GUIDED SETUP',
-    // The mock says slskdarr never writes the config file. That stopped being
+    // The mock says slusk never writes the config file. That stopped being
     // true with issue #134 — the Config view writes it. This copy points there
     // instead of describing a workflow we no longer have.
     intro:
@@ -965,7 +965,7 @@ export const t = {
       'Click Save again to confirm — this changes the database connection, listen address, auth token, or download path. If you change the listen address or auth token, this page may not reconnect automatically after the restart — you may need to reload and sign in again.',
     saveConfirm: 'Click again to confirm',
     dangerRecoveryHint:
-      'slskdarr writes the previous configuration to config.toml.bak before saving. Restoring it requires editing the file directly and a manual restart.',
+      'slusk writes the previous configuration to config.toml.bak before saving. Restoring it requires editing the file directly and a manual restart.',
     // Real TOML keys (config.example.toml), shown alongside the
     // human-readable labels above so a user can find the setting they see
     // here in the file they'd actually edit. Bare key names (not dotted with
@@ -1026,7 +1026,7 @@ export const t = {
     // (lidarrApiKey vs slskdApiKey, soulseekListenAddr vs observListenAddr).
     help: {
       lidarrUrl:
-        'Base URL of the Lidarr instance slskdarr syncs the wanted list from and imports finished albums into.',
+        'Base URL of the Lidarr instance slusk syncs the wanted list from and imports finished albums into.',
       lidarrApiKey: 'Lidarr API key (Settings → General in Lidarr).',
       slskdUrl:
         'Base URL of the slskd daemon used for searching and downloading when the backend is "slskd".',
@@ -1083,7 +1083,7 @@ export const t = {
       username: 'Username for the Soulseek account the native client logs in with.',
       password: 'Password for the Soulseek account the native client logs in with.',
       soulseekListenAddr:
-        'Address slskdarr listens on for incoming peer connections; its port is advertised to the server after login, so peers must be able to reach it directly. With Docker, the published host port must equal the container port, or use host networking instead.',
+        'Address slusk listens on for incoming peer connections; its port is advertised to the server after login, so peers must be able to reach it directly. With Docker, the published host port must equal the container port, or use host networking instead.',
       allowPrivatePeerAddresses:
         'Allow direct peer connections to private, loopback, and link-local addresses advertised by the Soulseek server. Keep this blocked unless trusted peers are intentionally reachable on those networks.',
       uploadSlots:
@@ -1093,7 +1093,7 @@ export const t = {
       sharedFolders:
         'Shares use explicit public names so local host/container paths never appear in browse or search results. Mount each path read-only. Shares are scanned at startup (a settings save restarts the process and rescans); SIGHUP triggers a rescan without a restart.',
       gluetun:
-        'Run behind gluetun for VPN port forwarding: at startup slskdarr asks the gluetun control server for the currently forwarded port and listens on it instead. The port part of the listen address above is ignored (its host is still used).',
+        'Run behind gluetun for VPN port forwarding: at startup slusk asks the gluetun control server for the currently forwarded port and listens on it instead. The port part of the listen address above is ignored (its host is still used).',
       logLevel:
         'Minimum log level: debug, info (default), warn, or error. Use debug to trace peer and transfer negotiation in the native Soulseek client (verbose).',
       dsn: 'PostgreSQL connection string. The schema is created automatically on startup; the database and user must already exist.',
@@ -1102,7 +1102,7 @@ export const t = {
       authToken:
         'Token required for the dashboard, JSON API, /status, and /metrics whenever the listener is not loopback-only. Generate one with openssl rand -hex 32, keep it out of URLs and logs, and terminate TLS at a trusted reverse proxy before exposing the listener beyond a private network.',
       slskdCompleteDir:
-        "Directory where finished downloads land, as seen by both slskdarr and Lidarr. With the slskd backend it must also point at the same location as slskd's completed-downloads directory, so all containers must mount it consistently.",
+        "Directory where finished downloads land, as seen by both slusk and Lidarr. With the slskd backend it must also point at the same location as slskd's completed-downloads directory, so all containers must mount it consistently.",
     },
     connections: 'CONNECTIONS',
     testConnection: 'Test',
@@ -1123,12 +1123,12 @@ export const t = {
     savedRestarting: 'Saved — restarting…',
     saveFailed: 'Could not save the configuration. Please try again.',
   },
-  // The login/first-run card (issue #279) — see docs/design/slskdarr-login.dc.html
+  // The login/first-run card (issue #279) — see docs/design/slusk-login.dc.html
   // and Login.tsx. It renders outside <Layout> (no nav, no top bar), before
   // any account is known to exist, so it owns its own brand line rather than
   // reusing `app.name`.
   auth: {
-    brand: 'SLSKDARR',
+    brand: 'SLUSK',
     loginSubtitle: 'sign in to continue',
     // States plainly that this is a fresh install, not a returning user —
     // deliberately not "welcome" copy.
@@ -1152,7 +1152,7 @@ export const t = {
     passwordTooLong: 'password must be 72 bytes or fewer',
     passwordMismatch: 'passwords do not match',
     genericError: 'something went wrong — try again',
-    footer: 'slskdarr · lidarr companion · self-hosted',
+    footer: 'slusk · lidarr companion · self-hosted',
     logout: 'log out',
   },
 } as const;

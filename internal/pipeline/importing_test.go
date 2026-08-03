@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // newImportingParams builds ImportingParams over a fresh store-backed
@@ -195,7 +195,7 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 // edition; measuring it against a different one was the bug.
 //
 // It is also self-defeating. Lidarr switches release during import when the
-// files match another edition better (slskdarr sends
+// files match another edition better (slusk sends
 // disableReleaseSwitching:false, and the lab confirmed Lidarr swapped 21→10 on
 // its own once it saw these files) — but that happens during the import this
 // gate refused to start, so the gate guaranteed the outcome it was measuring.
@@ -252,7 +252,7 @@ func TestImportingCoverageUsesReleaseBandNotSelectedRelease(t *testing.T) {
 // This is the commonest way a manual download gets rejected: the user picked
 // some tracks of a larger album, so the coverage gate refuses a partial
 // import. For a Lidarr-sourced job deleting the folder is right (another
-// candidate is coming, the files are slskdarr's own failed attempt). A manual
+// candidate is coming, the files are slusk's own failed attempt). A manual
 // job has no next candidate, and the files are the thing the user explicitly
 // asked for — deleting them turns "Lidarr declined to import this" into
 // silent data loss.

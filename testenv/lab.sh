@@ -17,9 +17,9 @@ usage: testenv/lab.sh <command> [arguments]
   down     stop the lab but preserve its state
   destroy  stop the lab and delete all volumes/runtime state
   info     print the lab's addresses, accounts, and listen ports
-  logs     follow logs (optionally: logs slskdarr)
+  logs     follow logs (optionally: logs slusk)
   ps       show container state
-  config   validate the rendered Compose and slskdarr configuration
+  config   validate the rendered Compose and slusk configuration
 EOF
 }
 
@@ -43,22 +43,22 @@ render() {
 
 # Docker silently creates a missing bind-mount source as a root-owned empty
 # directory, which then shares nothing and looks like a broken share index
-# rather than a typo. Fail loudly on a bad SLSKDARR_SHARE_DIR instead, and only
+# rather than a typo. Fail loudly on a bad SLUSK_SHARE_DIR instead, and only
 # create the default when the user has not pointed the lab elsewhere.
 ensure_share_dir() {
-    share_dir=$(sed -n 's/^[[:space:]]*SLSKDARR_SHARE_DIR[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -n 1 | tr -d '"'"'"'')
+    share_dir=$(sed -n 's/^[[:space:]]*SLUSK_SHARE_DIR[[:space:]]*=[[:space:]]*//p' "$ENV_FILE" | tail -n 1 | tr -d '"'"'"'')
     if [ -z "$share_dir" ]; then
         mkdir -p "$SCRIPT_DIR/share"
         return
     fi
     case "$share_dir" in
         */CHANGE_ME/*)
-            echo "set SLSKDARR_SHARE_DIR in $ENV_FILE to a real directory, or remove the line to use testenv/share" >&2
+            echo "set SLUSK_SHARE_DIR in $ENV_FILE to a real directory, or remove the line to use testenv/share" >&2
             exit 2
             ;;
     esac
     if [ ! -d "$share_dir" ]; then
-        echo "SLSKDARR_SHARE_DIR=$share_dir is not a directory" >&2
+        echo "SLUSK_SHARE_DIR=$share_dir is not a directory" >&2
         exit 2
     fi
 }
@@ -67,9 +67,9 @@ up() {
     render
     # Force-recreate both Soulseek clients so credential/backend-only .env
     # changes cannot leave an old process running with stale configuration.
-    compose up --detach --build --force-recreate slskd slskdarr
+    compose up --detach --build --force-recreate slskd slusk
     if ! python3 "$SCRIPT_DIR/wait_ready.py" --env "$ENV_FILE"; then
-        compose logs --tail 100 slskdarr >&2
+        compose logs --tail 100 slusk >&2
         return 1
     fi
     compose --profile tools run --rm lidarr-seed
@@ -123,8 +123,8 @@ case "$command" in
     config)
         render
         compose config --quiet
-        (cd "$ROOT_DIR" && go run ./testenv/validate_config.go testenv/runtime/slskdarr/config.toml)
-        echo "Compose and slskdarr configuration are valid"
+        (cd "$ROOT_DIR" && go run ./testenv/validate_config.go testenv/runtime/slusk/config.toml)
+        echo "Compose and slusk configuration are valid"
         ;;
     *)
         usage >&2

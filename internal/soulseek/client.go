@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 const (

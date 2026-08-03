@@ -16,7 +16,7 @@ type LidarrArtist struct {
 // LidarrRootFolder is one of Lidarr's configured root folders (issue #331).
 // The "add artist" flow needs a target folder, and Lidarr's own UI prefills
 // the profile selectors from DefaultQualityProfileID/DefaultMetadataProfileID
-// once one is chosen - slskdarr needs no config keys of its own for these
+// once one is chosen - slusk needs no config keys of its own for these
 // defaults, it just reads them from GET /rootfolder alongside everything
 // else.
 type LidarrRootFolder struct {
@@ -52,7 +52,7 @@ type AddArtistRequest struct {
 
 // LidarrCommand is one entry in Lidarr's GET /command response (issue #331),
 // as reported by internal/lidarr.Client.RunningCommands. It has no caller in
-// slskdarr itself since the "add to Lidarr" flow stopped monitoring anything
+// slusk itself since the "add to Lidarr" flow stopped monitoring anything
 // and no longer needs to wait out Lidarr's asynchronous post-add refresh
 // (see internal/app/lidarr_library.go's package doc comment); the wire
 // method stays because internal/lidarr is a client library.

@@ -1,13 +1,13 @@
 # TUI-omstilning av SPA:n — design
 
 Issue: #198. Tangentbordslagret bröts ut till #199.
-Visuell spec: `docs/design/slskdarr-tui.dc.html` (handoff-kopia av
-`Slskdarr TUI.dc.html` ur designprojektet `9085f510-06a3-4d25-b01d-f992601dd938`,
+Visuell spec: `docs/design/slusk-tui.dc.html` (handoff-kopia av
+`Slusk TUI.dc.html` ur designprojektet `9085f510-06a3-4d25-b01d-f992601dd938`,
 hämtad 2026-07-25).
 
 ## Problem
 
-Designprojektet har fått en ny mockup som ersätter `Slskdarr Dashboard.dc.html`.
+Designprojektet har fått en ny mockup som ersätter `Slusk Dashboard.dc.html`.
 Datamodellen är oförändrad; det är uttrycket som bytts. Den gamla mocken var ett
 mörkt dashboard med kort, rundade hörn, sans-serif brödtext och en grön accent per
 statuskategori. Den nya är en terminalyta: monospace genomgående, inga radier, en
@@ -185,7 +185,7 @@ Tre steg — Soulseek-inloggning, Lidarr-anslutning, delade mappar — med fält
 Shares-steget har ingen testendpoint; dess tillstånd härleds ur `/api/shares` (OK om
 minst en mapp är indexerad med filer, annars otestat).
 
-Mockens inledande text — "slskdarr validates the config file you already wrote — it
+Mockens inledande text — "slusk validates the config file you already wrote — it
 never writes it" — är falsk sedan #134 och skrivs om till att peka på Config-vyn.
 
 ### Config

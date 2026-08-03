@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 func TestPresenceStatusMapping(t *testing.T) {

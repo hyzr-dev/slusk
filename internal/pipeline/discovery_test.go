@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/matcher"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/matcher"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // fakeWantedSource is a WantedSource fake so tests can hand Discovery an

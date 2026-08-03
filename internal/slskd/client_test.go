@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func TestEnqueueSendsFilenameAndSize(t *testing.T) {

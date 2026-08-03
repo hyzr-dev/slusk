@@ -265,7 +265,7 @@ func TestApplySettingsNilSecretsKeepAllSixValues(t *testing.T) {
 	if got.Soulseek.Gluetun.APIKey != "gluetun-key" {
 		t.Errorf("Soulseek.Gluetun.APIKey = %q, want unchanged", got.Soulseek.Gluetun.APIKey)
 	}
-	if got.Store.DSN != "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable" {
+	if got.Store.DSN != "postgres://slusk:password@postgres:5432/slusk?sslmode=disable" {
 		t.Errorf("Store.DSN = %q, want unchanged", got.Store.DSN)
 	}
 	if got.Observ.AuthToken != "op-token" {
@@ -389,8 +389,8 @@ func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
 	path := writeFixtureFrom(t, "write_full.toml",
 		[2]string{"[store]\n", "# Shared Postgres instance for the whole arr-stack.\n[store]\n"},
 		[2]string{
-			`dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"`,
-			`dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable" # primary`,
+			`dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable"`,
+			`dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable" # primary`,
 		},
 	)
 
@@ -410,7 +410,7 @@ func TestApplySettingsPreservesCommentsAndUntouchedLines(t *testing.T) {
 	if !strings.Contains(string(after), "# Shared Postgres instance for the whole arr-stack.") {
 		t.Error("block comment on an untouched section was dropped")
 	}
-	dsnComment := regexp.MustCompile(`dsn = "postgres://slskdarr:password@postgres:5432/slskdarr\?sslmode=disable"\s*# primary`)
+	dsnComment := regexp.MustCompile(`dsn = "postgres://slusk:password@postgres:5432/slusk\?sslmode=disable"\s*# primary`)
 	if !dsnComment.Match(after) {
 		t.Errorf("inline trailing comment on an untouched key was dropped:\n%s", after)
 	}

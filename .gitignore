@@ -13,7 +13,7 @@ docker-compose.yml
 *.db
 *.db-wal
 *.db-shm
-/slskdarr
+/slusk
 /testenv/runtime/
 /testenv/share/
 __pycache__/

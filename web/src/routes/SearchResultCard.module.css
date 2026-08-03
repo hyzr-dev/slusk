@@ -9,7 +9,7 @@
 /* The best-match band's accent border, mapped onto --ok — the site's one
    existing "positive" semantic colour (see JobExpansion's .markDone) — since
    tokens.css carries no separate --accent (the mock this view follows,
-   docs/design/slskdarr-dashboard.dc.html, predates the 27 July TUI restyle
+   docs/design/slusk-dashboard.dc.html, predates the 27 July TUI restyle
    and uses its own accent green that is visually close to --ok). */
 .best { border-color: var(--ok); }
 

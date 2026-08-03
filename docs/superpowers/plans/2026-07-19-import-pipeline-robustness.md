@@ -270,7 +270,7 @@ git commit -m "feat(store): persist per-release track-count band on album_jobs"
 - Modify: `internal/pipeline/discovery.go` (params line 41-65, `DiscoveryStore` line 27-39, filter block line 170-214, new `trackBand` helper)
 - Modify: `internal/lidarr/client.go` (remove `WantedAlbum.TrackCount` + its parsing)
 - Modify: `internal/config/config.go` (remove `MaxCandidateFileRatio` field line 81-86 and validation line 263-265)
-- Modify: `cmd/slskdarr/main.go` (remove `MaxCandidateFileRatio:` line 80)
+- Modify: `cmd/slusk/main.go` (remove `MaxCandidateFileRatio:` line 80)
 - Modify: `config.example.toml` (remove the key at line 42 with its 5-line comment block above it; reword the `[pipeline]` intro comment at line 15 that references `max_candidate_file_ratio` to reference `min_bitrate` instead)
 - Modify: `internal/config/testdata/valid.toml`, `pipeline_invalid.toml`, `pipeline_unknown_key.toml`, `pipeline_overrides.toml` (each has `max_candidate_file_ratio = 2.0` at line 17 — remove; check `config_test.go` for assertions on the field and remove those too)
 - Modify: `internal/pipeline/pipeline_shared_test.go` (`fakeMusic`)
@@ -442,7 +442,7 @@ func trackBand(releases []lidarr.AlbumRelease) (minTracks, maxTracks int) {
 
 Config removal:
 - `internal/config/config.go`: delete the `MaxCandidateFileRatio` field + doc comment (lines 81-86) and its validation branch (lines 263-265).
-- `cmd/slskdarr/main.go`: delete line 80 (`MaxCandidateFileRatio: cfg.Pipeline.MaxCandidateFileRatio,`).
+- `cmd/slusk/main.go`: delete line 80 (`MaxCandidateFileRatio: cfg.Pipeline.MaxCandidateFileRatio,`).
 - `config.example.toml`: delete `max_candidate_file_ratio = 2.0` and the 5-line comment above it; in the `[pipeline]` intro comment ("The matcher/transfer knobs below (through max_candidate_file_ratio and ..."), replace `max_candidate_file_ratio` with `min_bitrate`.
 - The four testdata TOMLs: delete their `max_candidate_file_ratio = 2.0` line. Check `internal/config/config_test.go` for assertions on `MaxCandidateFileRatio` (e.g. in the valid-config or overrides test) and remove them, including any expected-problem string for `max_candidate_file_ratio` in the invalid-config test.
 

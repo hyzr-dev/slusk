@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // ImportingStore is the slice of the store Importing needs. Declared here (Go
@@ -197,7 +197,7 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 //
 // A manual job's folder is never cleaned up (issue #59). cleanupFolder is a
 // recursive delete, and for a Lidarr-sourced job that is right: the download
-// was slskdarr's own attempt, another candidate will be tried, and the
+// was slusk's own attempt, another candidate will be tried, and the
 // rejected files are cruft. A manual job has no next candidate - Selecting
 // marks it FAILED - and its files are the thing the user explicitly asked
 // for. Deleting them turns "Lidarr would not import this" into silent data

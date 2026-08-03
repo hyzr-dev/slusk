@@ -34,8 +34,8 @@ jobs:
           build-args: |
             VERSION=${{ gitea.ref_name }}
           tags: |
-            gitea.shcizo.se/shcizo/slskdarr:${{ gitea.ref_name }}
-            gitea.shcizo.se/shcizo/slskdarr:latest
+            gitea.shcizo.se/shcizo/slusk:${{ gitea.ref_name }}
+            gitea.shcizo.se/shcizo/slusk:latest
 
   deploy:
     runs-on: ubuntu-latest
@@ -44,6 +44,6 @@ jobs:
       - uses: https://gitea.shcizo.se/shcizo/package-updater-action@v1
         with:
           endpoint: https://updater.shcizo.se/update
-          image: gitea.shcizo.se/shcizo/slskdarr
+          image: gitea.shcizo.se/shcizo/slusk
           tag: ${{ gitea.ref_name }}
           token: ${{ secrets.UPDATER_API_KEY }}

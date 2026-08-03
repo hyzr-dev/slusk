@@ -382,7 +382,7 @@ export default function Jobs() {
             <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.speed}</span>
             <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.eta}</span>
             {/* Not sortable, like PROGRESS/SPEED/ETA beside it (mock's plain(),
-                docs/design/slskdarr-tui.dc.html:1174): TRY is a live field, and
+                docs/design/slusk-tui.dc.html:1174): TRY is a live field, and
                 only the three stable columns (ST, ALBUM, PEER) can reorder rows
                 without a row jumping mid-poll. */}
             <span role="columnheader" className={styles.headRight}>{t.jobs.gridHead.tries}</span>

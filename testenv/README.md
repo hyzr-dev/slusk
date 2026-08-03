@@ -1,8 +1,8 @@
-# PR-labb: slskdarr + Lidarr + slskd + PostgreSQL
+# PR-labb: slusk + Lidarr + slskd + PostgreSQL
 
-Det här är en lokal, destruktiv testmiljö för att köra en valfri slskdarr-checkout
+Det här är en lokal, destruktiv testmiljö för att köra en valfri slusk-checkout
 mot riktiga Soulseek-sökningar utan att blanda in produktionsdata. Miljön bygger
-alltid slskdarr från den aktuella worktreen och basladdar Lidarr med ett
+alltid slusk från den aktuella worktreen och basladdar Lidarr med ett
 reproducerbart urval av 150 saknade album.
 
 ## Första gången
@@ -16,11 +16,11 @@ $EDITOR testenv/.env
 Fyll i **två separata Soulseek-testkonton**:
 
 - `SLSKD_SOULSEEK_*` används av slskd.
-- `SLSKDARR_SOULSEEK_*` används av slskdarrs native-klient.
+- `SLUSK_SOULSEEK_*` används av slusks native-klient.
 
 Soulseek tillåter bara en samtidig inloggning per konto. Använd därför varken
 samma konto i båda klienterna eller ditt vanliga konto. `.env` är gitignorerad och `lab.sh` sätter filrättigheten till `0600`.
-Båda klienterna loggar in, men `SLSKDARR_BACKEND` avgör vilken som driver
+Båda klienterna loggar in, men `SLUSK_BACKEND` avgör vilken som driver
 pipeline-jobben. Standard är `soulseek`, alltså native-klienten — det är den
 backenden labbet finns för att köra mot riktig trafik. Sätt värdet till `slskd`
 för att jämföra mot daemonen. Observera att appens egen standard i
@@ -28,14 +28,14 @@ för att jämföra mot daemonen. Observera att appens egen standard i
 
 ## Delade filer
 
-`SLSKDARR_SHARE_DIR` pekar ut katalogen slskdarr delar med Soulseek-nätverket.
+`SLUSK_SHARE_DIR` pekar ut katalogen slusk delar med Soulseek-nätverket.
 Den monteras **read-only** på `/music/share` och är förkonfigurerad som
 `[[soulseek.shared_folders]]`. Utan den delar klienten ingenting: `/api/shares`
 rapporterar noll filer, ingen peer kan köa något från den, och varken
 share-vyn eller upload-panelen går att testa på riktigt.
 
 ```
-SLSKDARR_SHARE_DIR=/Users/dittnamn/Music/share
+SLUSK_SHARE_DIR=/Users/dittnamn/Music/share
 ```
 
 Använd en **absolut sökväg** — värden i `.env` expanderas inte av skalet, så
@@ -45,7 +45,7 @@ Använd en **absolut sökväg** — värden i `.env` expanderas inte av skalet, 
 Katalogen monteras avsiktligt **inte** på `/music/library`: den sökvägen är
 Lidarrs root-folder, dit labbet importerar testalbum. En riktig musikkatalog
 där hade legat öppen för skrivningar från en miljö vars uttalade syfte är att
-vara destruktiv. Monteringen sitter bara på slskdarr, som enbart behöver läsa.
+vara destruktiv. Monteringen sitter bara på slusk, som enbart behöver läsa.
 
 Filer som läggs till medan labbet kör syns först efter en omindexering — klicka
 **Rescan** i share-vyn, eller starta om containern.
@@ -59,7 +59,7 @@ när en PR verkligen ska testas från scratch.
 ```bash
 git switch <pr-branch>
 ./testenv/lab.sh reset       # helt ren körning av aktuell checkout
-./testenv/lab.sh logs slskdarr
+./testenv/lab.sh logs slusk
 ```
 
 För en ombyggnad som ska behålla state:
@@ -87,10 +87,10 @@ variabelnamn i stället för värde — labboutput hamnar ofta i issues och PR:e
 
 | Tjänst | Standardadress | Inloggning |
 |---|---|---|
-| slskdarr | <http://127.0.0.1:9090> | valfritt Basic-användarnamn, lösenordet i `SLSKDARR_OBSERV_TOKEN` |
+| slusk | <http://127.0.0.1:9090> | valfritt Basic-användarnamn, lösenordet i `SLUSK_OBSERV_TOKEN` |
 | Lidarr | <http://127.0.0.1:8686> | avstängd i det lokala labbet |
 | slskd | <http://127.0.0.1:5030> | `SLSKD_WEB_USERNAME` / `SLSKD_WEB_PASSWORD` |
-| PostgreSQL | `127.0.0.1:15432` | `slskdarr` / `slskdarr-test`, databas `slskdarr` |
+| PostgreSQL | `127.0.0.1:15432` | `slusk` / `slusk-test`, databas `slusk` |
 
 Webb- och databasportarna binds bara till loopback. Soulseek-portarna 50300
 (slskd) och 50301 (native) publiceras däremot på hosten eftersom inkommande
@@ -106,7 +106,7 @@ wanted/missing inte når exakt samma antal. Standard är 150; sätt ett värde
 mellan 1 och 500 i `.env`.
 
 Seedningen laddar **inte** ner album via Lidarr. De hamnar bara i wanted/missing så
-att slskdarr kan plocka upp dem. Första körningen kan ta några minuter medan
+att slusk kan plocka upp dem. Första körningen kan ta några minuter medan
 Lidarr hämtar metadata.
 
 ## Volymer och import
@@ -114,7 +114,7 @@ Lidarr hämtar metadata.
 Alla tre containrar ser samma download-volume som
 `/music/slskd-downloads`. Lidarr ser dessutom biblioteket som `/music/library`.
 Det gör att både slskd-backenden och native-backenden kan lämna över färdiga
-filer till Lidarr utan remote path mappings. Den genererade slskdarr-konfigen
+filer till Lidarr utan remote path mappings. Den genererade slusk-konfigen
 monteras read-only; ändra `.env` och kör `up` i stället för att redigera settings
 i dashboarden.
 

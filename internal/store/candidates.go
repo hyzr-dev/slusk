@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // NewCandidate is one ranked Soulseek user to cache for a job, as produced by
@@ -237,7 +237,7 @@ func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID,
 	// itself: concurrent selectors could all observe the same free slot. A
 	// transaction-scoped advisory lock serializes only activation/cap decisions
 	// without blocking unrelated album_jobs writes.
-	const activationLockKey int64 = 0x736c736b64617272 // "slskdarr"
+	const activationLockKey int64 = 0x736c736b64617272 // "slusk"
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, activationLockKey); err != nil {
 		return false, false, fmt.Errorf("lock candidate activation: %w", err)
 	}

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 const CodeWatchUser Code = 5

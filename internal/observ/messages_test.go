@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func newMessagesTestHandler(reg *prometheus.Registry, conversations ConversationsFunc, thread ThreadFunc, send SendMessageFunc, markRead MarkReadFunc, presence ...ConversationPresenceFunc) http.Handler {

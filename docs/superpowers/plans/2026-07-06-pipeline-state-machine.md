@@ -40,7 +40,7 @@ internal/pipeline/importing.go  (create)  Importing module (verify gate + import
 internal/pipeline/query.go      (create)  moved verbatim from engine/query.go (normalizeQuery)
 internal/pipeline/paths.go      (create)  moved verbatim from engine/paths.go (AlbumFolder, commonLeaf)
 internal/config/config.go       (modify) [pipeline] section
-cmd/slskdarr/main.go            (modify) wire pipeline instead of engine
+cmd/slusk/main.go            (modify) wire pipeline instead of engine
 internal/observ/*               (modify) state names, retries/not_before, retry endpoint, per-module health
 internal/engine/                (delete in Task 12)
 ```
@@ -682,7 +682,7 @@ func TestFullLifecycleExhaustionToFailedAndRevival(t *testing.T)
 ### Task 12: Swap main.go to pipeline, delete engine, finalize schema + config
 
 **Files:**
-- Modify: `cmd/slskdarr/main.go` (read it fully first)
+- Modify: `cmd/slusk/main.go` (read it fully first)
 - Modify: `internal/config/config.go`, `config.example.toml` (move matcher/transfer keys `[engine]`→`[pipeline]`, delete `[engine]`)
 - Modify: `internal/store/schema.sql` + store SQL (column rename, FK, drop candidate_attempts)
 - Delete: `internal/engine/` (entire package)

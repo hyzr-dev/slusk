@@ -6,8 +6,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 func TestLoginSerializeGoldenBytes(t *testing.T) {

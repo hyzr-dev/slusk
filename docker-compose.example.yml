@@ -1,12 +1,12 @@
-# docker-compose for slskdarr.
-# With the default slskd backend, slskdarr needs no media mount. But with
+# docker-compose for slusk.
+# With the default slskd backend, slusk needs no media mount. But with
 # pipeline.backend = "soulseek" (the native backend) it downloads files itself
 # and needs a WRITABLE volume at paths.slskd_complete_dir (see the mount below);
 # the slskd backend only ever read that path.
 # Named Soulseek shares are scanned and served read-only; mount only those roots
 # and use their in-container paths in [[soulseek.shared_folders]].
 #
-# State lives in PostgreSQL (store.dsn in config.toml), so slskdarr itself needs
+# State lives in PostgreSQL (store.dsn in config.toml), so slusk itself needs
 # no data volume. This example bundles a local Postgres for development; in
 # production you would typically point store.dsn at a shared external instance
 # instead (see docker-compose.prod.yml).
@@ -14,19 +14,19 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: slskdarr-postgres
+    container_name: slusk-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: slskdarr
+      POSTGRES_USER: slusk
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: slskdarr
+      POSTGRES_DB: slusk
     volumes:
-      - slskdarr-pgdata:/var/lib/postgresql/data
+      - slusk-pgdata:/var/lib/postgresql/data
 
-  slskdarr:
+  slusk:
     build: .
-    # ...or, if you build/pull separately: image: slskdarr:latest
-    container_name: slskdarr
+    # ...or, if you build/pull separately: image: slusk:latest
+    container_name: slusk
     restart: unless-stopped
 
     # Non-root. Set this to your usual arr PUID:PGID.
@@ -37,7 +37,7 @@ services:
 
     volumes:
       # A writable directory mount is required for editing settings from the
-      # UI (issue #89): slskdarr writes the updated config.toml back into
+      # UI (issue #89): slusk writes the updated config.toml back into
       # this directory, which needs an atomic rename to land safely, so a
       # single bind-mounted file cannot be modified this way. A read-only
       # single-file mount (./config.toml:/config/config.toml:ro) is still
@@ -70,13 +70,13 @@ services:
       # - "2234:2234"
 
     # After changing share contents, atomically rescan without restarting:
-    #   docker kill --signal=HUP slskdarr
+    #   docker kill --signal=HUP slusk
 
 volumes:
-  slskdarr-pgdata:
+  slusk-pgdata:
 
 # --- Option: run inside your existing arr-stack compose ---
-# If slskd/lidarr are services in the SAME compose project, put slskdarr on their
+# If slskd/lidarr are services in the SAME compose project, put slusk on their
 # network and use service-name URLs in config.toml (http://lidarr:8686, etc.):
 #   networks: [arr]
 # The slskd service itself is optional when pipeline.backend = "soulseek" in
@@ -88,15 +88,15 @@ volumes:
 #     external: true
 
 # --- Option: run behind gluetun with VPN port forwarding ---
-# With soulseek.gluetun set in config.toml, slskdarr fetches its forwarded
+# With soulseek.gluetun set in config.toml, slusk fetches its forwarded
 # port from gluetun's control server at startup instead of using a static
-# port. This requires slskdarr to share gluetun's network namespace (so it can
+# port. This requires slusk to share gluetun's network namespace (so it can
 # reach the control server at 127.0.0.1 and receive inbound peer connections
 # on the forwarded port), which means:
-#   - remove slskdarr's own "ports:" section above; the port is published on
+#   - remove slusk's own "ports:" section above; the port is published on
 #     the gluetun service instead (below, 9090 for the observ endpoint - the
 #     Soulseek peer port does not need publishing, gluetun forwards it).
-#   - add network_mode: "service:gluetun" to the slskdarr service.
+#   - add network_mode: "service:gluetun" to the slusk service.
 #   - soulseek.gluetun.control_url in config.toml is "http://127.0.0.1:8000"
 #     (same network namespace as gluetun, so localhost reaches it).
 #
@@ -116,16 +116,16 @@ volumes:
 #       VPN_TYPE: wireguard
 #       VPN_PORT_FORWARDING: "on"
 #     # gluetun >= v3.40 requires control-server auth config on ITS side for
-#     # /v1/portforward - without it, slskdarr's fetch gets 401 forever. Mount
+#     # /v1/portforward - without it, slusk's fetch gets 401 forever. Mount
 #     # a config granting the route to the same key as soulseek.gluetun.api_key:
 #     #   volumes: [./gluetun-auth.toml:/gluetun/auth/config.toml:ro]
-#     # with: [[roles]] name="slskdarr" routes=["GET /v1/portforward"]
+#     # with: [[roles]] name="slusk" routes=["GET /v1/portforward"]
 #     #       auth="apikey" apikey="<same key>"
 #     # (older gluetun: no auth needed, the api_key is simply unused)
 #     ports:
-#       - "127.0.0.1:9090:9090" # slskdarr's observ endpoint, published here
+#       - "127.0.0.1:9090:9090" # slusk's observ endpoint, published here
 #
-#   slskdarr:
+#   slusk:
 #     network_mode: "service:gluetun"
 #     depends_on:
 #       - gluetun

@@ -16,7 +16,7 @@ import styles from './Chat.module.css';
 /**
  * Private-message chat view (issue #183): a conversation rail on the left, one
  * thread's messages plus a composer on the right. Deviates from the mock
- * (docs/design/slskdarr-tui.dc.html, the CHAT block and chatVals()) in three
+ * (docs/design/slusk-tui.dc.html, the CHAT block and chatVals()) in three
  * deliberate ways:
  *
  *  1. A quiet "load older" control at the top of the pane when hasMore is
@@ -214,7 +214,7 @@ export default function Chat() {
   return (
     <Page title={t.page.chat.title} subtitle={t.page.chat.subtitle}>
       {/* One Panel around both panes, matching the mock's single bordered
-          <section> (docs/design/slskdarr-tui.dc.html CHAT block) — the rail's
+          <section> (docs/design/slusk-tui.dc.html CHAT block) — the rail's
           border-right stays as the internal divider between them, the same
           way a table's row dividers stay untouched by this restyle. */}
       <Panel className={styles.root}>

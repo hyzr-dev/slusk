@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // throughputRetention bounds how long throughput_minutes rows are kept;

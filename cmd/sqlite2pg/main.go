@@ -1,12 +1,12 @@
 // Command sqlite2pg is a one-off migration tool that transforms the final
-// released slskdarr SQLite schema into the current PostgreSQL schema. It
+// released slusk SQLite schema into the current PostgreSQL schema. It
 // validates the source shape before touching the target, applies the current
 // store schema, refuses to run if any target table already has rows, and copies
 // all supported data preserving primary keys and relationships.
 //
 // Usage:
 //
-//	sqlite2pg -sqlite /data/slskdarr.db -pg 'postgres://slskdarr:password@localhost:5432/slskdarr?sslmode=disable'
+//	sqlite2pg -sqlite /data/slusk.db -pg 'postgres://slusk:password@localhost:5432/slusk?sslmode=disable'
 package main
 
 import (
@@ -22,7 +22,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 type tableSpec struct {
@@ -70,7 +70,7 @@ var timestampColumns = map[string]bool{
 }
 
 func main() {
-	sqlitePath := flag.String("sqlite", "", "path to the existing slskdarr SQLite database")
+	sqlitePath := flag.String("sqlite", "", "path to the existing slusk SQLite database")
 	pgDSN := flag.String("pg", "", "PostgreSQL DSN of the migration target")
 	flag.Parse()
 	if *sqlitePath == "" || *pgDSN == "" {
@@ -199,7 +199,7 @@ func validateSource(src *sql.DB) error {
 	}
 	sort.Strings(expectedTables)
 	if strings.Join(actualTables, ",") != strings.Join(expectedTables, ",") {
-		return fmt.Errorf("expected final pre-PostgreSQL tables [%s], found [%s]; use the slskdarr release matching this database or migrate it to the final SQLite release first",
+		return fmt.Errorf("expected final pre-PostgreSQL tables [%s], found [%s]; use the slusk release matching this database or migrate it to the final SQLite release first",
 			strings.Join(expectedTables, ", "), strings.Join(actualTables, ", "))
 	}
 

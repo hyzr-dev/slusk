@@ -124,7 +124,7 @@ export default function Setup() {
       <QueryNotice phase={configPhase} />
 
       {/* One Panel around all three steps, matching the mock's single
-          bordered <section> (docs/design/slskdarr-tui.dc.html SETUP block)
+          bordered <section> (docs/design/slusk-tui.dc.html SETUP block)
           — each step's own border-top stays as the internal divider between
           them, the same way a table's row dividers stay untouched by this
           restyle. */}

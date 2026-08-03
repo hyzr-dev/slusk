@@ -54,7 +54,7 @@ function TicksImpl({ percent, tone = 'bar', live = false, height = 12 }: Props) 
 
 /**
  * A single-track progress bar that recolours and regrows in place as a
- * transfer advances (docs/design/slskdarr-tui.dc.html's `fill()` helper,
+ * transfer advances (docs/design/slusk-tui.dc.html's `fill()` helper,
  * commit 688d52c — the dense-tick track from before that commit is now one
  * repeating-gradient track plus one gradient fill, not one <span> per tick).
  *

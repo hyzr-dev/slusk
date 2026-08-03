@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 // messageUserFrame builds a raw server.CodeMessageUser frame: uint32 id,

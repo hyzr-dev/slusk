@@ -1,16 +1,16 @@
-# Production docker-compose for slskdarr.
+# Production docker-compose for slusk.
 #
 # Unlike docker-compose.example.yml (which builds locally with `build: .`), this
 # PULLS the pre-built image from the Gitea registry. That image is published by
 # .gitea/workflows/deploy.yml on every v* tag (release.yml auto-tags main from
 # conventional commits), tagged both :latest and :vX.Y.Z.
 #
-# slskdarr needs no media mount unless native Soulseek sharing is enabled.
+# slusk needs no media mount unless native Soulseek sharing is enabled.
 # Mount only explicitly named share roots read-only and configure their
 # in-container paths under [[soulseek.shared_folders]].
 #
 # State lives in PostgreSQL: point store.dsn in config.toml at the shared
-# Postgres instance (this compose deliberately does NOT bundle one). slskdarr
+# Postgres instance (this compose deliberately does NOT bundle one). slusk
 # itself needs no data volume.
 #
 # --- Prerequisites ---
@@ -32,7 +32,7 @@
 # deploy` (Swarm) read this from the image automatically; Swarm reschedules a
 # task once it's reported unhealthy for --retries consecutive checks.
 #
-# Pin a release with SLSKDARR_TAG=v1.2.3 (env or .env file); omit for :latest.
+# Pin a release with SLUSK_TAG=v1.2.3 (env or .env file); omit for :latest.
 # The homelab package-updater-action redeploys automatically on new tags.
 #
 # --- Deploy (breaking): pipeline-state-machine rewrite ---
@@ -40,7 +40,7 @@
 # WANTED/SELECTING/DOWNLOADING/IMPORTING/DONE/CANCELLED/FAILED) and swaps
 # candidate_attempts for a candidates table. There is no migration path for
 # in-flight jobs — clean-slate the pipeline tables instead:
-#   1. docker compose -f docker-compose.prod.yml stop slskdarr
+#   1. docker compose -f docker-compose.prod.yml stop slusk
 #   2. Migrate config.toml: [engine] -> [pipeline]; drop lidarr.poll_interval
 #      and slskd.status_poll_interval (both gone); rename
 #      max_concurrent_active -> max_active (now lives under [pipeline]);
@@ -52,14 +52,14 @@
 #   4. Manually clear slskd's downloads directory so leftover files from
 #      orphaned transfers don't collide with fresh attempts.
 #   5. docker compose -f docker-compose.prod.yml pull && ... up -d
-#      (pin SLSKDARR_TAG to the new release if not using :latest)
+#      (pin SLUSK_TAG to the new release if not using :latest)
 # Every still-wanted album reappears as WANTED on the first WantedSync tick
 # after startup, so nothing needs to be manually re-queued.
 
 services:
-  slskdarr:
-    image: gitea.shcizo.se/shcizo/slskdarr:${SLSKDARR_TAG:-latest}
-    container_name: slskdarr
+  slusk:
+    image: gitea.shcizo.se/shcizo/slusk:${SLUSK_TAG:-latest}
+    container_name: slusk
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -70,7 +70,7 @@ services:
 
     volumes:
       # A writable directory mount is required for editing settings from the
-      # UI (issue #89): slskdarr writes the updated config.toml back into
+      # UI (issue #89): slusk writes the updated config.toml back into
       # this directory, which needs an atomic rename to land safely, so a
       # single bind-mounted file cannot be modified this way. A read-only
       # single-file mount (./config.toml:/config/config.toml:ro) is still
@@ -95,12 +95,12 @@ services:
       # - "2234:2234"
 
     # Rescan configured shares after filesystem changes without restarting:
-    #   docker kill --signal=HUP slskdarr
+    #   docker kill --signal=HUP slusk
 
 # --- Option: run inside your existing arr-stack network ---
-# If slskd/lidarr are on a shared Docker network, attach slskdarr to it and use
+# If slskd/lidarr are on a shared Docker network, attach slusk to it and use
 # service-name URLs in config.toml (http://lidarr:8686, http://slskd:5030). Add
-# `networks: [arr]` to the slskdarr service and declare the external network:
+# `networks: [arr]` to the slusk service and declare the external network:
 # networks:
 #   arr:
 #     external: true

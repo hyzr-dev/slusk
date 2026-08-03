@@ -1,6 +1,6 @@
-# slskdarr
+# slusk
 
-A bridge between Lidarr and Soulseek. Lidarr says which albums are wanted; slskdarr
+A bridge between Lidarr and Soulseek. Lidarr says which albums are wanted; slusk
 finds them on Soulseek, downloads them, and hands the finished album back to Lidarr for
 import. Everything the system does is a state transition on one album job.
 

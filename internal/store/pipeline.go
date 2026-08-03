@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // ErrJobImporting is returned by DeleteJob when the job is currently

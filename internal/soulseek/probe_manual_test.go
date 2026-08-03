@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // TestManualDownloadProbe exercises Client.Enqueue/ListDownloads against a

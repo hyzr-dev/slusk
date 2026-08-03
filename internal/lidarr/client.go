@@ -1,5 +1,5 @@
 // Package lidarr is a thin REST client for Lidarr. It mirrors Lidarr's API and
-// returns its own types; it knows nothing about slskdarr's database.
+// returns its own types; it knows nothing about slusk's database.
 package lidarr
 
 import (
@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // Client talks to a Lidarr instance.
@@ -680,7 +680,7 @@ func (c *Client) AddArtist(ctx context.Context, req core.AddArtistRequest) (core
 // round-tripping avoids needing to know its full shape. Expects HTTP 202,
 // verified against Lidarr 3.1.0.4875 (.lidarr-endpoints-verified.md).
 //
-// Nothing in slskdarr calls this: the "add to Lidarr" flow monitors nothing
+// Nothing in slusk calls this: the "add to Lidarr" flow monitors nothing
 // (see internal/app/lidarr_library.go's package doc comment). It stays
 // because internal/lidarr is a client library - removing a working wire
 // method is a separate decision from removing its one caller.
@@ -730,7 +730,7 @@ func (c *Client) SetArtistMonitored(ctx context.Context, artistID int64, monitor
 // (issue #331). Expects HTTP 202, verified against Lidarr 3.1.0.4875
 // (.lidarr-endpoints-verified.md).
 //
-// Nothing in slskdarr calls this - see SetArtistMonitored's doc comment for
+// Nothing in slusk calls this - see SetArtistMonitored's doc comment for
 // why it stays anyway.
 func (c *Client) MonitorAlbums(ctx context.Context, albumIDs []int64, monitored bool) error {
 	body := map[string]any{"albumIds": albumIDs, "monitored": monitored}
@@ -793,7 +793,7 @@ func (c *Client) AlbumsByArtist(ctx context.Context, artistID int64) ([]core.Lid
 // the asynchronous RefreshArtist run that follows AddArtist shows up here, as
 // testenv/seed_lidarr.py's wait_for_idle relies on.
 //
-// Nothing in slskdarr calls this: the add flow no longer waits out that
+// Nothing in slusk calls this: the add flow no longer waits out that
 // refresh, because it no longer applies monitoring the refresh could revert.
 // See SetArtistMonitored's doc comment for why it stays anyway.
 func (c *Client) RunningCommands(ctx context.Context) ([]core.LidarrCommand, error) {

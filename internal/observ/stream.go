@@ -74,7 +74,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // streamInterval is how often the shared broadcaster ticks and considers
@@ -145,7 +145,7 @@ const streamFetchTimeout = 500 * time.Millisecond
 
 // streamMaxSubscribers caps concurrent open GET /api/stream connections.
 // Reachable unauthenticated whenever cfg.Observ.AuthToken is empty (see
-// cmd/slskdarr/main.go's authenticator wiring) — this is not primarily an
+// cmd/slusk/main.go's authenticator wiring) — this is not primarily an
 // abuse defense but a bound on the shared broadcaster's per-tick fan-out
 // work and memory.
 const streamMaxSubscribers = 200
@@ -550,7 +550,7 @@ func buildStreamDetail(view core.JobView, hasView bool, detail core.JobDetail, h
 // cannot show different numbers for the same quantity.
 //
 // Falls back to the estimate when there is no series at all: the meter lives
-// in the native soulseek client, so cmd/slskdarr/main.go leaves
+// in the native soulseek client, so cmd/slusk/main.go leaves
 // ServerDeps.Throughput nil on every other backend, and `down` would
 // otherwise read 0 while downloads were plainly running.
 //
@@ -1949,7 +1949,7 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 		}
 
 		rc := http.NewResponseController(w)
-		// The server's WriteTimeout (30s, see cmd/slskdarr/main.go) exists to
+		// The server's WriteTimeout (30s, see cmd/slusk/main.go) exists to
 		// bound ordinary request handlers; an SSE connection is meant to stay
 		// open indefinitely, so it must opt out of that deadline per-
 		// connection rather than have the server kill it every 30s. If the
@@ -1963,7 +1963,7 @@ func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlati
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
-		// Without this a reverse proxy in front of slskdarr buffers the
+		// Without this a reverse proxy in front of slusk buffers the
 		// stream until it has "enough" data, which for a mostly-idle SSE
 		// connection means never.
 		w.Header().Set("X-Accel-Buffering", "no")

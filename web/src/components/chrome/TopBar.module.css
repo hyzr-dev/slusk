@@ -20,7 +20,7 @@
 .brand { display: flex; align-items: baseline; gap: 10px; }
 .brandName { color: var(--fg); font-weight: 600; font-size: 13px; letter-spacing: 1.5px; }
 
-/* The mock's second span in the brand cell — docs/design/slskdarr-tui.dc.html:32.
+/* The mock's second span in the brand cell — docs/design/slusk-tui.dc.html:32.
    .brand already aligns on the baseline with a 10px gap for exactly this. */
 .brandVersion { color: var(--text-dim); font-size: 10.5px; letter-spacing: 0.5px; }
 

@@ -16,7 +16,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // ErrIdentifyQueryInvalid is returned when a required query or id argument is

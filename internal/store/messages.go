@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 const privateMessageSelect = `SELECT id, username, direction, body, server_message_id, is_admin, sent_at, received_at, read_at FROM private_messages`
@@ -85,7 +85,7 @@ func (s *Store) RecordIncomingMessage(ctx context.Context, m core.PrivateMessage
 // RecordOutgoingMessage persists one private message this client sent, always
 // marked already-read (ReadAt tracking only ever applies to incoming
 // messages, and a message we sent is read by definition). It is
-// send-then-persist — see cmd/slskdarr's sendMessageFn for why that
+// send-then-persist — see cmd/slusk's sendMessageFn for why that
 // ordering, not the reverse, is correct here.
 func (s *Store) RecordOutgoingMessage(ctx context.Context, username, body string, now time.Time) (core.PrivateMessage, error) {
 	var id int64

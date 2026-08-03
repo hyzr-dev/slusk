@@ -1,6 +1,6 @@
 # Migrating the store from SQLite to PostgreSQL
 
-As of the Postgres port, slskdarr persists all state in PostgreSQL
+As of the Postgres port, slusk persists all state in PostgreSQL
 (`store.dsn` in `config.toml`) instead of a local SQLite file. Existing
 SQLite databases are migrated once with the `sqlite2pg` tool.
 
@@ -40,12 +40,12 @@ The schema rewrite is transformed as follows:
 
 ## Steps
 
-1. Stop slskdarr (the SQLite file must not be written during the copy).
+1. Stop slusk (the SQLite file must not be written during the copy).
 2. Create an empty database and user on your Postgres instance, e.g.:
 
    ```sql
-   CREATE USER slskdarr WITH PASSWORD 'password';
-   CREATE DATABASE slskdarr OWNER slskdarr;
+   CREATE USER slusk WITH PASSWORD 'password';
+   CREATE DATABASE slusk OWNER slusk;
    ```
 
 3. Build and run the migration tool once:
@@ -53,8 +53,8 @@ The schema rewrite is transformed as follows:
    ```bash
    go build -o sqlite2pg ./cmd/sqlite2pg
    ./sqlite2pg \
-     -sqlite /path/to/slskdarr.db \
-     -pg 'postgres://slskdarr:password@localhost:5432/slskdarr?sslmode=disable'
+     -sqlite /path/to/slusk.db \
+     -pg 'postgres://slusk:password@localhost:5432/slusk?sslmode=disable'
    ```
 
    The tool validates the source, applies the current schema, refuses to run
@@ -67,8 +67,8 @@ The schema rewrite is transformed as follows:
 
    ```toml
    [store]
-   dsn = "postgres://slskdarr:password@postgres:5432/slskdarr?sslmode=disable"
+   dsn = "postgres://slusk:password@postgres:5432/slusk?sslmode=disable"
    ```
 
-5. Start slskdarr and verify with `psql ... -c 'SELECT count(*) FROM album_jobs'`
+5. Start slusk and verify with `psql ... -c 'SELECT count(*) FROM album_jobs'`
    and the dashboard. The old SQLite file can then be archived or deleted.

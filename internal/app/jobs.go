@@ -2,7 +2,7 @@
 // the store and the HTTP edge (internal/observ): the pipeline modules own
 // automatic state transitions, while Jobs owns the manual, user-triggered
 // ones (cancel, retry, and create) so they no longer live as ad hoc closures
-// in cmd/slskdarr/main.go. Errors are returned as plain Go errors
+// in cmd/slusk/main.go. Errors are returned as plain Go errors
 // (ErrJobNotFound, ErrJobNotRetryable, ErrRemoteFileBusy, or a wrapped
 // store/peer error); mapping them to HTTP status codes is internal/observ's
 // job, not this package's.
@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store"
 )
 
 // ErrJobNotFound is returned when a requested job does not exist.

@@ -15,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 // SessionTTL is how long a browser session stays valid after login/setup - a
-// fixed 90 days, deliberately not a config key (see cmd/slskdarr/main.go and
+// fixed 90 days, deliberately not a config key (see cmd/slusk/main.go and
 // CLAUDE.md: config adds no keys without a corresponding production rollout
 // step, and there is no product reason yet to make this tunable).
 const SessionTTL = 90 * 24 * time.Hour
@@ -141,7 +141,7 @@ func (a *Auth) Setup(ctx context.Context, username, password string) (token stri
 // does not distinguish "no such user" from "wrong password" (see Login).
 // Generated once at package init with a fixed, unused password - it is never
 // itself a real credential.
-var dummyHash = mustHash("slskdarr-login-timing-decoy-not-a-real-password")
+var dummyHash = mustHash("slusk-login-timing-decoy-not-a-real-password")
 
 func mustHash(password string) []byte {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -224,7 +224,7 @@ func (a *Auth) Logout(ctx context.Context, token string) error {
 
 // PruneExpiredSessions deletes expired session rows, returning how many were
 // removed. Intended to run periodically from a background goroutine (see
-// cmd/slskdarr/main.go), the same shape as the throughput recorder and share
+// cmd/slusk/main.go), the same shape as the throughput recorder and share
 // rescan loop already do.
 func (a *Auth) PruneExpiredSessions(ctx context.Context) (int64, error) {
 	return a.Store.DeleteExpiredSessions(ctx)

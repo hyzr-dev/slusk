@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // UpdateJobMetadata refreshes the cached title/artist_name/release_date/artist_id

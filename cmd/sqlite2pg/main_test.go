@@ -13,7 +13,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
+	"github.com/samuelenocsson/slusk/internal/store/storetest"
 )
 
 func TestMain(m *testing.M) {

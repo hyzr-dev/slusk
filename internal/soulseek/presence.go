@@ -4,7 +4,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/server"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/server"
 )
 
 const maxPresenceUsers = 500

@@ -1,4 +1,4 @@
-# slskdarr
+# slusk
 
 A Go rewrite of `soularr`: a bridge between Lidarr and Soulseek. It polls Lidarr for
 wanted albums, searches Soulseek, downloads candidates, and hands finished albums back
@@ -42,7 +42,7 @@ There is no staging step. "Merge it and see" is a production action.
 
 ## The local PR lab is the substitute for staging
 
-`testenv/` runs the full stack — this checkout's slskdarr, plus Lidarr, slskd and
+`testenv/` runs the full stack — this checkout's slusk, plus Lidarr, slskd and
 Postgres — against real Soulseek searches, with no production data involved. Use it to
 verify a PR before merging, since merging is the deploy.
 
@@ -50,7 +50,7 @@ verify a PR before merging, since merging is the deploy.
 cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test accounts
 ./testenv/lab.sh reset                 # clean run of the current checkout
 ./testenv/lab.sh info                  # addresses, accounts, listen ports
-./testenv/lab.sh logs slskdarr
+./testenv/lab.sh logs slusk
 ./testenv/lab.sh down                  # stop, keep state; `destroy` wipes volumes too
 ```
 
@@ -59,7 +59,7 @@ cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test a
 
 - **Two distinct Soulseek accounts are required.** Soulseek permits one login per
   account and both clients log in regardless of backend. Never use your own account.
-- The lab defaults to `SLSKDARR_BACKEND=soulseek` (the native client), which is the
+- The lab defaults to `SLUSK_BACKEND=soulseek` (the native client), which is the
   opposite of the app's own default in `config.example.toml`. That is deliberate — the
   native backend is the experimental one and the lab exists to exercise it.
 - Results are not hermetic: peer availability and transfer speed vary between runs, so
@@ -97,13 +97,13 @@ For frontend work, run Vite from the checkout and let the lab be the backend:
 make dev                     # http://localhost:5173, /api and /status proxied to :9090
 ```
 
-`web/vite.config.ts` proxies `/api` and `/status` to `SLSKDARR_DEV_API` (default
-`http://localhost:9090`) and injects the observ bearer token from `SLSKDARR_DEV_TOKEN`
+`web/vite.config.ts` proxies `/api` and `/status` to `SLUSK_DEV_API` (default
+`http://localhost:9090`) and injects the observ bearer token from `SLUSK_DEV_TOKEN`
 (default: the lab's fixed token), so the browser never sees an auth prompt. The token is read
 via `process.env` in the config file, which runs in Node — it never reaches the client bundle.
 Keep it that way; a `VITE_` prefix would ship it to the browser.
 
-Point `SLSKDARR_DEV_API` at another port when verifying a git worktree whose backend runs
+Point `SLUSK_DEV_API` at another port when verifying a git worktree whose backend runs
 somewhere else, and give Vite its own `--port` per worktree — two dev servers on one port
 silently serve the same code and you verify the wrong branch.
 
@@ -136,11 +136,11 @@ on startup.
   with a new migration.
 - Anything that could lose data during a rolling deploy (dropping a column an older
   running instance still reads) is named `%04d_description_destructive.sql`. Those are
-  never applied automatically — they need `slskdarr -migrate-destructive`.
+  never applied automatically — they need `slusk -migrate-destructive`.
 
 ## Issue tracker is Gitea, not GitHub
 
-`origin` is `ssh://git@gitea.shcizo.se:2223/shcizo/slskdarr.git`. Use `tea`, not `gh`.
+`origin` is `ssh://git@gitea.shcizo.se:2223/shcizo/slusk.git`. Use `tea`, not `gh`.
 
 ```bash
 tea issues <n> --comments --output json
@@ -183,7 +183,7 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, both created lazily
 ## Layout
 
 ```
-cmd/slskdarr/        main, wiring, signal handling, lifecycle
+cmd/slusk/           main, wiring, signal handling, lifecycle
 cmd/sqlite2pg/       one-off SQLite → Postgres migration tool
 internal/core/       protocol-neutral domain types shared across adapters
 internal/config/     strict TOML loading and validation
@@ -207,7 +207,7 @@ web/                 React SPA source, built into internal/observ/web/dist
 
 Adapters map their wire types to `internal/core` at the boundary. `internal/pipeline`
 owns every interface it consumes — `DownloadingStore`, `PeerSearcher`, `MetricsSink`
-and the rest are declared next to their consumer, and `cmd/slskdarr/main.go` injects
+and the rest are declared next to their consumer, and `cmd/slusk/main.go` injects
 the concrete types — so backends can be swapped without touching use cases. It never
 imports `internal/observ`, but the reverse wiring is normal and already in place:
 `observ.Metrics` satisfies `pipeline.MetricsSink`. A new observation port follows that
@@ -230,8 +230,8 @@ own transport types and `main.go` adapts between them.
 
 ### Users
 
-Other self-hosters running slskdarr on their own hardware. They know Lidarr and
-Soulseek; they do not know slskdarr's internal state machine, and the interface must
+Other self-hosters running slusk on their own hardware. They know Lidarr and
+Soulseek; they do not know slusk's internal state machine, and the interface must
 not assume they do — a state name that only makes sense if you have read
 `internal/pipeline` is a bug in the interface, not a gap in the user.
 
@@ -263,7 +263,7 @@ idiom is a *modern* terminal — htop and k9s, not a VT220 emulator.
 `prefers-color-scheme` branches, do not build a light theme, do not add tokens whose
 only purpose is to make one possible later.
 
-- The visual spec is `docs/design/slskdarr-tui.dc.html` (plus the dashboard mock beside
+- The visual spec is `docs/design/slusk-tui.dc.html` (plus the dashboard mock beside
   it) and `docs/superpowers/specs/2026-07-25-tui-reskin-design.md`. Grep the local
   files; they are the source of truth for spacing, weight and hue.
 - Every colour lives in `web/src/styles/tokens.css`. A raw hex in a `.module.css` is

@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // MetricsSink receives reconciliation metrics. A nil sink is a no-op, so

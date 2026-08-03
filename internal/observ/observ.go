@@ -19,11 +19,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
-// Metrics holds the Prometheus collectors slskdarr exports.
+// Metrics holds the Prometheus collectors slusk exports.
 type Metrics struct {
 	ReconcileTotal      prometheus.Counter
 	UnknownTransfers    prometheus.Gauge
@@ -36,19 +36,19 @@ type Metrics struct {
 func NewMetrics(reg *prometheus.Registry) *Metrics {
 	m := &Metrics{
 		ReconcileTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "slskdarr_reconcile_total", Help: "Total reconciliation passes run.",
+			Name: "slusk_reconcile_total", Help: "Total reconciliation passes run.",
 		}),
 		UnknownTransfers: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "slskdarr_unknown_transfers", Help: "slskd transfers not tracked by slskdarr.",
+			Name: "slusk_unknown_transfers", Help: "slskd transfers not tracked by slusk.",
 		}),
 		DownloadsActive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "slskdarr_downloads_active", Help: "Currently active downloads.",
+			Name: "slusk_downloads_active", Help: "Currently active downloads.",
 		}),
 		AlbumReleasesErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "slskdarr_album_releases_errors_total", Help: "Total failed Lidarr AlbumReleases calls during discovery.",
+			Name: "slusk_album_releases_errors_total", Help: "Total failed Lidarr AlbumReleases calls during discovery.",
 		}),
 		AlbumTracksErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "slskdarr_album_tracks_errors_total", Help: "Total failed Lidarr AlbumTracks calls during discovery.",
+			Name: "slusk_album_tracks_errors_total", Help: "Total failed Lidarr AlbumTracks calls during discovery.",
 		}),
 	}
 	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors)
@@ -64,7 +64,7 @@ func (m *Metrics) IncAlbumReleasesError() { m.AlbumReleasesErrors.Inc() }
 // IncAlbumTracksError counts one failed Lidarr AlbumTracks call in Discovery.
 func (m *Metrics) IncAlbumTracksError() { m.AlbumTracksErrors.Inc() }
 
-// SetUnknownTransfers records the current count of slskd transfers not tracked by slskdarr.
+// SetUnknownTransfers records the current count of slskd transfers not tracked by slusk.
 func (m *Metrics) SetUnknownTransfers(n int) { m.UnknownTransfers.Set(float64(n)) }
 
 // SetDownloadsActive records the current count of active downloads.
@@ -427,7 +427,7 @@ type ServerDeps struct {
 	// GET /api/config; it never carries secrets — see AppConfig. ConfigWriter
 	// applies a validated settings update from the same path's POST, and
 	// Restart is invoked afterward to reload the process with the new config
-	// (see cmd/slskdarr/main.go). ConnectionTester backs the settings view's
+	// (see cmd/slusk/main.go). ConnectionTester backs the settings view's
 	// connection checks.
 	Config           ConfigFunc
 	ConfigWriter     ConfigWriter
@@ -518,7 +518,7 @@ type ServerDeps struct {
 	// today's behavior for every other endpoint.
 	Shutdown <-chan struct{}
 	// TokenAuth is the TOKEN-ONLY authenticator (observ.NewTokenAuthenticator,
-	// NOT the AnyOf-combined instance cmd/slskdarr/main.go wraps the whole
+	// NOT the AnyOf-combined instance cmd/slusk/main.go wraps the whole
 	// handler in via ProtectPrivateEndpoints), threaded in separately so GET
 	// /api/auth/session (itself public, see isPrivatePath) can specifically
 	// report whether the request carries a valid bearer/Basic token, as
@@ -1070,7 +1070,7 @@ type createJobRequest struct {
 }
 
 // mbidPattern matches a MusicBrainz id: a lowercase UUID, 8-4-4-4-12 hex
-// digits. Every MBID slskdarr reads back from internal/musicbrainz is
+// digits. Every MBID slusk reads back from internal/musicbrainz is
 // already in this exact form, so a value that doesn't match one is not a
 // real MBID and must be rejected rather than passed through to Lidarr.
 var mbidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)

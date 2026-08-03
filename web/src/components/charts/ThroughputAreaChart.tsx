@@ -25,7 +25,7 @@ export default function ThroughputAreaChart({
   direction: ThroughputDirection;
   /**
    * The 27 July restyle (#281) stacks DOWN above UP under one shared axis
-   * row rather than one per chart (docs/design/slskdarr-tui.dc.html:174) —
+   * row rather than one per chart (docs/design/slusk-tui.dc.html:174) —
    * Overview renders that shared row itself and passes `false` here for
    * both directions.
    */

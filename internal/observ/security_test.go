@@ -191,7 +191,7 @@ func TestPrivateEndpointsAcceptBearerAndBasicToken(t *testing.T) {
 		auth func(*http.Request)
 	}{
 		{name: "bearer", auth: func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testAuthToken) }},
-		{name: "basic browser", auth: func(r *http.Request) { r.SetBasicAuth("slskdarr", testAuthToken) }},
+		{name: "basic browser", auth: func(r *http.Request) { r.SetBasicAuth("slusk", testAuthToken) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -263,7 +263,7 @@ func TestDeleteMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 			req := httptest.NewRequest(http.MethodDelete, "http://example.com/api/jobs/42", nil)
 			switch tt.auth {
 			case "basic":
-				req.SetBasicAuth("slskdarr", testAuthToken)
+				req.SetBasicAuth("slusk", testAuthToken)
 			case "bearer":
 				req.Header.Set("Authorization", "Bearer "+testAuthToken)
 			default:
@@ -326,7 +326,7 @@ func TestMarkReadAuthenticationAndSameOriginProtection(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "http://example.com/api/messages/someuser/read", nil)
 			switch tt.auth {
 			case "basic":
-				req.SetBasicAuth("slskdarr", testAuthToken)
+				req.SetBasicAuth("slusk", testAuthToken)
 			case "bearer":
 				req.Header.Set("Authorization", "Bearer "+testAuthToken)
 			default:
@@ -402,7 +402,7 @@ func TestMutationAuthenticationAndSameOriginProtection(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "http://example.com/api/jobs/42/cancel", strings.NewReader(""))
 			switch tt.auth {
 			case "basic":
-				req.SetBasicAuth("slskdarr", testAuthToken)
+				req.SetBasicAuth("slusk", testAuthToken)
 			case "bearer":
 				req.Header.Set("Authorization", "Bearer "+testAuthToken)
 			default:

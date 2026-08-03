@@ -13,7 +13,7 @@ docs/
 .superpowers/
 
 # Build artifacts — host-specific or regenerated in-image; mirrors .gitignore.
-/slskdarr
+/slusk
 /internal/observ/web/dist/*
 !/internal/observ/web/dist/placeholder.html
 /web/node_modules/

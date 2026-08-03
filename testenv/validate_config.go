@@ -1,12 +1,12 @@
 // Command validate_config checks the generated lab configuration with the same
-// strict loader used by slskdarr itself.
+// strict loader used by slusk itself.
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
+	"github.com/samuelenocsson/slusk/internal/config"
 )
 
 func main() {

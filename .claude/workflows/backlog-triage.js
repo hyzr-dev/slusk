@@ -311,7 +311,7 @@ for (const item of selected) {
      logs into a real Soulseek account, takes minutes, and only one can run.
 
      Serve the frontend from this checkout on a free port with
-     SLSKDARR_DEV_API=http://localhost:9090, using env to set it so the command
+     SLUSK_DEV_API=http://localhost:9090, using env to set it so the command
      works regardless of shell.
 
      Return the three-value verdict with evidence. Reading the CSS instead of

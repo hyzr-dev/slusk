@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
 )
 
 func TestEmbeddedMessageDeserializeRawRemainingPayload(t *testing.T) {

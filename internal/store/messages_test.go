@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/store/storetest"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/store/storetest"
 )
 
 func TestRecordIncomingMessageIsIdempotentOnServerID(t *testing.T) {

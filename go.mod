@@ -1,4 +1,4 @@
-module github.com/samuelenocsson/slskdarr
+module github.com/samuelenocsson/slusk
 
 go 1.26.3
 

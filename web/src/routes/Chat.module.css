@@ -1,4 +1,4 @@
-/* Two-pane layout (docs/design/slskdarr-tui.dc.html CHAT block). Only the
+/* Two-pane layout (docs/design/slusk-tui.dc.html CHAT block). Only the
    message pane scrolls — the rail and composer stay fixed. `flex: 1` grows
    this to the bottom of the Page column, which fills <main> (see Page.module
    .css's min-height), reproducing the mock's `flex:1` + `min-height:280px`

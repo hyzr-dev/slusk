@@ -13,8 +13,8 @@ Dagens UI är `internal/observ/web/dashboard.html` (141 rader, inline `<style>`)
 Det täcker fyra vyer: Översikt, Jobb, Händelser, Peers. Data hämtas klientsidigt
 från REST-endpoints med `setInterval`-polling.
 
-Ett färdigt designprojekt finns i Claude Design ("Slskdarr Dashboard Design",
-`Slskdarr Dashboard.dc.html`). Det är en omdesign av samma funktionsyta med fyra
+Ett färdigt designprojekt finns i Claude Design ("Slusk Dashboard Design",
+`Slusk Dashboard.dc.html`). Det är en omdesign av samma funktionsyta med fyra
 vyer — Översikt, Kö, Hälsa, Inställningar — men rikare: expanderbara jobbrader,
 filterchips, sparklines, charts och toasts.
 
@@ -62,7 +62,7 @@ En `Makefile` binder ihop stegen:
 | Mål | Gör |
 | --- | --- |
 | `make ui` | `npm ci && npm run build` i `web/` |
-| `make build` | `make ui` följt av `go build ./cmd/slskdarr` |
+| `make build` | `make ui` följt av `go build ./cmd/slusk` |
 | `make dev` | Vite dev-server med `/api`-proxy mot lokal Go-binär |
 | `make test` | `go test ./...` och `npm test` i `web/` |
 
@@ -156,7 +156,7 @@ Spårat som #86.
 engelskt UI: ISO-liknande datum är mer läsbara i ett tekniskt verktyg än `en-US`
 format. Att formatteringen ligger bakom en funktion gör valet enkelt att ändra.
 
-**Serverstate: TanStack Query.** Nästan all data i slskdarr är serverstate —
+**Serverstate: TanStack Query.** Nästan all data i slusk är serverstate —
 jobb, händelser, peers, hälsa — med minimal klientstate utöver filterval.
 Biblioteket ger polling, cache, "behåll senast kända data vid fel", och framför allt
 deklarativ invalidering efter mutationer. Med överlappande data mellan vyer (jobb

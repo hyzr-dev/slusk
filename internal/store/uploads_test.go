@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 func recordTestUpload(t *testing.T, s *Store, e core.UploadHistoryEntry) {

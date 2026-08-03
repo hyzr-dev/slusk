@@ -18,8 +18,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/samuelenocsson/slskdarr/internal/app"
-	"github.com/samuelenocsson/slskdarr/internal/core"
+	"github.com/samuelenocsson/slusk/internal/app"
+	"github.com/samuelenocsson/slusk/internal/core"
 )
 
 // IdentifySearchFunc runs a combined artist+album search against

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 // TransferInit we send this to a peer via a ‘F’ connection to tell them that we want to start uploading a file.

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/distributed"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek/soul/internal"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/distributed"
+	"github.com/samuelenocsson/slusk/internal/soulseek/soul/internal"
 )
 
 const CodeEmbeddedMessage Code = 93

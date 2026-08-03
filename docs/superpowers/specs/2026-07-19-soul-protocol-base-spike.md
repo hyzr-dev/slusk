@@ -7,7 +7,7 @@
 
 ## Question
 
-Can bh90210/soul serve as the message layer for slskdarr's native Soulseek
+Can bh90210/soul serve as the message layer for slusk's native Soulseek
 protocol implementation (`internal/soulseek`, issues #52–#57), replacing the
 slskd dependency?
 
@@ -46,7 +46,7 @@ The message codec is genuinely standalone: packages `server`, `peer`, `file`,
 `distributed` and the framing code in `internal/` are **stdlib-only**, one file
 per message, generic `Read`/`Write` per package. All eight external
 dependencies are confined to the high-level `client/` package (zerolog,
-nanoid, etc.), which duplicates concerns slskdarr already owns (logging,
+nanoid, etc.), which duplicates concerns slusk already owns (logging,
 state, config) and is not a fit.
 
 ### Practical verification
@@ -92,7 +92,7 @@ the wire format works against the live network.
 ## Decision
 
 **Vendor a forked subset** — `soul.go`, `internal/`, `server/`, `peer/`,
-`file/`, `distributed/` (drop `client/`, `cmd/`) — into slskdarr under
+`file/`, `distributed/` (drop `client/`, `cmd/`) — into slusk under
 `internal/soulseek/`, as the starting point for the protocol core (#52).
 Unlicense means no attribution is required, but we keep a provenance note
 pointing at the upstream commit.

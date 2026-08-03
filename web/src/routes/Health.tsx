@@ -29,7 +29,7 @@ export default function Health() {
   const names = Object.keys(modules).sort();
 
   // Human-readable counters, not Prometheus metric names — see strings.ts
-  // health.metricsHeading for why the mock's slskdarr_* row labels aren't used.
+  // health.metricsHeading for why the mock's slusk_* row labels aren't used.
   // Each row carries the phase of the query its value came from, so a failed
   // uploads/shares poll doesn't blank the status-sourced rows next to it.
   // Also feeds the dependency-modules region below — named after its source

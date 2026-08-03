@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/samuelenocsson/slskdarr/internal/config"
-	"github.com/samuelenocsson/slskdarr/internal/core"
-	"github.com/samuelenocsson/slskdarr/internal/soulseek"
+	"github.com/samuelenocsson/slusk/internal/config"
+	"github.com/samuelenocsson/slusk/internal/core"
+	"github.com/samuelenocsson/slusk/internal/soulseek"
 )
 
 func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, sink soulseek.MessageSink, uploads soulseek.UploadSink, shareCache soulseek.ShareMetaCache, logger *slog.Logger) *soulseek.Client {
