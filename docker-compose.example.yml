@@ -184,10 +184,3 @@ volumes:
 #       - gluetun
 #       - postgres
 #     # ports: intentionally omitted - see gluetun's ports above
-
-# --- Option: automatic redeploy on a new release ---
-# The homelab deployment adds labels its updater watches, and opts out of
-# watchtower so the two don't fight over the same container:
-#   labels:
-#     - "com.centurylinklabs.watchtower.enable=false"
-#     - "se.shcizo.auto-update=true"
