@@ -17,14 +17,23 @@ api_key = "CHANGEME"
 # section. Everything else in [pipeline] is optional; an absent key uses the
 # default shown.
 #
-# Which peer backend drives the pipeline: "slskd" (the slskd daemon, default)
-# or "soulseek" (the native internal/soulseek client, connecting directly to
-# the Soulseek server). Setting this to "soulseek" makes the whole [slskd]
-# section above optional, since nothing in the pipeline talks to it anymore -
-# but a configured [soulseek] section below becomes required instead. The
-# native backend is experimental while it's being tuned against production
-# traffic; slskd remains the default and the safe fallback.
-# backend = "slskd"
+# REQUIRED. Which peer backend drives the pipeline: "soulseek" (the native
+# internal/soulseek client, connecting directly to the Soulseek server) or
+# "slskd" (the slskd daemon). There is deliberately no default - this decides
+# which client performs every search and transfer, which is too consequential
+# to inherit from a key you never wrote.
+#
+# "soulseek" is the recommended setting: it is the client under active
+# development, and the one testenv/ exercises by default, so it sees more real
+# traffic before merge than the slskd path does. It makes the whole [slskd]
+# section above unnecessary, since nothing in the pipeline talks to it anymore,
+# and makes a configured [soulseek] section below required instead.
+#
+# "slskd" keeps the slskd daemon doing the searching and transferring. Choose it
+# if you already run one. slusk's slskd adapter is experimental: it does
+# everything the pipeline asks of it, but it is a small, static piece of code on
+# a fraction of the test coverage, and the lab does not exercise it by default.
+backend = "soulseek"
 max_candidates_per_album = 5
 transfer_deadline = "30m"
 stall_timeout = "5m"
@@ -136,22 +145,24 @@ listen_addr = "0.0.0.0:9090"
 # the next job to scan. Nothing ever prunes that directory - clear it yourself.
 slskd_complete_dir = "/music/slskd-downloads"
 
-# Optional: enable a direct connection to the central Soulseek server,
-# separate from the [slskd] daemon. Uncomment and fill in credentials to
-# enable it; leaving the whole section absent (or every field blank) keeps
-# it disabled. Once enabled, it can also drive pipeline downloads directly
-# instead of slskd - see pipeline.backend above.
-# [soulseek]
-# server_address = "server.slsknet.org:2242"
-# username = "CHANGEME"
-# password = "CHANGEME"
-#
+# A direct connection to the central Soulseek server, separate from the [slskd]
+# daemon. Required by the recommended pipeline.backend = "soulseek" above; with
+# backend = "slskd" the whole section is optional, and leaving it absent (or
+# every field blank) keeps the native client switched off. Note that it is worth
+# configuring even under backend = "slskd": shares, private messaging and uploads
+# are driven by this client, not by the backend choice, so they stay switched off
+# without it.
+[soulseek]
+server_address = "server.slsknet.org:2242"
+username = "CHANGEME"
+password = "CHANGEME"
+
 # listen_addr is where slusk listens for incoming peer connections and is
 # what gets advertised to the server after login - there is no separate
 # "advertised port" concept, so other peers must be able to reach this port
 # directly. With Docker port mapping, the published host port MUST equal the
 # container port (e.g. "2234:2234"), or use host networking instead.
-# listen_addr = "0.0.0.0:2234"
+listen_addr = "0.0.0.0:2234"
 #
 # Two upload slots are used by default. Negotiation and streaming both occupy
 # a slot; additional requests wait in a bounded global FIFO queue.

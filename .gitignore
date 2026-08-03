@@ -5,8 +5,7 @@ config.toml
 config.toml.*
 .env
 
-# Local compose override; the tracked examples are docker-compose.example.yml
-# and docker-compose.prod.yml.
+# Your working copy of the one tracked compose file, docker-compose.example.yml.
 docker-compose.yml
 
 # Local database and build artifacts

@@ -59,9 +59,14 @@ cp testenv/.env.example testenv/.env   # first time: fill in two Soulseek test a
 
 - **Two distinct Soulseek accounts are required.** Soulseek permits one login per
   account and both clients log in regardless of backend. Never use your own account.
-- The lab defaults to `SLUSK_BACKEND=soulseek` (the native client), which is the
-  opposite of the app's own default in `config.example.toml`. That is deliberate — the
-  native backend is the experimental one and the lab exists to exercise it.
+- The lab defaults to `SLUSK_BACKEND=soulseek` (the native client), matching the value
+  `config.example.toml` ships and the README recommends. `pipeline.backend` itself has
+  **no default at all** — it is required (#396), so "the app's default" is not a thing
+  to reason about; the example template's value is what a new user actually gets.
+  Both backends carry a caveat, for different reasons, and neither should be described
+  as the proven one: the native client is young and under active development, and
+  slusk's slskd *adapter* (not slskd, a mature project) is a small, static piece of code
+  on a fraction of the test coverage that the lab does not exercise by default.
 - Results are not hermetic: peer availability and transfer speed vary between runs, so
   a `FAILED` job is evidence to investigate, not proof of a regression.
 - Container logs echo the Soulseek usernames. Don't paste lab output verbatim into

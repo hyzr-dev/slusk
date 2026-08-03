@@ -1,15 +1,23 @@
-# docker-compose for slusk.
-# With the default slskd backend, slusk needs no media mount. But with
-# pipeline.backend = "soulseek" (the native backend) it downloads files itself
-# and needs a WRITABLE volume at paths.slskd_complete_dir (see the mount below);
-# the slskd backend only ever read that path.
+# docker-compose for slusk — the one file to copy.
+#
+#   cp docker-compose.example.yml docker-compose.yml
+#   cp config.example.toml config/config.toml   # then fill it in
+#   docker compose up -d
+#
+# docker-compose.yml is gitignored, so your copy (and any local edits to it)
+# stays out of the repo. Every deployment variant this project supports is a
+# commented block at the bottom of this file: external Postgres, an existing
+# arr network, gluetun with VPN port forwarding, and building from source.
+#
+# State lives in PostgreSQL, which this file bundles — slusk itself keeps no
+# data volume, so it needs no writable state mount of its own.
+#
+# With the default slskd backend, slusk needs no media mount: it only hands
+# Lidarr a path to import from. With pipeline.backend = "soulseek" (the native
+# backend) it downloads the files itself and needs a WRITABLE volume at
+# paths.slskd_complete_dir; the slskd backend only ever reads that path.
 # Named Soulseek shares are scanned and served read-only; mount only those roots
 # and use their in-container paths in [[soulseek.shared_folders]].
-#
-# State lives in PostgreSQL (store.dsn in config.toml), so slusk itself needs
-# no data volume. This example bundles a local Postgres for development; in
-# production you would typically point store.dsn at a shared external instance
-# instead (see docker-compose.prod.yml).
 
 services:
   postgres:
@@ -22,27 +30,45 @@ services:
       POSTGRES_DB: slusk
     volumes:
       - slusk-pgdata:/var/lib/postgresql/data
+    # slusk exits non-zero if it cannot reach the database at startup, so
+    # without this gate it crash-loops (harmlessly, but confusingly) until
+    # Postgres finishes initialising on a first run.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slusk -d slusk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   slusk:
-    build: .
-    # ...or, if you build/pull separately: image: slusk:latest
+    image: ghcr.io/hyzr-dev/slusk:${SLUSK_TAG:-latest}
+    # ...or build from this checkout instead: build: .
     container_name: slusk
     restart: unless-stopped
 
     # Non-root. Set this to your usual arr PUID:PGID.
-    user: "1000:1000"
+    user: "${PUID:-1000}:${PGID:-1000}"
 
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
     volumes:
-      # A writable directory mount is required for editing settings from the
+      # A writable DIRECTORY mount is required for editing settings from the
       # UI (issue #89): slusk writes the updated config.toml back into
       # this directory, which needs an atomic rename to land safely, so a
       # single bind-mounted file cannot be modified this way. A read-only
       # single-file mount (./config.toml:/config/config.toml:ro) is still
       # supported and works exactly as before, but makes settings read-only
-      # in the UI.
+      # in the UI. Either way the PUID:PGID above must be able to read it, and
+      # to write it if you want settings editable. On Docker Desktop for Mac,
+      # virtiofs does not map bind-mount UIDs the way Linux does, so a mount
+      # that works on a Linux server can still land unreadable there - check
+      # this first if startup cannot read the config. slusk used to sidestep
+      # this with a named volume plus a one-shot chown init service, because a
+      # freshly created named volume is root-owned; that was for the old SQLite
+      # database, and Postgres removed the need for slusk to write a volume at
+      # all. The Postgres image chowns slusk-pgdata itself, so nothing here
+      # needs an init service any more - only this bind mount can bite.
       - ./config:/config
       # Required with pipeline.backend = "soulseek": the native backend writes
       # completed downloads here itself, so this must be WRITABLE by the
@@ -55,12 +81,14 @@ services:
       # - /host/music:/shares/music:ro
 
     ports:
-      # Public: /healthz only. Dashboard, API, /status, and /metrics require the
-      # [observ] auth_token from config.toml. Keep that file out of source
-      # control and send the token in Authorization, never in a URL/query.
-      # The host side is bound to loopback for local-only development. A TLS
-      # reverse proxy may expose it, but must preserve Host and replace any
-      # client X-Forwarded-Proto with exactly one trusted http/https value.
+      # Public: /healthz, /readyz and the dashboard shell only. Every API,
+      # /status and /metrics request needs either a browser session (the first
+      # visit prompts to create the single account) or the [observ] auth_token
+      # from config.toml. Keep that file out of source control and send the
+      # token in Authorization, never in a URL/query.
+      # The host side is bound to loopback here. A TLS reverse proxy may expose
+      # it, but must preserve Host and replace any client X-Forwarded-Proto with
+      # exactly one trusted http/https value.
       - "127.0.0.1:9090:9090"
       # Soulseek peer listener; uncomment when [soulseek] is enabled in
       # config.toml. The published host port MUST equal the container port
@@ -69,11 +97,36 @@ services:
       # can't actually reach.
       # - "2234:2234"
 
+    # The image ships a HEALTHCHECK (see Dockerfile) that polls the reconcile
+    # loop's own liveness at /healthz, not just "is the process alive" — a hung
+    # HTTP/DB call inside a reconcile pass can otherwise wedge the loop forever
+    # without the process ever exiting. Both `docker compose` and `docker stack
+    # deploy` (Swarm) read this from the image automatically; Swarm reschedules
+    # a task once it's reported unhealthy for --retries consecutive checks.
+
     # After changing share contents, atomically rescan without restarting:
     #   docker kill --signal=HUP slusk
 
 volumes:
   slusk-pgdata:
+
+# --- Option: pin a release instead of tracking :latest ---
+# SLUSK_TAG=v1.2.3 in the environment or a .env file next to this file. Images
+# are published to ghcr.io/hyzr-dev/slusk on every v* tag, as :vX.Y.Z and
+# :latest. To update:
+#   docker compose pull && docker compose up -d
+
+# --- Option: build from source instead of pulling ---
+# Replace the `image:` line on the slusk service with `build: .` and run
+# `docker compose up -d --build`. Needed on architectures the published image
+# does not cover, or to run an unreleased checkout.
+
+# --- Option: use an external Postgres ---
+# If you already run a shared Postgres, delete the `postgres` service, the
+# `depends_on` block, and the `slusk-pgdata` volume above, then point
+# store.dsn in config.toml at that instance. The database and role must exist
+# already; slusk creates and migrates its own schema on startup. This is the
+# only variant where the compose file bundles no database.
 
 # --- Option: run inside your existing arr-stack compose ---
 # If slskd/lidarr are services in the SAME compose project, put slusk on their
