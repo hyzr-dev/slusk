@@ -138,8 +138,10 @@ type PipelineConfig struct {
 	// StuckAfter elapses. Default 5m.
 	ImportRetryCooldown Duration `toml:"import_retry_cooldown"`
 	// Backend selects which peer backend drives the pipeline: BackendSlskd
-	// (the slskd daemon, the default) or BackendSoulseek (the native
-	// internal/soulseek client). Default BackendSlskd.
+	// (the slskd daemon) or BackendSoulseek (the native internal/soulseek
+	// client). Required, with no default on purpose: it decides which client
+	// performs every search and transfer, which is too consequential a choice
+	// to inherit silently from a key the operator never wrote (issue #396).
 	Backend string `toml:"backend"`
 }
 
@@ -204,9 +206,6 @@ func (p *PipelineConfig) applyDefaults() {
 	}
 	if p.ImportRetryCooldown.Duration == 0 {
 		p.ImportRetryCooldown.Duration = 5 * time.Minute
-	}
-	if p.Backend == "" {
-		p.Backend = BackendSlskd
 	}
 }
 
@@ -445,6 +444,11 @@ func (c Config) Validate() error {
 		problems = append(problems, "lidarr.api_key is required")
 	}
 	switch c.Pipeline.Backend {
+	case "":
+		// Distinct from the default branch below: an absent key and a
+		// misspelled value need different fixes, and "must be x or y" reads
+		// like the value was wrong rather than never written.
+		problems = append(problems, fmt.Sprintf("pipeline.backend is required (%q or %q)", BackendSlskd, BackendSoulseek))
 	case BackendSlskd:
 		if c.Slskd.URL == "" {
 			problems = append(problems, "slskd.url is required")

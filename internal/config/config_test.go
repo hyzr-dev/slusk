@@ -487,13 +487,38 @@ func TestLoadSoulseekNonNumericPortListenAddr(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultBackendIsSlskd(t *testing.T) {
-	cfg, err := Load("testdata/valid.toml")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+func TestExampleConfigLoads(t *testing.T) {
+	// config.example.toml is what every operator copies, so it has to survive
+	// the same strict loading their copy will. Making pipeline.backend
+	// required (issue #396) is exactly the change that can silently leave the
+	// template invalid: the key is added to the validator and forgotten in the
+	// example, and nobody notices until a stranger's first start fails.
+	if _, err := Load("../../config.example.toml"); err != nil {
+		t.Fatalf("config.example.toml does not load: %v", err)
 	}
-	if cfg.Pipeline.Backend != BackendSlskd {
-		t.Errorf("Backend = %q, want %q", cfg.Pipeline.Backend, BackendSlskd)
+}
+
+func TestLoadMissingBackendFails(t *testing.T) {
+	// pipeline.backend has no default: it decides which client drives every
+	// download, so it must be stated rather than inherited (issue #396).
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(base), "backend = \"slskd\"\n", "", 1)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("expected error for a missing pipeline.backend, got nil")
+	}
+	if !strings.Contains(err.Error(), "pipeline.backend") {
+		t.Errorf("error should name the missing field: %v", err)
+	}
+	if !strings.Contains(err.Error(), "required") {
+		t.Errorf("error should say the field is required, not that its value is invalid: %v", err)
 	}
 }
 
@@ -502,7 +527,7 @@ func TestLoadBackendSoulseekWithoutSoulseekSectionFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"soulseek\"\n", 1)
+	contents := strings.Replace(string(base), "backend = \"slskd\"", "backend = \"soulseek\"", 1)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
@@ -523,7 +548,7 @@ func TestLoadBackendSoulseekWithSlskdSectionValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"soulseek\"\n", 1)
+	contents := strings.Replace(string(base), "backend = \"slskd\"", "backend = \"soulseek\"", 1)
 	contents += "\n[soulseek]\nusername = \"souluser\"\npassword = \"soulpass\"\n"
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -591,7 +616,7 @@ func TestLoadUnknownBackendValueFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents := strings.Replace(string(base), "[pipeline]\n", "[pipeline]\nbackend = \"bogus\"\n", 1)
+	contents := strings.Replace(string(base), "backend = \"slskd\"", "backend = \"bogus\"", 1)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)

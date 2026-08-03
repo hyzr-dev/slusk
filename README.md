@@ -89,10 +89,12 @@ Keep `config/config.toml` out of source control. It holds API keys.
   Soulseek server directly and no slskd is involved at all. Requires a `[soulseek]`
   section; the `[slskd]` section becomes unnecessary.
 - `"slskd"` — slskd does the searching and transferring. Requires the `[slskd]` section.
-  Worth choosing if you already run slskd and want to keep it.
+  Worth choosing if you already run slskd and want to keep it. slusk's slskd adapter is
+  experimental.
 
-`pipeline.backend` still defaults to `"slskd"` when the key is absent, so set it
-explicitly.
+`pipeline.backend` is **required and has no default.** Leaving it out is a startup error,
+not a silent choice — it decides which client performs every search and transfer, which
+is too consequential to inherit from a key you never wrote.
 
 The native client is the newer of the two and the one under active development — it is
 also what this project's own pre-merge test lab exercises by default, so in practice it
