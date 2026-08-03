@@ -22,6 +22,13 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 # Runtime stage: distroless, non-root, fixed UID.
 FROM gcr.io/distroless/static-debian12:nonroot
+
+# ghcr.io links a package to a repository by this label, and a linked package
+# inherits that repository's visibility. Without it the package sits loose in the
+# org and stays private even when the repo is public, which surfaces as an auth
+# error on `docker pull` rather than as a visibility problem.
+LABEL org.opencontainers.image.source="https://github.com/hyzr-dev/slusk"
+
 COPY --from=build /out/slusk /usr/local/bin/slusk
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/slusk", "--config", "/config/config.toml"]

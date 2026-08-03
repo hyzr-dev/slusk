@@ -1,7 +1,12 @@
 name: Build and deploy
 
 # Triggered by a v* tag push (created by release.yml). Builds and pushes the
-# image to the Gitea registry, then tells the homelab updater to redeploy it.
+# image to ghcr.io, then tells the homelab updater to redeploy it.
+#
+# The build runs in Gitea but publishes to GitHub's registry, so the login uses a
+# GitHub account and a classic PAT with write:packages held in GHCR_TOKEN — not
+# gitea.actor or PACKAGES_TOKEN, which belong to the Gitea registry this no longer
+# pushes to. Fine-grained PATs cannot carry the packages scope at all.
 
 on:
   push:
@@ -17,12 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to Gitea registry
+      - name: Login to ghcr.io
         uses: docker/login-action@v3
         with:
-          registry: gitea.shcizo.se
-          username: ${{ gitea.actor }}
-          password: ${{ secrets.PACKAGES_TOKEN }}
+          registry: ghcr.io
+          username: shcizo
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -34,8 +39,8 @@ jobs:
           build-args: |
             VERSION=${{ gitea.ref_name }}
           tags: |
-            gitea.shcizo.se/shcizo/slusk:${{ gitea.ref_name }}
-            gitea.shcizo.se/shcizo/slusk:latest
+            ghcr.io/hyzr-dev/slusk:${{ gitea.ref_name }}
+            ghcr.io/hyzr-dev/slusk:latest
 
   deploy:
     runs-on: ubuntu-latest
@@ -44,6 +49,6 @@ jobs:
       - uses: https://gitea.shcizo.se/shcizo/package-updater-action@v1
         with:
           endpoint: https://updater.shcizo.se/update
-          image: gitea.shcizo.se/shcizo/slusk
+          image: ghcr.io/hyzr-dev/slusk
           tag: ${{ gitea.ref_name }}
           token: ${{ secrets.UPDATER_API_KEY }}

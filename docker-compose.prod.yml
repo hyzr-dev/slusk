@@ -58,7 +58,7 @@
 
 services:
   slusk:
-    image: gitea.shcizo.se/shcizo/slusk:${SLUSK_TAG:-latest}
+    image: ghcr.io/hyzr-dev/slusk:${SLUSK_TAG:-latest}
     container_name: slusk
     restart: unless-stopped
     labels:
