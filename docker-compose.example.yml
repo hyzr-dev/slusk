@@ -59,10 +59,16 @@ services:
       # single bind-mounted file cannot be modified this way. A read-only
       # single-file mount (./config.toml:/config/config.toml:ro) is still
       # supported and works exactly as before, but makes settings read-only
-      # in the UI. Either way the PUID:PGID above must be able to read it —
-      # on Docker Desktop for Mac, bind-mount ownership does not always map
-      # the way it does on Linux, so check this first if startup can't read
-      # the config.
+      # in the UI. Either way the PUID:PGID above must be able to read it, and
+      # to write it if you want settings editable. On Docker Desktop for Mac,
+      # virtiofs does not map bind-mount UIDs the way Linux does, so a mount
+      # that works on a Linux server can still land unreadable there - check
+      # this first if startup cannot read the config. slusk used to sidestep
+      # this with a named volume plus a one-shot chown init service, because a
+      # freshly created named volume is root-owned; that was for the old SQLite
+      # database, and Postgres removed the need for slusk to write a volume at
+      # all. The Postgres image chowns slusk-pgdata itself, so nothing here
+      # needs an init service any more - only this bind mount can bite.
       - ./config:/config
       # Required with pipeline.backend = "soulseek": the native backend writes
       # completed downloads here itself, so this must be WRITABLE by the
