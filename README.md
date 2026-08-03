@@ -94,12 +94,11 @@ With the native backend, slusk writes the completed downloads itself, so
 `paths.slskd_complete_dir` must be a **writable** volume shared with Lidarr at the path
 Lidarr expects. With the slskd backend it only ever reads that path.
 
-The native backend also needs incoming peer connections to reach it. Either forward
+The native backend also needs incoming peer connections to reach it. Forward
 `soulseek.listen_addr`'s port — the published host port **must equal** the container
 port, because there is no separate "advertised port" concept and a mismatched mapping
-advertises a port nobody can reach — or run behind gluetun with VPN port forwarding, in
-which case slusk asks gluetun for its forwarded port at startup. Both are covered in the
-compose file's commented blocks.
+advertises a port nobody can reach. If you route Soulseek through a VPN instead, see
+[Running the native backend behind gluetun](#running-the-native-backend-behind-gluetun).
 
 ### 4. Start it
 
@@ -124,6 +123,48 @@ Terminate TLS at a trusted reverse proxy before exposing the listener beyond a p
 network. The proxy must preserve `Host`, discard any client-supplied
 `X-Forwarded-Proto`, and set exactly one trusted value; that header also decides whether
 the session cookie is marked `Secure`.
+
+### Running the native backend behind gluetun
+
+Soulseek needs peers to be able to open connections *to* you, which is the awkward part
+of putting it behind a VPN: you need a provider and a gluetun setup that supports port
+forwarding, and the port you get is assigned dynamically rather than chosen.
+
+slusk handles that by asking gluetun what the port is. Set `[soulseek.gluetun]` in the
+config and, at startup, it fetches `GET {control_url}/v1/portforward` and listens on the
+port gluetun reports. Only the port half of `soulseek.listen_addr` is replaced — the host
+half is still used — so the static port you configured is ignored in this mode.
+
+```toml
+[soulseek.gluetun]
+control_url = "http://127.0.0.1:8000"
+api_key = "CHANGEME"
+```
+
+This only works if slusk shares gluetun's network namespace, so that `127.0.0.1` reaches
+the control server and inbound peer connections arrive on the forwarded port. In compose
+that means `network_mode: "service:gluetun"` on the slusk service, no `ports:` section of
+its own, and 9090 published on the gluetun service instead. The compose file has the
+whole thing as a commented block.
+
+`network_mode: "service:<name>"` is **not supported by Docker Swarm.** This is a plain
+`docker compose` arrangement only.
+
+Two things worth knowing before you debug it at 2am:
+
+- **gluetun ≥ v3.40 requires auth configuration on its own side** for the
+  `/v1/portforward` route. Without it every fetch gets 401 forever and slusk never starts
+  listening. Grant the route to the same key you put in `soulseek.gluetun.api_key`; on
+  older gluetun no auth is needed and the key is simply unused. slusk names the config
+  key in the error when it sees a 401 or 403, so the log will say which knob to turn.
+- **The port is fetched once, at startup, and never again.** If gluetun's forwarded port
+  changes while slusk is running — a reconnect, a server change — slusk keeps listening
+  on the old one and quietly stops being reachable. Restart slusk to pick up the new port.
+
+Starting slusk and gluetun together is fine. A control server that isn't up yet, or a
+gluetun that reports port 0 because forwarding hasn't been established, are both treated
+as transient: slusk retries with exponential backoff (from 5s, capped at 10 minutes,
+each attempt bounded at 5s) and logs a warning per attempt until it gets a real port.
 
 ### If you lock yourself out
 
