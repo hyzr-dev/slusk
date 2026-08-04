@@ -951,17 +951,35 @@ func TestRunInitialShareScanRetriesThenPublishes(t *testing.T) {
 	}
 }
 
-// failSerializeTooLarge makes the browse-frame serializer fail the way it
-// does for a share too big to publish, and restores it when the test ends.
-// The real serializer needs around 170k files to reach this (issue #408),
-// which is why the seam exists; peer's own tests cover that the serializer
-// really does return ErrMessageTooLarge at its limit.
+// failSerializeTooLarge makes the browse-frame serializer fail the way it does
+// for a share too big to publish, and restores it when the test ends.
+//
+// The error is produced by the real serializer, not hand-written: what has to
+// hold is that scanShares classifies the error peer actually returns at its
+// limit, and a fake error string would keep passing if that shape ever
+// changed. Only the *input* is synthetic - a share index that reaches the
+// limit for real needs around 170k files on disk (issue #408), while 17
+// maximum-length names reach it in memory - so the substitution costs nothing
+// the classification depends on.
 func failSerializeTooLarge(t *testing.T) {
 	t.Helper()
-	restore := serializeSharedFileList
-	serializeSharedFileList = func([]peer.Directory) ([]byte, error) {
-		return nil, fmt.Errorf("%w: shared file list decompressed payload exceeds its 16777216-byte limit", soul.ErrMessageTooLarge)
+	files := make([]peer.File, 17)
+	for i := range files {
+		files[i].Name = strings.Repeat("a", 1<<20)
 	}
+	oversized := &peer.SharedFileListResponse{Directories: []peer.Directory{{Name: "Music", Files: files}}}
+	// Serialized once and the error reused: reaching the limit means actually
+	// writing 16 MiB, which is the bulk of this test's runtime.
+	_, tooLarge := oversized.Serialize(oversized)
+	// Asserted, not assumed: if peer's limit ever rises above this fixture,
+	// the seam would start returning success and every test using it would
+	// pass for the wrong reason.
+	if !errors.Is(tooLarge, soul.ErrMessageTooLarge) {
+		t.Fatalf("fixture no longer exceeds the serializer's limit (err = %v); raise the file count", tooLarge)
+	}
+
+	restore := serializeSharedFileList
+	serializeSharedFileList = func([]peer.Directory) ([]byte, error) { return nil, tooLarge }
 	t.Cleanup(func() { serializeSharedFileList = restore })
 }
 

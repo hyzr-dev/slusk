@@ -16,6 +16,43 @@ import (
 	"github.com/hyzr-dev/slusk/internal/soulseek"
 )
 
+// TestSharesModuleStatusReportsPermanentFailure locks issue #408's /status
+// surface: after a share scan that no retry can fix, the shares module must
+// carry the reason and read as neither live nor ready - a share index that
+// cannot be published is not "still working on it". On a healthy scan the
+// entry is clean, so a reader never sees a stale explanation.
+func TestSharesModuleStatusReportsPermanentFailure(t *testing.T) {
+	failedAt := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	const failure = "soulseek: shared file list is too large to publish: 512345 shared files ..."
+
+	got := sharesModuleStatus(soulseek.ShareReport{
+		ShareStats: soulseek.ShareStats{LastError: failure, LastErrorAt: failedAt},
+	})
+	if got.LastError != failure {
+		t.Errorf("LastError = %q, want %q", got.LastError, failure)
+	}
+	if !got.LastErrorAt.Equal(failedAt) {
+		t.Errorf("LastErrorAt = %v, want %v", got.LastErrorAt, failedAt)
+	}
+	if got.Ready || got.Live {
+		t.Errorf("Live/Ready = %v/%v, want false/false after a permanent failure", got.Live, got.Ready)
+	}
+
+	indexedAt := failedAt.Add(time.Hour)
+	healthy := sharesModuleStatus(soulseek.ShareReport{
+		ShareStats: soulseek.ShareStats{Files: 8231, IndexedAt: indexedAt},
+	})
+	if !healthy.Ready || !healthy.Live {
+		t.Errorf("Live/Ready = %v/%v, want true/true after a successful scan", healthy.Live, healthy.Ready)
+	}
+	if healthy.LastError != "" || !healthy.LastErrorAt.IsZero() {
+		t.Errorf("healthy entry carries a failure: %q at %v", healthy.LastError, healthy.LastErrorAt)
+	}
+	if !healthy.LastSuccess.Equal(indexedAt) {
+		t.Errorf("LastSuccess = %v, want the index timestamp %v", healthy.LastSuccess, indexedAt)
+	}
+}
+
 type fakeShareRescanner struct {
 	calls  atomic.Int32
 	active atomic.Int32

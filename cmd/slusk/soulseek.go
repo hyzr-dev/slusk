@@ -8,6 +8,7 @@ import (
 
 	"github.com/hyzr-dev/slusk/internal/config"
 	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/observ"
 	"github.com/hyzr-dev/slusk/internal/soulseek"
 )
 
@@ -27,6 +28,27 @@ func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, sink souls
 		UploadSink:                uploads,
 		ShareMetaCache:            shareCache,
 	}, logger)
+}
+
+// sharesModuleStatus adapts a share report into the /status module entry for
+// sharing. Sharing is its own module rather than part of "soulseek", because
+// the two fail independently: a share index too large to publish (issue #408)
+// leaves the server connection perfectly healthy, so one reading would have
+// to lie about the other.
+//
+// Live and Ready are both keyed on LastError. A permanent share failure ends
+// the retries, so the module is neither making progress (not live) nor going
+// to (not ready) - unlike a pipeline module, which stays live as long as it
+// keeps attempting work.
+func sharesModuleStatus(report soulseek.ShareReport) observ.ModuleStatus {
+	healthy := report.LastError == ""
+	return observ.ModuleStatus{
+		LastSuccess: report.IndexedAt,
+		LastErrorAt: report.LastErrorAt,
+		LastError:   report.LastError,
+		Live:        healthy,
+		Ready:       healthy,
+	}
 }
 
 type shareRescanner interface {
