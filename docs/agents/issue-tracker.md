@@ -34,6 +34,11 @@ Use the `tea` CLI for all operations. **Never `gh`** — there is no GitHub remo
 - **`tea pulls create` uses the currently checked-out branch as the PR head**, not the
   branch named elsewhere. Always pass `--head` explicitly, then verify with
   `tea pulls <n> --output json`.
+- **`tea`'s JSON is not the Gitea API's JSON.** `tea pulls <n> --output json` flattens
+  `head` and `base` to plain branch-name strings, where the REST API nests them as
+  objects. The `d["head"]["ref"]` that every `gh`-shaped snippet uses raises
+  `TypeError: string indices must be integers` here. Read `d["head"]` directly, and
+  check the shape before porting any parsing from a GitHub example.
 - **`Closes #N` inside backticks does not auto-close the issue.** Gitea only parses the
   keyword in plain text.
 - **`tea pulls merge` failing with `"failed to merge PR, is it still open?"` is a raw 405
