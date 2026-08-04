@@ -492,6 +492,17 @@ export const t = {
     // for a user in exactly the state this warning card is shown to. Shown as
     // the fallback for a read-only config mount; Settings is the primary path.
     emptyConfigSnippet: '[[soulseek.shared_folders]]\nname = "Library"\npath = "/music/library"',
+    // The permanent scan failure (SharesReport.lastError, issue #408). It
+    // takes the place of emptyTitle above rather than stacking with it: a
+    // failed scan also reports zero folders, and "no shared folders
+    // configured" would then be a confident wrong diagnosis of a share that
+    // is configured perfectly well. No cause is named here — the backend's
+    // message is rendered verbatim below the body, so this copy stays true
+    // whatever gets classified as permanent later.
+    scanFailedTitle: 'Share index could not be published',
+    scanFailedBody:
+      'The last scan failed in a way that retrying will not fix, so no files are being shared and slusk has stopped trying. It reported:',
+    scanFailedSuffix: 'Resolve the cause, then run a rescan.',
     statNever: 'Never',
     panelTitle: 'SHARED FOLDERS',
     summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,

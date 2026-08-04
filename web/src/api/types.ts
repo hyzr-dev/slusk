@@ -546,6 +546,15 @@ export interface SharesReport {
   files: number;
   totalBytes: number;
   folders: ShareFolder[];
+  /**
+   * Why sharing is off, when the last scan failed in a way retrying cannot fix
+   * (issue #408) — today: a share index too large to fit in a browse response.
+   * Absent, not "", when the last scan succeeded: the backend omits the key
+   * rather than serving an empty message that would read as "failed silently".
+   * It is the only thing distinguishing a failed scan from an empty share —
+   * both report zero files and zero folders.
+   */
+  lastError?: string;
 }
 
 /** POST /api/shares/rescan 202 response body. */

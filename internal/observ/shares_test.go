@@ -75,6 +75,55 @@ func TestSharesEndpointServesReportShape(t *testing.T) {
 	}
 }
 
+// TestSharesEndpointServesLastErrorOnlyWhenSet locks issue #408's share
+// surface: a scan that failed in a way no retry can fix has to reach the
+// frontend, or a zero-file report is indistinguishable from an empty share.
+// The field is absent (not "") on success, because an empty message would
+// read as "failed, no detail" rather than "did not fail".
+func TestSharesEndpointServesLastErrorOnlyWhenSet(t *testing.T) {
+	const failure = "soulseek: shared file list is too large to publish: 512345 shared files ..."
+	for _, tt := range []struct {
+		name       string
+		lastError  string
+		wantBody   string
+		wantAbsent bool
+	}{
+		{name: "failed", lastError: failure, wantBody: `"lastError":`},
+		{name: "succeeded", wantAbsent: true, wantBody: `"lastError"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			shares := func() ShareStatsReport { return ShareStatsReport{LastError: tt.lastError} }
+			h := newSharesTestHandler(reg, shares, noopRescanShares)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/shares", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if tt.wantAbsent {
+				if strings.Contains(body, tt.wantBody) {
+					t.Errorf("expected no lastError key on a successful scan, got %s", body)
+				}
+				return
+			}
+			if !strings.Contains(body, tt.wantBody) {
+				t.Errorf("expected %s in body, got %s", tt.wantBody, body)
+			}
+			var got sharesDTO
+			if err := json.NewDecoder(strings.NewReader(body)).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.LastError != failure {
+				t.Errorf("LastError = %q, want %q", got.LastError, failure)
+			}
+		})
+	}
+}
+
 // TestSharesEndpointEmptyFoldersEmitsEmptyArrayNotNull asserts folders is
 // always "[]" in JSON, never null, matching toChartsDTO's convention.
 func TestSharesEndpointEmptyFoldersEmitsEmptyArrayNotNull(t *testing.T) {

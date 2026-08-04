@@ -139,6 +139,35 @@ describe('no shares configured', () => {
   });
 });
 
+describe('permanent scan failure', () => {
+  const lastError =
+    'soulseek: shared file list is too large to publish: 512345 shared files in 41022 directories do not fit in a browse response, so sharing is disabled until fewer files are shared';
+
+  it('explains the failure verbatim instead of blaming the configuration', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [], files: 0, lastError }));
+    renderShares(client);
+    expect(screen.getByText(t.shares.scanFailedTitle)).toBeInTheDocument();
+    expect(screen.getByText(lastError)).toBeInTheDocument();
+    // The failure card replaces the empty-shares card rather than stacking
+    // with it: folders is [] in both states, and "no shared folders
+    // configured" would point the user at a setting that is already correct.
+    expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
+    // Everything else on the page keeps working — a share that cannot be
+    // published does not take the rest of slusk down (#408).
+    expect(screen.getByRole('button', { name: t.shares.rescan })).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
+  });
+
+  it('keeps the empty-shares card when there is no failure to report', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [] }));
+    renderShares(client);
+    expect(screen.getByText(t.shares.emptyTitle)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.scanFailedTitle)).not.toBeInTheDocument();
+  });
+});
+
 describe('loaded state', () => {
   it('renders the header summary and the folder grid', () => {
     // The header no longer carries individual stat cards (StatCard is

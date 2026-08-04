@@ -452,6 +452,7 @@ func main() {
 				Live:                soulStatus.State != soulseek.StateFailed,
 				Ready:               soulStatus.State == soulseek.StateConnected,
 			}
+			out["shares"] = sharesModuleStatus(soulClient.ShareReport())
 		}
 		return out
 	}
@@ -574,6 +575,8 @@ func main() {
 				ScanDuration: report.ScanDuration,
 				Scanning:     report.Scanning,
 				Folders:      folders,
+				LastError:    report.LastError,
+				LastErrorAt:  report.LastErrorAt,
 			}
 		}
 		rescanSharesFn = func() error {
