@@ -47,6 +47,9 @@ func noopJobs(ctx context.Context) ([]core.JobView, error) { return nil, nil }
 func noopPagedJobs(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error) {
 	return PagedJobsResult{Jobs: []core.JobView{}}, nil
 }
+func noopBulkRetry(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error) {
+	return BulkRetryResult{}, nil
+}
 func noopCharts(ctx context.Context) (ChartsData, error) { return ChartsData{}, nil }
 func noopShares() ShareStatsReport                       { return ShareStatsReport{} }
 func noopRescanShares() error                            { return nil }
@@ -87,6 +90,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		Live:             noopHealthy,
 		Modules:          noopModules,
 		Retry:            noopRetry,
+		BulkRetry:        noopBulkRetry,
 		FailedRetryAfter: testFailedRetryAfter,
 		MaxCandidates:    testMaxCandidates,
 		Config:           noopConfig,
@@ -1586,6 +1590,100 @@ func TestRetryEndpointSuccess(t *testing.T) {
 	}
 	if gotID != 42 {
 		t.Errorf("retry called with id %d, want 42", gotID)
+	}
+}
+
+// TestBulkRetryEndpointPassesFilterScope covers issue #378: the whole
+// filtered view is the scope, so the same status/source/search axes GET
+// /api/jobs took must reach the store — and page/pageSize/sort/dir must be
+// accepted (the frontend sends the URL it is already holding) without
+// narrowing anything.
+func TestBulkRetryEndpointPassesFilterScope(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var got PagedJobsQuery
+	deps := testServerDeps(reg)
+	deps.BulkRetry = func(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error) {
+		got = query
+		return BulkRetryResult{Retried: 42, Skipped: 3}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/retry?filter=failed&source=manual&q=four+tet&page=2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got.Filter != "failed" || got.Source != "manual" || got.Query != "four tet" {
+		t.Errorf("query = %+v, want filter=failed source=manual q=\"four tet\"", got)
+	}
+	var body BulkRetryResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Retried != 42 || body.Skipped != 3 {
+		t.Errorf("body = %+v, want 42 retried 3 skipped", body)
+	}
+}
+
+func TestBulkRetryEndpointRejectsUnknownFilter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	called := false
+	deps := testServerDeps(reg)
+	deps.BulkRetry = func(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error) {
+		called = true
+		return BulkRetryResult{}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/retry?filter=bogus", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want 400", rec.Code)
+	}
+	if called {
+		t.Error("BulkRetry was called for a rejected query")
+	}
+}
+
+// TestBulkRetryEndpointIgnoresNonPost: the route is pinned to POST (see its
+// registration), so a GET must never reach a handler that revives jobs — it
+// falls through to the SPA catch-all like any other unmatched path.
+func TestBulkRetryEndpointIgnoresNonPost(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	called := false
+	deps := testServerDeps(reg)
+	deps.BulkRetry = func(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error) {
+		called = true
+		return BulkRetryResult{}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/retry?filter=failed", nil)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if called {
+		t.Error("GET /api/jobs/retry reached BulkRetry")
+	}
+}
+
+func TestBulkRetryEndpointStoreFailure(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	deps := testServerDeps(reg)
+	deps.BulkRetry = func(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error) {
+		return BulkRetryResult{}, errors.New("db exploded")
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/retry?filter=parked", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want 500", rec.Code)
 	}
 }
 

@@ -33,6 +33,12 @@
 
 .chipGroup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* Pushes the bulk-retry button (issue #378) to the far right of the controls
+   row, and lets it drop to its own line when the two chip axes have already
+   consumed the width — .controlsRow wraps. */
+.bulkRetryAction { margin-left: auto; }
+
+
 /* Separates the status chips from the source chips on the same row, so two
    independent filter axes don't read as one longer list of statuses. */
 .chipDivider { width: 1px; align-self: stretch; background: var(--line2); margin: 0 2px; }

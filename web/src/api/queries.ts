@@ -17,6 +17,7 @@ import type {
   AddLidarrArtistRequest,
   AddLidarrArtistResult,
   AppConfig,
+  BulkRetryResult,
   ChartsReport,
   ConfigUpdateRequest,
   ConfigUpdateResult,
@@ -664,6 +665,42 @@ export function useRetryJob(id: number) {
       // Retry wipes candidate history server-side, so the cached detail is stale.
       void qc.invalidateQueries({ queryKey: queryKeys.jobDetail(id) });
       void qc.invalidateQueries({ queryKey: queryKeys.jobEvents(id) });
+    },
+  });
+}
+
+/**
+ * The scope a bulk retry acts on (issue #378): the status/source/search axes
+ * of the view the user is looking at, and deliberately nothing else. `page`,
+ * `sort` and `dir` are omitted rather than passed through — the endpoint
+ * accepts and ignores them, and sending them would suggest the operation
+ * respects the page on screen, which is the one thing it does not do.
+ */
+export function bulkRetryUrl(params: JobPageParams): string {
+  const query = new URLSearchParams();
+  query.set('filter', params.filter);
+  query.set('source', params.source);
+  query.set('q', params.q);
+  return `/api/jobs/retry?${query.toString()}`;
+}
+
+/**
+ * Revives every retryable job in the filtered set, not just the visible page.
+ * Resolves with the server's own counts — a partial outcome is normal, so the
+ * caller must report `retried`/`skipped` rather than treat the call as a
+ * binary success.
+ */
+export function useBulkRetryJobs() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: JobPageParams) => apiPostJson<BulkRetryResult>(bulkRetryUrl(params)),
+    onSuccess: () => {
+      // useRetryJob names the one job's detail/events keys explicitly because
+      // it knows which job moved; the response here does not say. It needs no
+      // equivalent: ['jobs'] is a prefix of ['jobs', id, 'detail'] and
+      // ['jobs', id, 'events'], so this one invalidation already covers every
+      // cached job's detail and history.
+      void qc.invalidateQueries({ queryKey: queryKeys.jobs });
     },
   });
 }
