@@ -104,10 +104,13 @@ jobs:
         run: |
           set -euo pipefail
           TARGET="${{ steps.resolve.outputs.target }}"
-          # Registry-side manifest copy: no layers move, no builder runs, and the
-          # digest behind :latest becomes byte-identical to the canary's.
+          # Registry-side manifest copy: no layers move and no builder runs. :latest
+          # gets a manifest digest of its own — create re-serialises the manifest list —
+          # but it references the same config and layers the canary has been running.
           docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${TARGET}"
-          docker buildx imagetools inspect "${IMAGE}:latest" | head -n 3
+          # The digest is the whole point of the echo, so ask for just it rather than
+          # piping the full inspect through `head`.
+          docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:latest"
 
       - name: Record the promotion
         run: |
@@ -141,14 +144,55 @@ jobs:
           # jump several versions at once, and that jump is what a user actually takes.
           RANGE="${TARGET}"
           [ -n "$PREV" ] && RANGE="${PREV}..${TARGET}"
-          NOTES=$(git log ${RANGE} --no-merges --format='%s' \
-            | grep -E '^(feat|fix)(\([^)]+\))?!?:|BREAKING[ -]CHANGE' \
-            | sed 's/^/- /' || true)
-          [ -z "$NOTES" ] && NOTES="- No user-facing changes recorded."
 
-          BODY=$(printf '%s\n\n---\n\nPromoted from the maintainer'"'"'s instance, where this exact image has been running.\nBuilds from `main` land on `%s:edge` if you want them sooner.' "$NOTES" "$IMAGE")
+          # Every commit in the range is listed, grouped by conventional-commit type.
+          # The old filter kept only feat/fix, on the assumption that the prefix marks
+          # user relevance. It does not: `chore: license slusk under AGPL-3.0-or-later`
+          # was dropped from the v2.0.0 notes, and a licence change is exactly what a
+          # stranger running the image needs to read.
+          SUBJECTS=$(git log ${RANGE} --no-merges --format='%s')
 
-          jq -n --arg tag "$TARGET" --arg name "$TARGET" --arg body "$BODY" \
+          # A breaking change is the one entry here that can stop someone's container
+          # from starting, so it is hoisted out of its type group. `!` in the subject
+          # or BREAKING CHANGE anywhere in the message — conventional commits allow
+          # the latter in the body alone, which a subject-only scan misses.
+          BREAKING=$(
+            { printf '%s\n' "$SUBJECTS" | grep -E '^[a-z]+(\([^)]+\))?!:' || true
+              git log ${RANGE} --no-merges --format='%s' --grep='BREAKING[ -]CHANGE' || true
+            } | awk 'NF && !seen[$0]++'
+          )
+          REST=$(printf '%s\n' "$SUBJECTS" \
+            | grep -vxF -f <(printf '%s\n' "$BREAKING") || true)
+
+          KNOWN='^(feat|fix|perf|refactor|docs|build|ci|test|style|chore)(\(|!?:)'
+          section() {
+            if [ -n "$2" ]; then
+              printf '### %s\n' "$1"
+              printf '%s\n' "$2" | sed 's/^/- /'
+              printf '\n'
+            fi
+          }
+          bytype() { printf '%s\n' "$REST" | grep -E "^$1(\(|!?:)" || true; }
+
+          NOTES=$(
+            section "Breaking changes" "$BREAKING"
+            section "Features"      "$(bytype feat)"
+            section "Fixes"         "$(bytype fix)"
+            section "Performance"   "$(bytype perf)"
+            section "Refactoring"   "$(bytype refactor)"
+            section "Documentation" "$(bytype docs)"
+            section "Build"         "$(bytype build)"
+            section "CI"            "$(bytype ci)"
+            section "Tests"         "$(bytype test)"
+            section "Style"         "$(bytype style)"
+            section "Chores"        "$(bytype chore)"
+            # Catch-all: a commit whose prefix nobody recognises is still a commit the
+            # user gets, and silently dropping it is what these notes exist to prevent.
+            section "Other"         "$(printf '%s\n' "$REST" | grep -vE "$KNOWN" || true)"
+          )
+          [ -z "$NOTES" ] && NOTES="- No commits in this range."
+
+          jq -n --arg tag "$TARGET" --arg name "$TARGET" --arg body "$NOTES" \
             '{tag_name: $tag, name: $name, body: $body}' \
             | curl -sS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \

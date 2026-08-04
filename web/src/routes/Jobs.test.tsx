@@ -851,3 +851,125 @@ describe('table semantics', () => {
     expect(empty.closest('[role="table"]')).toBeNull();
   });
 });
+
+// Issue #378: the bulk retry acts on the whole filtered set, so what these
+// tests pin is scope and honesty — which filters offer it, what the request
+// carries, and that the outcome is reported as the server's own numbers
+// rather than as a success.
+describe('bulk retry', () => {
+  const failedFacets = (failed: number, parked = 0): JobFacets => ({
+    status: {
+      all: failed + parked,
+      wanted: 0, selecting: 0, waiting: 0,
+      active: 0, importing: 0, queued: 0, stalled: 0, failed, parked, done: 0,
+    },
+    source: { all: failed + parked, manual: 0, lidarr: failed + parked },
+  });
+
+  // Seeds the ALL page plus the failed/parked pages a chip click switches to,
+  // so the button's visibility can be exercised without waiting on a fetch.
+  function renderWithRetryableFilters(facets: JobFacets) {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const failedJob = makeJob({ id: 20, title: 'Failed result', status: 'failed', state: 'FAILED' });
+    const parkedJob = makeJob({ id: 21, title: 'Parked result', status: 'parked', state: 'PARKED' });
+    seedPage(qc, pageFor([makeJob()], facets.status.all, facets));
+    seedPage(qc, pageFor([failedJob], facets.status.failed, facets), { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'failed' });
+    seedPage(qc, pageFor([parkedJob], facets.status.parked, facets), { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'parked' });
+    render(
+      <QueryClientProvider client={qc}>
+        <FlashProvider>
+          <MemoryRouter>
+            <Jobs />
+            <StatusBar />
+          </MemoryRouter>
+        </FlashProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('offers the action only for the failed and parked filters', async () => {
+    stubFetchIndefinitely();
+    renderWithRetryableFilters(failedFacets(6, 5));
+
+    expect(screen.queryByRole('button', { name: t.jobs.bulkRetry.button })).not.toBeInTheDocument();
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    expect(await screen.findByRole('button', { name: t.jobs.bulkRetry.button })).toBeInTheDocument();
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.done) }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: t.jobs.bulkRetry.button })).not.toBeInTheDocument());
+  });
+
+  it('hides the action when the filtered set is empty', async () => {
+    stubFetchIndefinitely();
+    renderWithRetryableFilters(failedFacets(0));
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    await screen.findByText('Failed result');
+    expect(screen.queryByRole('button', { name: t.jobs.bulkRetry.button })).not.toBeInTheDocument();
+  });
+
+  it('states the failed count as an upper bound and the parked count plainly', async () => {
+    stubFetchIndefinitely();
+    renderWithRetryableFilters(failedFacets(6, 5));
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    fireEvent.click(await screen.findByRole('button', { name: t.jobs.bulkRetry.button }));
+    expect(within(screen.getByRole('dialog')).getByText(t.jobs.bulkRetry.failedBody(6))).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.bulkRetry.cancel }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.parked) }));
+    fireEvent.click(await screen.findByRole('button', { name: t.jobs.bulkRetry.button }));
+    expect(within(screen.getByRole('dialog')).getByText(t.jobs.bulkRetry.parkedBody(5))).toBeInTheDocument();
+  });
+
+  it('sends the current filter scope and reports the server’s own counts', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      requested.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url.startsWith('/api/jobs/retry')) {
+        return Promise.resolve(new Response(JSON.stringify({ retried: 42, skipped: 3 }), { status: 200 }));
+      }
+      return new Promise(() => {});
+    }));
+    renderWithRetryableFilters(failedFacets(6));
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    fireEvent.click(await screen.findByRole('button', { name: t.jobs.bulkRetry.button }));
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.bulkRetry.confirm }));
+
+    await waitFor(() =>
+      expect(requested).toContain('POST /api/jobs/retry?filter=failed&source=all&q='));
+    // StatusBar prefixes a flash with its own ✓ glyph, so match the substring.
+    expect(await screen.findByText(new RegExp(t.jobs.bulkRetry.resultFlash(42, 3)))).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  // Scoped to within(dialog), not to the document: the scrim is position:fixed
+  // with a z-index, so an error rendered as a sibling of the dialog is painted
+  // behind it and invisible — and a document-wide getByText passes on exactly
+  // that bug, since jsdom computes no layout.
+  it('reports a failed bulk retry inside the still-open dialog', async () => {
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (url.startsWith('/api/jobs/retry')) {
+        return Promise.resolve(new Response('db exploded', { status: 500 }));
+      }
+      return new Promise(() => {});
+    }));
+    renderWithRetryableFilters(failedFacets(6));
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
+    fireEvent.click(await screen.findByRole('button', { name: t.jobs.bulkRetry.button }));
+    fireEvent.click(screen.getByRole('button', { name: t.jobs.bulkRetry.confirm }));
+
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(t.jobs.bulkRetry.failed)).toBeInTheDocument());
+    // Still open, so the user can retry without re-opening it.
+    expect(within(dialog).getByRole('button', { name: t.jobs.bulkRetry.confirm })).toBeInTheDocument();
+  });
+});

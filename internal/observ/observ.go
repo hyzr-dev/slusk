@@ -303,6 +303,21 @@ type PagedJobsResult struct {
 // PagedJobsFunc produces one persisted job page and its consistent counts.
 type PagedJobsFunc func(ctx context.Context, query PagedJobsQuery) (PagedJobsResult, error)
 
+// BulkRetryResult is what POST /api/jobs/retry reports back (issue #378).
+// A partial outcome is the normal case rather than an error: the filter the
+// caller pointed at is an upper bound on what is retryable, and jobs move
+// while the operation runs. See store.BulkRetryResult.
+type BulkRetryResult struct {
+	Retried int64 `json:"retried"`
+	Skipped int64 `json:"skipped"`
+}
+
+// BulkRetryFunc revives every retryable job in the filtered set (typically
+// backed by store.BulkRetryJobs). It takes the same query GET /api/jobs does
+// so the operation acts on exactly the view the user is looking at; the
+// query's Page, PageSize, Sort, Dir and SkipFacets fields are ignored.
+type BulkRetryFunc func(ctx context.Context, query PagedJobsQuery) (BulkRetryResult, error)
+
 // FailureDetailsFunc looks up the newest failure-explaining job_events detail
 // for each of the given job ids (typically backed by store.LatestFailureDetails),
 // keyed by job id. Ids with no matching event are absent from the result.
@@ -398,6 +413,9 @@ type ServerDeps struct {
 	Retry     RetryFunc
 	SearchJob SearchJobFunc
 	DeleteJob DeleteJobFunc
+	// BulkRetry backs POST /api/jobs/retry (issue #378) — the whole filtered
+	// set at once, not one id.
+	BulkRetry BulkRetryFunc
 	// CreateJob backs POST /api/jobs (manual jobs, see issue #155).
 	CreateJob CreateJobFunc
 	// JobDetail, JobEvents and RecentEvents back /api/jobs/{id}/detail,
@@ -674,6 +692,32 @@ func NewServer(deps ServerDeps) http.Handler {
 			w.Header().Set("Allow", "GET, POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	// Deliberately a sibling of /api/jobs rather than a member of the
+	// /api/jobs/{id}/... family: it addresses a filtered set, not a job.
+	//
+	// The method prefix is load-bearing, not decoration. A method-less
+	// "/api/jobs/retry" panics NewServer at registration: neither it nor
+	// "DELETE /api/jobs/{id}" is more specific than the other (each matches a
+	// request the other does not), which is exactly ServeMux's definition of
+	// a conflict. Pinning this one to POST makes the two disjoint.
+	mux.HandleFunc("POST /api/jobs/retry", func(w http.ResponseWriter, r *http.Request) {
+		// The read path's parser, reused whole (issue #378): a private one
+		// would be a third copy of the filter allowlist, and the two that
+		// already exist have drifted apart before (#310). page/pageSize/sort/
+		// dir are accepted and ignored — a set operation has no page.
+		query, err := parsePagedJobsQuery(r.URL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		result, err := deps.BulkRetry(r.Context(), query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(result)
 	})
 	mux.HandleFunc("/api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
