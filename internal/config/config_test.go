@@ -708,3 +708,80 @@ func TestLoadMusicBrainzUnknownKeyFails(t *testing.T) {
 		t.Errorf("error should report unknown keys: %v", err)
 	}
 }
+
+// --- matcher weights: defaulted per key, but an explicit zero must survive (#405) ---
+
+// withoutWeights returns testdata/valid.toml with its whole [pipeline.weights]
+// section removed, modelling a config written before the section was documented
+// or by someone who simply left it out.
+func withoutWeights(t *testing.T) string {
+	t.Helper()
+	base, err := os.ReadFile("testdata/valid.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const section = "[pipeline.weights]\nformat = 1.0\nbitrate = 0.5\nreliability = 0.8\nfile_count = 1.0\n"
+	contents := strings.Replace(string(base), section, "", 1)
+	if contents == string(base) {
+		t.Fatal("the [pipeline.weights] block was not found in testdata/valid.toml; update this helper")
+	}
+	return contents
+}
+
+func writeConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// An absent section used to load as all-zero weights, which makes the matcher
+// score every candidate identically and pick arbitrarily, silently. It must now
+// yield the documented defaults instead.
+func TestLoadDefaultsWeightsWhenSectionAbsent(t *testing.T) {
+	cfg, err := Load(writeConfig(t, withoutWeights(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pipeline.Weights != defaultWeights {
+		t.Errorf("Weights = %+v, want the defaults %+v", cfg.Pipeline.Weights, defaultWeights)
+	}
+}
+
+// The reason this is keyed off decode metadata rather than off a zero value:
+// zero is a legitimate weight, meaning "ignore this signal". Defaulting it away
+// would make that setting unexpressible.
+func TestLoadKeepsExplicitlyZeroedWeight(t *testing.T) {
+	contents := withoutWeights(t) +
+		"\n[pipeline.weights]\nformat = 0.0\nbitrate = 0.0\nreliability = 0.0\nfile_count = 0.0\nknown_user = 0.0\n"
+	cfg, err := Load(writeConfig(t, contents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Pipeline.Weights; got != (Weights{}) {
+		t.Errorf("Weights = %+v, want every weight to stay at the configured 0", got)
+	}
+}
+
+// A partially-written section defaults only the keys it omits, and leaves the
+// ones it sets alone - including a zero.
+func TestLoadDefaultsOnlyOmittedWeights(t *testing.T) {
+	contents := withoutWeights(t) +
+		"\n[pipeline.weights]\nformat = 0.0\nbitrate = 2.5\n"
+	cfg, err := Load(writeConfig(t, contents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Weights{
+		Format:      0.0, // explicitly set, must not be defaulted back to 1.0
+		Bitrate:     2.5, // explicitly set
+		Reliability: defaultWeights.Reliability,
+		FileCount:   defaultWeights.FileCount,
+		KnownUser:   defaultWeights.KnownUser,
+	}
+	if cfg.Pipeline.Weights != want {
+		t.Errorf("Weights = %+v, want %+v", cfg.Pipeline.Weights, want)
+	}
+}

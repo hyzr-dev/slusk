@@ -47,7 +47,11 @@ type SlskdConfig struct {
 	APIKey string `toml:"api_key"`
 }
 
-// Weights are the tunable scoring weights for the matcher.
+// Weights are the tunable scoring weights for the matcher. Every field is
+// optional; an unset one takes its defaultWeights value. Unlike the rest of
+// [pipeline], these cannot be defaulted from a zero value, because zero is a
+// legitimate weight - it disables that signal - so applyWeightDefaults keys off
+// the decode metadata instead. See its doc comment.
 type Weights struct {
 	Format      float64 `toml:"format"`
 	Bitrate     float64 `toml:"bitrate"`
@@ -66,7 +70,9 @@ type Weights struct {
 // legacy [engine] section it replaced is gone). The scheduling/backoff knobs
 // below are optional (a wholly absent [pipeline] section yields the defaults
 // applied in applyDefaults); the matcher/transfer knobs (MaxCandidatesPerAlbum
-// through Weights) are mandatory, same as they were under [engine].
+// through MaxTransferRetries) are mandatory, same as they were under [engine].
+// Weights is the exception: it is optional and defaulted per key, because a
+// zero weight is a meaningful choice rather than an absent one (#405).
 type PipelineConfig struct {
 	// MaxCandidatesPerAlbum bounds how many ranked search results are cached
 	// per album search.
@@ -154,10 +160,51 @@ const (
 	BackendSoulseek = "soulseek"
 )
 
+// defaultWeights are the matcher scoring weights applied to any weight key the
+// config does not set. They mirror the values config.example.toml ships, so a
+// user who omits the section gets the same ranking behaviour as one who copied
+// the example verbatim.
+var defaultWeights = Weights{
+	Format:      1.0,
+	Bitrate:     0.5,
+	Reliability: 0.8,
+	FileCount:   1.0,
+	KnownUser:   1.0,
+}
+
+// applyWeightDefaults fills each weight the file does not define, keyed off the
+// decode metadata rather than off a zero value.
+//
+// It is deliberately separate from applyDefaults, whose "zero means absent"
+// shortcut does not hold here: a zero weight is a legitimate setting that
+// disables that signal, so it must survive rather than be overwritten. Before
+// this existed the section was documented as mandatory but never enforced, and
+// omitting it left every weight at zero - which makes the matcher score every
+// candidate identically and pick arbitrarily, with nothing logged (#405).
+func (p *PipelineConfig) applyWeightDefaults(meta toml.MetaData) {
+	if !meta.IsDefined("pipeline", "weights", "format") {
+		p.Weights.Format = defaultWeights.Format
+	}
+	if !meta.IsDefined("pipeline", "weights", "bitrate") {
+		p.Weights.Bitrate = defaultWeights.Bitrate
+	}
+	if !meta.IsDefined("pipeline", "weights", "reliability") {
+		p.Weights.Reliability = defaultWeights.Reliability
+	}
+	if !meta.IsDefined("pipeline", "weights", "file_count") {
+		p.Weights.FileCount = defaultWeights.FileCount
+	}
+	if !meta.IsDefined("pipeline", "weights", "known_user") {
+		p.Weights.KnownUser = defaultWeights.KnownUser
+	}
+}
+
 // applyDefaults fills any zero-valued field with its documented default.
 // Note: an explicit zero in TOML (e.g. `max_active = 0`) is indistinguishable
 // from an absent key and silently takes the default rather than failing Validate.
-// Accepted: no pipeline field is legitimately zero.
+// Accepted: no pipeline field below is legitimately zero. The Weights are the
+// one place where that reasoning breaks down, which is why they are defaulted
+// separately in applyWeightDefaults.
 func (p *PipelineConfig) applyDefaults() {
 	if p.MaxActive == 0 {
 		p.MaxActive = 30
@@ -424,6 +471,7 @@ func LoadBytes(data []byte) (Config, error) {
 		return Config{}, errors.New("soulseek.upload_slots must be > 0")
 	}
 	cfg.Pipeline.applyDefaults()
+	cfg.Pipeline.applyWeightDefaults(meta)
 	cfg.Soulseek.applyDefaults()
 	cfg.MusicBrainz.applyDefaults()
 	if err := cfg.Validate(); err != nil {

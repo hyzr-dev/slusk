@@ -193,7 +193,7 @@ func TestApplySettingsUntouchedOptionalSectionsStayAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := mustLoad(t, path)
-	s := settingsFromConfig(cfg) // Soulseek all zero (disabled), KnownUser 0 — matches the fixture's absence
+	s := settingsFromConfig(cfg) // Soulseek all zero (disabled) — matches the fixture's absence
 
 	if err := ApplySettings(path, s); err != nil {
 		t.Fatalf("ApplySettings: %v", err)
@@ -206,12 +206,19 @@ func TestApplySettingsUntouchedOptionalSectionsStayAbsent(t *testing.T) {
 	if strings.Contains(string(after), "[soulseek]") {
 		t.Errorf("an untouched, never-configured soulseek section was materialized:\n%s", after)
 	}
-	if strings.Contains(string(after), "known_user") {
-		t.Errorf("an untouched, never-configured known_user key was materialized:\n%s", after)
-	}
 	got := mustLoad(t, path)
 	if got.Soulseek.Enabled() {
 		t.Error("soulseek became enabled despite an all-zero, untouched submission")
+	}
+	// known_user used to be asserted absent here, because it was the one weight
+	// with no default: materializing it would have invented a value the user
+	// never chose. Since #405 it has one, so it is no longer invented - it is
+	// resolved, exactly like max_active and the other defaulted pipeline keys
+	// this test already accepts materializing (see below). What must still hold
+	// is that the value written is the documented default, not a zero.
+	if got.Pipeline.Weights.KnownUser != defaultWeights.KnownUser {
+		t.Errorf("KnownUser = %v after round trip, want the default %v",
+			got.Pipeline.Weights.KnownUser, defaultWeights.KnownUser)
 	}
 	_ = before // the rest of the fixture may still gain defaulted pipeline keys (existing, accepted behavior)
 }
