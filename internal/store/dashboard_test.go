@@ -1453,7 +1453,10 @@ func TestListDashboardJobsStatusOrderAndIndependentFacets(t *testing.T) {
 
 	activeID := insertDashboardTestJob(t, s, 2001, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Active", "Artist", "peer_active", 0, now)
 	importingID := insertDashboardTestJob(t, s, 2002, core.SourceLidarr, core.StateImporting, core.TransferStalled, "Importing", "Artist", "peer_importing", 0, now.Add(time.Second))
-	queuedID := insertDashboardTestJob(t, s, 2003, core.SourceLidarr, core.StateWanted, "", "Queued", "Artist", "", 0, now.Add(2*time.Second))
+	// WANTED reports its own 'wanted' status (issue #416), not 'queued' — it
+	// still sorts third under sort=st, ahead of stalled/failed/parked/done, so
+	// wantIDs below is unchanged.
+	wantedID := insertDashboardTestJob(t, s, 2003, core.SourceLidarr, core.StateWanted, "", "Wanted", "Artist", "", 0, now.Add(2*time.Second))
 	stalledID := insertDashboardTestJob(t, s, 2004, core.SourceManual, core.StateDownloading, core.TransferStalled, "Stalled", "Artist", "peer_stalled", 0, now.Add(3*time.Second))
 	failedLidarrID := insertDashboardTestJob(t, s, 2005, core.SourceLidarr, core.StateFailed, core.TransferInProgress, "Failed Lidarr", "Artist", "peer_failed", 0, now.Add(4*time.Second))
 	failedManualID := insertDashboardTestJob(t, s, 2006, core.SourceManual, core.StateDownloading, core.TransferErrored, "Failed Manual", "Artist", "peer_failed_manual", 0, now.Add(5*time.Second))
@@ -1468,12 +1471,15 @@ func TestListDashboardJobsStatusOrderAndIndependentFacets(t *testing.T) {
 	for i, job := range page.Jobs {
 		gotIDs[i] = job.Job.ID
 	}
-	wantIDs := []int64{activeID, importingID, queuedID, stalledID, failedLidarrID, failedManualID, parkedID, doneID}
+	wantIDs := []int64{activeID, importingID, wantedID, stalledID, failedLidarrID, failedManualID, parkedID, doneID}
 	if fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
 		t.Errorf("status order ids = %v, want %v", gotIDs, wantIDs)
 	}
-	if page.Total != 8 || page.Facets.Status.All != 8 || page.Facets.Status.Active != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Queued != 1 || page.Facets.Status.Stalled != 1 || page.Facets.Status.Failed != 2 || page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
+	if page.Total != 8 || page.Facets.Status.All != 8 || page.Facets.Status.Active != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Wanted != 1 || page.Facets.Status.Stalled != 1 || page.Facets.Status.Failed != 2 || page.Facets.Status.Parked != 1 || page.Facets.Status.Done != 1 {
 		t.Errorf("unexpected unfiltered counts: total=%d status=%+v", page.Total, page.Facets.Status)
+	}
+	if page.Facets.Status.Queued != 0 || page.Facets.Status.Selecting != 0 || page.Facets.Status.Waiting != 0 {
+		t.Errorf("unexpected non-zero split-queued facets with no fixture in those statuses: %+v", page.Facets.Status)
 	}
 	if page.Facets.Source.All != 8 || page.Facets.Source.Lidarr != 5 || page.Facets.Source.Manual != 3 {
 		t.Errorf("unexpected source facets: %+v", page.Facets.Source)
@@ -1946,14 +1952,16 @@ func TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow(t *testing.
 	}
 }
 
-// TestJobWithTransferCandidatelessDownloadingJobIsQueued covers a DOWNLOADING
-// job with zero candidates — a.id is NULL, so jobViewFrom's agg LATERAL
-// aggregates over no rows. This is correct by construction (an ungrouped
-// aggregate always returns exactly one row; COUNT(*) FILTER yields 0, never
-// NULL, so dashboardJobStatusSQL's CASE cannot fall through on three-valued
-// logic), but nothing pinned it before this test. DOWNLOADING is used rather
-// than a job-level state (DONE, FAILED, ...) because those short-circuit
-// dashboardJobStatusSQL before it ever reaches the agg branches.
+// TestJobWithTransferCandidatelessDownloadingJobIsQueued covers a
+// DOWNLOADING job with zero candidates — a.id is NULL, so jobViewFrom's agg
+// LATERAL aggregates over no rows. This is correct by construction (an
+// ungrouped aggregate always returns exactly one row; COUNT(*) FILTER yields
+// 0, never NULL, so dashboardJobStatusSQL's CASE cannot fall through on
+// three-valued logic), but nothing pinned it before this test. DOWNLOADING is
+// used rather than a job-level state (DONE, FAILED, ...) because those
+// short-circuit dashboardJobStatusSQL before it ever reaches the agg
+// branches. Nothing has been delivered (agg.completed = 0), so this lands on
+// 'queued', not 'waiting' (issue #416).
 //
 // The real pipeline never leaves a DOWNLOADING job without an ACTIVE
 // candidate, so this fixture is built with direct SQL rather than the
@@ -2009,11 +2017,17 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 	}{
 		{9001, core.StateDownloading, core.TransferInProgress, "peer_active", "active"},
 		{9002, core.StateImporting, "", "", "importing"},
-		{9003, core.StateWanted, "", "", "queued"},
+		{9003, core.StateWanted, "", "", "wanted"},
 		{9004, core.StateDownloading, core.TransferStalled, "peer_stalled", "stalled"},
 		{9005, core.StateDownloading, core.TransferErrored, "peer_failed", "failed"},
 		{9006, core.StateParked, "", "", "parked"},
 		{9007, core.StateDone, "", "", "done"},
+		{9008, core.StateSelecting, "", "", "selecting"},
+		{9009, core.StateDownloading, core.TransferPending, "peer_queued", "queued"},
+		{9010, core.StateDownloading, core.TransferCompleted, "peer_waiting", "waiting"},
+		// A legacy state nothing in production writes any more (issue #416):
+		// every dead pre-download state falls to the CASE's ELSE, 'wanted'.
+		{9011, core.AlbumJobState("COOLDOWN"), "", "", "wanted"},
 	}
 	statusByID := map[int64]string{}
 	for i, f := range fixtures {
@@ -2057,6 +2071,39 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 	}
 	if len(seen) != len(fixtures) {
 		t.Fatalf("expected every fixture job returned, got %d of %d", len(seen), len(fixtures))
+	}
+}
+
+// TestListDashboardJobsStatusInProgressOutranksCompleted covers issue #416's
+// 'queued'/'waiting' split: a DOWNLOADING candidate with one file still
+// IN_PROGRESS and another already COMPLETED must report 'active', not
+// 'waiting' — agg.in_progress is checked before agg.completed in
+// dashboardJobStatusSQL, so a file actually moving always wins over one that
+// merely finished.
+func TestListDashboardJobsStatusInProgressOutranksCompleted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+
+	jobID := insertDashboardTestJob(t, s, 9101, core.SourceLidarr, core.StateDownloading, core.TransferCompleted, "Mixed Progress Album", "Artist", "peer_mixed", 0, now)
+
+	var candidateID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM candidates WHERE album_job_id = $1`, jobID).Scan(&candidateID); err != nil {
+		t.Fatalf("select candidate: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO transfers (candidate_id, username, filename, state, deadline, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		candidateID, "peer_mixed", "track2.flac", string(core.TransferInProgress), now.Add(time.Hour), now); err != nil {
+		t.Fatalf("insert second transfer: %v", err)
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Status != "active" {
+		t.Errorf("Status = %q, want active (one file still IN_PROGRESS outranks the other's COMPLETED)", view.Status)
 	}
 }
 
@@ -2180,8 +2227,8 @@ func TestListDashboardJobsFilterInflightSelectsByStateNotStatus(t *testing.T) {
 
 	// DOWNLOADING with a file actually moving -> status 'active'.
 	moving := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDownloading, core.TransferInProgress, "Moving", "A", "peer1", 0, now)
-	// DOWNLOADING with everything still PENDING -> status 'queued', which the
-	// transferring union never selected. This is the whole point of inflight.
+	// DOWNLOADING with everything still PENDING -> status 'queued', which
+	// the transferring union never selected. This is the whole point of inflight.
 	pending := insertDashboardTestJob(t, s, 2, core.SourceLidarr, core.StateDownloading, core.TransferPending, "Pending", "B", "peer2", 0, now.Add(time.Second))
 	// DOWNLOADING with a stalled file -> status 'stalled'.
 	stalled := insertDashboardTestJob(t, s, 3, core.SourceLidarr, core.StateDownloading, core.TransferStalled, "Stalled", "C", "peer3", 0, now.Add(2*time.Second))
@@ -2218,12 +2265,17 @@ func TestListDashboardJobsFilterInflightSelectsByStateNotStatus(t *testing.T) {
 	// Status facets must ignore the selected filter (same contract every
 	// other filter value has — see TestListDashboardJobsStatusOrderAndIndependentFacets)
 	// and so report the FULL unfiltered counts, not just the inflight subset.
-	// moving=active, pending/wanted/selecting=queued, stalled=stalled,
-	// importing=importing, done=done, failed=failed, parked=parked.
-	if page.Facets.Status.All != 9 || page.Facets.Status.Active != 1 || page.Facets.Status.Queued != 3 ||
+	// moving=active, pending=queued, wanted=wanted, selecting=selecting,
+	// stalled=stalled, importing=importing, done=done, failed=failed,
+	// parked=parked (issue #416 split what used to collapse into 'queued').
+	if page.Facets.Status.All != 9 || page.Facets.Status.Active != 1 || page.Facets.Status.Queued != 1 ||
+		page.Facets.Status.Wanted != 1 || page.Facets.Status.Selecting != 1 ||
 		page.Facets.Status.Stalled != 1 || page.Facets.Status.Importing != 1 || page.Facets.Status.Done != 1 ||
 		page.Facets.Status.Failed != 1 || page.Facets.Status.Parked != 1 {
 		t.Errorf("status facets did not ignore filter=inflight: %+v", page.Facets.Status)
+	}
+	if page.Facets.Status.Waiting != 0 {
+		t.Errorf("Waiting facet = %d, want 0 (no fixture has a COMPLETED transfer)", page.Facets.Status.Waiting)
 	}
 }
 

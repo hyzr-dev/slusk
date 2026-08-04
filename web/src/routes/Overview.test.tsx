@@ -80,9 +80,12 @@ function makeFacets(jobs: Job[]): JobFacets {
   return {
     status: {
       all: jobs.length,
+      wanted: 0,
+      selecting: 0,
+      queued: 0,
       active: 0,
       importing: 0,
-      queued: 0,
+      waiting: 0,
       stalled: 0,
       failed: 0,
       parked: 0,
@@ -386,9 +389,10 @@ describe('Overview', () => {
   });
 
   it('shows a peer-queued job as queued rather than downloading', () => {
-    // Job is active but has queuePosition 4 — no bytes are moving.
+    // Issue #416: the backend reports a peer-queue wait as its own 'queued'
+    // status now, not 'active' plus a queuePosition.
     renderOverview(makeJobPage([
-      { ...baseJob, status: 'active', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
+      { ...baseJob, status: 'queued', state: 'DOWNLOADING', queuePosition: 4, speed: 0 },
     ]));
     expect(screen.getByText('QU')).toBeInTheDocument();
     expect(screen.queryByText('DL')).not.toBeInTheDocument();

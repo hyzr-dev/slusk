@@ -270,6 +270,9 @@ type JobStatusFacets struct {
 	Active    int64 `json:"active"`
 	Importing int64 `json:"importing"`
 	Queued    int64 `json:"queued"`
+	Waiting   int64 `json:"waiting"`
+	Selecting int64 `json:"selecting"`
+	Wanted    int64 `json:"wanted"`
 	Stalled   int64 `json:"stalled"`
 	Failed    int64 `json:"failed"`
 	Parked    int64 `json:"parked"`
@@ -1001,7 +1004,7 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	// (issue #310 shipped exactly that until a lab run caught it).
 	// "failures" and "failed" are deliberately both present and deliberately
 	// different — see the case comments in store.dashboardJobsWhere.
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

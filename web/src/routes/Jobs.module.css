@@ -1,6 +1,14 @@
 .mono { font-family: var(--font-mono); }
 .right { text-align: right; white-space: nowrap; }
 
+/* The filter row's width budget is fixed, not responsive: .page caps every
+   page at max-width 1320px, so this row never gets more than ~1240px however
+   wide the display is. Issue #416 took the status axis from seven chips to ten
+   and blew that budget by 137px, wrapping the source axis onto its own line at
+   every width. It is bought back by dropping the source axis's ALL chip and
+   its counts, and by the narrower .filterBox below. Anything added here has to
+   pay for itself out of the same 1240px — check in a browser, since jsdom
+   computes no layout and the wrap cannot fail a test. */
 .controlsRow {
   display: flex;
   align-items: center;
@@ -16,7 +24,15 @@
   gap: 8px;
   border: 1px solid var(--line2);
   padding: 5px 10px;
-  flex: 0 0 230px;
+  /* The flexible element on the row, deliberately: the chip groups have a
+     fixed intrinsic width and the search field is the one control that can
+     give ground. The basis is the floor, not a preference: a wrapping flex
+     container breaks lines on each item's flex-basis and only *then* applies
+     shrinking, so a 200px basis wraps the source axis onto a second row even
+     though the row could have shrunk this box to fit. Set it at the minimum
+     and let flex-grow hand back whatever .controlsRow has left over. */
+  flex: 1 1 120px;
+  min-width: 120px;
 }
 
 /* :focus-within on the box rather than :focus on the input — the `/` glyph and
@@ -40,8 +56,13 @@
 
 
 /* Separates the status chips from the source chips on the same row, so two
-   independent filter axes don't read as one longer list of statuses. */
+   independent filter axes don't read as one longer list of statuses. It is
+   load-bearing precisely because they share a row: MANUAL and LIDARR sit
+   directly after DONE and would otherwise scan as two more statuses. Costs
+   ~17px of .controlsRow's fixed budget — see its note above before adding
+   anything else to that row. */
 .chipDivider { width: 1px; align-self: stretch; background: var(--line2); margin: 0 2px; }
+
 
 /* outline: none is safe here only because .filterBox:focus-within above marks
    the focus. Don't remove that rule without putting an indicator back. */

@@ -26,44 +26,50 @@ import styles from './Jobs.module.css';
 
 // The two filters a bulk retry is offered for (issue #378). Both are status
 // filters whose set overlaps the retryable states; every other filter would
-// send the server a scope it must refuse in full.
+// send the server a scope it must refuse in full. #416's three new statuses
+// are none of them: WANTED/SELECTING/WAITING describe a job that has not
+// failed, so there is nothing to retry.
 type BulkRetryFilter = 'failed' | 'parked';
 
 function bulkRetryFilter(status: JobStatusFilter): BulkRetryFilter | null {
   return status === 'failed' || status === 'parked' ? status : null;
 }
 
-// The approved status row keeps the mock's seven chips. IMPORTING, INFLIGHT,
-// FINISHED and FAILURES (issues #287, #310) are all server-only filter values
-// used by Overview's own useJobs calls, not chips a user picks here —
-// JobStatusFacets has no count for any of them, and IMPORTING is otherwise
-// represented under ALL by its IM tag.
+// The approved status row (issue #416 adds WANTED/SELECTING/WAITING to the
+// original seven, ten in total). IMPORTING, INFLIGHT, FINISHED and FAILURES
+// (issues #287, #310) are all server-only filter values used by Overview's
+// own useJobs calls, not chips a user picks here — JobStatusFacets has no
+// count for any of them, and IMPORTING is otherwise represented under ALL by
+// its IM tag. Ordered to mirror the backend's `sort=st` ranking.
 type ChipKey = Exclude<JobStatusFilter, 'importing' | 'inflight' | 'finished' | 'failures'>;
-const CHIP_ORDER: ChipKey[] = ['all', 'active', 'queued', 'stalled', 'failed', 'parked', 'done'];
+const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting', 'wanted', 'stalled', 'failed', 'parked', 'done'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
 // mock doesn't draw this control — its designer was working against a data
 // model that predates the source axis, though the mock does know the concept
 // (the small "●" dot on manual rows). Source filtering is a shipped feature,
-// so it stays in the same TUI chip idiom as the status row, visually separated
-// by a divider so it reads as a second axis rather than more status values.
-const SOURCE_CHIP_ORDER: JobSourceFilter[] = ['all', 'manual', 'lidarr'];
+// so it stays in the same TUI chip idiom as the status row, separated by a 1px
+// rule so it reads as a second axis rather than more status values.
+// No ALL chip here, unlike the status axis: 'all' is the absence of a source
+// filter, not a third source, and a second chip reading ALL next to the status
+// row's own ALL made the same word mean two different things on one screen.
+// Clicking the active chip clears the filter instead. Counts are omitted too —
+// the source split is a two-way toggle, and the numbers cost width the row does
+// not have (see .controlsRow's note in Jobs.module.css).
+const SOURCE_CHIP_ORDER: Exclude<JobSourceFilter, 'all'>[] = ['manual', 'lidarr'];
 
-// A non-zero queuePosition only means something while the job is still
-// 'active' — a stalled/failed job can carry a stale one from its last
-// attempt (see Tag.tagFor, which applies the same guard) and must keep
-// reading as its real status.
-function inPeerQueue(job: Job): boolean {
-  return job.status === 'active' && (job.queuePosition ?? 0) > 0;
-}
-
-// Tick/percentage colour for a row (mock's `col`, line ~1052): queued beats
-// everything else since no bytes move while waiting in a peer's queue, done
-// is the one unambiguous success color, and the three failure-ish statuses
-// share the bad tone. Everything else (active, downloading) is the neutral
-// bar color.
+// Tick/percentage colour for a row (mock's `col`, line ~1052). Issue #416
+// moved "no bytes moving in a peer queue" onto its own 'queued' status —
+// the backend, not a client-derived queuePosition check, is now the single
+// source of truth for it (see Tag.tagFor's doc comment on the same change).
+// 'waiting' gets the same quiet tone: a gap between two files of the same
+// candidate has no bytes moving either, the same story 'queued' tells.
+// 'selecting'/'wanted' fall through to the neutral bar instead — neither has
+// reached a candidate or transfer yet, so there's no "waiting on bytes"
+// story to tell with the queued tone. done is the one unambiguous success
+// color, and the three failure-ish statuses share the bad tone.
 function rowTone(job: Job): TickTone {
-  if (inPeerQueue(job)) return 'queued';
+  if (job.status === 'queued' || job.status === 'waiting') return 'queued';
   if (job.status === 'done') return 'ok';
   if (job.status === 'stalled' || job.status === 'failed' || job.status === 'parked') return 'bad';
   return 'bar';
@@ -90,22 +96,38 @@ interface JobRowProps {
 
 function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
   const expansionId = `job-expansion-${job.id}`;
-  const queued = inPeerQueue(job);
+  // Both peer-queue statuses: 'queued' before the candidate's first file has
+  // arrived, 'waiting' in the gaps after. Nothing is moving in either.
+  const queued = job.status === 'queued' || job.status === 'waiting';
   // "Downloading" in the narrow sense used by the SPEED/ETA cells: bytes are
-  // actually moving, as opposed to merely being counted 'active' while
-  // sitting in a peer's queue.
-  const downloading = job.status === 'active' && !queued;
-  // A queued job may still point at a dead candidate's partial bytes (issue
-  // #269): the same aggregate-status fix that lets a SELECTING job hold a
-  // FAILED candidate's leftover AlbumBytesDone/Total also means the tick bar
-  // must not render that candidate's progress next to a label ('—') that says
-  // nothing is happening. Bar and label read one binding, not two matching
-  // expressions — a second, independently editable guard is exactly the kind
-  // of drift issue #269 was about.
-  const noProgress = job.status === 'queued';
+  // actually moving. As of issue #416 this is exactly job.status === 'active'
+  // — the backend now reports "active but no bytes moving" as its own
+  // 'queued' status rather than overloading 'active' with a queuePosition.
+  const downloading = job.status === 'active';
+  // A selecting job may still point at a dead candidate's partial bytes
+  // (issue #269, and #416's rename of this status from 'queued' to
+  // 'selecting'): the same aggregate-status fix that lets a SELECTING job
+  // hold a FAILED candidate's leftover AlbumBytesDone/Total also means the
+  // tick bar must not render that candidate's progress next to a label ('—')
+  // that says nothing is happening. Bar and label read one binding, not two
+  // matching expressions — a second, independently editable guard is exactly
+  // the kind of drift issue #269 was about. Neither peer-queue status needs
+  // this guard: as of #416 both mean a real wait on a live candidate, and
+  // 'waiting' in particular has genuine partial bytes to show.
+  const noProgress = job.status === 'selecting';
   const pct = noProgress ? 0 : percent(job.bytesDone, job.bytesTotal);
   const tone = rowTone(job);
-  const pctLabel = noProgress ? '—' : queued ? t.jobs.queueShort(job.queuePosition!) : `${pct}%`;
+  // The queue position is shown only when the backend actually supplied one.
+  // Before issue #416 a non-null assertion was safe here because 'queued' was
+  // derived client-side from queuePosition > 0 and so implied it; the backend's
+  // 'queued' is derived from transfer aggregates instead and carries no such
+  // guarantee, which would have rendered a literal "Pundefined". Falling back to
+  // the percentage keeps the cell on data that exists.
+  const pctLabel = noProgress
+    ? '—'
+    : queued && job.queuePosition
+      ? t.jobs.queueShort(job.queuePosition)
+      : `${pct}%`;
 
   return (
     <Fragment>
@@ -119,7 +141,7 @@ function JobRowImpl({ job, expanded, onToggle }: JobRowProps) {
             28px column holding two glyphs, but see .albumCell below for the
             case where it is not. */}
         <span role="cell">
-          <Tag status={job.status} queuePosition={job.queuePosition} bare />
+          <Tag status={job.status} bare />
         </span>
         <div role="cell" className={styles.albumCell}>
           <button
@@ -399,10 +421,9 @@ export default function Jobs() {
               <Chip
                 key={key}
                 label={t.jobs.sourceChipLabel[key]}
-                count={hasData(phase) ? result?.facets.source[key] : undefined}
                 active={source === key}
                 onClick={() => {
-                  setSource(key);
+                  setSource(source === key ? 'all' : key);
                   resetPage();
                 }}
               />
