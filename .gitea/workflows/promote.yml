@@ -104,10 +104,13 @@ jobs:
         run: |
           set -euo pipefail
           TARGET="${{ steps.resolve.outputs.target }}"
-          # Registry-side manifest copy: no layers move, no builder runs, and the
-          # digest behind :latest becomes byte-identical to the canary's.
+          # Registry-side manifest copy: no layers move and no builder runs. :latest
+          # gets a manifest digest of its own — create re-serialises the manifest list —
+          # but it references the same config and layers the canary has been running.
           docker buildx imagetools create -t "${IMAGE}:latest" "${IMAGE}:${TARGET}"
-          docker buildx imagetools inspect "${IMAGE}:latest" | head -n 3
+          # The digest is the whole point of the echo, so ask for just it rather than
+          # piping the full inspect through `head`.
+          docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:latest"
 
       - name: Record the promotion
         run: |

@@ -16,8 +16,12 @@ wants them sooner.
 ## Promotion re-points a digest and must never rebuild
 
 `docker buildx imagetools create -t …:latest …:vX.Y.Z` is a registry-side manifest copy:
-no layers move, no builder runs, and the digest behind `:latest` is byte-identical to the
-one that has been running on the canary.
+no layers move and no builder runs. `:latest` does end up with a manifest digest of its
+own — `create` re-serialises the manifest list, so it is not the digest the canary
+pulled — but it references the same config and the same layer blobs, and that is what the
+soak was evidence about. Do not treat the two digests as an equality check: comparing
+`:latest` to `:vX.Y.Z` by digest reports a difference on a perfectly good promotion.
+Compare the config digest instead.
 
 Rebuilding from the same git tag looks equivalent and is not. `Dockerfile` resolves a
 base image and `npm ci` fetches from the network, so a rebuild two weeks later is a
