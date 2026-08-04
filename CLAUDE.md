@@ -197,6 +197,33 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, both created lazily
 
 - Branch per issue: `feat/<description>-<issue>`, `fix/<description>-<issue>`,
   `chore/<description>`. Never work directly on `main`.
+- **Implementation work happens in a worktree, not in this checkout.** Several
+  sessions run here at once, and a shared working tree cannot survive that: two
+  sessions each assume they own the branch, and one of them is wrong.
+
+  ```bash
+  git worktree add .claude/worktrees/<short-name> -b fix/<description>-<issue> main
+  ```
+
+  `.claude/worktrees/` is gitignored and is the established location. The main
+  checkout is for reading, review and lab runs — the things that do not write.
+
+  This is not hypothetical: a session implementing #408 had the branch checked
+  out from under it by a concurrent session, between its last commit and
+  `tea pulls create`. `--head` was passed explicitly and held, so the PR was
+  correct — but `docs/agents/issue-tracker.md` documents that `--head` is
+  ignored often enough to warrant a warning, and on the other outcome the PR
+  would have carried a stranger's branch under the wrong title. Into a repo
+  where merging deploys.
+- **Print `git branch --show-current` before any command that reads the current
+  branch implicitly** — `tea pulls create`, `git push`, `git commit`. A worktree
+  makes the collision unlikely, not impossible; a skill or agent that checks out
+  is still free to move it under you. This check costs nothing and is what caught
+  the #408 near-miss.
+- Two costs worth knowing before you are surprised by them: a fresh worktree
+  needs its own `npm ci` (`web/node_modules` is ~114 MB, never shared) and its
+  own Vite `--port`. The lab does **not** multiply — only one `testenv/` stack
+  runs at a time, so PR verification still serializes across sessions.
 - Commit subject: `<type>: <description> (#<issue>)`.
 - **Never `git add -A` in this repo.** Agent tooling drops untracked directories here
   (`.pi-subagents/`, `.remnic/`, `.serena/`, `.claude/worktrees/`) and a blanket add has
