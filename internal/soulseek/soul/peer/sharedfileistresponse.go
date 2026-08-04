@@ -25,12 +25,20 @@ const (
 type sharedFileListLimitWriter struct {
 	writer    io.Writer
 	remaining int64
+	limit     int64
 	what      string
 }
 
+func newSharedFileListLimitWriter(w io.Writer, limit int64, what string) *sharedFileListLimitWriter {
+	return &sharedFileListLimitWriter{writer: w, remaining: limit, limit: limit, what: what}
+}
+
+// Write reports the limit itself in the error, not just that one was hit: the
+// only actionable thing a caller can say to a user whose share is too big is
+// how big it was allowed to be (issue #408).
 func (w *sharedFileListLimitWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > w.remaining {
-		return 0, fmt.Errorf("%w: shared file list %s exceeds its configured limit", soul.ErrMessageTooLarge, w.what)
+		return 0, fmt.Errorf("%w: shared file list %s exceeds its %d-byte limit", soul.ErrMessageTooLarge, w.what, w.limit)
 	}
 	n, err := w.writer.Write(p)
 	w.remaining -= int64(n)
@@ -73,13 +81,13 @@ func (s *SharedFileListResponse) Serialize(message *SharedFileListResponse) ([]b
 	}
 
 	buf := new(bytes.Buffer)
-	frameWriter := &sharedFileListLimitWriter{writer: buf, remaining: maxSharedFileListFrameSize, what: "frame"}
+	frameWriter := newSharedFileListLimitWriter(buf, maxSharedFileListFrameSize, "frame")
 	if err := internal.WriteUint32(frameWriter, uint32(CodeSharedFileListResponse)); err != nil {
 		return nil, err
 	}
 
 	zw := zlib.NewWriter(frameWriter)
-	payloadWriter := &sharedFileListLimitWriter{writer: zw, remaining: maxSharedFileListDecompressedSize, what: "decompressed payload"}
+	payloadWriter := newSharedFileListLimitWriter(zw, maxSharedFileListDecompressedSize, "decompressed payload")
 	if err := s.walkWrite(message.Directories, payloadWriter); err != nil {
 		_ = zw.Close()
 		return nil, err

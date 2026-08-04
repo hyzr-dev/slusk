@@ -39,6 +39,32 @@ const (
 // is already running; the caller should not queue a second one.
 var ErrShareScanInProgress = errors.New("soulseek: share scan already in progress")
 
+// ErrShareTooLarge marks a share-scan failure that no retry can fix: the
+// index was built, but it does not fit in a browse response and so cannot be
+// published (issue #408). It is minted at exactly one place - the serialize
+// step of our own browse frame in scanShares - deliberately narrower than
+// soul.ErrMessageTooLarge, which the decode paths also return for oversized
+// data received from other peers. Classifying on that sentinel instead would
+// let a remote peer's frame decide our retry policy.
+var ErrShareTooLarge = errors.New("soulseek: shared file list is too large to publish")
+
+// serializeSharedFileList builds the browse frame for a scanned index. It is
+// a variable so a test can force the too-large branch of scanShares without
+// a six-figure share index on disk; the peer package covers the real
+// serializer's own limit. Never reassigned outside tests.
+var serializeSharedFileList = func(directories []peer.Directory) ([]byte, error) {
+	msg := &peer.SharedFileListResponse{Directories: directories}
+	return msg.Serialize(msg)
+}
+
+// shareFailure is a permanent share-scan failure and when it happened. The
+// message is already user-facing prose (see scanShares) and carries no local
+// filesystem paths, so it is safe to surface over HTTP.
+type shareFailure struct {
+	Message string
+	At      time.Time
+}
+
 // ErrClientStopped is returned when the client is not running (or is
 // shutting down) and cannot start background work.
 var ErrClientStopped = errors.New("soulseek: client is not running")
@@ -67,6 +93,15 @@ type ShareStats struct {
 	// ScanDuration is how long the filesystem walk that produced this index
 	// took, measured from after any test shareScanHook.
 	ScanDuration time.Duration
+	// LastError explains why sharing is off when the last scan failed
+	// permanently (issue #408) and is empty otherwise. It is not set for a
+	// transient failure, which is still being retried and leaves the previous
+	// index live. The counts above describe the *published* index, so on a
+	// permanent failure they are the pre-failure ones (zero on a fresh
+	// start) - LastError is what says they are not going to change.
+	LastError string
+	// LastErrorAt is when LastError was recorded, zero when there is none.
+	LastErrorAt time.Time
 }
 
 // ShareFolderStats is one configured SharedFolder's contribution to the
@@ -163,8 +198,15 @@ func (c *Client) scanAndPublish(ctx context.Context) (ShareStats, error) {
 func (c *Client) scanAndPublishLocked(ctx context.Context) (ShareStats, error) {
 	snapshot, err := c.scanShares(ctx)
 	if err != nil {
+		// Only a permanent failure is recorded. A transient one is still
+		// being retried and leaves the previous index live, so reporting it
+		// as the reason sharing is off would be wrong on both counts.
+		if errors.Is(err, ErrShareTooLarge) {
+			c.shareFailure.Store(&shareFailure{Message: err.Error(), At: time.Now()})
+		}
 		return ShareStats{}, err
 	}
+	c.shareFailure.Store(nil)
 	c.shares.Store(snapshot)
 
 	if c.logger != nil {
@@ -268,8 +310,16 @@ func (c *Client) ShareReport() ShareReport {
 	s := c.shareSnapshot()
 	folders := make([]ShareFolderStats, len(s.folders))
 	copy(folders, s.folders)
+	stats := s.stats
+	// The failure lives outside the snapshot (see Client.shareFailure), so it
+	// is merged in here rather than being written into snapshot.stats: a
+	// permanently failed scan publishes no snapshot to write it into.
+	if failure := c.shareFailure.Load(); failure != nil {
+		stats.LastError = failure.Message
+		stats.LastErrorAt = failure.At
+	}
 	return ShareReport{
-		ShareStats: s.stats,
+		ShareStats: stats,
 		Folders:    folders,
 		Scanning:   len(c.shareScanSem) > 0,
 	}
@@ -346,9 +396,19 @@ func (c *Client) announceCurrentShares(loginTime bool) error {
 // waiting on a scan of the local filesystem (a boot-time disk blip or
 // not-yet-ready mount can otherwise take arbitrarily long). Until this
 // completes, the client answers browse/search requests with the empty
-// snapshot New installs. Retries forever with the same exponential backoff
-// retryStartup uses, since there is no clean terminal classification for a
-// scan failure and a genuinely bad config is caught by config.Validate first.
+// snapshot New installs. Retries with the same exponential backoff
+// retryStartup uses for as long as failures are transient - an I/O error, a
+// mount that has not come up yet - since those do resolve on their own and a
+// genuinely bad config is caught by config.Validate first.
+//
+// A permanent failure (ErrShareTooLarge: the index does not fit in a browse
+// response) ends the retries instead. That error is a function of the shared
+// files, not of time, so every further attempt would re-walk every root and
+// throw away the whole allocated snapshot to fail identically (issue #408).
+// The failure is recorded on the client, surfaced on /status and /api/shares,
+// and nothing else is torn down: the download pipeline does not depend on
+// shares.
+//
 // It never returns early on ctx cancellation mid-attempt beyond the standard
 // per-attempt check, since scanAndPublish/scanShares already thread ctx
 // through the filesystem walk.
@@ -372,6 +432,10 @@ func (c *Client) runInitialShareScan(ctx context.Context) {
 			if announceErr := c.announceShares(); announceErr != nil {
 				c.logger.Debug("share stats will be announced on next server login", "err", announceErr)
 			}
+			return
+		}
+		if errors.Is(err, ErrShareTooLarge) {
+			c.logger.Error("initial share scan failed permanently; sharing is disabled until the configuration changes", "err", err)
 			return
 		}
 		wait := nextBackoff(attempt, c.cfg.backoffBase, c.cfg.backoffCap)
@@ -595,9 +659,18 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 		IndexedAt:    time.Now(),
 		ScanDuration: time.Since(start),
 	}
-	msg := &peer.SharedFileListResponse{Directories: s.directories}
-	frame, err := msg.Serialize(msg)
+	frame, err := serializeSharedFileList(s.directories)
 	if err != nil {
+		if errors.Is(err, soul.ErrMessageTooLarge) {
+			// Only here, on our own outbound browse frame, does an oversized
+			// message mean "the share is too big" - hence ErrShareTooLarge
+			// rather than passing soul.ErrMessageTooLarge up as the
+			// classification. The count and the limit both go in the message
+			// because "message declares a size larger than the maximum
+			// allowed message size" tells a user nothing about their library.
+			return nil, fmt.Errorf("%w: %d shared files in %d directories do not fit in a browse response, so sharing is disabled until fewer files are shared: %w",
+				ErrShareTooLarge, len(s.search), len(s.directories), err)
+		}
 		return nil, fmt.Errorf("serialize shared file list: %w", err)
 	}
 	s.sharedFrame = frame

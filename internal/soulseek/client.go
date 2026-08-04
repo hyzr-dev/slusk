@@ -314,6 +314,13 @@ type Client struct {
 	incoming chan incomingMessage
 
 	shares atomic.Pointer[shareSnapshot]
+	// shareFailure carries the last permanent share-scan failure (issue
+	// #408), nil when the last scan succeeded or only failed transiently. It
+	// lives beside shares rather than inside the snapshot because a failed
+	// scan publishes no snapshot at all: the whole point of the field is to
+	// explain why the live snapshot is the empty one. ShareReport merges it
+	// into ShareStats, which is what both /status and /api/shares read.
+	shareFailure atomic.Pointer[shareFailure]
 	// shareScanSem is the share-scan lock, as a capacity-1 semaphore rather
 	// than a plain mutex: TriggerRescanShares needs to claim it without
 	// blocking (tryAcquireShareScan) and ShareReport needs to read whether it

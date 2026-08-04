@@ -452,6 +452,21 @@ func main() {
 				Live:                soulStatus.State != soulseek.StateFailed,
 				Ready:               soulStatus.State == soulseek.StateConnected,
 			}
+			// Sharing is a separate entry rather than folded into "soulseek"
+			// above, because the two fail independently: a share index too
+			// large to publish leaves the server connection perfectly healthy,
+			// and one reading would have to lie about the other (issue #408).
+			// Live and Ready are both keyed on LastError since a permanent
+			// share failure ends the retries - the module is neither making
+			// progress nor going to.
+			shares := soulClient.ShareReport()
+			out["shares"] = observ.ModuleStatus{
+				LastSuccess: shares.IndexedAt,
+				LastErrorAt: shares.LastErrorAt,
+				LastError:   shares.LastError,
+				Live:        shares.LastError == "",
+				Ready:       shares.LastError == "",
+			}
 		}
 		return out
 	}
@@ -574,6 +589,8 @@ func main() {
 				ScanDuration: report.ScanDuration,
 				Scanning:     report.Scanning,
 				Folders:      folders,
+				LastError:    report.LastError,
+				LastErrorAt:  report.LastErrorAt,
 			}
 		}
 		rescanSharesFn = func() error {

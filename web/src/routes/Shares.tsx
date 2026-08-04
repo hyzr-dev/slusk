@@ -22,6 +22,28 @@ import UploadsPanel from './UploadsPanel';
 // folder grid (see internal/observ/shares.go ShareFolderStats).
 const STALE_INDEX_MS = 24 * 60 * 60 * 1000;
 
+// Shared by the two warning cards below (empty shares, and a scan that failed
+// permanently — #408), which differ only in their copy.
+function WarningIcon() {
+  return (
+    <svg
+      width="22"
+      height="22"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--bad)"
+      strokeWidth="2"
+      strokeLinecap="round"
+      className={styles.warningIcon}
+      aria-hidden="true"
+    >
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+      <path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+    </svg>
+  );
+}
+
 export default function Shares() {
   const sharesQuery = useShares();
   const { data } = sharesQuery;
@@ -75,33 +97,39 @@ export default function Shares() {
   return (
     <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
       <QueryNotice phase={phase} />
-      {data.folders.length === 0 && (
+      {/* A permanently failed scan (#408) also reports zero folders, so these
+          two warnings are mutually exclusive rather than stacked: showing "no
+          shared folders configured" to someone whose folders are configured
+          and merely unpublishable sends them to fix the wrong thing. The
+          empty-shares branch is unchanged, just no longer the only one. */}
+      {data.lastError ? (
         <div className={styles.warningCard}>
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="var(--bad)"
-            strokeWidth="2"
-            strokeLinecap="round"
-            className={styles.warningIcon}
-            aria-hidden="true"
-          >
-            <path d="M12 9v4" />
-            <path d="M12 17h.01" />
-            <path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
-          </svg>
+          <WarningIcon />
           <div>
-            <div className={styles.warningTitle}>{t.shares.emptyTitle}</div>
-            <div className={styles.warningBody}>
-              {t.shares.emptyBodyPrefix}{' '}
-              <Link to="/settings">{t.nav.settings}</Link>
-              {t.shares.emptyBodySuffix}
-            </div>
-            <pre className={styles.warningSnippet}>{t.shares.emptyConfigSnippet}</pre>
+            <div className={styles.warningTitle}>{t.shares.scanFailedTitle}</div>
+            <div className={styles.warningBody}>{t.shares.scanFailedBody}</div>
+            {/* Rendered verbatim: it is the only place the file count and the
+                limit that was exceeded appear, and paraphrasing it here would
+                mean inventing a cause the frontend cannot know. */}
+            <pre className={styles.warningSnippet}>{data.lastError}</pre>
+            <div className={styles.warningBody}>{t.shares.scanFailedSuffix}</div>
           </div>
         </div>
+      ) : (
+        data.folders.length === 0 && (
+          <div className={styles.warningCard}>
+            <WarningIcon />
+            <div>
+              <div className={styles.warningTitle}>{t.shares.emptyTitle}</div>
+              <div className={styles.warningBody}>
+                {t.shares.emptyBodyPrefix}{' '}
+                <Link to="/settings">{t.nav.settings}</Link>
+                {t.shares.emptyBodySuffix}
+              </div>
+              <pre className={styles.warningSnippet}>{t.shares.emptyConfigSnippet}</pre>
+            </div>
+          </div>
+        )
       )}
 
       <Panel>

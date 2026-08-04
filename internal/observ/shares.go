@@ -36,6 +36,14 @@ type ShareStatsReport struct {
 	ScanDuration time.Duration
 	Scanning     bool
 	Folders      []ShareFolderStats
+	// LastError explains why sharing is off when the last scan failed in a way
+	// no retry can fix (issue #408), and is empty otherwise. Unlike the rescan
+	// errors below, this string is safe to serve: it is minted on the soulseek
+	// side as user-facing prose with no local filesystem paths in it.
+	LastError string
+	// LastErrorAt is when LastError was recorded, zero when there is none. It
+	// feeds the /status module entry; GET /api/shares does not serve it.
+	LastErrorAt time.Time
 }
 
 // SharesFunc reports the current share index. Nil when native Soulseek
@@ -63,6 +71,10 @@ type sharesDTO struct {
 	Files          int                `json:"files"`
 	TotalBytes     uint64             `json:"totalBytes"`
 	Folders        []ShareFolderStats `json:"folders"`
+	// LastError is omitted rather than served as "" when the last scan
+	// succeeded: an empty string would read as "failed with no message", which
+	// is a different claim from "did not fail".
+	LastError string `json:"lastError,omitempty"`
 }
 
 // disabledSharesDTO returns the shape served at GET /api/shares when native
@@ -84,6 +96,7 @@ func toSharesDTO(report ShareStatsReport) sharesDTO {
 		Files:          report.Files,
 		TotalBytes:     report.TotalBytes,
 		Folders:        folders,
+		LastError:      report.LastError,
 	}
 	if !report.IndexedAt.IsZero() {
 		dto.IndexedAt = report.IndexedAt.Format(timeFormat)

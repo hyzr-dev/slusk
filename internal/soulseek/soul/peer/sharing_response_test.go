@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,8 +58,16 @@ func TestSharedFileListResponseEnforcesCountAndSerializedSizeBounds(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := tt.response.Serialize(tt.response); !errors.Is(err, soul.ErrMessageTooLarge) {
+			_, err := tt.response.Serialize(tt.response)
+			if !errors.Is(err, soul.ErrMessageTooLarge) {
 				t.Fatalf("Serialize error = %v, want ErrMessageTooLarge", err)
+			}
+			// The limit that was hit has to be in the message, not just the
+			// fact that one was: internal/soulseek quotes this error verbatim
+			// to a user whose share is too big to publish (issue #408), and
+			// "too large" without a number is not something they can act on.
+			if want := fmt.Sprint(maxSharedFileListDecompressedSize); tt.name == "decompressed size" && !strings.Contains(err.Error(), want) {
+				t.Fatalf("Serialize error = %q, want it to name the %s-byte limit", err, want)
 			}
 		})
 	}

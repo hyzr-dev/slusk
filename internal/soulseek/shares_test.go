@@ -951,6 +951,137 @@ func TestRunInitialShareScanRetriesThenPublishes(t *testing.T) {
 	}
 }
 
+// failSerializeTooLarge makes the browse-frame serializer fail the way it
+// does for a share too big to publish, and restores it when the test ends.
+// The real serializer needs around 170k files to reach this (issue #408),
+// which is why the seam exists; peer's own tests cover that the serializer
+// really does return ErrMessageTooLarge at its limit.
+func failSerializeTooLarge(t *testing.T) {
+	t.Helper()
+	restore := serializeSharedFileList
+	serializeSharedFileList = func([]peer.Directory) ([]byte, error) {
+		return nil, fmt.Errorf("%w: shared file list decompressed payload exceeds its 16777216-byte limit", soul.ErrMessageTooLarge)
+	}
+	t.Cleanup(func() { serializeSharedFileList = restore })
+}
+
+// TestRunInitialShareScanStopsAfterPermanentFailure locks issue #408. A share
+// index that does not fit in a browse response fails identically on every
+// attempt, so the background scan must give up after exactly one, rather than
+// re-walking every root and re-allocating the whole snapshot forever. The
+// error it leaves behind has to name the file count and the limit: the
+// underlying protocol error says only that some message was too big, which
+// tells a user nothing about their library.
+func TestRunInitialShareScanStopsAfterPermanentFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+	// Deliberately long: if the terminal classification regresses, the second
+	// attempt cannot arrive before the deadline below, so this fails loudly
+	// instead of quietly taking one extra lap and still passing.
+	c.cfg.backoffBase = time.Hour
+	c.cfg.backoffCap = time.Hour
+	failSerializeTooLarge(t)
+
+	var attempts int
+	c.cfg.shareScanHook = func(context.Context) error {
+		attempts++
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.runInitialShareScan(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runInitialShareScan did not return after a permanent failure; it is still retrying")
+	}
+
+	if attempts != 1 {
+		t.Fatalf("scan attempts = %d, want exactly 1 (a permanent failure is not retried)", attempts)
+	}
+
+	report := c.ShareReport()
+	for _, want := range []string{"1 shared files", "16777216", "sharing is disabled"} {
+		if !strings.Contains(report.LastError, want) {
+			t.Fatalf("LastError = %q, want it to contain %q", report.LastError, want)
+		}
+	}
+	if report.LastErrorAt.IsZero() {
+		t.Fatal("LastErrorAt is zero after a permanent failure")
+	}
+	// Nothing was published, so the rest of slusk sees the empty index it
+	// started with - not a half-built one.
+	if report.Files != 0 || report.Directories != 0 {
+		t.Fatalf("published stats = %+v, want the empty index (nothing is publishable)", report.ShareStats)
+	}
+}
+
+// TestScanAndPublishClearsPermanentFailureOnSuccess covers the other
+// direction of issue #408's failure field: once a scan succeeds - the user
+// removed a share, or a rescan was triggered after fixing the config - the
+// recorded failure must go, or /status and the Shares view would keep
+// explaining a problem that no longer exists.
+func TestScanAndPublishClearsPermanentFailureOnSuccess(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "track.flac"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: root}}}, testLogger())
+
+	failSerializeTooLarge(t)
+	if _, err := c.scanAndPublish(context.Background()); !errors.Is(err, ErrShareTooLarge) {
+		t.Fatalf("scanAndPublish error = %v, want ErrShareTooLarge", err)
+	}
+	if c.ShareReport().LastError == "" {
+		t.Fatal("LastError is empty after a permanent failure")
+	}
+
+	restore := serializeSharedFileList
+	serializeSharedFileList = func(directories []peer.Directory) ([]byte, error) {
+		msg := &peer.SharedFileListResponse{Directories: directories}
+		return msg.Serialize(msg)
+	}
+	t.Cleanup(func() { serializeSharedFileList = restore })
+
+	if _, err := c.scanAndPublish(context.Background()); err != nil {
+		t.Fatalf("scanAndPublish after recovery: %v", err)
+	}
+	report := c.ShareReport()
+	if report.LastError != "" || !report.LastErrorAt.IsZero() {
+		t.Fatalf("failure still reported after a successful scan: %q at %v", report.LastError, report.LastErrorAt)
+	}
+	if report.Files != 1 {
+		t.Fatalf("published files = %d, want 1", report.Files)
+	}
+}
+
+// TestScanAndPublishDoesNotRecordTransientFailures guards the branch the
+// permanent classification must not swallow: a transient scan error is still
+// retried by runInitialShareScan (TestRunInitialShareScanRetriesThenPublishes
+// covers that), and it must not leave a "sharing is disabled" reading behind,
+// because sharing is not disabled - the previous index is still live and the
+// next attempt may well succeed.
+func TestScanAndPublishDoesNotRecordTransientFailures(t *testing.T) {
+	c := New(Config{SharedFolders: []SharedFolder{{Name: "Music", Path: t.TempDir()}}}, testLogger())
+	c.cfg.shareScanHook = func(context.Context) error { return errors.New("simulated I/O failure") }
+
+	if _, err := c.scanAndPublish(context.Background()); err == nil {
+		t.Fatal("scanAndPublish succeeded, want the injected failure")
+	} else if errors.Is(err, ErrShareTooLarge) {
+		t.Fatalf("transient error classified as permanent: %v", err)
+	}
+	if report := c.ShareReport(); report.LastError != "" {
+		t.Fatalf("LastError = %q, want empty (a transient failure is not a permanent one)", report.LastError)
+	}
+}
+
 // TestRescanSharesReportsPerFolderStats locks issue #160's per-folder
 // breakdown: two shares with known file sizes, plus an escaping symlink that
 // must contribute neither files nor bytes to either total.
