@@ -34,11 +34,15 @@ const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting'
 // mock doesn't draw this control — its designer was working against a data
 // model that predates the source axis, though the mock does know the concept
 // (the small "●" dot on manual rows). Source filtering is a shipped feature,
-// so it stays in the same TUI chip idiom as the status row. It reads as a
-// second axis rather than more status values because it sits on its own line —
-// see .chipDivider's note in Jobs.module.css for the 1px rule that used to do
-// that job while the two axes still shared a row.
-const SOURCE_CHIP_ORDER: JobSourceFilter[] = ['all', 'manual', 'lidarr'];
+// so it stays in the same TUI chip idiom as the status row, separated by a 1px
+// rule so it reads as a second axis rather than more status values.
+// No ALL chip here, unlike the status axis: 'all' is the absence of a source
+// filter, not a third source, and a second chip reading ALL next to the status
+// row's own ALL made the same word mean two different things on one screen.
+// Clicking the active chip clears the filter instead. Counts are omitted too —
+// the source split is a two-way toggle, and the numbers cost width the row does
+// not have (see .controlsRow's note in Jobs.module.css).
+const SOURCE_CHIP_ORDER: Exclude<JobSourceFilter, 'all'>[] = ['manual', 'lidarr'];
 
 // Tick/percentage colour for a row (mock's `col`, line ~1052). Issue #416
 // moved "no bytes moving in a peer queue" onto its own 'queued' status —
@@ -371,15 +375,15 @@ export default function Jobs() {
               />
             ))}
           </div>
+          <span aria-hidden className={styles.chipDivider} />
           <div className={styles.chipGroup} role="group" aria-label={t.jobs.sourceFilterLabel}>
             {SOURCE_CHIP_ORDER.map((key) => (
               <Chip
                 key={key}
                 label={t.jobs.sourceChipLabel[key]}
-                count={hasData(phase) ? result?.facets.source[key] : undefined}
                 active={source === key}
                 onClick={() => {
-                  setSource(key);
+                  setSource(source === key ? 'all' : key);
                   resetPage();
                 }}
               />

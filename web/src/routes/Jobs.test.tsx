@@ -58,8 +58,9 @@ function statusChipName(label: string): RegExp {
 }
 
 // The status chips and the source chips are two independent axes rendered as
-// two ARIA groups on the same row — both have an ALL button, so an unscoped
-// query would be ambiguous. Scope to the group that owns the chip you mean.
+// two ARIA groups on the same row. Only the status axis has an ALL button
+// since issue #416, but scoping to the owning group is still the rule here:
+// the two axes share a row and an unscoped query reads across both.
 function statusGroup() {
   return within(screen.getByRole('group', { name: t.columns.status }));
 }
@@ -273,7 +274,11 @@ describe('server-owned filters and facets', () => {
     renderJobs([makeJob()], undefined, 42, facets);
 
     expect(within(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) })).getByText('6')).toBeInTheDocument();
-    expect(within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).getByText('11')).toBeInTheDocument();
+    // The source axis deliberately carries no counts (issue #416): they cost
+    // width the single filter row does not have, and the split is a two-way
+    // toggle rather than a population to scan. Its chips are the bare label.
+    expect(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.manual })).toBeInTheDocument();
+    expect(sourceGroup().queryByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).not.toBeInTheDocument();
   });
 
   // Issue #416: all ten status chips render, in the order that mirrors the
@@ -306,11 +311,35 @@ describe('server-owned filters and facets', () => {
     }));
     renderJobs([makeJob()]);
 
-    fireEvent.click(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) }));
+    fireEvent.click(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.manual }));
     await screen.findByText('Rounds');
     fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
 
     await waitFor(() => expect(requested.some((url) => url.includes('filter=failed') && url.includes('source=manual'))).toBe(true));
+  });
+
+  // Issue #416 dropped the source axis's ALL chip — 'all' is the absence of a
+  // source filter, not a third source, and a second ALL beside the status
+  // row's own made one word mean two things. Clicking the active chip is now
+  // the only way back to unfiltered, so it is the only thing standing between
+  // a user and a filter they cannot clear.
+  it('clears the source filter when the active source chip is clicked again', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      requested.push(url);
+      return Promise.resolve(new Response(JSON.stringify(pageFor([makeJob()])), { status: 200 }));
+    }));
+    renderJobs([makeJob()]);
+
+    const manual = () => sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.manual });
+    fireEvent.click(manual());
+    await waitFor(() => expect(requested.some((url) => url.includes('source=manual'))).toBe(true));
+    expect(manual()).toHaveAttribute('aria-pressed', 'true');
+
+    requested.length = 0;
+    fireEvent.click(manual());
+    await waitFor(() => expect(requested.some((url) => url.includes('source=all'))).toBe(true));
+    expect(manual()).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('resets to page one immediately while modestly debouncing search requests', async () => {
@@ -763,13 +792,17 @@ describe('query state', () => {
     // No chip anywhere in either group carries a count span while the query
     // has never resolved — the bare label is the whole accessible name.
     expect(statusGroup().getByRole('button', { name: t.jobs.chipLabel.all })).toBeInTheDocument();
-    expect(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.all })).toBeInTheDocument();
+    expect(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.lidarr })).toBeInTheDocument();
   });
 
   it('shows the filter chip counts once the jobs fetch resolves', () => {
     renderJobs([makeJob({ id: 1, status: 'active' })]);
     expect(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.all) })).toBeInTheDocument();
-    expect(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.all) })).toBeInTheDocument();
+    // Only the status axis has an ALL, and only it carries counts. A second
+    // ALL on the source axis made one word mean two things on one screen
+    // (issue #416); source is now a toggle over MANUAL/LIDARR alone.
+    expect(sourceGroup().getByRole('button', { name: t.jobs.sourceChipLabel.lidarr })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^ALL/ })).toHaveLength(1);
   });
 });
 

@@ -226,7 +226,12 @@ export const t = {
     lidarr: 'Lidarr',
   },
   jobs: {
-    searchPlaceholder: 'Search artist, album, peer…',
+    // Short because the field is the flexible element on a full filter row and
+    // shrinks to 120px there (see .filterBox in Jobs.module.css). The longer
+    // 'Search artist, album, peer…' clipped mid-word, which reads as breakage
+    // rather than as a hint. What is searchable is legible from the column
+    // headers beside it.
+    searchPlaceholder: 'Search…',
     noMatch: 'No jobs match the filter.',
     back: '← Back',
     cancel: 'Cancel',
