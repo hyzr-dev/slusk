@@ -192,9 +192,7 @@ jobs:
           )
           [ -z "$NOTES" ] && NOTES="- No commits in this range."
 
-          BODY=$(printf '%s\n\n---\n\nPromoted from the maintainer'"'"'s instance, where this exact image has been running.\nBuilds from `main` land on `%s:edge` if you want them sooner.' "$NOTES" "$IMAGE")
-
-          jq -n --arg tag "$TARGET" --arg name "$TARGET" --arg body "$BODY" \
+          jq -n --arg tag "$TARGET" --arg name "$TARGET" --arg body "$NOTES" \
             '{tag_name: $tag, name: $name, body: $body}' \
             | curl -sS -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
