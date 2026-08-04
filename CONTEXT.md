@@ -13,6 +13,14 @@ One album being carried from wanted to imported. The only unit of work the syste
 schedules, and the only contact surface between pipeline steps.
 _Avoid_: task, item, download (a download is one part of a job)
 
+**Job state**:
+The lifecycle value stored on the job row — `WANTED`, `SELECTING`, `DOWNLOADING`,
+`IMPORTING`, `DONE`, `PARKED`, `FAILED`, `CANCELLED`, `NOT_IMPORTED` — and the only
+vocabulary the pipeline itself reads or writes. Not the same as dashboard status:
+several statuses are derived from transfer activity rather than the job row, and one
+job state can present as more than one status.
+_Avoid_: status on its own (ambiguous with dashboard status)
+
 **Source**:
 What caused an album job to exist — a Lidarr wanted-sync, or a person creating one by
 hand. A manual job skips discovery because its candidate is already chosen.
@@ -43,6 +51,36 @@ the album is still absent from the library.
 _Avoid_: failed, rejected
 
 ### The dashboard
+
+**Dashboard status**:
+What the interface calls a job. Derived from job state and, for some statuses, transfer
+activity — never stored. Not a rename of job state: several statuses come from
+transfer activity rather than the job row, and one job state can present as more than
+one status.
+_Avoid_: state on its own (that is the database's word, see Job state)
+
+**Wanted**:
+Dashboard status for a job never yet searched — no candidates cached.
+_Avoid_: new, unstarted
+
+**Selecting**:
+Dashboard status for a job with candidates cached, waiting for a `max_active` slot to
+open.
+_Avoid_: ranking, picking
+
+**Queued**:
+Dashboard status for a job with a candidate chosen but no file from it completed yet —
+the request is sitting in a peer's queue waiting for the first file to arrive.
+Deliberately the narrow, literal sense: what a Soulseek user already expects "queued"
+to mean.
+_Avoid_: preparing, starting, initializing (nothing is happening on our side; the peer
+holds the initiative)
+
+**Waiting**:
+Dashboard status for a job with at least one file from the candidate already arrived,
+and none moving right now.
+_Avoid_: pending (collides with `core.TransferPending`, a real per-file transfer state
+rendered in the job detail panel)
 
 **Manual search**:
 A search a person starts by hand against Soulseek, independent of any wanted album.

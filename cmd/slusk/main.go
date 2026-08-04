@@ -312,7 +312,9 @@ func main() {
 				Status: observ.JobStatusFacets{
 					All: page.Facets.Status.All, Active: page.Facets.Status.Active,
 					Importing: page.Facets.Status.Importing, Queued: page.Facets.Status.Queued,
-					Stalled: page.Facets.Status.Stalled, Failed: page.Facets.Status.Failed,
+					Waiting: page.Facets.Status.Waiting, Selecting: page.Facets.Status.Selecting,
+					Wanted: page.Facets.Status.Wanted, Stalled: page.Facets.Status.Stalled,
+					Failed: page.Facets.Status.Failed,
 					Parked: page.Facets.Status.Parked, Done: page.Facets.Status.Done,
 				},
 				Source: observ.JobSourceFacets{

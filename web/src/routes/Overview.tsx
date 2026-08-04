@@ -294,7 +294,7 @@ export default function Overview() {
                     onKeyDown={(event) => handleRowKeyDown(event, () => navigate(`/jobs/${job.id}`))}
                   >
                     <span role="cell">
-                      <Tag status={job.status} queuePosition={job.queuePosition} bare />
+                      <Tag status={job.status} bare />
                     </span>
                     <span role="cell" className={styles.albumCell}>
                       <span className={styles.transferTitle}>{job.title}</span>

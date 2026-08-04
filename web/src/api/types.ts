@@ -11,7 +11,25 @@
 // import into — it downloaded successfully and was never handed to Lidarr,
 // which is neither a success nor a failure and must not read as either (see
 // Tag's TONE).
-export type JobStatus = 'queued' | 'active' | 'stalled' | 'importing' | 'done' | 'failed' | 'parked' | 'notImported';
+//
+// 'wanted'/'selecting'/'waiting' (issue #416) split what used to be grouped
+// under 'queued'/'active': 'wanted' is synced from Lidarr with no candidates
+// yet, and 'selecting' has cached candidates waiting for a `max_active` slot.
+// 'queued' narrows to its literal Soulseek meaning — a candidate is chosen and
+// its files sit in the peer's queue with nothing delivered yet — and 'waiting'
+// is the gap between files of the same candidate, at least one already here.
+export type JobStatus =
+  | 'wanted'
+  | 'selecting'
+  | 'queued'
+  | 'waiting'
+  | 'active'
+  | 'stalled'
+  | 'importing'
+  | 'done'
+  | 'failed'
+  | 'parked'
+  | 'notImported';
 // NOT_IMPORTED is terminal. JobActions.TERMINAL_STATES must list it: the
 // store's cancel path rewrites a job's state unconditionally, so hiding the
 // Cancel button is the only thing stopping a terminal job from being
@@ -49,9 +67,12 @@ export type JobPageSort = 'st' | 'album' | 'peer' | 'try' | 'transfer' | 'recent
 export type JobPageDirection = 'asc' | 'desc';
 export type JobStatusFilter =
   | 'all'
+  | 'wanted'
+  | 'selecting'
+  | 'queued'
+  | 'waiting'
   | 'active'
   | 'importing'
-  | 'queued'
   | 'stalled'
   | 'failed'
   | 'parked'
@@ -85,6 +106,9 @@ export interface JobPageParams {
 
 export interface JobStatusFacets {
   all: number;
+  wanted: number;
+  selecting: number;
+  waiting: number;
   active: number;
   importing: number;
   queued: number;

@@ -33,9 +33,14 @@
 
 .chipGroup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-/* Separates the status chips from the source chips on the same row, so two
-   independent filter axes don't read as one longer list of statuses. */
-.chipDivider { width: 1px; align-self: stretch; background: var(--line2); margin: 0 2px; }
+/* The status and source chips used to share a row, separated by a 1px rule so
+   two independent filter axes didn't read as one longer list of statuses.
+   Issue #416 took the status row from seven chips to ten, and the source group
+   now wraps onto its own line at every width measured up to 1920 — leaving the
+   rule stranded at the end of the status row, separating nothing. The line
+   break does that job now, so the rule is gone rather than kept as a 1px tick
+   pointing at empty space. Restore it if the status row ever gets short enough
+   for the two axes to share a line again. */
 
 /* outline: none is safe here only because .filterBox:focus-within above marks
    the focus. Don't remove that rule without putting an indicator back. */

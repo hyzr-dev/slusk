@@ -114,7 +114,8 @@ const jobViewFrom = `
 			COUNT(*) FILTER (WHERE state = 'IN_PROGRESS')                              AS in_progress,
 			COUNT(*) FILTER (WHERE state = 'STALLED')                                  AS stalled,
 			COUNT(*) FILTER (WHERE state NOT IN ('COMPLETED', 'ERRORED', 'CANCELLED')) AS live,
-			COUNT(*) FILTER (WHERE state IN ('ERRORED', 'CANCELLED'))                  AS failed
+			COUNT(*) FILTER (WHERE state IN ('ERRORED', 'CANCELLED'))                  AS failed,
+			COUNT(*) FILTER (WHERE state = 'COMPLETED')                                AS completed
 		FROM transfers
 		WHERE candidate_id = a.id
 	) agg ON true`
@@ -127,36 +128,60 @@ const jobViewFrom = `
 // already drifted from this one over IMPORTING).
 //
 // Job-level states are checked first because they're unambiguous regardless
-// of any transfer activity. SELECTING is deliberately mapped to 'queued', not
-// 'active': it's the pipeline's waiting room — candidates are cached but the
-// job is waiting for a MaxActive slot (the cap only counts
-// DOWNLOADING+IMPORTING). Counting it as active made the dashboard's Aktiv
-// figure grow past max_active, which read like a broken cap.
+// of any transfer activity. WANTED and SELECTING now report their own
+// statuses instead of both collapsing into 'queued' (issue #416): "why is
+// nothing happening" has two different answers, and only one of them is a
+// config knob. 'wanted' means never searched; 'selecting' means candidates
+// are cached but the job is waiting for a MaxActive slot (the cap only
+// counts DOWNLOADING+IMPORTING) — counting it as active made the dashboard's
+// Aktiv figure grow past max_active, which read like a broken cap.
 //
-// Only once none of those apply does the CASE fall through to agg (see
-// jobViewFrom), which aggregates every transfer of the job's current
-// candidate rather than reading one arbitrarily-chosen row: any file actually
-// moving makes the job 'active', any file stalled (with none in progress)
-// makes it 'stalled', and a candidate whose transfers are all terminal with
-// at least one failure reports 'failed'. A DOWNLOADING job with no transfer
-// activity yet (agg.live > 0 but nothing in progress or errored, e.g. all
-// still PENDING) falls through to 'queued' — nothing is happening yet.
+// Only once none of the job-level states apply does the CASE fall through to
+// agg (see jobViewFrom), which aggregates every transfer of the job's
+// current candidate rather than reading one arbitrarily-chosen row: any file
+// actually moving makes the job 'active', any file stalled (with none in
+// progress) makes it 'stalled', and a candidate whose transfers are all
+// terminal with at least one failure reports 'failed'. 'queued' and 'waiting'
+// split what used to be a single DOWNLOADING fallback, on whether the peer has
+// delivered anything yet: 'queued' means what it means in Soulseek — a
+// candidate is chosen, its first files sit in the peer's queue, and nothing
+// has arrived (agg.completed = 0); 'waiting' is the gap between files of the
+// same candidate, at least one already delivered.
+//
+// The two were originally named the other way round, on the assumption that
+// the pre-first-file window was a transient startup blip. A lab run measured
+// it populated in 60 of 60 samples across six minutes — one job, one peer, no
+// file — while 'selecting', assumed long-lived, appeared in 8. The wait for a
+// peer's first byte is the dominant state, so it takes the word that describes
+// it. See docs/adr/0005-dashboard-status-vocabulary.md.
+//
+// 'queued' is asserted explicitly on j.state = 'DOWNLOADING' rather than left
+// to the ELSE, so a legacy COOLDOWN/VERIFYING row (nothing in production
+// writes those any more) does not claim to be queued at a peer. The ELSE falls
+// to 'wanted': every dead legacy state is a pre-download state, and none can
+// be confused with a live transfer. 'waiting' also catches the millisecond
+// window where every file is COMPLETED but pipeline resolve
+// (internal/pipeline/downloading.go:556) has not yet advanced the job to
+// IMPORTING — no branch of its own is needed; the job is indeed waiting.
 const dashboardJobStatusSQL = `CASE
-	WHEN j.state IN ('DONE', 'COMPLETED') THEN 'done'
-	WHEN j.state = 'FAILED' THEN 'failed'
-	WHEN j.state IN ('PARKED', 'ORPHANED') THEN 'parked'
-	WHEN j.state = 'IMPORTING' THEN 'importing'
+	WHEN j.state IN ('DONE', 'COMPLETED')   THEN 'done'
+	WHEN j.state = 'FAILED'                 THEN 'failed'
+	WHEN j.state IN ('PARKED', 'ORPHANED')  THEN 'parked'
+	WHEN j.state = 'IMPORTING'              THEN 'importing'
 	-- A manual job (issue #59) whose download completed with no Lidarr album
 	-- to import into. Terminal and deliberately NOT 'failed' or 'done': the
 	-- download itself succeeded, but there is nothing to report as
 	-- imported. Checked alongside the other job-level states above, before
 	-- any transfer-aggregate fallback applies.
-	WHEN j.state = 'NOT_IMPORTED' THEN 'notImported'
-	WHEN j.state IN ('WANTED', 'SELECTING') THEN 'queued'
-	WHEN agg.in_progress > 0 THEN 'active'
-	WHEN agg.stalled > 0 THEN 'stalled'
-	WHEN agg.live = 0 AND agg.failed > 0 THEN 'failed'
-	ELSE 'queued'
+	WHEN j.state = 'NOT_IMPORTED'           THEN 'notImported'
+	WHEN j.state = 'WANTED'                 THEN 'wanted'
+	WHEN j.state = 'SELECTING'              THEN 'selecting'
+	WHEN agg.in_progress > 0                THEN 'active'
+	WHEN agg.stalled > 0                    THEN 'stalled'
+	WHEN agg.live = 0 AND agg.failed > 0    THEN 'failed'
+	WHEN agg.completed > 0                  THEN 'waiting'
+	WHEN j.state = 'DOWNLOADING'            THEN 'queued'
+	ELSE 'wanted'
 END`
 
 // jobViewSelect projects one row per album_job (see jobViewFrom for the
@@ -312,6 +337,9 @@ type DashboardStatusFacets struct {
 	Active    int64
 	Importing int64
 	Queued    int64
+	Waiting   int64
+	Selecting int64
+	Wanted    int64
 	Stalled   int64
 	Failed    int64
 	Parked    int64
@@ -376,7 +404,7 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	// dashboardJobsWhere's default case — it is NOT the same set as
 	// "failures" below; see that case's comment for why the two must never
 	// be merged.
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "inflight", "finished", "failures":
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "wanted", "selecting", "waiting", "inflight", "finished", "failures":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -478,9 +506,10 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 	switch q.Sort {
 	case "st":
 		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
-			WHEN 'active' THEN 1 WHEN 'importing' THEN 2 WHEN 'queued' THEN 3
-			WHEN 'stalled' THEN 4 WHEN 'failed' THEN 5 WHEN 'parked' THEN 6
-			WHEN 'done' THEN 7 ELSE 8 END ` + direction + `, j.id ASC`
+			WHEN 'active' THEN 1 WHEN 'importing' THEN 2 WHEN 'waiting' THEN 3
+			WHEN 'queued' THEN 4 WHEN 'selecting' THEN 5 WHEN 'wanted' THEN 6
+			WHEN 'stalled' THEN 7 WHEN 'failed' THEN 8 WHEN 'parked' THEN 9
+			WHEN 'done' THEN 10 ELSE 11 END ` + direction + `, j.id ASC`
 	case "album":
 		return " ORDER BY lower(j.title) " + direction + ", lower(j.artist_name) " + direction + ", j.id ASC"
 	case "peer":
@@ -507,15 +536,19 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 		// (group, created_at) pairs is undefined, and the same job could
 		// appear on two pages while another never shows at all.
 		//
-		// Four groups since issue #287 widened the panel's filter from the
+		// Groups since issue #287 widened the panel's filter from the
 		// active+stalled union to every in-flight job: a job waiting for more
 		// files ('queued') and a job past download ('importing') used to be
 		// unreachable here and both collapsed into the old ELSE, which made
 		// their relative order fall out of created_at alone. They now rank
 		// explicitly, in pipeline order — moving, stuck, waiting, importing.
+		// Issue #416 split the old single 'queued' group into 'queued'
+		// (candidate chosen, nothing delivered yet) and 'waiting' (at least one
+		// file delivered) — WANTED/SELECTING remain unreachable here since this
+		// panel's own filter is DOWNLOADING/IMPORTING only.
 		return ` ORDER BY CASE (` + dashboardJobStatusSQL + `)
 			WHEN 'active' THEN 1 WHEN 'stalled' THEN 2 WHEN 'queued' THEN 3
-			WHEN 'importing' THEN 4 ELSE 5 END ASC, j.created_at ASC, j.id ASC`
+			WHEN 'waiting' THEN 4 WHEN 'importing' THEN 5 ELSE 6 END ASC, j.created_at ASC, j.id ASC`
 	case "recent":
 		// Newest finish first, for Overview's recently-finished panel (issue
 		// #287). Direction is hardcoded DESC, never `direction`: validation
@@ -558,6 +591,9 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 			COUNT(*) FILTER (WHERE status = 'active'),
 			COUNT(*) FILTER (WHERE status = 'importing'),
 			COUNT(*) FILTER (WHERE status = 'queued'),
+			COUNT(*) FILTER (WHERE status = 'waiting'),
+			COUNT(*) FILTER (WHERE status = 'selecting'),
+			COUNT(*) FILTER (WHERE status = 'wanted'),
 			COUNT(*) FILTER (WHERE status = 'stalled'),
 			COUNT(*) FILTER (WHERE status = 'failed'),
 			COUNT(*) FILTER (WHERE status = 'parked'),
@@ -565,7 +601,8 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 			FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
 		if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
 			&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
-			&page.Facets.Status.Queued, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
+			&page.Facets.Status.Queued, &page.Facets.Status.Waiting, &page.Facets.Status.Selecting,
+			&page.Facets.Status.Wanted, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
 			&page.Facets.Status.Parked, &page.Facets.Status.Done,
 		); err != nil {
 			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)

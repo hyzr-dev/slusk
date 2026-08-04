@@ -21,17 +21,14 @@ describe('tagFor', () => {
     expect(tagFor('notImported')).toBe('NI');
   });
 
-  it('reports a job waiting in a peer queue as queued, not downloading', () => {
-    // This is the case StatusPill could not express (issue #190): the job is
-    // active, but no bytes move until the peer reaches us in its own queue.
-    expect(tagFor('active', 4)).toBe('QU');
-    expect(tagFor('active', 0)).toBe('DL');
-    expect(tagFor('active', undefined)).toBe('DL');
-  });
-
-  it('does not let a peer queue position override a terminal status', () => {
-    expect(tagFor('done', 3)).toBe('OK');
-    expect(tagFor('failed', 3)).toBe('FA');
+  // Issue #416 split wanted/selecting/waiting out of queued/active, and
+  // moved the "waiting in a peer queue" fact (formerly a client-side
+  // queuePosition check on an 'active' job — issue #190) onto the backend's
+  // own 'queued' status. tagFor no longer takes a queuePosition at all.
+  it('maps the three new pre-transfer statuses to their own tags', () => {
+    expect(tagFor('wanted')).toBe('WA');
+    expect(tagFor('selecting')).toBe('SE');
+    expect(tagFor('queued')).toBe('QU');
   });
 });
 
@@ -40,6 +37,15 @@ describe('Tag', () => {
     render(<Tag status="parked" />);
     const el = screen.getByText('PA');
     expect(el).toHaveAttribute('title', 'Parked');
+  });
+
+  it('renders the three new pre-transfer statuses with their own tags and titles (issue #416)', () => {
+    render(<Tag status="wanted" />);
+    expect(screen.getByText('WA')).toHaveAttribute('title', t.tagTitle.WA);
+    render(<Tag status="selecting" />);
+    expect(screen.getByText('SE')).toHaveAttribute('title', t.tagTitle.SE);
+    render(<Tag status="waiting" />);
+    expect(screen.getByText('WT')).toHaveAttribute('title', t.tagTitle.WT);
   });
 
   it('renders NI with the title from strings (issue #59)', () => {

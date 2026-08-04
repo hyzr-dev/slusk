@@ -39,7 +39,14 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
   // keepPreviousData, expanding row B right after row A returned the *A*
   // detail with isLoading false, so B's file list showed A's files.
   const candidate = hasData(phase) && detail ? currentCandidate(detail.attempts) : undefined;
-  const queued = job.status === 'active' && (job.queuePosition ?? 0) > 0;
+  // An inlined third copy of the client-side peer-queue derivation until issue
+  // #416 removed the concept from the frontend entirely. Sitting in a peer's
+  // queue is now a backend status of its own, so this reads it rather than
+  // inferring it from 'active' plus a position — under the new vocabulary
+  // 'active' means bytes are moving, which is the opposite case. The position
+  // itself stays guarded: the backend derives 'queued' from transfer
+  // aggregates and may report it with no position to show.
+  const queued = (job.status === 'queued' || job.status === 'waiting') && (job.queuePosition ?? 0) > 0;
   const elapsed = secondsInState(job);
 
   return (

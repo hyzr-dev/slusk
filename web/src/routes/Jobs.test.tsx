@@ -70,9 +70,12 @@ function sourceGroup() {
 function facetsFor(jobs: Job[]): JobFacets {
   const status: JobFacets['status'] = {
     all: jobs.length,
+    wanted: 0,
+    selecting: 0,
+    queued: 0,
     active: 0,
     importing: 0,
-    queued: 0,
+    waiting: 0,
     stalled: 0,
     failed: 0,
     parked: 0,
@@ -165,9 +168,26 @@ describe('placeholders for absent fields', () => {
 });
 
 describe('queue position rendering', () => {
-  it('tags an active job waiting in a peer queue as QU and shows a compact queue position', () => {
+  // Issue #416: the backend, not a client-side queuePosition check, is now
+  // the sole source of truth for "waiting in a peer's queue" — it reports
+  // that as its own 'queued' status rather than 'active' plus a
+  // queuePosition. An 'active' job renders DL and flares regardless of a
+  // leftover queuePosition value.
+  it('renders an active job with a non-zero queuePosition as DL, not QU, and still flares the bar', () => {
     stubFetchIndefinitely();
-    const { container } = renderJobs([makeJob({ id: 1, status: 'active', queuePosition: 4 })]);
+    const { container } = renderJobs([
+      makeJob({ id: 1, status: 'active', queuePosition: 4, bytesDone: 50, bytesTotal: 100 }),
+    ]);
+
+    expect(screen.getByTitle(t.tagTitle.DL)).toHaveTextContent('DL');
+    expect(screen.queryByTitle(t.tagTitle.QU)).not.toBeInTheDocument();
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
+  });
+
+  it('tags a backend-reported queued job as QU, shows a compact queue position, and never flares', () => {
+    stubFetchIndefinitely();
+    const { container } = renderJobs([makeJob({ id: 1, status: 'queued', queuePosition: 4 })]);
 
     expect(screen.getByTitle(t.tagTitle.QU)).toHaveTextContent('QU');
     expect(screen.getByText(t.jobs.queueShort(4))).toBeInTheDocument();
@@ -175,18 +195,6 @@ describe('queue position rendering', () => {
     // wrong: no bytes move while a job sits in a peer's queue, so its Ticks
     // bar must never flare as though a transfer were live.
     expect(container.querySelectorAll('[data-flare="true"]')).toHaveLength(0);
-  });
-
-  // The other half of the same pin: a job that IS genuinely downloading
-  // (active, no queue position) must flare exactly one tick, so this view
-  // can't silently regress to never flaring at all either.
-  it('flares the bar for a genuinely transferring row', () => {
-    stubFetchIndefinitely();
-    const { container } = renderJobs([
-      makeJob({ id: 1, status: 'active', queuePosition: undefined, bytesDone: 50, bytesTotal: 100 }),
-    ]);
-
-    expect(container.querySelectorAll('[data-flare="true"]')).toHaveLength(1);
   });
 
   // Regression: queuePosition comes from the live ListDownloads snapshot
@@ -212,14 +220,14 @@ describe('queue position rendering', () => {
   });
 
   // Issue #269: currentCandidateOrder can leave a SELECTING (status
-  // 'queued') job pointed at a candidate that already failed, so
-  // AlbumBytesDone/Total can be non-zero even though nothing is happening.
-  // The '—' label already says so; the tick bar must agree rather than
-  // showing a dead attempt's leftover progress next to it.
-  it('shows an empty tick bar for a queued job carrying a dead candidate\'s bytes', () => {
+  // 'selecting' as of issue #416's status split) job pointed at a candidate
+  // that already failed, so AlbumBytesDone/Total can be non-zero even though
+  // nothing is happening. The '—' label already says so; the tick bar must
+  // agree rather than showing a dead attempt's leftover progress next to it.
+  it('shows an empty tick bar for a selecting job carrying a dead candidate\'s bytes', () => {
     stubFetchIndefinitely();
     const { container } = renderJobs([
-      makeJob({ id: 1, status: 'queued', state: 'SELECTING', bytesDone: 40, bytesTotal: 100 }),
+      makeJob({ id: 1, status: 'selecting', state: 'SELECTING', bytesDone: 40, bytesTotal: 100 }),
     ]);
 
     const pctLabel = container.querySelector('[class*="pct_"]') as HTMLElement;
@@ -227,19 +235,63 @@ describe('queue position rendering', () => {
     const fill = container.querySelector('[data-fill]') as HTMLElement;
     expect(fill.style.width).toBe('0%');
   });
+
+  // Issue #416 decoupled 'queued' from queuePosition: the backend derives it
+  // from transfer aggregates, so a queued job can arrive with no position at
+  // all. The label used to assert the field was present and would have
+  // rendered a literal "Pundefined" — an invented value in the one place the
+  // interface is supposed to stay silent.
+  it('falls back to the percentage when a queued job carries no queue position', () => {
+    stubFetchIndefinitely();
+    const { container } = renderJobs([
+      makeJob({ id: 1, status: 'queued', state: 'DOWNLOADING', bytesDone: 30, bytesTotal: 100 }),
+    ]);
+
+    const pctLabel = container.querySelector('[class*="pct_"]') as HTMLElement;
+    expect(pctLabel).toHaveTextContent('30%');
+    expect(pctLabel.textContent).not.toContain('undefined');
+  });
+
+  it('shows the queue position when a queued job carries one', () => {
+    stubFetchIndefinitely();
+    const { container } = renderJobs([
+      makeJob({ id: 1, status: 'queued', state: 'DOWNLOADING', queuePosition: 4, bytesDone: 30, bytesTotal: 100 }),
+    ]);
+
+    const pctLabel = container.querySelector('[class*="pct_"]') as HTMLElement;
+    expect(pctLabel).toHaveTextContent(t.jobs.queueShort(4));
+  });
 });
 
 describe('server-owned filters and facets', () => {
   it('shows global status and source facet counts rather than counting the current page', () => {
     stubFetchIndefinitely();
     const facets: JobFacets = {
-      status: { all: 42, active: 9, importing: 2, queued: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
+      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
       source: { all: 31, manual: 11, lidarr: 20 },
     };
     renderJobs([makeJob()], undefined, 42, facets);
 
     expect(within(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) })).getByText('6')).toBeInTheDocument();
     expect(within(sourceGroup().getByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).getByText('11')).toBeInTheDocument();
+  });
+
+  // Issue #416: all ten status chips render, in the order that mirrors the
+  // backend's sort=st ranking, each with its own facet count.
+  it('renders all ten status chips with their facet counts, including the three new pre-transfer ones', () => {
+    stubFetchIndefinitely();
+    const facets: JobFacets = {
+      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
+      source: { all: 31, manual: 11, lidarr: 20 },
+    };
+    renderJobs([makeJob()], undefined, 42, facets);
+
+    const group = statusGroup();
+    expect(group.getAllByRole('button')).toHaveLength(10);
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.wanted) })).getByText('3')).toBeInTheDocument();
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.selecting) })).getByText('2')).toBeInTheDocument();
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.queued) })).getByText('1')).toBeInTheDocument();
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.waiting) })).getByText('8')).toBeInTheDocument();
   });
 
   it('requests source and status filters from the server instead of page-local filtering', async () => {

@@ -114,7 +114,12 @@ export const t = {
     stale: 'Could not refresh — showing last known data.',
   },
   status: {
+    // Wanted/selecting/waiting (issue #416) split what used to be grouped
+    // under queued/active — see JobStatus's doc comment in api/types.ts.
+    wanted: 'Wanted',
+    selecting: 'Selecting',
     queued: 'Queued',
+    waiting: 'Waiting',
     active: 'Active',
     stalled: 'Stalled',
     importing: 'Importing',
@@ -136,6 +141,9 @@ export const t = {
     OK: 'OK',
     IM: 'IM',
     NI: 'NI',
+    WA: 'WA',
+    SE: 'SE',
+    WT: 'WT',
     // Uploads panel marker, not a JobStatus/JobState — the map already
     // serves as a general two-letter tag vocabulary, so it's added here
     // rather than duplicated in its own small map.
@@ -149,6 +157,9 @@ export const t = {
     FA: 'Failed',
     OK: 'Done',
     IM: 'Importing',
+    WA: 'Wanted',
+    SE: 'Selecting candidate',
+    WT: 'Waiting for next file',
     // Issue #59. Two different routes end here — the download was never
     // identified against a release group, or it was and that release group
     // is not in Lidarr's library — and the tag cannot tell them apart, so it
@@ -299,6 +310,9 @@ export const t = {
       all: 'ALL',
       active: 'ACTIVE',
       queued: 'QUEUED',
+      waiting: 'WAITING',
+      selecting: 'SELECTING',
+      wanted: 'WANTED',
       stalled: 'STALLED',
       failed: 'FAILED',
       parked: 'PARKED',
