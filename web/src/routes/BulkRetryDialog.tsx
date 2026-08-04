@@ -13,6 +13,13 @@ interface Props {
    */
   count: number;
   pending: boolean;
+  /**
+   * Rendered inside the panel rather than behind it. The dialog stays open on
+   * a failed retry so the user can try again, and .scrim is `position: fixed`
+   * with a z-index — an error placed in the page under it would be painted
+   * out of sight, which jsdom cannot fail a test on.
+   */
+  failed: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -27,7 +34,7 @@ function focusable(container: HTMLElement): HTMLElement[] {
  * than inventing a second one, and stays deliberately smaller — two buttons
  * and a sentence, no scrolling body.
  */
-export default function BulkRetryDialog({ filter, count, pending, onConfirm, onClose }: Props) {
+export default function BulkRetryDialog({ filter, count, pending, failed, onConfirm, onClose }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const scrimMouseDownOnBackground = useRef(false);
@@ -92,6 +99,7 @@ export default function BulkRetryDialog({ filter, count, pending, onConfirm, onC
               : t.jobs.bulkRetry.failedBody(count)}
           </p>
           <p className={styles.note}>{t.jobs.bulkRetry.lidarrNote}</p>
+          {failed && <p className={styles.error}>{t.jobs.bulkRetry.failed}</p>}
         </div>
         <div className={styles.footer}>
           <Button variant="ghost" onClick={onClose}>

@@ -861,7 +861,11 @@ describe('bulk retry', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
-  it('surfaces a failed bulk retry in place instead of silently closing', async () => {
+  // Scoped to within(dialog), not to the document: the scrim is position:fixed
+  // with a z-index, so an error rendered as a sibling of the dialog is painted
+  // behind it and invisible — and a document-wide getByText passes on exactly
+  // that bug, since jsdom computes no layout.
+  it('reports a failed bulk retry inside the still-open dialog', async () => {
     vi.stubGlobal('fetch', vi.fn((url: string) => {
       if (url.startsWith('/api/jobs/retry')) {
         return Promise.resolve(new Response('db exploded', { status: 500 }));
@@ -874,6 +878,9 @@ describe('bulk retry', () => {
     fireEvent.click(await screen.findByRole('button', { name: t.jobs.bulkRetry.button }));
     fireEvent.click(screen.getByRole('button', { name: t.jobs.bulkRetry.confirm }));
 
-    expect(await screen.findByText(t.jobs.bulkRetry.failed)).toBeInTheDocument();
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByText(t.jobs.bulkRetry.failed)).toBeInTheDocument());
+    // Still open, so the user can retry without re-opening it.
+    expect(within(dialog).getByRole('button', { name: t.jobs.bulkRetry.confirm })).toBeInTheDocument();
   });
 });

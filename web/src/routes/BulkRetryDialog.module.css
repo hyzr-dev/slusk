@@ -50,6 +50,18 @@
   color: var(--text-dim);
 }
 
+/* Same treatment as JobActions' .error, inside the panel rather than in the
+   page behind it — see the `failed` prop's comment. */
+.error {
+  margin: 2px 0 0;
+  padding: 9px 12px;
+  border-left: 2px solid var(--bad);
+  background: var(--panel-hover);
+  color: var(--bad);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .footer {
   display: flex;
   justify-content: flex-end;

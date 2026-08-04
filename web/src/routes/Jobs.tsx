@@ -421,15 +421,16 @@ export default function Jobs() {
           )}
         </div>
 
-        {bulkRetry.isError && (
-          <div className={styles.bulkRetryError}>{t.jobs.bulkRetry.failed}</div>
-        )}
-
+        {/* A failure keeps the dialog open and reports itself inside it: the
+            scrim is position:fixed with a z-index, so an error rendered out
+            here would be painted behind the dialog the user is still looking
+            at — and jsdom, which computes no layout, would never fail on it. */}
         {bulkRetryOpen && retryableFilter && (
           <BulkRetryDialog
             filter={retryableFilter}
             count={retryableCount}
             pending={bulkRetry.isPending}
+            failed={bulkRetry.isError}
             onConfirm={runBulkRetry}
             onClose={() => setBulkRetryOpen(false)}
           />
