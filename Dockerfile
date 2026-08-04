@@ -29,6 +29,9 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # error on `docker pull` rather than as a visibility problem.
 LABEL org.opencontainers.image.source="https://github.com/hyzr-dev/slusk"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
+# ghcr renders this as the package page's only prose. Without it the page is the
+# tag list and nothing else, which says nothing about what the image is for.
+LABEL org.opencontainers.image.description="Bridges Lidarr and Soulseek: polls Lidarr for wanted albums, searches Soulseek, downloads candidates, and hands finished albums back for import."
 
 COPY --from=build /out/slusk /usr/local/bin/slusk
 # The AGPL requires the licence text to travel with the work, and pushing an
