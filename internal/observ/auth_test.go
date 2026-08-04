@@ -422,6 +422,7 @@ var registeredRoutes = []struct {
 	{method: "", path: "/readyz", public: true},
 	{method: "", path: "/status", public: false},
 	{method: "", path: "/api/jobs", public: false},
+	{method: "POST", path: "/api/jobs/retry", public: false},
 	{method: "", path: "/api/jobs/{id}/cancel", public: false},
 	{method: "", path: "/api/jobs/{id}/retry", public: false},
 	{method: "", path: "/api/jobs/{id}/search", public: false},

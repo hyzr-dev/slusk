@@ -325,6 +325,33 @@ export const t = {
     queueShort: (n: number) => `P${n}`,
     // Flash confirmations (see FlashContext) for the three row actions —
     // mutations the row itself won't visibly reflect before the next poll.
+    // Bulk retry (issue #378) — the whole filtered set, never the page on
+    // screen, which is why every string here talks about the filter rather
+    // than about rows.
+    bulkRetry: {
+      button: 'Retry all',
+      dialogLabel: 'Confirm bulk retry',
+      dialogTitle: 'RETRY ALL',
+      confirm: 'Retry them',
+      cancel: 'Cancel',
+      // The parked status is exactly state IN ('PARKED','ORPHANED'), so its
+      // facet count is the retryable set and can be stated plainly.
+      parkedBody: (n: number) =>
+        `Retry all ${n} parked jobs matching the current filter — not just this page.`,
+      // The failed status is derived, not a state: it also matches a job the
+      // pipeline is still working through (its current candidate's transfers
+      // have all failed, and the next candidate has not been tried yet), which
+      // the server will refuse to touch. The count is therefore an upper
+      // bound, and the copy has to say so — the response carries the truth.
+      failedBody: (n: number) =>
+        `Retry the failed jobs matching the current filter — not just this page. Up to ${n}: some of those are still mid-retry in the pipeline and will be left alone.`,
+      lidarrNote:
+        'Lidarr-sourced jobs start a fresh search; manually created jobs retry the same peer.',
+      // Reported as what happened, not as success/failure.
+      resultFlash: (retried: number, skipped: number) =>
+        `${retried} retried, ${skipped} skipped`,
+      failed: 'Could not run the bulk retry.',
+    },
     retryFlash: (id: number) => `retried #${id}`,
     cancelFlash: (id: number) => `cancelled #${id}`,
     forceSearchFlash: (id: number) => `pipeline re-run queued for #${id}`,

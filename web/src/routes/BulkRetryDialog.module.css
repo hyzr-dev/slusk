@@ -1,0 +1,59 @@
+/* Second modal in this codebase (issue #378) — same scrim/panel contract as
+   IdentifyModal.module.css: separation comes from the scrim and a border
+   alone, never a shadow (CLAUDE.md's "recesses, never elevates"). */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 90;
+  padding: 24px;
+}
+
+.panel {
+  border: 1px solid var(--line2);
+  background: var(--panel-inset);
+  width: 460px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  color: var(--text-dim);
+}
+
+.body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+
+.note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}

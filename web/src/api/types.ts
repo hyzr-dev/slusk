@@ -172,6 +172,17 @@ export interface JobPage {
   facets: JobFacets;
 }
 
+/**
+ * POST /api/jobs/retry response (issue #378). Both numbers are what the
+ * server actually did, not what the client asked for: the filter the request
+ * carried is an upper bound on the retryable set, so a non-zero `skipped` is
+ * the normal outcome rather than a failure.
+ */
+export interface BulkRetryResult {
+  retried: number;
+  skipped: number;
+}
+
 /** GET /api/jobs response before nested jobs are normalized. */
 export interface WireJobPage extends Omit<JobPage, 'jobs'> {
   jobs: WireJob[];

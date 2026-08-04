@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { JOBS_PAGE_SIZE, useJobs } from '../api/queries';
+import { JOBS_PAGE_SIZE, useBulkRetryJobs, useJobs } from '../api/queries';
 import { useJobScope } from '../api/stream';
 import type {
   Job,
@@ -9,6 +9,8 @@ import type {
   JobSourceFilter,
   JobStatusFilter,
 } from '../api/types';
+import { useFlash } from '../components/chrome/FlashContext';
+import Button from '../components/tui/Button';
 import Chip from '../components/tui/Chip';
 import EmptyState from '../components/tui/EmptyState';
 import Page from '../components/tui/Page';
@@ -18,8 +20,18 @@ import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import { formatEta, formatSpeed, percent } from '../format';
 import { t } from '../strings';
+import BulkRetryDialog from './BulkRetryDialog';
 import JobExpansion from './JobExpansion';
 import styles from './Jobs.module.css';
+
+// The two filters a bulk retry is offered for (issue #378). Both are status
+// filters whose set overlaps the retryable states; every other filter would
+// send the server a scope it must refuse in full.
+type BulkRetryFilter = 'failed' | 'parked';
+
+function bulkRetryFilter(status: JobStatusFilter): BulkRetryFilter | null {
+  return status === 'failed' || status === 'parked' ? status : null;
+}
 
 // The approved status row keeps the mock's seven chips. IMPORTING, INFLIGHT,
 // FINISHED and FAILURES (issues #287, #310) are all server-only filter values
@@ -254,6 +266,9 @@ export default function Jobs() {
   const [status, setStatus] = useState<JobStatusFilter>('all');
   const [source, setSource] = useState<JobSourceFilter>('all');
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [bulkRetryOpen, setBulkRetryOpen] = useState(false);
+  const bulkRetry = useBulkRetryJobs();
+  const flash = useFlash();
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 250);
@@ -324,6 +339,29 @@ export default function Jobs() {
   const start = total === 0 ? 0 : page * JOBS_PAGE_SIZE + 1;
   const end = Math.min(total, (page + 1) * JOBS_PAGE_SIZE);
 
+  const retryableFilter = bulkRetryFilter(status);
+  // The chip's own count, reused rather than refetched. For filter=failed it
+  // is an upper bound on what can actually be revived — the dialog's copy
+  // says so, and the server's response is what gets reported afterwards.
+  const retryableCount = retryableFilter ? (result?.facets.status[retryableFilter] ?? 0) : 0;
+  // Hidden, not disabled, when the scope is empty: an offer to retry nothing
+  // is noise, and this is the one control on the page whose availability is
+  // itself information.
+  const showBulkRetry = retryableFilter !== null && hasData(phase) && retryableCount > 0;
+
+  function runBulkRetry() {
+    bulkRetry.mutate(
+      { page, sort, dir: direction, filter: status, source, q: debouncedSearch },
+      {
+        onSuccess: (r) => {
+          setBulkRetryOpen(false);
+          setExpandedId(null);
+          flash(t.jobs.bulkRetry.resultFlash(r.retried, r.skipped));
+        },
+      },
+    );
+  }
+
   return (
     <Page title={t.page.jobs.title} subtitle={t.page.jobs.subtitle}>
       <Panel>
@@ -370,7 +408,32 @@ export default function Jobs() {
               />
             ))}
           </div>
+          {showBulkRetry && (
+            <span className={styles.bulkRetryAction}>
+              <Button
+                variant="primary"
+                disabled={bulkRetry.isPending}
+                onClick={() => setBulkRetryOpen(true)}
+              >
+                {t.jobs.bulkRetry.button}
+              </Button>
+            </span>
+          )}
         </div>
+
+        {bulkRetry.isError && (
+          <div className={styles.bulkRetryError}>{t.jobs.bulkRetry.failed}</div>
+        )}
+
+        {bulkRetryOpen && retryableFilter && (
+          <BulkRetryDialog
+            filter={retryableFilter}
+            count={retryableCount}
+            pending={bulkRetry.isPending}
+            onConfirm={runBulkRetry}
+            onClose={() => setBulkRetryOpen(false)}
+          />
+        )}
 
         <div role="table">
           <div role="row" className={`${styles.grid} ${styles.head}`}>

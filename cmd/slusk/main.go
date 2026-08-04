@@ -322,6 +322,24 @@ func main() {
 			},
 		}, nil
 	}
+	// Bulk retry (issue #378) goes straight to the store rather than through
+	// app.Jobs, unlike the per-job Retry beside it. app.Jobs.Retry exists to
+	// route one job to the right source semantics, a decision the store
+	// deliberately does not make; the bulk statements route on source in SQL,
+	// so an app method here would be a pass-through with nothing to own.
+	bulkRetryFn := func(ctx context.Context, query observ.PagedJobsQuery) (observ.BulkRetryResult, error) {
+		result, err := st.BulkRetryJobs(ctx, store.DashboardJobsQuery{
+			Filter: query.Filter, Source: query.Source, Query: query.Query,
+			// filter=finished is the only filter that reads Now, and it is
+			// not one the bulk-retry button offers — supplied anyway so the
+			// store's validation never trips on a query the parser accepted.
+			Now: time.Now(),
+		}, time.Now())
+		if err != nil {
+			return observ.BulkRetryResult{}, err
+		}
+		return observ.BulkRetryResult{Retried: result.Retried, Skipped: result.Skipped}, nil
+	}
 	jobDetailFn := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
 		return st.JobDetail(ctx, jobID)
 	}
@@ -666,6 +684,7 @@ func main() {
 		FailureDetails:            failureDetailsFn,
 		Cancel:                    jobs.Cancel,
 		Retry:                     jobs.Retry,
+		BulkRetry:                 bulkRetryFn,
 		SearchJob:                 jobs.ForceSearch,
 		DeleteJob:                 jobs.Delete,
 		CreateJob:                 createJobFn,
