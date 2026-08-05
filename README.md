@@ -329,5 +329,10 @@ make build   # builds the web UI, then the binary
 make test    # go test ./... && npm test
 ```
 
+`go install github.com/hyzr-dev/slusk/cmd/slusk@latest` is not a supported install path.
+The module path carries no `/v2` suffix, so `@latest` silently resolves to the last v1
+tag (currently v1.59.2) with no error or warning, and a pinned v2 version fails outright
+with an invalid-version error instead. Use `make build` or a tagged container image.
+
 To build the container instead, replace the `image:` line in your compose file with
 `build: .` and run `docker compose up -d --build`.
