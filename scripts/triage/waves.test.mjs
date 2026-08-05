@@ -307,6 +307,125 @@ test('the two invalidation axes are independent: same digest, code changed', () 
   assert.deepEqual(out, { fresh: [], stale: [11] })
 })
 
+import { referencedIssues, closedSince } from './waves.mjs'
+
+test('referencedIssues finds every #N in the free-text evidence fields', () => {
+  const judgement = {
+    impactEvidence: 'Issue #287 (still open) is what turns this into a bug; see also #12.',
+    reproCheck: 'Could not reproduce while #300 is unmerged.',
+  }
+  assert.deepEqual(referencedIssues(judgement), [12, 287, 300])
+})
+
+test('referencedIssues ignores a hex colour and other #-prefixed non-numbers', () => {
+  const judgement = { impactEvidence: 'tokens.css sets --bad to #1d76db, not #fff.' }
+  assert.deepEqual(referencedIssues(judgement), [])
+})
+
+test('referencedIssues survives a judgement with no evidence text at all', () => {
+  assert.deepEqual(referencedIssues({ number: 1 }), [])
+  assert.deepEqual(referencedIssues({ impactEvidence: null, reproCheck: null }), [])
+})
+
+test('closedSince is the cached issues that are no longer open', () => {
+  const out = closedSince(state, [{ number: 10, digest: 'abc123def456' }])
+  assert.deepEqual([...out], [11])
+})
+
+test('closedSince is empty without a state file', () => {
+  assert.deepEqual([...closedSince(null, [{ number: 10, digest: 'x' }])], [])
+})
+
+test('a judgement resting on a now-closed issue is stale, digest and code unchanged', () => {
+  // The #294/#287 case from issue #298: the evidence named #287 as the
+  // condition that would turn the finding into a real bug, #287 then merged,
+  // and both existing axes reported the judgement as fresh.
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Issue #11 (still open) is what turns this into an actual bug.',
+      },
+      '11': { number: 11, digest: 'xyz789uvw012', touches: ['web/src/App.tsx'] },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [10] })
+})
+
+test('a judgement referencing an issue that is still open stays fresh', () => {
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Blocked behind #11, which is still open.',
+      },
+      '11': { number: 11, digest: 'xyz789uvw012', touches: ['web/src/App.tsx'] },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [
+      { number: 10, digest: 'abc123def456' },
+      { number: 11, digest: 'xyz789uvw012' },
+    ],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10, 11], stale: [] })
+})
+
+test('a judgement referencing an issue that was already closed when it was made stays fresh', () => {
+  // #999 was never in the cache, so it cannot have closed since the cache was
+  // written -- the judge saw it closed and judged accordingly.
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Already fixed by #999, which shipped last month.',
+      },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10], stale: [] })
+})
+
+test('a judgement citing itself does not go stale on its own number', () => {
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Placeholder until issue #10 builds a search endpoint.',
+      },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10], stale: [] })
+})
+
 import { execFileSync } from 'node:child_process'
 import { decodeChunks } from './waves.mjs'
 
