@@ -1,5 +1,5 @@
 import { Fragment, useState } from 'react';
-import { usePeers } from '../api/queries';
+import { usePeerHistory, usePeers } from '../api/queries';
 import type { Peer } from '../api/types';
 import EmptyState from '../components/tui/EmptyState';
 import Page from '../components/tui/Page';
@@ -17,6 +17,48 @@ type SortKey = 'score' | 'successCount' | 'failCount';
 // sort before any real timestamp lexicographically, which is what we want.
 function lastSeenAt(p: Peer): string {
   return p.lastSuccessAt > p.lastFailAt ? p.lastSuccessAt : p.lastFailAt;
+}
+
+/**
+ * The body of one expanded peer row.
+ *
+ * Its own component so the fetch is mounted with the expansion and unmounted
+ * with it — usePeerHistory is `enabled` on a username, and rendering this
+ * conditionally is what scopes the request to the one open row (issue #424).
+ * Before that split the artist rows arrived with the list and this was a plain
+ * read of data already in hand; it is a network call now, so it carries the
+ * loading and failure states that come with one.
+ */
+function PeerExpansion({ username }: { username: string }) {
+  const historyQuery = usePeerHistory(username);
+
+  if (historyQuery.isPending) {
+    return <div className={styles.artist}>{t.peers.artistHistoryLoading}</div>;
+  }
+  // A failure is reported even when a previous response is still cached: a
+  // stale artist history looks identical to a fresh one, so silently showing
+  // it would be the interface inventing certainty it does not have.
+  if (historyQuery.isError) {
+    return <div className={styles.artist}>{t.peers.artistHistoryFailed}</div>;
+  }
+  const artists = historyQuery.data?.artists ?? [];
+  if (artists.length === 0) {
+    return <div className={styles.artist}>{t.peers.noArtistHistory}</div>;
+  }
+  return (
+    <>
+      {artists.map((a) => (
+        <div key={a.artistId} className={styles.artist}>
+          {t.peers.artistLine(
+            t.peers.artistLabel(a.artistId, a.artistName),
+            formatScore(a.score),
+            a.successCount,
+            a.failCount,
+          )}
+        </div>
+      ))}
+    </>
+  );
 }
 
 export default function Peers() {
@@ -112,20 +154,7 @@ export default function Peers() {
               {isExpanded && (
                 <div id={expansionId} role="row" className={styles.expansionWrap}>
                   <div role="cell" aria-colspan={5}>
-                    {p.artists.length === 0 ? (
-                      <div className={styles.artist}>{t.peers.noArtistHistory}</div>
-                    ) : (
-                      p.artists.map((a) => (
-                        <div key={a.artistId} className={styles.artist}>
-                          {t.peers.artistLine(
-                            a.artistId,
-                            formatScore(a.score),
-                            a.successCount,
-                            a.failCount,
-                          )}
-                        </div>
-                      ))
-                    )}
+                    <PeerExpansion username={p.username} />
                   </div>
                 </div>
               )}

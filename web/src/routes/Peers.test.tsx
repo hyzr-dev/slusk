@@ -3,7 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
-import type { Peer } from '../api/types';
+import type { Peer, PeerArtist, PeerHistory } from '../api/types';
 import { t } from '../strings';
 import Peers from './Peers';
 
@@ -25,24 +25,38 @@ function makePeer(overrides: Partial<Peer> = {}): Peer {
     lastSuccessAt: '',
     lastFailAt: '',
     score: 0,
-    artists: [],
+    ...overrides,
+  };
+}
+
+function makeArtist(overrides: Partial<PeerArtist> = {}): PeerArtist {
+  return {
+    artistId: 1,
+    artistName: '',
+    successCount: 0,
+    failCount: 0,
+    lastSuccessAt: '',
+    lastFailAt: '',
+    score: 0,
     ...overrides,
   };
 }
 
 const peers: Peer[] = [
-  makePeer({
-    username: 'alice',
-    score: 5,
-    successCount: 10,
-    failCount: 1,
-    artists: [
-      { artistId: 1, successCount: 2, failCount: 0, lastSuccessAt: '', lastFailAt: '', score: 1.5 },
-    ],
-  }),
+  makePeer({ username: 'alice', score: 5, successCount: 10, failCount: 1 }),
   makePeer({ username: 'bob', score: 8, successCount: 2, failCount: 5 }),
   makePeer({ username: 'carol', score: 2, successCount: 20, failCount: 0 }),
 ];
+
+// alice's artist history, which since #424 lives behind its own request rather
+// than inside the list response. Seeded into the cache under the same key
+// usePeerHistory reads, so expansion tests never depend on a stubbed fetch
+// resolving.
+const aliceHistory: PeerHistory = {
+  username: 'alice',
+  artists: [makeArtist({ artistId: 1, artistName: 'Named Artist', successCount: 2, score: 1.5 })],
+};
+const aliceArtistLine = t.peers.artistLine('Named Artist', '1.50', 2, 0);
 
 function renderPeers() {
   // A real refetch on mount would otherwise hit the unmocked global fetch;
@@ -50,6 +64,8 @@ function renderPeers() {
   vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.peers, peers);
+  queryClient.setQueryData(queryKeys.peerHistory('alice'), aliceHistory);
+  queryClient.setQueryData(queryKeys.peerHistory('bob'), { username: 'bob', artists: [] });
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
@@ -123,21 +139,21 @@ describe('Peers row expansion', () => {
   it('expands a peer to show its per-artist history', () => {
     renderPeers();
     fireEvent.click(screen.getByText('alice'));
-    expect(screen.getByText(t.peers.artistLine(1, '1.50', 2, 0))).toBeInTheDocument();
+    expect(screen.getByText(aliceArtistLine)).toBeInTheDocument();
   });
 
   it('collapses the same peer on a second click', () => {
     renderPeers();
     fireEvent.click(screen.getByText('alice'));
     fireEvent.click(screen.getByText('alice'));
-    expect(screen.queryByText(t.peers.artistLine(1, '1.50', 2, 0))).not.toBeInTheDocument();
+    expect(screen.queryByText(aliceArtistLine)).not.toBeInTheDocument();
   });
 
   it('only expands one peer at a time', () => {
     renderPeers();
     fireEvent.click(screen.getByText('alice'));
     fireEvent.click(screen.getByText('bob'));
-    expect(screen.queryByText(t.peers.artistLine(1, '1.50', 2, 0))).not.toBeInTheDocument();
+    expect(screen.queryByText(aliceArtistLine)).not.toBeInTheDocument();
     expect(screen.getByText(t.peers.noArtistHistory)).toBeInTheDocument();
   });
 
@@ -145,7 +161,88 @@ describe('Peers row expansion', () => {
     renderPeers();
     fireEvent.click(screen.getByText('alice'));
     fireEvent.click(screen.getByText(t.peers.gridHead.ok));
-    expect(screen.getByText(t.peers.artistLine(1, '1.50', 2, 0))).toBeInTheDocument();
+    expect(screen.getByText(aliceArtistLine)).toBeInTheDocument();
+  });
+
+  // The id fallback, not a placeholder name: album_jobs.artist_name defaults
+  // to '' and an artist whose jobs are all gone has no row at all, so ''
+  // means "no name known" and the row must still say which artist it is.
+  it('labels an artist with no known name by its id', () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.peers, peers);
+    client.setQueryData(queryKeys.peerHistory('alice'), {
+      username: 'alice',
+      artists: [makeArtist({ artistId: 7, artistName: '', successCount: 2, score: 1.5 })],
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Peers />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(screen.getByText('alice'));
+    expect(screen.getByText(t.peers.artistLine('Artist #7', '1.50', 2, 0))).toBeInTheDocument();
+  });
+});
+
+// The expansion became a request of its own in #424, so it has states the
+// old in-hand render could not: still fetching, and failed.
+describe('Peers expansion query state', () => {
+  function renderWithoutHistory() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.peers, peers);
+    return render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Peers />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('shows a loading line while the expanded peer’s history is in flight', () => {
+    stubFetchIndefinitely();
+    renderWithoutHistory();
+    fireEvent.click(screen.getByText('alice'));
+    expect(screen.getByText(t.peers.artistHistoryLoading)).toBeInTheDocument();
+    // Not "no artist history": nothing has been established yet, and saying
+    // so would be a claim the interface cannot back.
+    expect(screen.queryByText(t.peers.noArtistHistory)).not.toBeInTheDocument();
+  });
+
+  it('shows a failure line when the expanded peer’s history cannot be fetched', async () => {
+    stubFetchFailing();
+    renderWithoutHistory();
+    fireEvent.click(screen.getByText('alice'));
+    expect(await screen.findByText(t.peers.artistHistoryFailed)).toBeInTheDocument();
+    expect(screen.queryByText(t.peers.noArtistHistory)).not.toBeInTheDocument();
+  });
+
+  it('does not fetch any history until a row is expanded', () => {
+    const fetchMock = vi.fn((url: string) => {
+      void url;
+      return new Promise(() => {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderWithoutHistory();
+    expect(fetchMock.mock.calls.some(([url]) => url.startsWith('/api/peers/'))).toBe(false);
+  });
+
+  it('requests the expanded peer by URL-encoded username', () => {
+    const fetchMock = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.peers, [makePeer({ username: 'awkward peer/name' })]);
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Peers />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(screen.getByText('awkward peer/name'));
+    expect(fetchMock).toHaveBeenCalledWith('/api/peers/awkward%20peer%2Fname');
   });
 });
 

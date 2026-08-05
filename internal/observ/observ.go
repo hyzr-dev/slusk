@@ -433,6 +433,9 @@ type ServerDeps struct {
 	JobView JobViewFunc
 	// Peers backs /api/peers.
 	Peers PeersFunc
+	// PeerHistory backs /api/peers/{username} — one peer's per-artist rows,
+	// fetched only when the dashboard expands that peer (issue #424).
+	PeerHistory PeerHistoryFunc
 	// Live reports liveness for /healthz. Ready reports readiness for
 	// /readyz; when nil, Live answers both checks.
 	Live  HealthyFunc
@@ -881,20 +884,7 @@ func NewServer(deps ServerDeps) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(toEventDTOs(events))
 	})
-	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := deps.Peers(r.Context())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		now := time.Now()
-		dtos := make([]peerDTO, len(rows))
-		for i, row := range rows {
-			dtos[i] = toPeerDTO(row, now)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dtos)
-	})
+	registerPeers(mux, deps.Peers, deps.PeerHistory)
 	registerAuth(mux, deps.TokenAuth, deps.SetupRequired, deps.SessionUser, deps.Setup, deps.Login, deps.Logout)
 	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
 	registerCharts(mux, deps.Charts, deps.Throughput)
