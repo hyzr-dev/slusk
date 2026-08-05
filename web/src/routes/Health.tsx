@@ -35,9 +35,17 @@ export default function Health() {
   // Also feeds the dependency-modules region below — named after its source
   // rather than either consumer.
   const statusPhase = queryPhase(statusQuery);
+  //
+  // The seven status-sourced rows are ordered the way a job moves through the
+  // pipeline — wanted → selecting → waiting → queued → active — so the list
+  // reads as a progression rather than an alphabet, with the two rows that
+  // mean "something is wrong" (stalled, parked) last.
   const metricRows = [
-    { key: t.health.metricActive, value: status?.active ?? 0, phase: statusPhase },
+    { key: t.health.metricWanted, value: status?.wanted ?? 0, phase: statusPhase },
+    { key: t.health.metricSelecting, value: status?.selecting ?? 0, phase: statusPhase },
+    { key: t.health.metricWaiting, value: status?.waiting ?? 0, phase: statusPhase },
     { key: t.health.metricQueued, value: status?.queued ?? 0, phase: statusPhase },
+    { key: t.health.metricActive, value: status?.active ?? 0, phase: statusPhase },
     { key: t.health.metricStalled, value: status?.stalled ?? 0, phase: statusPhase },
     { key: t.health.metricParked, value: status?.parked ?? 0, phase: statusPhase },
     { key: t.health.metricUploads, value: uploadsQuery.data?.active ?? 0, phase: queryPhase(uploadsQuery) },

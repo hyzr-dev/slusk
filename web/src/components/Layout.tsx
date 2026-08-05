@@ -13,7 +13,14 @@ export default function Layout() {
   const conversations = useConversations();
 
   const s = status.data;
-  const inFlight = (s?.active ?? 0) + (s?.queued ?? 0) + (s?.stalled ?? 0);
+  // Jobs the pipeline is currently downloading. 'waiting' joined this sum when
+  // /status became a job count (issue #417): it is a job between files of the
+  // same candidate, as in-flight as 'active', and before #417 it had no field
+  // to be counted in. 'selecting' stays out on purpose — those jobs have
+  // candidates but no max_active slot yet, which is why the store's own
+  // inflight filter excludes SELECTING too. 'importing' would belong here as
+  // well; /status deliberately does not expose it.
+  const inFlight = (s?.active ?? 0) + (s?.queued ?? 0) + (s?.waiting ?? 0) + (s?.stalled ?? 0);
   const needsAttention = (s?.stalled ?? 0) + (s?.parked ?? 0);
   const unreadChat = (conversations.data ?? []).reduce((sum, c) => sum + c.unread, 0);
 

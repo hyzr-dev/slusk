@@ -111,6 +111,9 @@ const jobPage: JobPage = makeJobPage([
 ]);
 
 const status: StatusReport = {
+  wanted: 0,
+  selecting: 0,
+  waiting: 0,
   queued: 1,
   active: 1,
   stalled: 0,
