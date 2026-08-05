@@ -89,8 +89,15 @@ export default function Peers() {
     }));
   }
 
+  // The expansion belongs to the row that was clicked, not to the username it
+  // happens to be keyed by — every row under it is replaced by a page change,
+  // so an expansion left open would attach itself to whatever now occupies
+  // that position. Re-sorting deliberately does not do this: it returns to
+  // page 0 and reorders the same set, so the opened peer is still on screen
+  // and keeping it open is the useful outcome.
   function goToPage(page: number) {
     setParams((prev) => ({ ...prev, page }));
+    setExpanded(null);
   }
 
   function toggle(username: string) {
@@ -185,7 +192,14 @@ export default function Peers() {
         <EmptyState message={total === 0 ? t.peers.empty : t.peers.pastTheEnd} />
       )}
 
-      {hasData(phase) && (
+      {/* A single page gets no pager and no range. The control would offer only
+          the page already on screen, and `1–3 of 3 peers` beside three visible
+          rows is chrome restating what the table already says — most instances
+          know few enough peers for this to be the ordinary case, not an edge
+          one. The <nav> goes with them rather than staying behind empty: a
+          navigation landmark with nothing to navigate is a lie to a screen
+          reader. */}
+      {hasData(phase) && totalPages > 1 && (
         <nav className={styles.pagination} aria-label={t.peers.paginationLabel}>
           <span className={styles.resultRange}>{t.peers.resultRange(start, end, total)}</span>
           <Pager page={params.page} totalPages={totalPages} onChange={goToPage} />

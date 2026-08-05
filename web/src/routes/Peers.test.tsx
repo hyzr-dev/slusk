@@ -217,6 +217,19 @@ describe('Peers paging', () => {
     expect(screen.queryByLabelText(t.pager.pageLabel(5))).not.toBeInTheDocument();
   });
 
+  // A pager offering the page you are already on is a control with nothing to
+  // do. Most instances know a handful of peers, so this is the common case,
+  // not an edge one — and the result range goes with it: the count is the row
+  // count, visible in full a few pixels above.
+  it('shows no pager at all when the whole set fits on one page', () => {
+    renderPaged(peers.length);
+    expect(screen.queryByLabelText(t.pager.pageLabel(1))).not.toBeInTheDocument();
+    expect(screen.queryByText(t.pager.nextPage)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t.peers.resultRange(1, peers.length, peers.length)),
+    ).not.toBeInTheDocument();
+  });
+
   it('renders an out-of-range page as empty while still reporting the real total', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
@@ -261,6 +274,25 @@ describe('Peers row expansion', () => {
     fireEvent.click(screen.getByText('alice'));
     fireEvent.click(screen.getByText(t.peers.gridHead.ok));
     expect(screen.getByText(aliceArtistLine)).toBeInTheDocument();
+  });
+
+  // Deliberately the same username on both pages, which cannot happen for real:
+  // it is the only way to make this assertion non-vacuous. An expansion keyed
+  // by username survives a page change silently whenever the name is gone from
+  // the new page, so seeding a disjoint page would pass without the reset.
+  it('collapses the expanded peer when the page changes', () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    seedPage(client, peers, {}, 97);
+    seedPage(client, peers, { page: 1 }, 97);
+    client.setQueryData(queryKeys.peerHistory('alice'), aliceHistory);
+    renderWith(client);
+
+    fireEvent.click(screen.getByText('alice'));
+    expect(screen.getByText(aliceArtistLine)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(t.pager.pageLabel(2)));
+    expect(screen.queryByText(aliceArtistLine)).not.toBeInTheDocument();
   });
 
   // The id fallback, not a placeholder name: album_jobs.artist_name defaults
