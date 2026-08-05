@@ -23,14 +23,6 @@ CREATE INDEX IF NOT EXISTS idx_artist_user_reliability_user
 -- artist, and rows carrying it must never be picked as an answer. Keeping them
 -- out of the index also keeps it small — most album_jobs rows share the
 -- handful of artists a library actually tracks.
--- 0001's CREATE TABLE IF NOT EXISTS never backfills columns onto an album_jobs
--- table that already existed (the pre-rewrite shape it migrates in place), and
--- unlike retries/not_before it has no ADD COLUMN fixup for these two. Add them
--- defensively, same idiom as 0009, so indexing them does not assume a history
--- this migration cannot verify.
-ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS artist_name TEXT   NOT NULL DEFAULT '';
-ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS artist_id   BIGINT NOT NULL DEFAULT 0;
-
 CREATE INDEX IF NOT EXISTS idx_album_jobs_artist_name
     ON album_jobs(artist_id, artist_name)
     WHERE artist_name <> '';
