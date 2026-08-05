@@ -548,10 +548,19 @@ export const t = {
     // via metricsMeta instead of being named row by row.
     metricsHeading: 'METRICS',
     metricsMeta: 'full set at /metrics',
-    metricActive: 'active downloads',
-    metricQueued: 'queued',
-    metricStalled: 'stalled',
-    metricParked: 'parked transfers',
+    // The seven /status rows all count jobs, in the Jobs page's status
+    // vocabulary (issue #416), so each says so: 'active downloads' and
+    // 'parked transfers' both named the wrong unit, and the first was wrong
+    // by a factor of the album's file count once the value became a job
+    // count (issues #305 and #417). The uploads and shared rows below come
+    // from other endpoints and genuinely are not jobs.
+    metricWanted: 'wanted jobs',
+    metricSelecting: 'selecting jobs',
+    metricWaiting: 'waiting jobs',
+    metricQueued: 'queued jobs',
+    metricActive: 'active jobs',
+    metricStalled: 'stalled jobs',
+    metricParked: 'parked jobs',
     metricUploads: 'active uploads',
     metricShared: 'shared files',
   },

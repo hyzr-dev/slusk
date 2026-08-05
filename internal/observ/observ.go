@@ -71,11 +71,37 @@ func (m *Metrics) SetUnknownTransfers(n int) { m.UnknownTransfers.Set(float64(n)
 func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) }
 
 // StatusReport is the read-only snapshot served at /status.
+//
+// Every field is a count of *jobs*, in the dashboard's status vocabulary
+// (issue #416) — never a count of transfers. Before issue #417 the report
+// mixed the two: Active was the length of the active-transfers query, so one
+// downloading job with seventeen files in flight reported as seventeen, while
+// Queued and Stalled were never assigned at all and served a hardcoded zero to
+// the Health page. Producers must derive all seven from
+// store.CountDashboardStatuses; deriving any of them another way reintroduces
+// exactly the disagreement this struct was fixed to remove.
+//
+// The seven are deliberately a subset of the dashboard's eleven facets: the
+// remaining four (importing, failed, done, all) come free from the same query
+// but exposing them is a separate API decision that was not taken.
 type StatusReport struct {
-	Queued  int `json:"queued"`
-	Active  int `json:"active"`
+	// Wanted is jobs never searched, with no candidates yet.
+	Wanted int `json:"wanted"`
+	// Selecting is jobs whose candidates are cached, waiting for a
+	// max_active slot.
+	Selecting int `json:"selecting"`
+	// Waiting is downloading jobs between files of the same candidate — at
+	// least one file already delivered, none currently in progress.
+	Waiting int `json:"waiting"`
+	// Queued is jobs standing in a peer's queue with nothing delivered yet
+	// (issue #416's narrowed sense of the word).
+	Queued int `json:"queued"`
+	// Active is jobs with a transfer actually in progress.
+	Active int `json:"active"`
+	// Stalled is jobs whose transfers have stopped making progress.
 	Stalled int `json:"stalled"`
-	Parked  int `json:"parked"`
+	// Parked is jobs in PARKED or ORPHANED.
+	Parked int `json:"parked"`
 }
 
 // StatusFunc produces a current StatusReport (typically backed by the store).

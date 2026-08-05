@@ -589,23 +589,9 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 	var page DashboardJobsPage
 	if !q.SkipFacets {
 		statusWhere, statusArgs := dashboardJobsWhere(q, false, true)
-		statusSQL := `SELECT COUNT(*),
-			COUNT(*) FILTER (WHERE status = 'active'),
-			COUNT(*) FILTER (WHERE status = 'importing'),
-			COUNT(*) FILTER (WHERE status = 'queued'),
-			COUNT(*) FILTER (WHERE status = 'waiting'),
-			COUNT(*) FILTER (WHERE status = 'selecting'),
-			COUNT(*) FILTER (WHERE status = 'wanted'),
-			COUNT(*) FILTER (WHERE status = 'stalled'),
-			COUNT(*) FILTER (WHERE status = 'failed'),
-			COUNT(*) FILTER (WHERE status = 'parked'),
-			COUNT(*) FILTER (WHERE status = 'done')
-			FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + statusWhere + `) dashboard_jobs`
-		if err := tx.QueryRowContext(ctx, statusSQL, statusArgs...).Scan(
-			&page.Facets.Status.All, &page.Facets.Status.Active, &page.Facets.Status.Importing,
-			&page.Facets.Status.Queued, &page.Facets.Status.Waiting, &page.Facets.Status.Selecting,
-			&page.Facets.Status.Wanted, &page.Facets.Status.Stalled, &page.Facets.Status.Failed,
-			&page.Facets.Status.Parked, &page.Facets.Status.Done,
+		if err := scanDashboardStatusFacets(
+			tx.QueryRowContext(ctx, dashboardStatusFacetSQL(statusWhere), statusArgs...),
+			&page.Facets.Status,
 		); err != nil {
 			return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: status facets: %w", err)
 		}
@@ -655,6 +641,63 @@ func (s *Store) ListDashboardJobs(ctx context.Context, q DashboardJobsQuery) (Da
 		return DashboardJobsPage{}, fmt.Errorf("list dashboard jobs: commit: %w", err)
 	}
 	return page, nil
+}
+
+// dashboardStatusFacetSQL builds the status facet count query over the row set
+// selected by where (a clause from dashboardJobsWhere, whose placeholders it
+// leaves untouched). Every count is a FILTER over dashboardJobStatusSQL rather
+// than its own predicate, so the facets can never disagree with the per-row
+// status the same CASE produces — the drift issue #269 removed.
+//
+// Shared by ListDashboardJobs and CountDashboardStatuses so /api/jobs and
+// /status cannot come to mean different things by the same word (issue #417).
+func dashboardStatusFacetSQL(where string) string {
+	return `SELECT COUNT(*),
+		COUNT(*) FILTER (WHERE status = 'active'),
+		COUNT(*) FILTER (WHERE status = 'importing'),
+		COUNT(*) FILTER (WHERE status = 'queued'),
+		COUNT(*) FILTER (WHERE status = 'waiting'),
+		COUNT(*) FILTER (WHERE status = 'selecting'),
+		COUNT(*) FILTER (WHERE status = 'wanted'),
+		COUNT(*) FILTER (WHERE status = 'stalled'),
+		COUNT(*) FILTER (WHERE status = 'failed'),
+		COUNT(*) FILTER (WHERE status = 'parked'),
+		COUNT(*) FILTER (WHERE status = 'done')
+		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + where + `) dashboard_jobs`
+}
+
+// scanDashboardStatusFacets reads one dashboardStatusFacetSQL row into facets,
+// keeping the column order in exactly one place alongside the SQL that emits it.
+func scanDashboardStatusFacets(row *sql.Row, facets *DashboardStatusFacets) error {
+	return row.Scan(
+		&facets.All, &facets.Active, &facets.Importing,
+		&facets.Queued, &facets.Waiting, &facets.Selecting,
+		&facets.Wanted, &facets.Stalled, &facets.Failed,
+		&facets.Parked, &facets.Done,
+	)
+}
+
+// CountDashboardStatuses returns the dashboard status facets alone, without the
+// page of rows, the total or the source facets that ListDashboardJobs computes
+// alongside them. It backs /status (issue #417), which wants the counts and
+// nothing else.
+//
+// The row scope is the facet query's own: every album_job except CANCELLED,
+// unfiltered by source or search text — deliberately the same set
+// ListDashboardJobs reports facets over, since facets there already ignore the
+// selected filter.
+//
+// Unlike ListDashboardJobs this takes no transaction: there is one statement,
+// and a single statement already reads one snapshot. Callers should be aware it
+// is not cached and evaluates dashboardJobStatusSQL over every non-cancelled
+// row, the same ~85ms warm cost the Jobs page has paid since issue #286.
+func (s *Store) CountDashboardStatuses(ctx context.Context) (DashboardStatusFacets, error) {
+	where, args := dashboardJobsWhere(DashboardJobsQuery{Filter: "all", Source: "all"}, false, true)
+	var facets DashboardStatusFacets
+	if err := scanDashboardStatusFacets(s.db.QueryRowContext(ctx, dashboardStatusFacetSQL(where), args...), &facets); err != nil {
+		return DashboardStatusFacets{}, fmt.Errorf("count dashboard statuses: %w", err)
+	}
+	return facets, nil
 }
 
 // JobWithTransfer looks up a single job (regardless of state) with its current

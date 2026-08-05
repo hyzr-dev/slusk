@@ -278,16 +278,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Every count comes from the one query the Jobs page's facets come from,
+	// so /status and /api/jobs can never disagree about a status word
+	// (issue #417). Deriving any field here — from ActiveTransfers, from a
+	// state count — is what made /status report seventeen "active downloads"
+	// for a single active job, and queued/stalled as a hardcoded zero.
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
-		active, err := st.ActiveTransfers(ctx)
+		counts, err := st.CountDashboardStatuses(ctx)
 		if err != nil {
 			return observ.StatusReport{}, err
 		}
-		parked, err := st.CountJobsInStates(ctx, core.StateParked, core.StateOrphaned)
-		if err != nil {
-			return observ.StatusReport{}, err
-		}
-		return observ.StatusReport{Active: len(active), Parked: parked}, nil
+		return observ.StatusReport{
+			Wanted:    int(counts.Wanted),
+			Selecting: int(counts.Selecting),
+			Waiting:   int(counts.Waiting),
+			Queued:    int(counts.Queued),
+			Active:    int(counts.Active),
+			Stalled:   int(counts.Stalled),
+			Parked:    int(counts.Parked),
+		}, nil
 	}
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)

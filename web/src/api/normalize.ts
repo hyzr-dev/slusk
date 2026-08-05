@@ -49,6 +49,11 @@ export function normalizeJobDetail(detail: WireJobDetail): JobDetail {
 
 export function normalizeStatusReport(report: WireStatusReport): StatusReport {
   return {
+    // A server predating issue #417 omits these three; 0 keeps the Health
+    // rows numeric instead of rendering undefined.
+    wanted: report.wanted ?? 0,
+    selecting: report.selecting ?? 0,
+    waiting: report.waiting ?? 0,
     queued: report.queued,
     active: report.active,
     stalled: report.stalled,

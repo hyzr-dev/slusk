@@ -2841,3 +2841,66 @@ func TestLatestFailureDetails(t *testing.T) {
 		}
 	})
 }
+
+// TestCountDashboardStatusesMatchesListFacets is the regression test for
+// issue #417: /status used to derive its counts itself (and left two of them
+// unassigned), so it disagreed with the Jobs page about the word "queued" —
+// a live instance reported queued=0 while /api/jobs reported 2. Both surfaces
+// now read the same facet query, and this pins that they agree field for
+// field over one fixture of every dashboard status.
+//
+// A second derivation is exactly the drift issue #269 removed; if anyone
+// gives CountDashboardStatuses its own counting rule, this fails.
+func TestCountDashboardStatusesMatchesListFacets(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+
+	fixtures := []struct {
+		id     int64
+		state  core.AlbumJobState
+		tstate core.TransferState
+		peer   string
+	}{
+		{9101, core.StateDownloading, core.TransferInProgress, "peer_active"},
+		{9102, core.StateImporting, "", ""},
+		{9103, core.StateWanted, "", ""},
+		{9104, core.StateDownloading, core.TransferStalled, "peer_stalled"},
+		{9105, core.StateDownloading, core.TransferErrored, "peer_failed"},
+		{9106, core.StateParked, "", ""},
+		{9107, core.StateOrphaned, "", ""},
+		{9108, core.StateDone, "", ""},
+		{9109, core.StateSelecting, "", ""},
+		{9110, core.StateDownloading, core.TransferPending, "peer_queued"},
+		{9111, core.StateDownloading, core.TransferCompleted, "peer_waiting"},
+		// Cancelled jobs are outside the facet query's row scope; the
+		// counts-only query must use the same scope, so this must not
+		// appear in All.
+		{9112, core.StateCancelled, "", ""},
+	}
+	for i, f := range fixtures {
+		insertDashboardTestJob(t, s, f.id, core.SourceLidarr, f.state, f.tstate, fmt.Sprintf("Job %d", i), "Artist", f.peer, 0, now.Add(time.Duration(i)*time.Second))
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	counts, err := s.CountDashboardStatuses(ctx)
+	if err != nil {
+		t.Fatalf("CountDashboardStatuses: %v", err)
+	}
+	if counts != page.Facets.Status {
+		t.Fatalf("CountDashboardStatuses = %+v, want the /api/jobs facets %+v", counts, page.Facets.Status)
+	}
+
+	// Pin the fixture's own shape too, so a change that broke both queries
+	// identically would still be caught.
+	want := DashboardStatusFacets{
+		All: 11, Active: 1, Importing: 1, Queued: 1, Waiting: 1, Selecting: 1,
+		Wanted: 1, Stalled: 1, Failed: 1, Parked: 2, Done: 1,
+	}
+	if counts != want {
+		t.Errorf("CountDashboardStatuses = %+v, want %+v", counts, want)
+	}
+}

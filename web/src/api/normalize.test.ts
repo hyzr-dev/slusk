@@ -89,6 +89,25 @@ describe('wire compatibility normalization', () => {
     ]);
   });
 
+  it('supplies zero for the status counts an older server omits', () => {
+    // wireStatus() carries no wanted/selecting/waiting, exactly like a binary
+    // predating issue #417. The Health page renders these straight into its
+    // metric rows, so undefined would reach the DOM as an empty cell.
+    const normalized = normalizeStatusReport(wireStatus());
+
+    expect(normalized.wanted).toBe(0);
+    expect(normalized.selecting).toBe(0);
+    expect(normalized.waiting).toBe(0);
+  });
+
+  it('keeps the new status counts a current server sends', () => {
+    const normalized = normalizeStatusReport(
+      wireStatus({ wanted: 143, selecting: 4, waiting: 3 }),
+    );
+
+    expect(normalized).toMatchObject({ wanted: 143, selecting: 4, waiting: 3 });
+  });
+
   it('falls back to orphaned for an old status payload', () => {
     expect(normalizeStatusReport(wireStatus({ orphaned: 4 })).parked).toBe(4);
   });

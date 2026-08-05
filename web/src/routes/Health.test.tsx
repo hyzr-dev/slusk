@@ -39,6 +39,9 @@ function renderHealth(moduleDetails: StatusReport['moduleDetails']) {
   stubFetchIndefinitely();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.status, {
+    wanted: 0,
+    selecting: 0,
+    waiting: 0,
     queued: 0,
     active: 0,
     stalled: 0,
@@ -105,6 +108,9 @@ describe('Health loading vs empty', () => {
           return Promise.resolve(
             new Response(
               JSON.stringify({
+                wanted: 0,
+                selecting: 0,
+                waiting: 0,
                 queued: 2,
                 active: 1,
                 stalled: 0,
@@ -129,6 +135,79 @@ describe('Health loading vs empty', () => {
     );
     expect(await screen.findByText('1')).toBeInTheDocument(); // metricActive
     expect(screen.getAllByText('—').length).toBeGreaterThan(0); // uploads/shares rows
+  });
+
+  // Issue #417: queued and stalled were never assigned server-side and this
+  // page rendered their hardcoded zero as fact, on the surface people visit
+  // when something is wrong. Every one of the seven /status counts must reach
+  // its own row carrying its own value.
+  it('renders all seven status counts, each next to its own label', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/status') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                wanted: 143,
+                selecting: 11,
+                waiting: 3,
+                queued: 2,
+                active: 1,
+                stalled: 7,
+                parked: 5,
+                modules: {},
+                moduleDetails: {},
+              } satisfies StatusReport),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <Health />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // The labels render before the query resolves (the value cell shows an
+    // em dash until then), so wait on a value, not on a label.
+    await screen.findByText('143');
+    const rows: [string, string][] = [
+      [t.health.metricWanted, '143'],
+      [t.health.metricSelecting, '11'],
+      [t.health.metricWaiting, '3'],
+      [t.health.metricQueued, '2'],
+      [t.health.metricActive, '1'],
+      [t.health.metricStalled, '7'],
+      [t.health.metricParked, '5'],
+    ];
+    for (const [label, value] of rows) {
+      const row = screen.getByText(label).parentElement;
+      expect(row?.textContent).toBe(`${label}${value}`);
+    }
+  });
+
+  // The labels are the second half of the same fix (#305, absorbed by #417):
+  // the value became a job count, so no label sourced from /status may still
+  // call it a download or a transfer.
+  it('names the status-sourced rows as job counts, not downloads or transfers', () => {
+    for (const label of [
+      t.health.metricWanted,
+      t.health.metricSelecting,
+      t.health.metricWaiting,
+      t.health.metricQueued,
+      t.health.metricActive,
+      t.health.metricStalled,
+      t.health.metricParked,
+    ]) {
+      expect(label).not.toMatch(/download|transfer/i);
+    }
   });
 });
 

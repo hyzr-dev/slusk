@@ -165,6 +165,48 @@ func TestStatusEndpointReturnsParkedAndDeprecatedAlias(t *testing.T) {
 	}
 }
 
+// Issue #417: queued and stalled used to serialize as a hardcoded zero because
+// nothing assigned them, and a consumer could not tell "nothing is queued" from
+// "this field is not implemented". Every one of the seven counts must appear in
+// the JSON carrying the value its producer reported.
+func TestStatusEndpointReportsEverySevenCounts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	deps := testServerDeps(reg)
+	deps.Status = func(ctx context.Context) (StatusReport, error) {
+		return StatusReport{Wanted: 7, Selecting: 6, Waiting: 5, Queued: 4, Active: 3, Stalled: 2, Parked: 1}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d", rec.Code)
+	}
+	// Decoded key by key rather than into StatusReport, so a field that stops
+	// being serialized (or is renamed on the wire) fails here instead of
+	// silently decoding as its zero value.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw JSON: %v", err)
+	}
+	for key, want := range map[string]int{
+		"wanted": 7, "selecting": 6, "waiting": 5, "queued": 4,
+		"active": 3, "stalled": 2, "parked": 1,
+	} {
+		value, ok := raw[key]
+		if !ok {
+			t.Errorf("raw JSON missing %q: %s", key, rec.Body.String())
+			continue
+		}
+		var got int
+		if err := json.Unmarshal(value, &got); err != nil || got != want {
+			t.Errorf("%s = %s, want %d (decode error %v)", key, value, want, err)
+		}
+	}
+}
+
 func TestStatusEndpointReportsBuildVersion(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	deps := testServerDeps(reg)

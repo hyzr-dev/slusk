@@ -341,11 +341,31 @@ export interface ModuleStatus {
   ready: boolean;
 }
 
-/** GET /status */
+/**
+ * GET /status
+ *
+ * The seven counts are counts of *jobs*, in the same status vocabulary the
+ * Jobs page uses (see JobStatus) — the server derives them from the query
+ * /api/jobs' facets come from, so the two surfaces cannot disagree about a
+ * word. Before issue #417 `active` counted transfer rows instead, which made
+ * a single downloading album with many files in flight read as seventeen
+ * "active downloads", while `queued` and `stalled` were served as a hardcoded
+ * zero the Health page rendered as fact.
+ */
 export interface StatusReport {
+  /** Never searched, no candidates yet. */
+  wanted: number;
+  /** Candidates cached, waiting for a max_active slot. */
+  selecting: number;
+  /** Downloading, at least one file delivered and none currently moving. */
+  waiting: number;
+  /** Standing in a peer's queue with nothing delivered yet. */
   queued: number;
+  /** A transfer is in progress. */
   active: number;
+  /** A transfer has stopped making progress. */
   stalled: number;
+  /** Parked or orphaned. */
   parked: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
@@ -358,10 +378,21 @@ export interface StatusReport {
   version?: string;
 }
 
-/** GET /status wire shape; old servers omit parked, new servers may omit orphaned. */
-export type WireStatusReport = Omit<StatusReport, 'parked'> & {
+/**
+ * GET /status wire shape; old servers omit parked, new servers may omit
+ * orphaned. A server predating issue #417 omits wanted/selecting/waiting
+ * entirely — the normalizer supplies 0 rather than letting undefined reach the
+ * Health rows.
+ */
+export type WireStatusReport = Omit<
+  StatusReport,
+  'parked' | 'wanted' | 'selecting' | 'waiting'
+> & {
   parked?: number;
   orphaned?: number;
+  wanted?: number;
+  selecting?: number;
+  waiting?: number;
 };
 
 /** internal/observ/config.go LidarrView */
