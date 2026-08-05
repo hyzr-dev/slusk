@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/config"
+	"github.com/hyzr-dev/slusk/internal/observ"
 	"github.com/hyzr-dev/slusk/internal/pipeline"
 )
 
@@ -47,6 +48,60 @@ func TestConversationPresenceForBackend(t *testing.T) {
 	}
 	if provider := conversationPresenceForBackend(config.BackendSoulseek, nil); provider != nil {
 		t.Fatal("nil native client exposed presence provider")
+	}
+}
+
+func TestDashboardJobsQueryFromPaged(t *testing.T) {
+	query := observ.PagedJobsQuery{
+		Page:       7,
+		Sort:       "updated_at",
+		Dir:        "asc",
+		Filter:     "failed",
+		Source:     "manual",
+		Query:      "radiohead",
+		PageSize:   25,
+		SkipFacets: true,
+	}
+	before := time.Now()
+	got := dashboardJobsQueryFromPaged(query)
+	after := time.Now()
+
+	if got.Page != query.Page {
+		t.Errorf("Page = %v, want %v", got.Page, query.Page)
+	}
+	if got.Sort != query.Sort {
+		t.Errorf("Sort = %v, want %v", got.Sort, query.Sort)
+	}
+	if got.Dir != query.Dir {
+		t.Errorf("Dir = %v, want %v", got.Dir, query.Dir)
+	}
+	if got.Filter != query.Filter {
+		t.Errorf("Filter = %v, want %v", got.Filter, query.Filter)
+	}
+	if got.Source != query.Source {
+		t.Errorf("Source = %v, want %v", got.Source, query.Source)
+	}
+	if got.Query != query.Query {
+		t.Errorf("Query = %v, want %v", got.Query, query.Query)
+	}
+	if got.PageSize != query.PageSize {
+		t.Errorf("PageSize = %v, want %v", got.PageSize, query.PageSize)
+	}
+	if got.SkipFacets != query.SkipFacets {
+		t.Errorf("SkipFacets = %v, want %v", got.SkipFacets, query.SkipFacets)
+	}
+	if got.Now.Before(before) || got.Now.After(after) {
+		t.Errorf("Now = %v, want between %v and %v", got.Now, before, after)
+	}
+}
+
+func TestDashboardJobsQueryFromPagedGeneratesFreshNow(t *testing.T) {
+	first := dashboardJobsQueryFromPaged(observ.PagedJobsQuery{})
+	time.Sleep(time.Millisecond)
+	second := dashboardJobsQueryFromPaged(observ.PagedJobsQuery{})
+
+	if !second.Now.After(first.Now) {
+		t.Fatalf("second Now (%v) did not advance past first Now (%v)", second.Now, first.Now)
 	}
 }
 

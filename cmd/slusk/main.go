@@ -71,6 +71,31 @@ func conversationPresenceForBackend(backend string, client conversationPresenceC
 	return client.ConversationPresence
 }
 
+// dashboardJobsQueryFromPaged maps an observ.PagedJobsQuery — the HTTP-layer
+// request shape — onto the store.DashboardJobsQuery the paged jobs endpoint
+// queries with. It is extracted from pagedJobsFn's closure (issue #293) so
+// the field-by-field mapping has a name and can be tested on its own, rather
+// than only ever being exercised indirectly through a mocked store call.
+//
+// Now is generated here, not threaded in from the caller, because the only
+// caller (pagedJobsFn) has no query-scoped timestamp of its own to thread —
+// each HTTP request must anchor filter=finished's window (see
+// store.DashboardFinishedWindow) to the moment it is actually served, not to
+// some earlier point in the request's life.
+func dashboardJobsQueryFromPaged(query observ.PagedJobsQuery) store.DashboardJobsQuery {
+	return store.DashboardJobsQuery{
+		Page:       query.Page,
+		Sort:       query.Sort,
+		Dir:        query.Dir,
+		Filter:     query.Filter,
+		Source:     query.Source,
+		Query:      query.Query,
+		PageSize:   query.PageSize,
+		SkipFacets: query.SkipFacets,
+		Now:        time.Now(),
+	}
+}
+
 // version is the build's identity, surfaced at GET /status and shown beside
 // the product name in the UI's top bar (issue #229).
 //
@@ -293,15 +318,7 @@ func main() {
 		return st.ListJobsWithTransfer(ctx)
 	}
 	pagedJobsFn := func(ctx context.Context, query observ.PagedJobsQuery) (observ.PagedJobsResult, error) {
-		page, err := st.ListDashboardJobs(ctx, store.DashboardJobsQuery{
-			Page: query.Page, Sort: query.Sort, Dir: query.Dir,
-			Filter: query.Filter, Source: query.Source, Query: query.Query,
-			PageSize: query.PageSize, SkipFacets: query.SkipFacets,
-			// filter=finished anchors its window here rather than in SQL, so
-			// the store never reads the database clock (see
-			// store.DashboardFinishedWindow). Every other filter ignores it.
-			Now: time.Now(),
-		})
+		page, err := st.ListDashboardJobs(ctx, dashboardJobsQueryFromPaged(query))
 		if err != nil {
 			return observ.PagedJobsResult{}, err
 		}
