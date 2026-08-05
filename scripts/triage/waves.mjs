@@ -178,14 +178,73 @@ export function computeWaves(issues, contracts) {
   }
 }
 
+// Issue references in prose: `#294`, but not the leading digits of a CSS hex
+// colour (`#1d76db`) or a `#`-prefixed word. A six-digit all-numeric hex would
+// still match; that costs a re-judgement only if it collides with a real issue
+// number that closed since the cache was written, which the intersection in
+// invalidate() makes vanishingly unlikely.
+const ISSUE_REFERENCE = /#(\d+)(?!\w)/g
+
+/**
+ * Issue numbers a cached judgement names in its free-text evidence, ascending
+ * and deduplicated.
+ *
+ * Only the prose fields are scanned. `statedBlockers` is already structured and
+ * already drives the wave ordering; what this exists to find is the *unstated*
+ * dependency — "issue #287 (still open) is what turns this into an actual bug"
+ * — which lives in prose or nowhere.
+ */
+export function referencedIssues(judgement) {
+  const prose = [judgement?.impactEvidence, judgement?.reproCheck]
+    .filter(field => typeof field === 'string')
+    .join('\n')
+  const found = new Set()
+  for (const [, number] of prose.matchAll(ISSUE_REFERENCE)) found.add(Number(number))
+  return [...found].sort((a, b) => a - b)
+}
+
+/**
+ * The issue numbers that have closed since the cache was written, derived from
+ * the cache itself rather than fetched.
+ *
+ * Every issue in `state.issues` was open when it was judged — being open is
+ * what got it judged at all — so any of them missing from the current open list
+ * has since closed. No extra `tea` call, and nothing for the caller to pass.
+ *
+ * It also fires for an issue that was deleted or moved rather than closed. That
+ * is the same signal for this purpose: a judgement resting on it was written
+ * against a world that no longer holds.
+ */
+export function closedSince(state, openIssues) {
+  const open = new Set((openIssues ?? []).map(i => i.number))
+  return new Set(
+    Object.values(state?.issues ?? {})
+      .map(cached => cached.number)
+      .filter(number => !open.has(number)))
+}
+
 /**
  * Split the open issues into those whose cached judgement still holds and
  * those that must be re-judged.
  *
- * Two independent axes, because `touches` is an asserted relation between an
- * issue and the code: the issue can move, and the code under it can move. An
- * issue may sit untouched for months while the file it concerns is refactored
- * away, so checking only the issue's content would miss the refactoring.
+ * Three independent axes. Two of them exist because `touches` is an asserted
+ * relation between an issue and the code: the issue can move, and the code
+ * under it can move. An issue may sit untouched for months while the file it
+ * concerns is refactored away, so checking only the issue's content would miss
+ * the refactoring.
+ *
+ * The third is that a judgement's severity can rest on a *third* issue's
+ * open/closed status — "#287 (still open) is what turns this into an actual
+ * bug" — and neither of the first two axes can see that condition come true.
+ * Both fired in one run on 2026-07-30 when #287 merged and had to be forced
+ * stale by hand (#298). So a judgement also dies when its evidence names an
+ * issue that has closed since the cache was written.
+ *
+ * That last axis is a text heuristic and is meant to be one. It misses a
+ * dependency the judge paraphrased instead of numbering, and it fires on a
+ * number that was mentioned without being load-bearing. Both errors cost a
+ * re-judgement, never a wrong one presented as fresh, which is the trade the
+ * issue asked for.
  *
  * The digest is a content hash computed by the caller and is expected to cover
  * the issue's title, body, labels, and comments — enough to detect real content
@@ -195,6 +254,7 @@ export function invalidate({ state, openIssues, changedPaths }) {
   const fresh = []
   const stale = []
   const changed = new Set(changedPaths ?? [])
+  const closed = closedSince(state, openIssues)
 
   for (const open of openIssues) {
     const cached = state?.issues?.[String(open.number)]
@@ -203,8 +263,11 @@ export function invalidate({ state, openIssues, changedPaths }) {
       ? (cached.touches ?? []).some(path =>
           [...changed].some(c => c === path || c.startsWith(path) || path.startsWith(c)))
       : false
+    const movedReference = cached
+      ? referencedIssues(cached).some(number => closed.has(number))
+      : false
 
-    if (movedIssue || movedCode) stale.push(open.number)
+    if (movedIssue || movedCode || movedReference) stale.push(open.number)
     else fresh.push(open.number)
   }
 
