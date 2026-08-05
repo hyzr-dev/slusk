@@ -45,6 +45,21 @@ describe('Pager', () => {
     expect(onChange).toHaveBeenCalledTimes(3);
   });
 
+  it('renders caller-supplied shortcut hints without letting them into the accessible name', () => {
+    render(<Pager page={1} totalPages={20} onChange={() => {}} previousHint="[,]" nextHint="[.]" />);
+
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent('[,] PREV');
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent('NEXT [.]');
+  });
+
+  it('renders no hint by default, since only a caller that binds the keys may claim them', () => {
+    render(<Pager page={1} totalPages={20} onChange={() => {}} />);
+
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent(/^PREV$/);
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent(/^NEXT$/);
+    expect(screen.queryByText('[,]')).not.toBeInTheDocument();
+  });
+
   it('disables next on the last page', () => {
     render(<Pager page={19} totalPages={20} onChange={() => {}} />);
     expect(screen.getByRole('button', { name: t.pager.nextPage })).toBeDisabled();

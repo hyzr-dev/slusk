@@ -655,6 +655,11 @@ describe('sorting and pagination', () => {
     renderJobs([makeJob({ id: 1 })], client, 120);
 
     expect(screen.getByText(t.jobs.resultRange(1, 12, 120))).toBeInTheDocument();
+    // This view binds ',' and '.', so it — and only it — draws the hint (#434).
+    // The glyph is decoration: the accessible name each button is found by
+    // stays the plain label.
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent('[,] PREV');
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent('NEXT [.]');
     expect(screen.getByRole('button', { name: t.pager.previousPage })).toBeDisabled();
     expect(screen.getByRole('button', { name: t.pager.pageLabel(10) })).toBeInTheDocument();
     expect(screen.getAllByText('…')).toHaveLength(1);

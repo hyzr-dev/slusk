@@ -474,7 +474,8 @@ export default function Jobs() {
         {hasData(phase) && totalPages > 1 && (
           <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
             <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
-            <Pager page={page} totalPages={totalPages} onChange={goToPage} />
+            {/* The hints are true here: the keydown effect above binds both. */}
+            <Pager page={page} totalPages={totalPages} onChange={goToPage} previousHint="[,]" nextHint="[.]" />
           </nav>
         )}
       </Panel>

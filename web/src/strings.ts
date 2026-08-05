@@ -231,8 +231,12 @@ export const t = {
   // `jobs.nextPage` on a control the Peers view also mounts would be a name
   // that lies about its scope.
   pager: {
-    previousPage: '[,] PREV',
-    nextPage: 'NEXT [.]',
+    // Plain, with no bracket glyph: only a caller that binds the keys may claim
+    // them, and it passes the glyph to Pager as decoration instead (#434). A
+    // shared string cannot carry a per-caller promise — on Peers, which binds
+    // nothing, `NEXT [.]` was simply false.
+    previousPage: 'PREV',
+    nextPage: 'NEXT',
     pageLabel: (page: number) => `Page ${page}`,
   },
   jobs: {
