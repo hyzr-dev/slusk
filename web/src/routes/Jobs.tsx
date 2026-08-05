@@ -14,6 +14,7 @@ import Button from '../components/tui/Button';
 import Chip from '../components/tui/Chip';
 import EmptyState from '../components/tui/EmptyState';
 import Page from '../components/tui/Page';
+import Pager from '../components/tui/Pager';
 import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import Tag from '../components/tui/Tag';
@@ -230,24 +231,6 @@ function jobRowPropsEqual(prev: JobRowProps, next: JobRowProps): boolean {
 }
 
 const JobRow = memo(JobRowImpl, jobRowPropsEqual);
-
-type PageItem = number | 'ellipsis';
-
-// Always exposes the boundaries while keeping the control compact for large
-// collections. A one-page neighbourhood around the current page is enough to
-// move locally; first/last provide the long jump.
-export function paginationItems(page: number, totalPages: number): PageItem[] {
-  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i);
-  const pages = [...new Set([0, totalPages - 1, page - 1, page, page + 1])]
-    .filter((candidate) => candidate >= 0 && candidate < totalPages)
-    .sort((a, b) => a - b);
-  const items: PageItem[] = [];
-  pages.forEach((candidate, index) => {
-    if (index > 0 && candidate - pages[index - 1] > 1) items.push('ellipsis');
-    items.push(candidate);
-  });
-  return items;
-}
 
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -485,30 +468,7 @@ export default function Jobs() {
         {hasData(phase) && (
           <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
             <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
-            <div className={styles.pageButtons}>
-              <button type="button" className={styles.pageButton} disabled={page === 0} onClick={() => goToPage(page - 1)}>
-                {t.jobs.previousPage}
-              </button>
-              {paginationItems(page, totalPages).map((item, index) =>
-                item === 'ellipsis' ? (
-                  <span key={`ellipsis-${index}`} className={styles.ellipsis} aria-hidden>…</span>
-                ) : (
-                  <button
-                    type="button"
-                    key={item}
-                    className={`${styles.pageButton} ${item === page ? styles.pageButtonActive : ''}`}
-                    aria-current={item === page ? 'page' : undefined}
-                    aria-label={t.jobs.pageLabel(item + 1)}
-                    onClick={() => goToPage(item)}
-                  >
-                    {item + 1}
-                  </button>
-                ),
-              )}
-              <button type="button" className={styles.pageButton} disabled={page + 1 >= totalPages} onClick={() => goToPage(page + 1)}>
-                {t.jobs.nextPage}
-              </button>
-            </div>
+            <Pager page={page} totalPages={totalPages} onChange={goToPage} />
           </nav>
         )}
       </Panel>

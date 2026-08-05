@@ -1,0 +1,23 @@
+.pageButtons { display: flex; align-items: center; gap: 5px; }
+
+.pageButton {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line2);
+  background: transparent;
+  color: var(--dim);
+  font: 10.5px var(--font-mono);
+  letter-spacing: 0.4px;
+  cursor: pointer;
+}
+
+.pageButton:hover:not(:disabled), .pageButtonActive {
+  border-color: var(--dim);
+  color: var(--fg);
+}
+
+.pageButton:focus-visible { outline: 1px solid var(--fg); outline-offset: 2px; }
+.pageButton:disabled { color: var(--line2); cursor: default; }
+.pageButtonActive { background: var(--panel-hover); }
+.ellipsis { min-width: 20px; text-align: center; color: var(--text-dim); }

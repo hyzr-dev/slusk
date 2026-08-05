@@ -225,6 +225,16 @@ export const t = {
     manual: 'Manual',
     lidarr: 'Lidarr',
   },
+  // The shared prev/numbered/next control (see components/tui/Pager) — text
+  // that names no domain, since any list view can mount it. Lives here rather
+  // than under the route that used to own it (#425): a string called
+  // `jobs.nextPage` on a control the Peers view also mounts would be a name
+  // that lies about its scope.
+  pager: {
+    previousPage: '[,] PREV',
+    nextPage: 'NEXT [.]',
+    pageLabel: (page: number) => `Page ${page}`,
+  },
   jobs: {
     // Short because the field is the flexible element on a full filter row and
     // shrinks to 120px there (see .filterBox in Jobs.module.css). The longer
@@ -334,10 +344,10 @@ export const t = {
       manual: 'MANUAL',
       lidarr: 'LIDARR',
     },
+    // paginationLabel stays: it names *these* pages ("Job pages") and is the
+    // one pager-adjacent string that is genuinely route-specific. The prev/
+    // next/page-N labels moved to `t.pager` with the component (#425).
     paginationLabel: 'Job pages',
-    previousPage: '[,] PREV',
-    nextPage: 'NEXT [.]',
-    pageLabel: (page: number) => `Page ${page}`,
     resultRange: (start: number, end: number, total: number) => `${start}–${end} of ${total} jobs`,
     // Compact peer-queue position for the dense PROGRESS cell, where "queue
     // #4" (queuePosition above) would overflow the column.
