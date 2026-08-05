@@ -214,6 +214,13 @@ export function referencedIssues(judgement) {
  * It also fires for an issue that was deleted or moved rather than closed. That
  * is the same signal for this purpose: a judgement resting on it was written
  * against a world that no longer holds.
+ *
+ * The blind spot is an issue that never had a cache row of its own -- opened and
+ * closed entirely between two triage runs, or never judged while it was open. It
+ * cannot appear here, so a judgement citing it stays fresh. Closing that gap
+ * needs closed-issue status fetched from the tracker; anchoring on the cache is
+ * what keeps the alternative -- "referenced and not currently open" -- from
+ * staling every judgement that cites a long-closed issue on every future run.
  */
 export function closedSince(state, openIssues) {
   const open = new Set((openIssues ?? []).map(i => i.number))
@@ -236,15 +243,18 @@ export function closedSince(state, openIssues) {
  * The third is that a judgement's severity can rest on a *third* issue's
  * open/closed status — "#287 (still open) is what turns this into an actual
  * bug" — and neither of the first two axes can see that condition come true.
- * Both fired in one run on 2026-07-30 when #287 merged and had to be forced
- * stale by hand (#298). So a judgement also dies when its evidence names an
- * issue that has closed since the cache was written.
+ * Two judgements fired on that in one run on 2026-07-30 when #287 merged, and
+ * both had to be forced stale by hand (#298). So a judgement also dies when its
+ * evidence names an issue that has closed since the cache was written.
  *
- * That last axis is a text heuristic and is meant to be one. It misses a
- * dependency the judge paraphrased instead of numbering, and it fires on a
- * number that was mentioned without being load-bearing. Both errors cost a
- * re-judgement, never a wrong one presented as fresh, which is the trade the
- * issue asked for.
+ * That last axis is a text heuristic and is meant to be one. It fires on a
+ * number that was mentioned without being load-bearing, and it misses a
+ * dependency the judge paraphrased instead of numbering — which is to say it
+ * would have caught only one of the two judgements that motivated it. #294
+ * wrote "#287" and is caught; #292 said the rows "are not clickable" without
+ * naming what would change that, and would cache-hit still. Both errors cost a
+ * re-judgement or leave the status quo, never a wrong answer presented as
+ * fresh, which is the trade the issue asked for.
  *
  * The digest is a content hash computed by the caller and is expected to cover
  * the issue's title, body, labels, and comments — enough to detect real content

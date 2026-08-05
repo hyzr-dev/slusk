@@ -157,10 +157,15 @@ in `state.json` was open when it was judged, so any of them missing from the ope
 since closed. It then re-judges any cached judgement whose `impactEvidence` or `reproCheck`
 mentions one of those numbers as `#N`. This exists because a judgement's severity can hang on
 a *third* issue's status — "#287 (still open) is what turns this into an actual bug" — which
-neither of the other axes can see coming true (#298). It is a text heuristic on purpose: it
-misses a dependency the judge paraphrased instead of numbering, and it fires on a number that
-was mentioned in passing. Both cost a re-judgement, never a confident wrong answer that looks
-fresh.
+neither of the other axes can see coming true (#298).
+
+It is a text heuristic on purpose, and it is a floor rather than a guarantee. It fires on a
+number mentioned in passing, misses a dependency the judge paraphrased instead of numbering,
+and cannot see an issue that closed without ever having a cache row of its own. Of the two
+judgements that motivated #298 it catches one: #294 wrote the number, #292 wrote "the rows
+are not clickable" and would still cache-hit. So the payoff for writing `#N` into
+`impactEvidence` when a finding depends on another issue is direct — that is what makes the
+dependency machine-visible.
 
 `invalidate` prints `{"fresh": [...], "stale": [...]}`. **Both arrays are bare issue
 numbers, not objects.** Keep both:
