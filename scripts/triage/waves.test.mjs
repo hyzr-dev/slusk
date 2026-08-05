@@ -84,12 +84,12 @@ const CONTRACTS = [
 
 test('an issue touching one side of a contract touches the contract', () => {
   const issue = { number: 275, touches: ['internal/observ/stream.go'] }
-  assert.deepEqual(contractsTouched(issue, CONTRACTS), ['sse-events'])
+  assert.deepEqual(contractsTouched(issue, CONTRACTS), [{ name: 'sse-events', side: 0 }])
 })
 
 test('a path prefix matches a directory side', () => {
   const issue = { number: 89, touches: ['internal/config/config.go'] }
-  assert.deepEqual(contractsTouched(issue, CONTRACTS), ['config'])
+  assert.deepEqual(contractsTouched(issue, CONTRACTS), [{ name: 'config', side: 0 }])
 })
 
 test('opposite sides of one contract conflict despite disjoint files', () => {
@@ -110,7 +110,21 @@ test('a directory side without a trailing slash does not match a longer sibling 
   const unrelated = { number: 1, touches: ['internal/configuration/x.go'] }
   const real = { number: 2, touches: ['internal/config/config.go'] }
   assert.deepEqual(contractsTouched(unrelated, contracts), [])
-  assert.deepEqual(contractsTouched(real, contracts), ['config'])
+  assert.deepEqual(contractsTouched(real, contracts), [{ name: 'config', side: 0 }])
+})
+
+test('two issues touching the same side of a shared contract do not conflict', () => {
+  const a = { number: 1, touches: ['internal/config/config.go'] }
+  const b = { number: 2, touches: ['internal/config/loader.go'] }
+  assert.equal(filesConflict(a, b), false)
+  assert.equal(conflicts(a, b, CONTRACTS), false)
+})
+
+test('an issue touching both sides of a contract still conflicts with an issue touching only one', () => {
+  const both = { number: 1, touches: ['internal/config/config.go', 'config.example.toml'] }
+  const oneSide = { number: 2, touches: ['internal/config/loader.go'] }
+  assert.equal(filesConflict(both, oneSide), false)
+  assert.equal(conflicts(both, oneSide, CONTRACTS), true)
 })
 
 test('rank orders by prod impact, then by ascending effort', () => {

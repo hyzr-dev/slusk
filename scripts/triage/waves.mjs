@@ -60,20 +60,32 @@ export function hasDirectoryTouch(issue) {
 }
 
 /**
- * Names of the shared contracts an issue touches. A side is a list of path
- * prefixes, so both a file and a directory can name a side.
+ * The (contract, side) pairs an issue touches. A side is a list of path
+ * prefixes, so both a file and a directory can name a side; its index within
+ * the contract's `sides` array is a sufficient identity for it.
+ *
+ * An issue can appear against more than one side of the same contract -- an
+ * issue that changes both the SSE producer and its consumer, say. That is
+ * exactly the case `conflicts` must still treat as a clash against anything
+ * else on that contract: touching every side is strictly more entangled with
+ * the protocol than touching one, never less, so it must not be read as
+ * cancelling out into "no side" or "safe".
  */
 export function contractsTouched(issue, contracts) {
   const touches = issue.touches ?? []
-  return contracts
-    .filter(c => c.sides.some(side =>
-      side.some(prefix => touches.some(path => {
+  const result = []
+  for (const c of contracts) {
+    c.sides.forEach((side, sideIndex) => {
+      const matches = side.some(prefix => {
         // Remove trailing slash from prefix for consistent matching
         const normalized = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix
         // Match exactly (file) or with slash following (directory)
-        return path === normalized || path.startsWith(normalized + '/')
-      }))))
-    .map(c => c.name)
+        return touches.some(path => path === normalized || path.startsWith(normalized + '/'))
+      })
+      if (matches) result.push({ name: c.name, side: sideIndex })
+    })
+  }
+  return result
 }
 
 /**
@@ -82,11 +94,18 @@ export function contractsTouched(issue, contracts) {
  * while touching entirely disjoint files -- #275 changes the SSE producer,
  * #267 the consumer -- and scheduling those together lets two agents skew a
  * contract silently, because each side is tested against its own mock.
+ *
+ * The comparison is by (contract, side), not by contract name alone: two
+ * issues that both only touch the producer side, say, are both working on the
+ * same end of the same protocol and are exactly the kind of change that
+ * benefits from being in the same wave, not split apart by a rule meant for
+ * the opposite case.
  */
 export function conflicts(a, b, contracts) {
   if (filesConflict(a, b)) return true
-  const mine = new Set(contractsTouched(a, contracts))
-  return contractsTouched(b, contracts).some(name => mine.has(name))
+  const mine = contractsTouched(a, contracts)
+  const theirs = contractsTouched(b, contracts)
+  return mine.some(x => theirs.some(y => x.name === y.name && x.side !== y.side))
 }
 
 const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 }
