@@ -120,6 +120,15 @@ func TestSchemaHasTitleAndArtistColumns(t *testing.T) {
 // connection that looks fine but no longer delivers bytes. Open must configure
 // a connection max idle time so idle connections are proactively replaced
 // well before that can happen.
+//
+// The wait loop must never issue another query (#171). database/sql bumps
+// MaxIdleTimeClosed from its own cleaner goroutine, which runs on a hard
+// one-second minimum interval no matter how short ConnMaxIdleTime is, and it
+// only closes a connection whose returnedAt is already older than that limit.
+// A loop that re-queries while polling keeps resetting returnedAt, so each
+// tick becomes a coin flip on whether the connection happens to be idle right
+// then - the very idle period this test asserts. Letting the connection sit
+// untouched makes the first tick close it deterministically.
 func TestOpenRecyclesIdleConnections(t *testing.T) {
 	s, err := openWithLimits(storetest.DSN(t), 10*time.Millisecond, time.Hour)
 	if err != nil {
@@ -127,19 +136,25 @@ func TestOpenRecyclesIdleConnections(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 
+	// Returning this connection to the pool is what starts the cleaner.
 	if _, err := s.db.Exec("SELECT 1"); err != nil {
 		t.Fatalf("first query: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	// Generous only so a wholly broken recycling policy fails instead of
+	// hanging; it is not a latency assertion, and it is deliberately far
+	// above the ~1s the cleaner actually takes. Do not tighten it towards
+	// that measurement: a deadline snug enough to double as a latency bound
+	// is what made this test load-sensitive in the first place, and a
+	// CPU-quota-throttled CI container (#139) delays goroutines by more than
+	// a saturated laptop does. The 30s is paid once, only when recycling is
+	// genuinely broken.
+	deadline := time.Now().Add(30 * time.Second)
 	for s.db.Stats().MaxIdleTimeClosed == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("expected at least one connection closed due to ConnMaxIdleTime, got 0 - idle connections are never recycled")
 		}
-		time.Sleep(20 * time.Millisecond) // let the connection sit idle past the limit
-		if _, err := s.db.Exec("SELECT 1"); err != nil {
-			t.Fatalf("query: %v", err)
-		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
