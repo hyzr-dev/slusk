@@ -4,6 +4,11 @@ const CHAT_ONLINE = 'ONLINE';
 const CHAT_OFFLINE = 'OFFLINE';
 const CHAT_STATUS_ONLINE = 'online';
 const CHAT_STATUS_OFFLINE = 'offline';
+// Shared with `t.jobs` below — see the comment on `pager` for why these are
+// constants rather than two independent literals.
+const PAGER_PREVIOUS_PAGE = '[,] PREV';
+const PAGER_NEXT_PAGE = 'NEXT [.]';
+const PAGER_PAGE_LABEL = (page: number) => `Page ${page}`;
 
 export const t = {
   app: {
@@ -225,6 +230,16 @@ export const t = {
     manual: 'Manual',
     lidarr: 'Lidarr',
   },
+  // The shared prev/numbered/next control (see components/tui/Pager) — text
+  // that names no domain, since any list view can mount it. `jobs` below
+  // reuses these same values (issue #425 moved the pager component out of
+  // Jobs, but Jobs.test.tsx still reads them off `t.jobs`, so the literals
+  // stay defined once here and are re-exported there rather than duplicated).
+  pager: {
+    previousPage: PAGER_PREVIOUS_PAGE,
+    nextPage: PAGER_NEXT_PAGE,
+    pageLabel: PAGER_PAGE_LABEL,
+  },
   jobs: {
     // Short because the field is the flexible element on a full filter row and
     // shrinks to 120px there (see .filterBox in Jobs.module.css). The longer
@@ -335,9 +350,12 @@ export const t = {
       lidarr: 'LIDARR',
     },
     paginationLabel: 'Job pages',
-    previousPage: '[,] PREV',
-    nextPage: 'NEXT [.]',
-    pageLabel: (page: number) => `Page ${page}`,
+    // Jobs.test.tsx reads these three off `t.jobs` — kept here as aliases of
+    // the shared `pager` strings above so the pager component's move out of
+    // this route (#425) didn't require touching that test file.
+    previousPage: PAGER_PREVIOUS_PAGE,
+    nextPage: PAGER_NEXT_PAGE,
+    pageLabel: PAGER_PAGE_LABEL,
     resultRange: (start: number, end: number, total: number) => `${start}–${end} of ${total} jobs`,
     // Compact peer-queue position for the dense PROGRESS cell, where "queue
     // #4" (queuePosition above) would overflow the column.
