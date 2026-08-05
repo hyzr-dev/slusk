@@ -664,7 +664,7 @@ func TestTransferBytesByCandidateEmptyAndUnknownIDs(t *testing.T) {
 	}
 }
 
-func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
+func TestPeersReturnsGlobalCountersOnly(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -695,15 +695,6 @@ func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
 	if rp.Global.SuccessCount != 1 || rp.Global.FailCount != 1 {
 		t.Errorf("Global = %+v, want success=1 fail=1", rp.Global)
 	}
-	if len(rp.Artists) != 2 {
-		t.Fatalf("expected 2 artist-specific rows, got %d", len(rp.Artists))
-	}
-	if rp.Artists[1].SuccessCount != 1 || rp.Artists[1].FailCount != 0 {
-		t.Errorf("Artists[1] = %+v, want success=1 fail=0", rp.Artists[1])
-	}
-	if rp.Artists[2].SuccessCount != 0 || rp.Artists[2].FailCount != 1 {
-		t.Errorf("Artists[2] = %+v, want success=0 fail=1", rp.Artists[2])
-	}
 
 	np, ok := byUsername["no_artist_peer"]
 	if !ok {
@@ -712,8 +703,80 @@ func TestPeersReturnsGlobalAndArtistBreakdown(t *testing.T) {
 	if np.Global.SuccessCount != 1 {
 		t.Errorf("no_artist_peer Global.SuccessCount = %d, want 1", np.Global.SuccessCount)
 	}
-	if len(np.Artists) != 0 {
-		t.Errorf("expected no artist-specific rows for artistID<=0, got %+v", np.Artists)
+}
+
+func TestPeerHistoryReturnsArtistRowsWithNames(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := s.RecordAttemptOutcome(ctx, 1, "reliable_peer", true, now); err != nil {
+		t.Fatalf("RecordAttemptOutcome artist 1: %v", err)
+	}
+	if err := s.RecordAttemptOutcome(ctx, 2, "reliable_peer", false, now.Add(time.Hour)); err != nil {
+		t.Fatalf("RecordAttemptOutcome artist 2: %v", err)
+	}
+	if err := s.RecordAttemptOutcome(ctx, 3, "reliable_peer", true, now); err != nil {
+		t.Fatalf("RecordAttemptOutcome artist 3: %v", err)
+	}
+	if err := s.RecordAttemptOutcome(ctx, 0, "no_artist_peer", true, now); err != nil {
+		t.Fatalf("RecordAttemptOutcome no artist: %v", err)
+	}
+
+	// Artist 1 has a name. Artist 2 has only the empty-string DEFAULT, which
+	// means "no name known" and must not be served as a nameless artist.
+	// Artist 3 has no album_jobs row at all — the "every job deleted" case.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO album_jobs (lidarr_album_id, state, created_at, updated_at, title, artist_name, artist_id)
+		 VALUES (901, 'WANTED', $1, $1, 'Album A', 'Named Artist', 1),
+		        (902, 'WANTED', $1, $1, 'Album B', '', 2)`, now); err != nil {
+		t.Fatalf("seed album_jobs: %v", err)
+	}
+
+	history, found, err := s.PeerHistory(ctx, "reliable_peer")
+	if err != nil {
+		t.Fatalf("PeerHistory: %v", err)
+	}
+	if !found {
+		t.Fatal("PeerHistory reported reliable_peer unknown")
+	}
+	if history.Global.SuccessCount != 2 || history.Global.FailCount != 1 {
+		t.Errorf("Global = %+v, want success=2 fail=1", history.Global)
+	}
+	if len(history.Artists) != 3 {
+		t.Fatalf("expected 3 artist rows, got %+v", history.Artists)
+	}
+	if got := history.Artists[0]; got.ArtistID != 1 || got.Name != "Named Artist" || got.Counters.SuccessCount != 1 || got.Counters.FailCount != 0 {
+		t.Errorf("Artists[0] = %+v, want artist 1 'Named Artist' success=1 fail=0", got)
+	}
+	if got := history.Artists[1]; got.ArtistID != 2 || got.Name != "" || got.Counters.FailCount != 1 {
+		t.Errorf("Artists[1] = %+v, want artist 2 with no name and fail=1", got)
+	}
+	if got := history.Artists[2]; got.ArtistID != 3 || got.Name != "" {
+		t.Errorf("Artists[2] = %+v, want artist 3 with no name", got)
+	}
+
+	// A peer whose only outcome was recorded with artistID <= 0 exists but has
+	// no artist-specific rows — a different answer from "no such peer".
+	empty, found, err := s.PeerHistory(ctx, "no_artist_peer")
+	if err != nil {
+		t.Fatalf("PeerHistory(no_artist_peer): %v", err)
+	}
+	if !found {
+		t.Fatal("PeerHistory reported no_artist_peer unknown")
+	}
+	if len(empty.Artists) != 0 {
+		t.Errorf("expected no artist rows for artistID<=0, got %+v", empty.Artists)
+	}
+}
+
+func TestPeerHistoryReportsUnknownPeer(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, found, err := s.PeerHistory(context.Background(), "never_seen"); err != nil {
+		t.Fatalf("PeerHistory: %v", err)
+	} else if found {
+		t.Error("PeerHistory reported an unknown peer as found")
 	}
 }
 

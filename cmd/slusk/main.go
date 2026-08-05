@@ -375,6 +375,9 @@ func main() {
 	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
 		return st.Peers(ctx)
 	}
+	peerHistoryFn := func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+		return st.PeerHistory(ctx, username)
+	}
 	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
 	// authSvc backs form-based login (issue #279): account bootstrap,
 	// credential verification, and session lifecycle. See internal/app/auth.go.
@@ -695,6 +698,7 @@ func main() {
 		JobEvents:                 jobEventsFn,
 		RecentEvents:              recentEventsFn,
 		Peers:                     peersFn,
+		PeerHistory:               peerHistoryFn,
 		Live:                      liveFn,
 		Ready:                     readyFn,
 		Modules:                   modulesFn,

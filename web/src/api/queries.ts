@@ -36,6 +36,7 @@ import type {
   MusicBrainzEditionListResult,
   MusicBrainzSearchResponse,
   Peer,
+  PeerHistory,
   PrivateMessage,
   ScopedLivePayload,
   SearchPayload,
@@ -155,6 +156,10 @@ export const queryKeys = {
   status: ['status'] as const,
   events: ['events'] as const,
   peers: ['peers'] as const,
+  // Deliberately nested under `peers`: one peer's artist history is a strict
+  // child of the list, and the list's PEERS_INTERVAL poll invalidating an
+  // open expansion alongside it is exactly the wanted behaviour.
+  peerHistory: (username: string) => ['peers', username, 'history'] as const,
   config: ['config'] as const,
   charts: ['charts'] as const,
   shares: ['shares'] as const,
@@ -496,6 +501,24 @@ export function usePeers() {
     queryKey: queryKeys.peers,
     queryFn: () => apiGet<Peer[]>('/api/peers'),
     refetchInterval: PEERS_INTERVAL,
+  });
+}
+
+/**
+ * GET /api/peers/{username} — one peer's per-artist reliability history.
+ *
+ * `enabled` is what keeps the split worth making (issue #424): the list no
+ * longer carries this data, so it must be fetched for the one expanded row and
+ * no other. Peers.tsx passes username=null while nothing is expanded.
+ *
+ * Not polled. Reliability counters move when a transfer finishes, not on a
+ * timer, and the row is open only as long as someone is reading it.
+ */
+export function usePeerHistory(username: string | null) {
+  return useQuery({
+    queryKey: queryKeys.peerHistory(username ?? ''),
+    queryFn: () => apiGet<PeerHistory>(`/api/peers/${encodeURIComponent(username ?? '')}`),
+    enabled: username !== null,
   });
 }
 

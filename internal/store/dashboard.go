@@ -831,11 +831,15 @@ func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[i
 	return out, rows.Err()
 }
 
-// Peers returns every known Soulseek peer's global reliability plus their
-// per-artist rows, for the dashboard's Peers view (GET /api/peers). Ordered by
-// username for determinism; the dashboard sorts client-side. Score computation
-// (which needs "now" for decay) is left to the caller — see
-// matcher.ReliabilityHistoryScore — so this stays a plain read.
+// Peers returns every known Soulseek peer's global reliability, for the
+// dashboard's Peers list (GET /api/peers). Ordered by username for
+// determinism; the dashboard sorts client-side. Score computation (which needs
+// "now" for decay) is left to the caller — see matcher.ReliabilityHistoryScore
+// — so this stays a plain read.
+//
+// It deliberately does not touch artist_user_reliability: that table is
+// unbounded in the number of (artist, peer) pairs ever recorded, and no list
+// row renders any of it. Use PeerHistory for one peer's artist rows.
 func (s *Store) Peers(ctx context.Context) ([]core.PeerRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT username, success_count, fail_count, last_success_at, last_fail_at
@@ -845,50 +849,77 @@ func (s *Store) Peers(ctx context.Context) ([]core.PeerRow, error) {
 	}
 	defer rows.Close()
 
-	byUsername := map[string]*core.PeerRow{}
-	var order []string
+	var out []core.PeerRow
 	for rows.Next() {
 		var p core.PeerRow
 		if err := rows.Scan(&p.Username, &p.Global.SuccessCount, &p.Global.FailCount, &p.Global.LastSuccessAt, &p.Global.LastFailAt); err != nil {
 			return nil, fmt.Errorf("peers: scan known_users: %w", err)
 		}
-		byUsername[p.Username] = &p
-		order = append(order, p.Username)
+		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	artistRows, err := s.db.QueryContext(ctx,
-		`SELECT ku.username, aur.artist_id, aur.success_count, aur.fail_count, aur.last_success_at, aur.last_fail_at
-		 FROM artist_user_reliability aur JOIN known_users ku ON ku.id = aur.user_id`)
-	if err != nil {
-		return nil, fmt.Errorf("peers: query artist_user_reliability: %w", err)
-	}
-	defer artistRows.Close()
-	for artistRows.Next() {
-		var username string
-		var artistID int64
-		var c core.ReliabilityCounters
-		if err := artistRows.Scan(&username, &artistID, &c.SuccessCount, &c.FailCount, &c.LastSuccessAt, &c.LastFailAt); err != nil {
-			return nil, fmt.Errorf("peers: scan artist_user_reliability: %w", err)
-		}
-		p, ok := byUsername[username]
-		if !ok {
-			continue
-		}
-		if p.Artists == nil {
-			p.Artists = map[int64]core.ReliabilityCounters{}
-		}
-		p.Artists[artistID] = c
-	}
-	if err := artistRows.Err(); err != nil {
-		return nil, err
-	}
-
-	out := make([]core.PeerRow, 0, len(order))
-	for _, u := range order {
-		out = append(out, *byUsername[u])
-	}
 	return out, nil
+}
+
+// peerHistoryArtistsSQL reads one known_users id's artist rows. Named because
+// TestPeerHistoryUsesItsIndexes EXPLAINs this exact text — a plan guard over a
+// paraphrase of the query proves nothing about the query that ships.
+//
+// The name is a correlated subquery rather than a JOIN because album_jobs holds
+// many rows per artist and only one name is wanted; LIMIT 1 lets the planner
+// stop at the first index entry instead of aggregating a group away.
+const peerHistoryArtistsSQL = `SELECT aur.artist_id, aur.success_count, aur.fail_count, aur.last_success_at, aur.last_fail_at,
+	        COALESCE((SELECT aj.artist_name FROM album_jobs aj
+	                  WHERE aj.artist_id = aur.artist_id AND aj.artist_name <> ''
+	                  LIMIT 1), '')
+	 FROM artist_user_reliability aur
+	 WHERE aur.user_id = $1
+	 ORDER BY aur.artist_id`
+
+// PeerHistory returns one peer's per-artist reliability rows plus the global
+// counters they have to be scored against, for GET /api/peers/{username}.
+// Ordered by artist id for determinism.
+//
+// The bool reports whether the peer exists in known_users at all. A peer that
+// exists but has no artist-specific outcomes recorded returns (history, true,
+// nil) with no Artists — "this peer has no artist history" and "there is no
+// such peer" are different claims and the caller answers them differently.
+//
+// Artist names come from the denormalized album_jobs.artist_name (there is no
+// artists table). The empty-string DEFAULT is excluded rather than selected,
+// so a row whose name is blank leaves PeerArtistRow.Name empty and the caller
+// falls back to the id; see migration 0014 for the index that keeps this
+// lookup off a sequential scan.
+func (s *Store) PeerHistory(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+	out := core.PeerHistory{Username: username}
+	var userID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, success_count, fail_count, last_success_at, last_fail_at
+		 FROM known_users WHERE username = $1`, username).
+		Scan(&userID, &out.Global.SuccessCount, &out.Global.FailCount, &out.Global.LastSuccessAt, &out.Global.LastFailAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return core.PeerHistory{}, false, nil
+	}
+	if err != nil {
+		return core.PeerHistory{}, false, fmt.Errorf("peer history: query known_users: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, peerHistoryArtistsSQL, userID)
+	if err != nil {
+		return core.PeerHistory{}, false, fmt.Errorf("peer history: query artist_user_reliability: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a core.PeerArtistRow
+		if err := rows.Scan(&a.ArtistID, &a.Counters.SuccessCount, &a.Counters.FailCount, &a.Counters.LastSuccessAt, &a.Counters.LastFailAt, &a.Name); err != nil {
+			return core.PeerHistory{}, false, fmt.Errorf("peer history: scan artist_user_reliability: %w", err)
+		}
+		out.Artists = append(out.Artists, a)
+	}
+	if err := rows.Err(); err != nil {
+		return core.PeerHistory{}, false, err
+	}
+	return out, true, nil
 }

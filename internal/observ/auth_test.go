@@ -431,6 +431,7 @@ var registeredRoutes = []struct {
 	{method: "", path: "/api/jobs/{id}/events", public: false},
 	{method: "", path: "/api/events", public: false},
 	{method: "", path: "/api/peers", public: false},
+	{method: "", path: "/api/peers/{username}", public: false},
 	{method: "", path: "/", public: true},
 	{method: "", path: "/api/charts", public: false},
 	{method: "", path: "/api/config", public: false},

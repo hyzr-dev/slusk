@@ -268,9 +268,17 @@ export interface JobEvent {
   createdAt: string;
 }
 
-/** internal/observ/peers.go peerArtistDTO */
+/**
+ * internal/observ/peers.go peerArtistDTO.
+ *
+ * `artistName` is '' whenever no name is known — there is no artists table
+ * behind it, only the denormalized album_jobs.artist_name, which an artist
+ * with no jobs left has no row for. Render the id in that case; a placeholder
+ * name would be invented data.
+ */
 export interface PeerArtist {
   artistId: number;
+  artistName: string;
   successCount: number;
   failCount: number;
   lastSuccessAt: string;
@@ -278,7 +286,7 @@ export interface PeerArtist {
   score: number;
 }
 
-/** GET /api/peers — peerDTO */
+/** GET /api/peers — peerDTO. Carries no artist history; see PeerHistory. */
 export interface Peer {
   username: string;
   successCount: number;
@@ -286,6 +294,11 @@ export interface Peer {
   lastSuccessAt: string;
   lastFailAt: string;
   score: number;
+}
+
+/** GET /api/peers/{username} — peerHistoryDTO */
+export interface PeerHistory {
+  username: string;
   artists: PeerArtist[];
 }
 

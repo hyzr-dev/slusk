@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,11 +36,14 @@ func noopJobView(ctx context.Context, jobID int64) (core.JobView, bool, error) {
 func noopJobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, error)  { return nil, nil }
 func noopRecentEvents(ctx context.Context, limit int) ([]core.JobEvent, error) { return nil, nil }
 func noopPeers(ctx context.Context) ([]core.PeerRow, error)                    { return nil, nil }
-func noopHealthy() bool                                                        { return true }
-func noopModules() map[string]ModuleStatus                                     { return nil }
-func noopRetry(ctx context.Context, jobID int64) error                         { return nil }
-func noopConfig() AppConfig                                                    { return AppConfig{} }
-func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error)     { return nil, nil }
+func noopPeerHistory(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+	return core.PeerHistory{}, false, nil
+}
+func noopHealthy() bool                                                    { return true }
+func noopModules() map[string]ModuleStatus                                 { return nil }
+func noopRetry(ctx context.Context, jobID int64) error                     { return nil }
+func noopConfig() AppConfig                                                { return AppConfig{} }
+func noopLiveTransfers(ctx context.Context) ([]core.RemoteTransfer, error) { return nil, nil }
 func noopTransferBytes(ctx context.Context, candidateIDs []int64) (map[int64]map[string]int64, error) {
 	return nil, nil
 }
@@ -87,6 +91,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 		JobEvents:        noopJobEvents,
 		RecentEvents:     noopRecentEvents,
 		Peers:            noopPeers,
+		PeerHistory:      noopPeerHistory,
 		Live:             noopHealthy,
 		Modules:          noopModules,
 		Retry:            noopRetry,
@@ -2205,12 +2210,18 @@ func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 			{
 				Username: "reliable_peer",
 				Global:   core.ReliabilityCounters{SuccessCount: 5, LastSuccessAt: &now},
-				Artists:  map[int64]core.ReliabilityCounters{1: {SuccessCount: 2, LastSuccessAt: &now}},
 			},
 		}, nil
 	}
 	deps := testServerDeps(reg)
 	deps.Peers = peers
+	// The list must not reach for artist history at all (issue #424) — that is
+	// the whole point of the split, and a response that happened to look right
+	// while still loading the table would leave the cost exactly where it was.
+	deps.PeerHistory = func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+		t.Errorf("GET /api/peers called PeerHistory(%q)", username)
+		return core.PeerHistory{}, false, nil
+	}
 	h := NewServer(deps)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/peers", nil)
@@ -2230,8 +2241,107 @@ func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 	if got[0].Score <= 0.5 {
 		t.Errorf("Score = %v, want > 0.5 (peer has only successes)", got[0].Score)
 	}
-	if len(got[0].Artists) != 1 || got[0].Artists[0].ArtistID != 1 {
-		t.Errorf("unexpected artist breakdown: %+v", got[0].Artists)
+	if strings.Contains(rec.Body.String(), "artist") {
+		t.Errorf("list response still carries artist data: %s", rec.Body.String())
+	}
+}
+
+func TestPeerHistoryEndpointReturnsArtistsWithNames(t *testing.T) {
+	now := time.Now()
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.PeerHistory = func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+		if username != "reliable_peer" {
+			return core.PeerHistory{}, false, nil
+		}
+		return core.PeerHistory{
+			Username: username,
+			Global:   core.ReliabilityCounters{SuccessCount: 5, LastSuccessAt: &now},
+			Artists: []core.PeerArtistRow{
+				{ArtistID: 1, Name: "Named Artist", Counters: core.ReliabilityCounters{SuccessCount: 2, LastSuccessAt: &now}},
+				{ArtistID: 2, Counters: core.ReliabilityCounters{FailCount: 1, LastFailAt: &now}},
+			},
+		}, true, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/peers/reliable_peer", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got peerHistoryDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Username != "reliable_peer" || len(got.Artists) != 2 {
+		t.Fatalf("unexpected history: %+v", got)
+	}
+	if got.Artists[0].ArtistID != 1 || got.Artists[0].ArtistName != "Named Artist" {
+		t.Errorf("Artists[0] = %+v, want artist 1 named", got.Artists[0])
+	}
+	if got.Artists[0].Score <= 0.5 {
+		t.Errorf("Artists[0].Score = %v, want > 0.5 (only successes)", got.Artists[0].Score)
+	}
+	// An artist with no name known stays identified by its id; the field is
+	// served empty rather than filled with anything plausible.
+	if got.Artists[1].ArtistID != 2 || got.Artists[1].ArtistName != "" {
+		t.Errorf("Artists[1] = %+v, want artist 2 with an empty name", got.Artists[1])
+	}
+}
+
+// TestPeerHistoryEndpointHandlesAwkwardUsernames covers the acceptance
+// criterion that Soulseek usernames are not URL-safe by assumption: a space, a
+// slash and a non-ASCII character must all reach the handler intact rather
+// than being split into extra path segments or mangled.
+func TestPeerHistoryEndpointHandlesAwkwardUsernames(t *testing.T) {
+	for _, username := range []string{"peer with space", "peer/with/slash", "pëer-nön-ascii", "peer+plus&amp"} {
+		t.Run(username, func(t *testing.T) {
+			var seen string
+			deps := testServerDeps(prometheus.NewRegistry())
+			deps.PeerHistory = func(ctx context.Context, u string) (core.PeerHistory, bool, error) {
+				seen = u
+				return core.PeerHistory{Username: u}, true, nil
+			}
+			h := NewServer(deps)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/peers/"+url.PathEscape(username), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if seen != username {
+				t.Errorf("handler saw %q, want %q", seen, username)
+			}
+			var got peerHistoryDTO
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.Username != username {
+				t.Errorf("response username = %q, want %q", got.Username, username)
+			}
+		})
+	}
+}
+
+func TestPeerHistoryEndpointAnswers404ForUnknownPeer(t *testing.T) {
+	deps := testServerDeps(prometheus.NewRegistry())
+	deps.PeerHistory = func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
+		return core.PeerHistory{}, false, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/peers/never_seen", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// 404, not an empty history: "this peer has no artist history" and "there
+	// is no such peer" are different claims and a 200 would collapse them.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want 404, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

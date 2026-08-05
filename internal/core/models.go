@@ -218,13 +218,41 @@ type HourCount struct {
 	Count int
 }
 
-// PeerRow is one Soulseek peer's global reliability plus every artist-specific
-// row recorded for them, read by the dashboard's Peers view (GET /api/peers).
-// Score computation is left to the caller (see matcher.ReliabilityHistoryScore)
-// so the dashboard reuses the exact formula the ranker uses rather than
-// duplicating it.
+// PeerRow is one Soulseek peer's global reliability, read by the dashboard's
+// Peers list (GET /api/peers). Score computation is left to the caller (see
+// matcher.ReliabilityHistoryScore) so the dashboard reuses the exact formula
+// the ranker uses rather than duplicating it.
+//
+// Deliberately carries no per-artist rows: the list would then grow with the
+// number of (artist, peer) pairs ever recorded rather than with the number of
+// peers, for data no list row renders. A single peer's artist history is
+// PeerHistory, fetched on demand (issue #424).
 type PeerRow struct {
 	Username string
 	Global   ReliabilityCounters
-	Artists  map[int64]ReliabilityCounters // keyed by artist_id
+}
+
+// PeerArtistRow is one peer's reliability history for a single artist, plus
+// the artist's display name where one is known.
+//
+// Name is empty whenever no name could be resolved — there is no artists
+// table, so the name is read from the denormalized album_jobs.artist_name and
+// an artist whose jobs were all deleted has no row left to read. Empty means
+// "no name known" and callers must fall back to showing ArtistID rather than
+// rendering a blank or inventing a placeholder.
+type PeerArtistRow struct {
+	ArtistID int64
+	Name     string
+	Counters ReliabilityCounters
+}
+
+// PeerHistory is one Soulseek peer's per-artist reliability history together
+// with the global counters it has to be scored against — an artist-specific
+// score folds in the peer's global record (see matcher.ReliabilityHistoryScore),
+// so serving the artist rows alone would not be enough to reproduce the
+// numbers the ranker used.
+type PeerHistory struct {
+	Username string
+	Global   ReliabilityCounters
+	Artists  []PeerArtistRow
 }

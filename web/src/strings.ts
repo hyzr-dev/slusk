@@ -485,8 +485,19 @@ export const t = {
   peers: {
     empty: 'No peers recorded yet.',
     noArtistHistory: 'No artist-specific history.',
-    artistLine: (id: number, score: string, ok: number, fail: number) =>
-      `Artist #${id} — score ${score}, ${ok} succeeded, ${fail} failed`,
+    // The expansion is a network call of its own since #424, so it has the
+    // same two failure modes every other GET in this app has. Worded for the
+    // one row it applies to rather than reusing t.query.*, which reads as a
+    // statement about the whole page.
+    artistHistoryLoading: 'Loading artist history…',
+    artistHistoryFailed: 'Could not load this peer’s artist history.',
+    // An artist with no known name is labelled by its Lidarr id. That id is
+    // useless to a user who only knows Lidarr and Soulseek — which is exactly
+    // why it is the fallback and not the default — but it is true, and a
+    // placeholder name would not be. See interface-must-not-invent-data.
+    artistLabel: (id: number, name: string) => (name === '' ? `Artist #${id}` : name),
+    artistLine: (label: string, score: string, ok: number, fail: number) =>
+      `${label} — score ${score}, ${ok} succeeded, ${fail} failed`,
     // The TUI peers grid's column headers, short forms in the same idiom as
     // jobs.gridHead (#198) — SCORE/OK/FAIL rather than the generic Title Case
     // labels in `columns`, which predate this reskin.
