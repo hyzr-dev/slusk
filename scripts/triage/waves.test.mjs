@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { filesConflict, contractsTouched, conflicts, rank, isAssessable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
+import { filesConflict, contractsTouched, conflicts, rank, isAssessable, isBrowserVerifiable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
 
 test('issues touching the same file conflict', () => {
   const a = { number: 1, touches: ['internal/pipeline/importing.go'] }
@@ -135,6 +135,21 @@ test('rank orders by prod impact, then by ascending effort', () => {
   const cheap = { number: 3, prodImpact: 'degraded', effort: 'S', touches: ['c'] }
   const dear = { number: 4, prodImpact: 'degraded', effort: 'L', touches: ['d'] }
   assert.ok(rank(cheap) > rank(dear))
+})
+
+test('a test-classified issue is not browser-verifiable even with frontend and reproCheck', () => {
+  const issue = { number: 1, kind: 'test', frontend: true, reproCheck: 'open /jobs, check table renders' }
+  assert.equal(isBrowserVerifiable(issue), false)
+})
+
+test('a feature is not browser-verifiable: nothing shipped yet to reproduce against', () => {
+  const issue = { number: 2, kind: 'feature', frontend: true, reproCheck: 'open /jobs, check new column' }
+  assert.equal(isBrowserVerifiable(issue), false)
+})
+
+test('a bug with frontend and reproCheck is browser-verifiable', () => {
+  const issue = { number: 3, kind: 'bug', frontend: true, reproCheck: 'open /jobs, check table renders' }
+  assert.equal(isBrowserVerifiable(issue), true)
 })
 
 test('disjoint issues share wave one, ordered by rank', () => {

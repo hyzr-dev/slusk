@@ -121,6 +121,22 @@ export function isAssessable(issue) {
 }
 
 /**
+ * True when an issue is a sound candidate for browser-based reproduction.
+ * Three conditions, each excluding a case a browser session cannot settle:
+ * `frontend` and `reproCheck` are the obvious prerequisites -- there must be
+ * something in `web/` to load and a concrete check to run against it -- and
+ * `kind` rules out two further cases. A `feature` has nothing shipped yet to
+ * reproduce against: there is no existing behaviour for a browser session to
+ * compare against a description. A `test` issue's defect lives in a test
+ * command's output, not in the running application, so no browser session can
+ * falsify or confirm it either way.
+ */
+export function isBrowserVerifiable(issue) {
+  return Boolean(issue.frontend) && Boolean(issue.reproCheck) &&
+    issue.kind !== 'feature' && issue.kind !== 'test'
+}
+
+/**
  * Priority score. Production impact dominates; cheaper work wins ties, so a
  * wave fills with the most urgent issues that can actually be finished.
  * Defaults to `none` and `M` respectively so ranking stays total.
