@@ -296,6 +296,32 @@ export interface Peer {
   score: number;
 }
 
+/**
+ * GET /api/peers sort keys (issue #426). 'score' is the default and the one
+ * that could not be sorted client-side: it is a time-decayed sigmoid over the
+ * whole set, so ordering it means ordering in the database — see
+ * store.peerScoreSQL. Note there is no 'lastSeen' key: the column exists but
+ * it is derived from two independent timestamps, and nothing on the backend
+ * ranks by it.
+ */
+export type PeerPageSort = 'score' | 'successCount' | 'failCount' | 'username';
+export type PeerPageDirection = 'asc' | 'desc';
+
+export interface PeerPageParams {
+  page: number;
+  sort: PeerPageSort;
+  dir: PeerPageDirection;
+}
+
+/**
+ * GET /api/peers' envelope. `total` counts every known peer, not the page —
+ * without it a pager cannot say how far the set runs.
+ */
+export interface PeerPage {
+  peers: Peer[];
+  total: number;
+}
+
 /** GET /api/peers/{username} — peerHistoryDTO */
 export interface PeerHistory {
   username: string;

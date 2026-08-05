@@ -494,6 +494,10 @@ export const t = {
   },
   peers: {
     empty: 'No peers recorded yet.',
+    // Reachable when the list shrinks under a page the user is already on.
+    // Deliberately not `empty`: there are peers, just none on this page, and
+    // the two claims are not interchangeable.
+    pastTheEnd: 'No peers on this page.',
     noArtistHistory: 'No artist-specific history.',
     // The expansion is a network call of its own since #424, so it has the
     // same two failure modes every other GET in this app has. Worded for the
@@ -518,6 +522,10 @@ export const t = {
       fail: 'FAIL',
       lastSeen: 'LAST SEEN',
     },
+    // Names *these* pages ("Peer pages") rather than reusing jobs.paginationLabel,
+    // so a screen reader landing on the control knows which list it moves.
+    paginationLabel: 'Peer pages',
+    resultRange: (start: number, end: number, total: number) => `${start}–${end} of ${total} peers`,
   },
   health: {
     neverRun: 'Never run',

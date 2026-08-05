@@ -679,10 +679,11 @@ func TestPeersReturnsGlobalCountersOnly(t *testing.T) {
 		t.Fatalf("RecordAttemptOutcome no artist: %v", err)
 	}
 
-	rows, err := s.Peers(ctx)
+	page, err := s.Peers(ctx, PeersQuery{Sort: "username", Dir: "asc"})
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
 	}
+	rows := page.Peers
 	byUsername := map[string]core.PeerRow{}
 	for _, r := range rows {
 		byUsername[r.Username] = r

@@ -35,7 +35,7 @@ func noopJobView(ctx context.Context, jobID int64) (core.JobView, bool, error) {
 }
 func noopJobEvents(ctx context.Context, jobID int64) ([]core.JobEvent, error)  { return nil, nil }
 func noopRecentEvents(ctx context.Context, limit int) ([]core.JobEvent, error) { return nil, nil }
-func noopPeers(ctx context.Context) ([]core.PeerRow, error)                    { return nil, nil }
+func noopPeers(ctx context.Context, query PeersQuery) (PeersResult, error)     { return PeersResult{}, nil }
 func noopPeerHistory(ctx context.Context, username string) (core.PeerHistory, bool, error) {
 	return core.PeerHistory{}, false, nil
 }
@@ -2205,12 +2205,15 @@ func TestEventsEndpointClampsLimit(t *testing.T) {
 func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	now := time.Now()
-	peers := func(ctx context.Context) ([]core.PeerRow, error) {
-		return []core.PeerRow{
-			{
-				Username: "reliable_peer",
-				Global:   core.ReliabilityCounters{SuccessCount: 5, LastSuccessAt: &now},
+	peers := func(ctx context.Context, query PeersQuery) (PeersResult, error) {
+		return PeersResult{
+			Peers: []core.PeerRow{
+				{
+					Username: "reliable_peer",
+					Global:   core.ReliabilityCounters{SuccessCount: 5, LastSuccessAt: &now},
+				},
 			},
+			Total: 42,
 		}, nil
 	}
 	deps := testServerDeps(reg)
@@ -2231,12 +2234,20 @@ func TestPeersEndpointReturnsPeersWithScore(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	var got []peerDTO
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+	var envelope struct {
+		Peers []peerDTO `json:"peers"`
+		Total int64     `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	got := envelope.Peers
 	if len(got) != 1 || got[0].Username != "reliable_peer" {
 		t.Fatalf("unexpected peers: %+v", got)
+	}
+	// total counts the whole set, not the page the store handed back.
+	if envelope.Total != 42 {
+		t.Errorf("total = %d, want 42", envelope.Total)
 	}
 	if got[0].Score <= 0.5 {
 		t.Errorf("Score = %v, want > 0.5 (peer has only successes)", got[0].Score)

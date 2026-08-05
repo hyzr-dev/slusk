@@ -96,6 +96,25 @@
 .mono { font-family: var(--font-mono); color: var(--dim); }
 .right { text-align: right; white-space: nowrap; }
 
+/* The pager strip, same idiom as .pagination in Jobs.module.css: the range
+   summary on the left, the page buttons on the right, separated from the last
+   row by the same 1px rule every row already carries. */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.resultRange {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0.8px;
+}
+
 /* --panel-inset, not --bg: an expanded artist-history block is nested,
    recessed content, not an active surface (that's --nav-active, e.g. the
    active nav item in SideNav.module.css). */

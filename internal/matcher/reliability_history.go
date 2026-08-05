@@ -7,34 +7,41 @@ import (
 	"github.com/hyzr-dev/slusk/internal/core"
 )
 
-// reliabilityDecayTau is the exponential recency time constant used to fade a
+// The four shape constants below are exported for one reason only: the store
+// re-expresses ReliabilityHistoryScore as SQL so the Peers list can order the
+// whole set by score rather than reorder one fetched page (issue #426). That
+// duplication is guarded by a parity test, but a parity test cannot repair two
+// diverging copies of the numbers — so there is only one copy, here, and the
+// SQL interpolates it. See store.peerScoreSQL.
+
+// ReliabilityDecayTau is the exponential recency time constant used to fade a
 // peer's success/fail history toward zero influence as it ages: at age ==
-// reliabilityDecayTau, a count's weight has decayed to 1/e (~37%) of its
+// ReliabilityDecayTau, a count's weight has decayed to 1/e (~37%) of its
 // value at the moment it was recorded. 30 days means a peer who was reliable
 // a month ago still counts for something, but a candidate that succeeded a
 // year ago carries almost no weight against a peer that failed yesterday.
-const reliabilityDecayTau = 30 * 24 * time.Hour
+const ReliabilityDecayTau = 30 * 24 * time.Hour
 
-// reliabilityCountCap bounds how many decayed successes/fails contribute to
+// ReliabilityCountCap bounds how many decayed successes/fails contribute to
 // the score, so a peer with an enormous history (thousands of downloads over
 // the app's lifetime) can't dominate the normalization below purely by
 // volume; decay already makes old outcomes fade, this just bounds the
 // still-fresh ones too.
-const reliabilityCountCap = 20.0
+const ReliabilityCountCap = 20.0
 
-// reliabilityGlobalInfluence is the weight applied to the global
+// ReliabilityGlobalInfluence is the weight applied to the global
 // (cross-artist) history relative to the artist-specific history, which
 // always counts at full weight. A peer's reliability for one artist says
 // only a little about how they'll behave for a different artist, so the
 // global signal is a fallback, not an equal partner: it always contributes,
 // but at half strength.
-const reliabilityGlobalInfluence = 0.5
+const ReliabilityGlobalInfluence = 0.5
 
-// reliabilitySigmoidScale sets how much decayed net history is needed for
+// ReliabilitySigmoidScale sets how much decayed net history is needed for
 // ReliabilityHistoryScore to approach its 0/1 extremes. It is a shape
 // constant, not a tunable weight - the overall strength of the boost is
 // matcher.Weights.KnownUser, applied by the caller.
-const reliabilitySigmoidScale = 5.0
+const ReliabilitySigmoidScale = 5.0
 
 // decayedCount applies an exponential recency weight to a raw count: a count
 // of 0 (or a nil timestamp, meaning "never happened") contributes nothing.
@@ -48,8 +55,8 @@ func decayedCount(count int, at *time.Time, now time.Time) float64 {
 	if age < 0 {
 		age = 0 // guard against a timestamp slightly in the future (clock skew)
 	}
-	bounded := math.Min(float64(count), reliabilityCountCap)
-	return bounded * math.Exp(-age.Hours()/reliabilityDecayTau.Hours())
+	bounded := math.Min(float64(count), ReliabilityCountCap)
+	return bounded * math.Exp(-age.Hours()/ReliabilityDecayTau.Hours())
 }
 
 // decayedNet returns one scope's (artist- or global-level) decayed
@@ -71,9 +78,9 @@ func decayedNet(c core.ReliabilityCounters, now time.Time) float64 {
 //
 // The artist-specific scope counts at full weight (preferred, per the design);
 // the global (cross-artist) scope always also contributes, but at
-// reliabilityGlobalInfluence (half) weight, acting as a fallback signal when
+// ReliabilityGlobalInfluence (half) weight, acting as a fallback signal when
 // there is no artist-specific history and a secondary signal when there is.
 func ReliabilityHistoryScore(rel core.PeerReliability, now time.Time) float64 {
-	net := decayedNet(rel.Artist, now) + reliabilityGlobalInfluence*decayedNet(rel.Global, now)
-	return 1.0 / (1.0 + math.Exp(-net/reliabilitySigmoidScale))
+	net := decayedNet(rel.Artist, now) + ReliabilityGlobalInfluence*decayedNet(rel.Global, now)
+	return 1.0 / (1.0 + math.Exp(-net/ReliabilitySigmoidScale))
 }

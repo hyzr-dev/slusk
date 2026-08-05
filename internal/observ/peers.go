@@ -13,7 +13,11 @@ package observ
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,9 +108,93 @@ func toPeerHistoryDTO(history core.PeerHistory, now time.Time) peerHistoryDTO {
 	return out
 }
 
-// PeersFunc produces every known peer's global reliability (typically backed
-// by the store's Peers).
-type PeersFunc func(ctx context.Context) ([]core.PeerRow, error)
+// peersPageSize is the default PageSize when a request omits ?pageSize=, and
+// the dashboard Peers list's own page size. peersPageSizeMin/Max bound the
+// explicit parameter on the same reasoning as the jobs list (issue #268): 1 so
+// a page can never be empty by construction, 50 so a caller can't turn a
+// paginated endpoint back into the unbounded one this replaced.
+//
+// These must stay in step with store.PeersPageSize{,Min,Max}; the store
+// enforces its own copy, and this one exists so a bad value is a 400 rather
+// than a 500.
+const peersPageSize int64 = 25
+const peersPageSizeMin int64 = 1
+const peersPageSizeMax int64 = 50
+
+// PeersQuery is the validated query for one page of GET /api/peers. It mirrors
+// store.PeersQuery — internal/observ does not import internal/store, so
+// cmd/slusk adapts between the two.
+type PeersQuery struct {
+	Page     int64
+	PageSize int64
+	Sort     string
+	Dir      string
+}
+
+// PeersResult is one page of known peers plus the total number of known peers
+// — the whole set, not the page.
+type PeersResult struct {
+	Peers []core.PeerRow
+	Total int64
+}
+
+// PeersFunc produces one page of known peers' global reliability and the total
+// count (typically backed by the store's Peers).
+type PeersFunc func(ctx context.Context, query PeersQuery) (PeersResult, error)
+
+// parsePeersQuery validates GET /api/peers' page/pageSize/sort/dir, following
+// the vocabulary parsePagedJobsQuery established.
+//
+// The sort allowlist below is a second, independent copy of
+// store.PeersSortKeys: this package cannot import the store, and the store's
+// copy is never reached for a value rejected here, so a key added there but
+// not here is a 400 that store-level tests cannot see. #310 shipped exactly
+// that shape for the jobs filter. TestPeersSortKeysMatchTheStore is the guard.
+func parsePeersQuery(u *url.URL) (PeersQuery, error) {
+	query := PeersQuery{Sort: "score", Dir: "desc", PageSize: peersPageSize}
+	values, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return PeersQuery{}, errors.New("invalid query parameters")
+	}
+	allowed := map[string]struct{}{"page": {}, "pageSize": {}, "sort": {}, "dir": {}}
+	for key, value := range values {
+		if _, ok := allowed[key]; !ok {
+			return PeersQuery{}, fmt.Errorf("unknown query parameter %q", key)
+		}
+		if len(value) != 1 {
+			return PeersQuery{}, fmt.Errorf("duplicate query parameter %q", key)
+		}
+	}
+	// pageSize is parsed before page: page's own overflow guard divides by the
+	// page size actually in effect, so it must already be resolved.
+	if raw, ok := values["pageSize"]; ok {
+		pageSize, parseErr := strconv.ParseInt(raw[0], 10, 64)
+		if parseErr != nil || pageSize < peersPageSizeMin || pageSize > peersPageSizeMax {
+			return PeersQuery{}, errors.New("invalid pageSize")
+		}
+		query.PageSize = pageSize
+	}
+	if raw, ok := values["page"]; ok {
+		page, parseErr := strconv.ParseInt(raw[0], 10, 64)
+		if parseErr != nil || page < 0 || page > (int64(^uint64(0)>>1)/query.PageSize) {
+			return PeersQuery{}, errors.New("invalid page")
+		}
+		query.Page = page
+	}
+	if raw, ok := values["sort"]; ok {
+		query.Sort = raw[0]
+	}
+	if raw, ok := values["dir"]; ok {
+		query.Dir = raw[0]
+	}
+	if !oneOf(query.Sort, "score", "successCount", "failCount", "username") {
+		return PeersQuery{}, errors.New("invalid sort")
+	}
+	if !oneOf(query.Dir, "asc", "desc") {
+		return PeersQuery{}, errors.New("invalid dir")
+	}
+	return query, nil
+}
 
 // PeerHistoryFunc produces one peer's per-artist reliability history
 // (typically backed by the store's PeerHistory). The bool is false when there
@@ -117,18 +205,29 @@ type PeerHistoryFunc func(ctx context.Context, username string) (core.PeerHistor
 // registerPeers wires the Peers view's two routes onto mux.
 func registerPeers(mux *http.ServeMux, peers PeersFunc, history PeerHistoryFunc) {
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := peers(r.Context())
+		query, err := parsePeersQuery(r.URL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		result, err := peers(r.Context(), query)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		now := time.Now()
-		dtos := make([]peerDTO, len(rows))
-		for i, row := range rows {
+		dtos := make([]peerDTO, len(result.Peers))
+		for i, row := range result.Peers {
 			dtos[i] = toPeerDTO(row, now)
 		}
+		// An envelope rather than a bare array: the page alone cannot tell a
+		// caller how many peers there are, and a pager that cannot say how far
+		// the set runs is a pager that cannot get back.
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dtos)
+		_ = json.NewEncoder(w).Encode(struct {
+			Peers []peerDTO `json:"peers"`
+			Total int64     `json:"total"`
+		}{Peers: dtos, Total: result.Total})
 	})
 
 	// Soulseek usernames are not URL-safe by assumption — spaces, slashes and
