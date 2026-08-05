@@ -465,10 +465,17 @@ export default function Jobs() {
         <QueryNotice phase={phase} />
         {hasData(phase) && jobs.length === 0 && <EmptyState message={t.jobs.noMatch} />}
 
-        {hasData(phase) && (
+        {/* A single page gets no pager and no range, matching Peers (#427): the
+            control would offer only the page already on screen, and `1–7 of 7
+            jobs` beside seven visible rows is chrome restating what the table
+            already says. The <nav> goes with them rather than staying behind
+            empty — a navigation landmark with nothing to navigate is a lie to a
+            screen reader. */}
+        {hasData(phase) && totalPages > 1 && (
           <nav className={styles.pagination} aria-label={t.jobs.paginationLabel}>
             <span className={styles.resultRange}>{t.jobs.resultRange(start, end, total)}</span>
-            <Pager page={page} totalPages={totalPages} onChange={goToPage} />
+            {/* The hints are true here: the keydown effect above binds both. */}
+            <Pager page={page} totalPages={totalPages} onChange={goToPage} previousHint="[,]" nextHint="[.]" />
           </nav>
         )}
       </Panel>

@@ -655,6 +655,11 @@ describe('sorting and pagination', () => {
     renderJobs([makeJob({ id: 1 })], client, 120);
 
     expect(screen.getByText(t.jobs.resultRange(1, 12, 120))).toBeInTheDocument();
+    // This view binds ',' and '.', so it — and only it — draws the hint (#434).
+    // The glyph is decoration: the accessible name each button is found by
+    // stays the plain label.
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent('[,] PREV');
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent('NEXT [.]');
     expect(screen.getByRole('button', { name: t.pager.previousPage })).toBeDisabled();
     expect(screen.getByRole('button', { name: t.pager.pageLabel(10) })).toBeInTheDocument();
     expect(screen.getAllByText('…')).toHaveLength(1);
@@ -668,6 +673,14 @@ describe('sorting and pagination', () => {
     expect(screen.getByRole('button', { name: t.pager.previousPage })).toBeEnabled();
   });
 
+  it('shows no pager at all when the whole set fits on one page', () => {
+    const jobs = [makeJob({ id: 1 }), makeJob({ id: 2, title: 'Second' })];
+    renderJobs(jobs);
+    expect(screen.queryByLabelText(t.pager.pageLabel(1))).not.toBeInTheDocument();
+    expect(screen.queryByText(t.pager.nextPage)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.jobs.resultRange(1, jobs.length, jobs.length))).not.toBeInTheDocument();
+  });
+
   it('resets the page and expansion when a status filter changes', async () => {
     stubFetchIndefinitely();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -675,7 +688,10 @@ describe('sorting and pagination', () => {
     seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
     seedPage(
       client,
-      pageFor([makeJob({ id: 20, title: 'Failed result', status: 'failed', state: 'FAILED' })]),
+      // Spans more than one page so the pager still renders after the filter
+      // change — with a single-page set there would be no page button left to
+      // read the reset off (see the single-page test above).
+      pageFor([makeJob({ id: 20, title: 'Failed result', status: 'failed', state: 'FAILED' })], 25),
       { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'failed' },
     );
     renderJobs([makeJob()], client, 25);

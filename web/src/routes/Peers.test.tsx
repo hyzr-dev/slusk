@@ -209,6 +209,13 @@ describe('Peers paging', () => {
     expect(listRequests(fetchMock)).toContain('/api/peers?page=2&sort=score&dir=desc');
   });
 
+  // This view binds no keys, so its pager may not advertise any (#434).
+  it('shows no keyboard hint on the prev/next buttons', () => {
+    renderPaged(97);
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent(/^PREV$/);
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent(/^NEXT$/);
+  });
+
   it('offers as many pages as the total implies, not as many as the page holds', () => {
     renderPaged(97);
     // 97 peers at 25 a page is four pages; a pager sized from the three seeded
