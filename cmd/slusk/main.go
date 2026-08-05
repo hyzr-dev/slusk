@@ -372,8 +372,21 @@ func main() {
 		}
 		return observ.ChartsData{Passes: passes, CompletedByHour: counts}, nil
 	}
-	peersFn := func(ctx context.Context) ([]core.PeerRow, error) {
-		return st.Peers(ctx)
+	peersFn := func(ctx context.Context, query observ.PeersQuery) (observ.PeersResult, error) {
+		// Now is threaded in rather than left to the database's now() so the
+		// score that decides the ordering and the score observ computes for
+		// display are anchored to the same instant.
+		page, err := st.Peers(ctx, store.PeersQuery{
+			Page:     query.Page,
+			PageSize: query.PageSize,
+			Sort:     query.Sort,
+			Dir:      query.Dir,
+			Now:      time.Now(),
+		})
+		if err != nil {
+			return observ.PeersResult{}, err
+		}
+		return observ.PeersResult{Peers: page.Peers, Total: page.Total}, nil
 	}
 	peerHistoryFn := func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
 		return st.PeerHistory(ctx, username)

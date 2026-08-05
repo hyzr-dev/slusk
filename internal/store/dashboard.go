@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
 )
 
 // currentCandidateOrder is the ORDER BY that picks the one candidate of
@@ -831,36 +833,196 @@ func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[i
 	return out, rows.Err()
 }
 
-// Peers returns every known Soulseek peer's global reliability, for the
-// dashboard's Peers list (GET /api/peers). Ordered by username for
-// determinism; the dashboard sorts client-side. Score computation (which needs
-// "now" for decay) is left to the caller — see matcher.ReliabilityHistoryScore
-// — so this stays a plain read.
+// PeersPageSize is the default number of peers in one page of the dashboard's
+// Peers list when a query leaves PeersQuery.PageSize unset.
+// PeersPageSizeMin/Max bound an explicit choice, matching the jobs list's
+// reasoning (issue #268): 1 so a page can never be empty by construction, 50
+// so a caller can't turn a paginated endpoint back into the unbounded one this
+// replaced.
+const PeersPageSize int64 = 25
+const PeersPageSizeMin int64 = 1
+const PeersPageSizeMax int64 = 50
+
+// peerScoreSQL returns matcher.ReliabilityHistoryScore rewritten as a SQL
+// expression over one known_users row, with nowParam naming the placeholder
+// carrying "now" (e.g. "$1"). Column references are qualified to the alias
+// `ku`.
+//
+// This is a deliberate second implementation of a Go function, which this repo
+// has been burned by before, so the reasoning is worth stating. The score is a
+// time-decayed sigmoid: it cannot be an ORDER BY over stored columns, and it
+// cannot be materialized into a column because it changes as the clock moves.
+// Sorting a fetched page instead of the set would be a different claim than
+// the one the column header makes, and rows would silently reorder while the
+// user pages. So the decay is expressed here and guarded by
+// TestPeerScoreSQLMatchesGo, which is the reason this option was chosen rather
+// than a nicety attached to it.
+//
+// The numbers are interpolated from matcher's exported constants rather than
+// copied, so only the *shape* is duplicated — a parity test cannot repair two
+// diverging sets of magic numbers.
+//
+// Two details keep the two implementations from parting company at the edges:
+// GREATEST(..., 0) mirrors Go's clock-skew guard for a timestamp in the
+// future, and LEAST(..., cap) mirrors the count cap — which also bounds the
+// exponent, and so is load-bearing here in a way it is not in Go: float8 exp()
+// raises an error on overflow in Postgres where Go's math.Exp quietly returns
+// +Inf and 1/+Inf collapses to 0.
+func peerScoreSQL(nowParam string) string {
+	decayed := func(count, at string) string {
+		return fmt.Sprintf(`CASE WHEN ku.%[1]s > 0 AND ku.%[2]s IS NOT NULL
+			THEN LEAST(ku.%[1]s::double precision, %[3]g::double precision)
+			     * exp(-GREATEST(EXTRACT(EPOCH FROM (%[4]s::timestamptz - ku.%[2]s))::double precision, 0::double precision)
+			           / %[5]g::double precision)
+			ELSE 0::double precision END`,
+			count, at, matcher.ReliabilityCountCap, nowParam, matcher.ReliabilityDecayTau.Seconds())
+	}
+	// Only the global scope: a list row has no artist context, matching how
+	// toPeerDTO scores it and how the ranker scores a peer for an artist it has
+	// no artist-specific history with.
+	net := fmt.Sprintf("%g::double precision * ((%s) - (%s))",
+		matcher.ReliabilityGlobalInfluence,
+		decayed("success_count", "last_success_at"),
+		decayed("fail_count", "last_fail_at"))
+	return fmt.Sprintf("(1::double precision / (1::double precision + exp(-(%s) / %g::double precision)))",
+		net, matcher.ReliabilitySigmoidScale)
+}
+
+// PeersSortKeys is every sort key the Peers list accepts, in no meaningful
+// order. Exported so the HTTP layer's own, independent allowlist can be tested
+// against it: internal/observ cannot import this package, so its parser
+// necessarily holds a second copy, and a key accepted by one side and rejected
+// by the other is a 400 that neither package's own tests can see (issue #310
+// shipped exactly that until a lab run caught it).
+var PeersSortKeys = []string{"score", "successCount", "failCount", "username"}
+
+// PeersQuery is the validated query behind one page of the dashboard's Peers
+// list (GET /api/peers).
+type PeersQuery struct {
+	Page     int64
+	PageSize int64
+	// Sort is one of score, successCount, failCount, username; Dir is asc or
+	// desc. Both are validated against validatePeersQuery, which is a second,
+	// independent copy of the allowlist in observ.parsePeersQuery — see the
+	// comment there for why both must exist and be kept in step.
+	Sort string
+	Dir  string
+	// Now anchors the decay in the score ordering. Threaded in rather than read
+	// from the database's now() so a test is independent of the wall clock and
+	// so the ordering matches the score the caller computes for display from
+	// the same instant.
+	Now time.Time
+}
+
+// PeersPage is one page of known peers plus the total number of known peers —
+// the whole table, not the page.
+type PeersPage struct {
+	Peers []core.PeerRow
+	Total int64
+}
+
+func validatePeersQuery(q PeersQuery) error {
+	// Checked before Page's own overflow guard, which divides by it.
+	if q.PageSize < PeersPageSizeMin || q.PageSize > PeersPageSizeMax {
+		return fmt.Errorf("invalid peers page size %d", q.PageSize)
+	}
+	if q.Page < 0 || q.Page > (int64(^uint64(0)>>1)/q.PageSize) {
+		return fmt.Errorf("invalid peers page %d", q.Page)
+	}
+	if !slices.Contains(PeersSortKeys, q.Sort) {
+		return fmt.Errorf("invalid peers sort %q", q.Sort)
+	}
+	switch q.Dir {
+	case "asc", "desc":
+	default:
+		return fmt.Errorf("invalid peers dir %q", q.Dir)
+	}
+	if q.Sort == "score" && q.Now.IsZero() {
+		return errors.New("peers sort=score requires Now")
+	}
+	return nil
+}
+
+// peersOrderSQL builds the ORDER BY for one validated PeersQuery, plus whether
+// it references the "now" placeholder $1 (only sort=score does, and passing an
+// argument the statement never mentions is a bind error).
+//
+// The ordering is always total: every key but username is non-unique, so
+// username — the table's UNIQUE column — breaks the tie. Without it two peers
+// with the same score could swap places between two page requests and one of
+// them would appear twice, or not at all.
+func peersOrderSQL(q PeersQuery) (order string, usesNow bool) {
+	dir := "ASC"
+	if q.Dir == "desc" {
+		dir = "DESC"
+	}
+	switch q.Sort {
+	case "score":
+		return "ORDER BY " + peerScoreSQL("$1") + " " + dir + ", ku.username ASC", true
+	case "successCount":
+		return "ORDER BY ku.success_count " + dir + ", ku.username ASC", false
+	case "failCount":
+		return "ORDER BY ku.fail_count " + dir + ", ku.username ASC", false
+	default:
+		return "ORDER BY ku.username " + dir, false
+	}
+}
+
+// Peers returns one page of known Soulseek peers' global reliability plus the
+// total number of known peers, for the dashboard's Peers list (GET /api/peers).
+// A page past the end is an empty page with the real total, not an error.
+//
+// Score computation for *display* is still left to the caller (see
+// matcher.ReliabilityHistoryScore) — this query computes the score only to
+// order by it, because ordering is a claim about the whole set that a client
+// holding one page cannot make. See peerScoreSQL.
 //
 // It deliberately does not touch artist_user_reliability: that table is
 // unbounded in the number of (artist, peer) pairs ever recorded, and no list
 // row renders any of it. Use PeerHistory for one peer's artist rows.
-func (s *Store) Peers(ctx context.Context) ([]core.PeerRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT username, success_count, fail_count, last_success_at, last_fail_at
-		 FROM known_users ORDER BY username`)
+func (s *Store) Peers(ctx context.Context, q PeersQuery) (PeersPage, error) {
+	if q.PageSize == 0 {
+		q.PageSize = PeersPageSize
+	}
+	if err := validatePeersQuery(q); err != nil {
+		return PeersPage{}, err
+	}
+
+	var page PeersPage
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM known_users`).Scan(&page.Total); err != nil {
+		return PeersPage{}, fmt.Errorf("peers: count known_users: %w", err)
+	}
+
+	order, usesNow := peersOrderSQL(q)
+	args := make([]any, 0, 3)
+	if usesNow {
+		args = append(args, q.Now)
+	}
+	limitParam := fmt.Sprintf("$%d", len(args)+1)
+	offsetParam := fmt.Sprintf("$%d", len(args)+2)
+	args = append(args, q.PageSize, q.Page*q.PageSize)
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT ku.username, ku.success_count, ku.fail_count, ku.last_success_at, ku.last_fail_at
+		 FROM known_users ku
+		 %s
+		 LIMIT %s OFFSET %s`, order, limitParam, offsetParam), args...)
 	if err != nil {
-		return nil, fmt.Errorf("peers: query known_users: %w", err)
+		return PeersPage{}, fmt.Errorf("peers: query known_users: %w", err)
 	}
 	defer rows.Close()
 
-	var out []core.PeerRow
 	for rows.Next() {
 		var p core.PeerRow
 		if err := rows.Scan(&p.Username, &p.Global.SuccessCount, &p.Global.FailCount, &p.Global.LastSuccessAt, &p.Global.LastFailAt); err != nil {
-			return nil, fmt.Errorf("peers: scan known_users: %w", err)
+			return PeersPage{}, fmt.Errorf("peers: scan known_users: %w", err)
 		}
-		out = append(out, p)
+		page.Peers = append(page.Peers, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return PeersPage{}, err
 	}
-	return out, nil
+	return page, nil
 }
 
 // peerHistoryArtistsSQL reads one known_users id's artist rows. Named because

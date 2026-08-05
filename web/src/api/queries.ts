@@ -35,8 +35,9 @@ import type {
   MarkReadResult,
   MusicBrainzEditionListResult,
   MusicBrainzSearchResponse,
-  Peer,
   PeerHistory,
+  PeerPage,
+  PeerPageParams,
   PrivateMessage,
   ScopedLivePayload,
   SearchPayload,
@@ -156,6 +157,12 @@ export const queryKeys = {
   status: ['status'] as const,
   events: ['events'] as const,
   peers: ['peers'] as const,
+  // Nested under `peers` so a future invalidateQueries on the list reaches
+  // every page. The literal 'page' segment keeps these keys disjoint from
+  // peerHistory's ['peers', <username>, 'history'] — a peer named "page"
+  // would still not collide, since the third segment differs in type.
+  peersPage: (params: PeerPageParams) =>
+    ['peers', 'page', params.page, params.sort, params.dir] as const,
   // Deliberately nested under `peers`: one peer's artist history is a strict
   // child of the list, and the list's PEERS_INTERVAL poll invalidating an
   // open expansion alongside it is exactly the wanted behaviour.
@@ -496,10 +503,35 @@ export function useEvents() {
   });
 }
 
-export function usePeers() {
+// The Peers list's page size. Matches the backend's own default
+// (observ.peersPageSize), which is why peersPageUrl does not send it.
+export const PEERS_PAGE_SIZE = 25;
+
+export const DEFAULT_PEER_PAGE_PARAMS: PeerPageParams = {
+  page: 0,
+  sort: 'score',
+  dir: 'desc',
+};
+
+export function peersPageUrl(params: PeerPageParams): string {
+  const query = new URLSearchParams();
+  query.set('page', String(params.page));
+  query.set('sort', params.sort);
+  query.set('dir', params.dir);
+  return `/api/peers?${query.toString()}`;
+}
+
+/**
+ * One page of known peers, ordered server-side (issue #426).
+ *
+ * The ordering cannot be done here: `score` is a time-decayed sigmoid over the
+ * whole set, and sorting the fetched page would be a different claim than the
+ * column header makes — rows would silently reorder as the user pages.
+ */
+export function usePeers(params: PeerPageParams) {
   return useQuery({
-    queryKey: queryKeys.peers,
-    queryFn: () => apiGet<Peer[]>('/api/peers'),
+    queryKey: queryKeys.peersPage(params),
+    queryFn: () => apiGet<PeerPage>(peersPageUrl(params)),
     refetchInterval: PEERS_INTERVAL,
   });
 }

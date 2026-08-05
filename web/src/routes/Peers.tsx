@@ -1,15 +1,19 @@
 import { Fragment, useState } from 'react';
-import { usePeerHistory, usePeers } from '../api/queries';
-import type { Peer } from '../api/types';
+import {
+  DEFAULT_PEER_PAGE_PARAMS,
+  PEERS_PAGE_SIZE,
+  usePeerHistory,
+  usePeers,
+} from '../api/queries';
+import type { Peer, PeerPageParams, PeerPageSort } from '../api/types';
 import EmptyState from '../components/tui/EmptyState';
 import Page from '../components/tui/Page';
+import Pager from '../components/tui/Pager';
 import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import { formatScore, formatShortTime } from '../format';
 import { t } from '../strings';
 import styles from './Peers.module.css';
-
-type SortKey = 'score' | 'successCount' | 'failCount';
 
 // lastSuccessAt and lastFailAt are recorded independently (each only touched
 // by its own outcome), so neither alone tells you when a peer was last seen
@@ -62,37 +66,41 @@ function PeerExpansion({ username }: { username: string }) {
 }
 
 export default function Peers() {
-  const peersQuery = usePeers();
-  const peers = peersQuery.data ?? [];
+  const [params, setParams] = useState<PeerPageParams>(DEFAULT_PEER_PAGE_PARAMS);
+  const peersQuery = usePeers(params);
+  const peers = peersQuery.data?.peers ?? [];
+  const total = peersQuery.data?.total ?? 0;
   const phase = queryPhase(peersQuery);
-  const [sortKey, setSortKey] = useState<SortKey>('score');
-  const [desc, setDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  const totalPages = Math.max(1, Math.ceil(total / PEERS_PAGE_SIZE));
+  const start = total === 0 ? 0 : params.page * PEERS_PAGE_SIZE + 1;
+  const end = Math.min(total, (params.page + 1) * PEERS_PAGE_SIZE);
+
   // Clicking the active column toggles direction; a new column always starts
-  // descending. Sort is non-mutating so the API order breaks ties stably.
-  function sortBy(key: SortKey) {
-    if (key === sortKey) {
-      setDesc((d) => !d);
-    } else {
-      setSortKey(key);
-      setDesc(true);
-    }
+  // descending. Both reset to page 0: the row that was at offset 25 under the
+  // old order has nothing to do with the row at offset 25 under the new one,
+  // so staying on page 2 would land the user somewhere arbitrary.
+  function sortBy(key: PeerPageSort) {
+    setParams((prev) => ({
+      page: 0,
+      sort: key,
+      dir: prev.sort === key && prev.dir === 'desc' ? 'asc' : 'desc',
+    }));
   }
 
-  const sorted = [...peers].sort((a, b) => {
-    const d = a[sortKey] - b[sortKey];
-    return desc ? -d : d;
-  });
+  function goToPage(page: number) {
+    setParams((prev) => ({ ...prev, page }));
+  }
 
   function toggle(username: string) {
     setExpanded((prev) => (prev === username ? null : username));
   }
 
-  const sortHead = (key: SortKey, label: string) => {
-    const dir = sortKey === key ? (desc ? 'descending' : 'ascending') : 'none';
+  const sortHead = (key: PeerPageSort, label: string, className?: string) => {
+    const dir = params.sort === key ? (params.dir === 'desc' ? 'descending' : 'ascending') : 'none';
     return (
-      <span role="columnheader" aria-sort={dir}>
+      <span role="columnheader" aria-sort={dir} className={className}>
         <button type="button" className={styles.sortHead} onClick={() => sortBy(key)}>
           {label}
         </button>
@@ -105,14 +113,18 @@ export default function Peers() {
       <Panel>
       <div role="table">
         <div role="row" className={`${styles.grid} ${styles.head}`}>
-          <span role="columnheader">{t.peers.gridHead.peer}</span>
+          {sortHead('username', t.peers.gridHead.peer)}
           {sortHead('score', t.peers.gridHead.score)}
           {sortHead('successCount', t.peers.gridHead.ok)}
           {sortHead('failCount', t.peers.gridHead.fail)}
+          {/* Not sortable, and deliberately so: LAST SEEN is derived here from
+              whichever of two independent timestamps is newer, and the backend
+              has no key that ranks by it. A header that sorted only the
+              fetched page would claim an order over the set it does not have. */}
           <span role="columnheader" className={styles.headRight}>{t.peers.gridHead.lastSeen}</span>
         </div>
 
-        {hasData(phase) && sorted.map((p) => {
+        {hasData(phase) && peers.map((p) => {
           const isExpanded = expanded === p.username;
           const expansionId = `peer-expansion-${p.username}`;
 
@@ -166,7 +178,19 @@ export default function Peers() {
       {/* Both of these sit outside the table: `role="table"` admits only rows,
           so a notice or an empty state nested inside would be invalid ARIA. */}
       <QueryNotice phase={phase} />
-      {hasData(phase) && sorted.length === 0 && <EmptyState message={t.peers.empty} />}
+      {/* An empty page and an empty list are different facts. Saying "no peers
+          recorded yet" while the pager beside it reads "of 97 peers" would be
+          the interface contradicting itself — see interface-must-not-invent-data. */}
+      {hasData(phase) && peers.length === 0 && (
+        <EmptyState message={total === 0 ? t.peers.empty : t.peers.pastTheEnd} />
+      )}
+
+      {hasData(phase) && (
+        <nav className={styles.pagination} aria-label={t.peers.paginationLabel}>
+          <span className={styles.resultRange}>{t.peers.resultRange(start, end, total)}</span>
+          <Pager page={params.page} totalPages={totalPages} onChange={goToPage} />
+        </nav>
+      )}
       </Panel>
     </Page>
   );
