@@ -355,11 +355,11 @@ describe('server-owned filters and facets', () => {
     seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), { ...DEFAULT_JOB_PAGE_PARAMS, page: 1 });
     renderJobs([makeJob()], client, 25);
 
-    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    fireEvent.click(screen.getByRole('button', { name: t.pager.nextPage }));
     expect(await screen.findByText('Page two')).toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText(t.jobs.searchPlaceholder), { target: { value: 'Miles & Blue' } });
 
-    expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: t.pager.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
     expect(requested.some((url) => url.includes('q=Miles'))).toBe(false);
     await waitFor(
       () => expect(requested.some((url) => url.includes('page=0') && url.includes('q=Miles+%26+Blue'))).toBe(true),
@@ -655,17 +655,17 @@ describe('sorting and pagination', () => {
     renderJobs([makeJob({ id: 1 })], client, 120);
 
     expect(screen.getByText(t.jobs.resultRange(1, 12, 120))).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: t.jobs.previousPage })).toBeDisabled();
-    expect(screen.getByRole('button', { name: t.jobs.pageLabel(10) })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toBeDisabled();
+    expect(screen.getByRole('button', { name: t.pager.pageLabel(10) })).toBeInTheDocument();
     expect(screen.getAllByText('…')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
     expect(screen.getByRole('button', { name: t.jobs.hideDetails })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    fireEvent.click(screen.getByRole('button', { name: t.pager.nextPage }));
 
     expect(await screen.findByText('Page two')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: t.jobs.hideDetails })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: t.jobs.previousPage })).toBeEnabled();
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toBeEnabled();
   });
 
   it('resets the page and expansion when a status filter changes', async () => {
@@ -680,13 +680,13 @@ describe('sorting and pagination', () => {
     );
     renderJobs([makeJob()], client, 25);
 
-    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    fireEvent.click(screen.getByRole('button', { name: t.pager.nextPage }));
     expect(await screen.findByText('Page two')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
     fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.failed) }));
 
     expect(await screen.findByText('Failed result')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: t.pager.pageLabel(1) })).toHaveAttribute('aria-current', 'page');
     expect(screen.queryByRole('button', { name: t.jobs.hideDetails })).not.toBeInTheDocument();
   });
 
@@ -724,11 +724,11 @@ describe('sorting and pagination', () => {
     seedPage(client, pageFor([makeJob({ id: 13, title: 'Page two' })], 25), secondParams);
     renderJobs([makeJob()], client, 25);
 
-    fireEvent.click(screen.getByRole('button', { name: t.jobs.nextPage }));
+    fireEvent.click(screen.getByRole('button', { name: t.pager.nextPage }));
     expect(await screen.findByText('Page two')).toBeInTheDocument();
     act(() => seedPage(client, pageFor([], 1), secondParams));
 
-    await waitFor(() => expect(screen.getByRole('button', { name: t.jobs.pageLabel(1) })).toHaveAttribute('aria-current', 'page'));
+    await waitFor(() => expect(screen.getByRole('button', { name: t.pager.pageLabel(1) })).toHaveAttribute('aria-current', 'page'));
   });
 });
 
