@@ -12,21 +12,19 @@ import (
 // A past-deadline transfer that is still live in the backend can only be
 // recorded CANCELLED after the backend confirms the cancellation - otherwise we
 // orphan an in-flight download. When that remote Cancel keeps failing, reconcile
-// takes the `continue` at downloading.go:360-363 and leaves the row untouched:
-// no state change, no ReconcileStats increment, no job_event, and Tick returns
-// nil. resolveDownloadingJob then sees a non-terminal transfer and returns
-// (false, nil), so the job stays in DOWNLOADING holding a MaxActive slot.
+// retries on the next pass rather than recording anything.
 //
-// Nothing bounds that retry. Unlike the transient-rejection path, which spends
-// MaxTransferRetries and then parks the job, this loop has no budget and no
-// signature: module health stays green while the job advances forever.
-//
-// This test pins the current behaviour so the fix in #443 has something to
-// flip. It shares its signature with the four-week wedge investigated in #442,
-// but was NOT established as that wedge's cause — those jobs were freed by hand
-// and re-entry deleted their transfer rows, so nothing distinguishes this path
-// from the other silent ones.
-func TestDownloadingWedgesSilentlyWhenRemoteCancelKeepsFailing(t *testing.T) {
+// That retry is deliberately bounded (#443). Unbounded it has no signature at
+// all: the row never leaves QUEUED, no ReconcileStats field increments so the
+// heartbeat stays quiet, resolveDownloadingJob keeps returning (false, nil), and
+// the job holds a MaxActive slot forever while module health reads green. These
+// two tests pin both halves of the bound - the retry that still happens, and the
+// park that ends it.
+
+// Within the grace period the original behaviour is unchanged: keep retrying and
+// touch nothing, because a briefly unreachable peer deserves the chance to come
+// back before its job is handed to a human.
+func TestDownloadingRetriesUncancellableTransferWithinGrace(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 8, 5, 20, 0, 0, time.UTC)
 
@@ -40,22 +38,17 @@ func TestDownloadingWedgesSilentlyWhenRemoteCancelKeepsFailing(t *testing.T) {
 	}
 	p, st := newDownloadingParams(t, net, &fakeSearcher{})
 	// One in flight fills the budget, exactly as production's "3 sent, N
-	// deferred" does - so top-up cannot mask the wedge by sending b.flac.
+	// deferred" does - so top-up cannot mask the outcome by sending b.flac.
 	p.MaxInflightPerPeer = 1
 
 	jobID, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{
 		{Filename: "a.flac", Size: 100},
 		{Filename: "b.flac", Size: 100},
 	}, now)
-	// a.flac was sent and is past its deadline; b.flac is still deferred.
+	// Overdue by a minute against an hour of grace: 20 ticks stay well inside it.
 	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
-		state: core.TransferQueued, slskdID: "g1", deadline: now.Add(-time.Hour), stampAt: now,
+		state: core.TransferQueued, slskdID: "g1", deadline: now.Add(-time.Minute), stampAt: now,
 	})
-
-	before, err := st.JobEvents(ctx, jobID)
-	if err != nil {
-		t.Fatalf("JobEvents: %v", err)
-	}
 
 	d := NewDownloading(p)
 	const ticks = 20
@@ -65,43 +58,85 @@ func TestDownloadingWedgesSilentlyWhenRemoteCancelKeepsFailing(t *testing.T) {
 		}
 	}
 
-	// Every tick reported success, and nothing moved.
 	states := transferStatesFor(t, st, candID)
 	if got := states["a.flac"].State; got != core.TransferQueued {
-		t.Errorf("overdue transfer state = %v, want %v (unchanged)", got, core.TransferQueued)
-	}
-	if got := states["a.flac"].Retries; got != 0 {
-		t.Errorf("overdue transfer retries = %d, want 0: this path spends no budget", got)
+		t.Errorf("overdue transfer state = %v, want %v (still retrying)", got, core.TransferQueued)
 	}
 	if got := states["b.flac"].State; got != core.TransferPending {
-		t.Errorf("deferred transfer state = %v, want %v (never released)", got, core.TransferPending)
+		t.Errorf("deferred transfer state = %v, want %v", got, core.TransferPending)
 	}
 	if len(net.cancelled) != 0 {
 		t.Errorf("cancelled = %v, want none: every Cancel failed", net.cancelled)
 	}
+	assertJobInState(t, st, jobID, core.StateDownloading, now.Add(ticks*p.Interval))
+}
 
-	// The job is still DOWNLOADING, still occupying a MaxActive slot.
-	jobs, err := st.RunnableJobsInState(ctx, core.StateDownloading, now.Add(ticks*p.Interval), 10)
-	if err != nil {
-		t.Fatalf("RunnableJobsInState: %v", err)
+// Past the grace period the retry ends: the transfer is recorded ERRORED and its
+// job is PARKED for a human, so it stops occupying a MaxActive slot silently.
+// stats.Parked is what makes the reconcile heartbeat speak - without it the fix
+// would end the wedge but keep the silence.
+func TestDownloadingParksUncancellableTransferPastGrace(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 8, 5, 20, 0, 0, time.UTC)
+
+	net := &fakeNetwork{
+		downloads: []core.RemoteTransfer{
+			{ID: "g1", Username: "bob", Filename: "a.flac", State: core.TransferQueued, Size: 100},
+		},
+		cancelErr: errors.New("peer unreachable"),
 	}
-	var found bool
+	p, st := newDownloadingParams(t, net, &fakeSearcher{})
+	p.MaxInflightPerPeer = 1
+
+	jobID, candID := seedActiveCandidate(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: "a.flac", Size: 100},
+		{Filename: "b.flac", Size: 100},
+	}, now)
+	// Overdue by two hours against an hour of grace.
+	seedTransfer(t, st, candID, "bob", "a.flac", txfOpts{
+		state: core.TransferQueued, slskdID: "g1", deadline: now.Add(-2 * time.Hour), stampAt: now,
+	})
+
+	d := NewDownloading(p)
+	stats, err := d.reconcile(ctx, now)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if stats.Parked != 1 {
+		t.Errorf("Parked = %d, want 1: the heartbeat only speaks when a stat moves", stats.Parked)
+	}
+
+	states := transferStatesFor(t, st, candID)
+	if got := states["a.flac"].State; got != core.TransferErrored {
+		t.Errorf("uncancellable transfer state = %v, want %v", got, core.TransferErrored)
+	}
+	// Never handed to the backend, so nothing was cancelled or purged there - the
+	// whole point is that the backend is the part we cannot reach.
+	if len(net.cancelled) != 0 {
+		t.Errorf("cancelled = %v, want none", net.cancelled)
+	}
+	if len(net.removed) != 0 {
+		t.Errorf("removed = %v, want none: we never confirmed the cancellation", net.removed)
+	}
+	assertJobInState(t, st, jobID, core.StateParked, now)
+}
+
+// assertJobInState fails unless the job is runnable in exactly the given state.
+func assertJobInState(t *testing.T, st jobStater, jobID int64, want core.AlbumJobState, at time.Time) {
+	t.Helper()
+	jobs, err := st.RunnableJobsInState(context.Background(), want, at, 50)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState(%s): %v", want, err)
+	}
 	for _, j := range jobs {
 		if j.ID == jobID {
-			found = true
+			return
 		}
 	}
-	if !found {
-		t.Fatalf("job %d left DOWNLOADING; the wedge this test pins no longer reproduces", jobID)
-	}
+	t.Fatalf("job %d is not in %s", jobID, want)
+}
 
-	// And it left no trace at all - the reason four weeks could pass unnoticed.
-	after, err := st.JobEvents(ctx, jobID)
-	if err != nil {
-		t.Fatalf("JobEvents: %v", err)
-	}
-	if len(after) != len(before) {
-		t.Errorf("job_events grew from %d to %d; %d silent ticks should write nothing",
-			len(before), len(after), ticks)
-	}
+// jobStater is the sliver of *store.Store assertJobInState needs.
+type jobStater interface {
+	RunnableJobsInState(ctx context.Context, state core.AlbumJobState, now time.Time, limit int) ([]core.AlbumJob, error)
 }
