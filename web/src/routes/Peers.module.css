@@ -130,3 +130,25 @@
   padding: 3px 0 3px 12px;
   font-family: var(--font-mono);
 }
+
+/* Five fixed tracks plus their gaps and the row padding commit 344px, which at
+   375px leaves the PEER column nothing: `minmax(0, 1fr)` lets it shrink past its
+   content rather than force overflow, so the usernames resolved into a literally
+   zero-wide cell and the headers overlapped (#433). OK and FAIL are the two
+   values recoverable elsewhere — both are repeated per artist in the expanded
+   row — where the username identifies the row and appears nowhere else, so they
+   are what gets dropped. 640px is the layout shell's own step, where the side
+   nav already becomes a horizontal strip; this is not a new breakpoint policy
+   (#215 owns that question). Hidden grid items leave the flow entirely, so the
+   three survivors land on these three tracks in order and the header stays in
+   step with the rows without any per-cell placement.
+
+   The two survivors also shed the slack the desktop tracks carry, measured in
+   the browser at this width: SCORE holds `0.52` at 28px under a 35px header,
+   LAST SEEN holds `20:29` at 35px under a 63px header. 46px and 70px keep both
+   headers on one line and hand the 44px back to the username, which is the
+   difference between a 15-character name being clipped and being readable. */
+@media (max-width: 640px) {
+  .grid { grid-template-columns: minmax(0, 1fr) 46px 70px; }
+  .narrowHide { display: none; }
+}
