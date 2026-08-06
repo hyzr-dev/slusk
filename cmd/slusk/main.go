@@ -123,6 +123,12 @@ const (
 	// row cannot authenticate anything (see SessionUser), so this is cleanup,
 	// not a security control.
 	sessionPrunerInterval = time.Hour
+	// jobProgressInterval is how often runJobProgressPublisher republishes the
+	// job-staleness gauges (issue #442). The signal it carries is measured in
+	// hours and days — three jobs once sat untouched for four weeks — so a
+	// minute of scrape lag costs nothing, while a tighter loop would run two
+	// aggregate queries far more often than the reading can change.
+	jobProgressInterval = time.Minute
 )
 
 // ensureWritableDir verifies dir exists (creating it if needed) and is actually
@@ -322,6 +328,17 @@ func main() {
 			Stalled:   int(counts.Stalled),
 			Parked:    int(counts.Parked),
 		}, nil
+	}
+	// /status recomputes the progress snapshot per request rather than reading
+	// the publisher's last sample: two cheap aggregates beat a second cache
+	// with a staleness of its own, on a screen whose entire subject is
+	// staleness.
+	jobProgressFn := func(ctx context.Context) (observ.JobProgressReport, error) {
+		snapshot, err := st.JobProgress(ctx)
+		if err != nil {
+			return observ.JobProgressReport{}, err
+		}
+		return jobProgressReport(snapshot, time.Now()), nil
 	}
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)
@@ -728,6 +745,7 @@ func main() {
 		Registry:                  reg,
 		Version:                   version,
 		Status:                    statusFn,
+		JobProgress:               jobProgressFn,
 		Jobs:                      jobsFn,
 		PagedJobs:                 pagedJobsFn,
 		FailureDetails:            failureDetailsFn,
@@ -816,6 +834,8 @@ func main() {
 	// goroutine, rather than threaded through the soulDone/throughputDone
 	// join further down.
 	go runSessionPruner(restartCtx, authSvc, sessionPrunerInterval, logger)
+	// Same rationale: nothing to flush, so no join on shutdown.
+	go runJobProgressPublisher(restartCtx, st, metrics, jobProgressInterval, logger)
 
 	var soulDone chan error
 	var throughputDone chan struct{}
