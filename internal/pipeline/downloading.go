@@ -358,7 +358,38 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// Still live in slskd: it MUST be cancelled there before we record it
 			// cancelled, otherwise we orphan an in-flight download.
 			if err := d.p.Network.Cancel(ctx, tr.Username, effectiveID); err != nil {
-				// Leave non-terminal; the next pass retries.
+				// Leave non-terminal; the next pass retries - but only for a
+				// bounded while. An unbounded retry here is invisible: the row
+				// never leaves QUEUED, no stat increments so the reconcile
+				// heartbeat stays silent, and resolveDownloadingJob keeps
+				// returning (false, nil) because nothing is terminal. The job
+				// then holds a MaxActive slot indefinitely with module health
+				// green, which is how #443's wedge runs for weeks.
+				//
+				// Past the grace period the invariant above no longer protects
+				// anything worth protecting: a backend that has refused to
+				// confirm the cancellation for this long has most likely lost
+				// the peer, so there is no in-flight download left to orphan.
+				// Park rather than fail the candidate - parking wants a human,
+				// and unlike the fail path it does not run cleanupFolder, so a
+				// download that somehow is still alive keeps its folder.
+				if now.Sub(tr.Deadline) <= d.p.TransferDeadline {
+					continue
+				}
+				d.log().Warn("remote cancel still failing past grace, parking job",
+					"transfer", tr.ID, "candidate", tr.CandidateID, "user", tr.Username,
+					"remote_id", effectiveID, "overdue_by", now.Sub(tr.Deadline), "err", err)
+				parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
+					core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+				if perr != nil {
+					return stats, fmt.Errorf("park job for uncancellable transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, effectiveID, perr)
+				}
+				// Only count a job this call actually flipped, same as the lost
+				// transfer path: on a race the transfer write still commits.
+				if parked {
+					stats.Parked++
+				}
+				handled[tr.ID] = true
 				continue
 			}
 		}
