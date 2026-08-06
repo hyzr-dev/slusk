@@ -230,7 +230,7 @@ func TestSyncWantedJobsIgnoresManualJobs(t *testing.T) {
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSyncWantedJobsEmptySnapshotIgnoresManualJobs(t *testing.T) {
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestSyncWantedJobsRevivePredicateExcludesInvariantViolatingManualJob(t *tes
 	cutoff := now.Add(-30 * 24 * time.Hour)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestSyncWantedJobsReenterPredicateExcludesInvariantViolatingManualJob(t *te
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestSyncWantedJobsMetadataPredicatesExcludeInvariantViolatingManualJobs(t *
 	// Backfill target: manual job with empty metadata, left in its natural
 	// post-creation state (past WANTED - CreateManualJob starts DOWNLOADING).
 	backfillTarget, err := s.CreateManualJob(ctx, "", "", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestSyncWantedJobsMetadataPredicatesExcludeInvariantViolatingManualJobs(t *
 	// API that produces this state; it only exists here to exercise the
 	// refresh predicate, alongside the same lidarr_album_id violation.
 	refreshTarget, err := s.CreateManualJob(ctx, "old title", "old artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual2.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual2.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestUpsertWantedJobIgnoresInvariantViolatingManualRow(t *testing.T) {
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestUpsertWantedJobReenterDoesNotWipeInvariantViolatingManualChildren(t *te
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 	manual, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer1", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}

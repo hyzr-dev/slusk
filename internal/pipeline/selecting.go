@@ -24,7 +24,9 @@ type SelectingStore interface {
 	// ActivateCandidateWithTransfers atomically re-checks ownership, lifecycle
 	// eligibility, and MaxActive, then creates the complete PENDING transfer set
 	// before activating the candidate and advancing its job to DOWNLOADING.
-	ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (activated, capFull bool, err error)
+	// deadline is when those transfers become overdue; topUpCandidate rewrites
+	// it per file as each one is actually enqueued.
+	ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, deadline, now time.Time) (activated, capFull bool, err error)
 	// DeferSelectingJob moves a candidate-specific skip behind FIFO peers so a
 	// full batch of live-owner conflicts cannot starve later unrelated jobs.
 	DeferSelectingJob(ctx context.Context, jobID int64, now time.Time) error
@@ -256,7 +258,7 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		return true, nil
 	}
 
-	activated, capFull, err := s.p.Store.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, s.p.MaxActive, now)
+	activated, capFull, err := s.p.Store.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, s.p.MaxActive, now.Add(s.p.TransferDeadline), now)
 	if err != nil {
 		return false, err
 	}

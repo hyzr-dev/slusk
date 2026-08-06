@@ -13,11 +13,12 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(90 * time.Minute)
 
 	job, err := s.CreateManualJob(ctx, "Some Album", "Some Artist", "peer1", "", []ManualJobFile{
 		{Filename: "01 - Track.flac", Size: 111},
 		{Filename: "02 - Track.flac", Size: 222},
-	}, now)
+	}, deadline, now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -55,6 +56,12 @@ func TestCreateManualJobProducesRunnableDownload(t *testing.T) {
 		}
 		if tr.Username != "peer1" {
 			t.Errorf("transfer %q username = %q, want peer1", tr.Filename, tr.Username)
+		}
+		// A manual job's PENDING rows must carry the caller's deadline, not the
+		// creation timestamp: a row born past its own deadline (issue #441)
+		// reads as overdue to anything that later sweeps PENDING.
+		if !tr.Deadline.Equal(deadline) {
+			t.Errorf("transfer %q deadline = %v, want %v", tr.Filename, tr.Deadline.UTC(), deadline)
 		}
 	}
 
@@ -94,7 +101,7 @@ func TestCreateManualJobPersistsAlbumMBID(t *testing.T) {
 	const mbid = "a1b2c3d4-e5f6-4789-a012-3456789abcde"
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer4", mbid,
-		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now)
+		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -140,7 +147,7 @@ func TestCreateManualJobEmptyAlbumMBID(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer5", "",
-		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now)
+		[]ManualJobFile{{Filename: "01 - Track.flac", Size: 111}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -166,7 +173,7 @@ func TestCreateManualJobCoexistsWithLidarrJob(t *testing.T) {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 	manualJob, err := s.CreateManualJob(ctx, "Manual Album", "Manual Artist", "peer2", "",
-		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now)
+		[]ManualJobFile{{Filename: "manual.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -252,12 +259,12 @@ func TestCreateManualJobRejectsLiveRemoteFileConflict(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
 	if _, err := s.CreateManualJob(ctx, "First", "Artist", "peer3", "",
-		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now); err != nil {
+		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now.Add(time.Hour), now); err != nil {
 		t.Fatalf("CreateManualJob (first): %v", err)
 	}
 
 	_, err := s.CreateManualJob(ctx, "Second", "Artist", "peer3", "",
-		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now.Add(time.Minute))
+		[]ManualJobFile{{Filename: "shared.flac", Size: 1}}, now.Add(time.Minute).Add(time.Hour), now.Add(time.Minute))
 	if !errors.Is(err, ErrRemoteFileBusy) {
 		t.Fatalf("CreateManualJob (conflicting) = %v, want ErrRemoteFileBusy", err)
 	}

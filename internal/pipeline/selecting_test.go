@@ -295,8 +295,9 @@ func TestSelectingLiveOwnerConflictDoesNotStarveLaterJob(t *testing.T) {
 		return job, cand
 	}
 
-	ownerJob, owner := seed(13, "shared", "same.flac", now.Add(-5*time.Minute))
-	if activated, _, err := st.ActivateCandidateWithTransfers(ctx, owner.ID, ownerJob.ID, p.MaxActive, now.Add(-5*time.Minute)); err != nil || !activated {
+	ownerSeededAt := now.Add(-5 * time.Minute)
+	ownerJob, owner := seed(13, "shared", "same.flac", ownerSeededAt)
+	if activated, _, err := st.ActivateCandidateWithTransfers(ctx, owner.ID, ownerJob.ID, p.MaxActive, ownerSeededAt.Add(time.Hour), ownerSeededAt); err != nil || !activated {
 		t.Fatalf("activate live owner: activated=%v err=%v", activated, err)
 	}
 
@@ -452,7 +453,7 @@ func seedExhaustedJobWithLeftovers(t *testing.T, ctx context.Context, st *store.
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
 	// Activation is what writes the transfer rows quarantineLeftovers reads.
-	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, now.Add(time.Hour), now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
 	}
@@ -662,7 +663,7 @@ func TestSelectingManualJobExhaustionFailsOnFirstFailure(t *testing.T) {
 	p.MaxRetries = 3 // would NOT be terminal for a lidarr job at this retry count
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
-		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -718,7 +719,7 @@ func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "", []store.ManualJobFile{
 		{Filename: `music\` + leaf + `\01.flac`, Size: 1},
-	}, now)
+	}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -768,7 +769,7 @@ func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	p.CandidateTTL = 24 * time.Hour
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
-		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt)
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt.Add(time.Hour), createdAt)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
