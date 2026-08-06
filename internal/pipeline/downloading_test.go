@@ -59,7 +59,7 @@ func seedActiveCandidate(t *testing.T, st *store.Store, albumID int64, username 
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
-	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidate: %v activated=%v", err, activated)
 	}
@@ -1068,7 +1068,7 @@ func TestDownloadingRoutesUnidentifiedManualJobToNotImported(t *testing.T) {
 	p, st := newDownloadingParams(t, &fakeNetwork{}, &fakeSearcher{})
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob", "",
-		[]store.ManualJobFile{{Filename: `A\01.flac`, Size: 10}}, now)
+		[]store.ManualJobFile{{Filename: `A\01.flac`, Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}

@@ -58,7 +58,7 @@ type JobStore interface {
 	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
-	CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error)
+	CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, deadline, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	DeleteJob(ctx context.Context, jobID int64) (bool, error)
 }
@@ -75,6 +75,10 @@ type Jobs struct {
 	Store  JobStore
 	Peers  TransferCanceller
 	Logger *slog.Logger
+	// TransferDeadline is pipeline.transfer_deadline, used to stamp a real
+	// future deadline on a manual job's PENDING transfers (#441). Zero means
+	// the created rows would be born overdue, so main.go must set it.
+	TransferDeadline time.Duration
 }
 
 func (j *Jobs) log() *slog.Logger {
@@ -169,7 +173,8 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 // an albumMBID that Lidarr's library does not know, the job does reach
 // Importing, whose resolve step routes it once the lookup comes back empty.
 func (j *Jobs) Create(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile) (core.JobView, error) {
-	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, albumMBID, files, time.Now())
+	now := time.Now()
+	job, err := j.Store.CreateManualJob(ctx, title, artistName, peer, albumMBID, files, now.Add(j.TransferDeadline), now)
 	if errors.Is(err, store.ErrRemoteFileBusy) {
 		return core.JobView{}, ErrRemoteFileBusy
 	}

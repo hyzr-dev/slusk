@@ -45,10 +45,14 @@ type ManualJobFile struct {
 // Returns ErrRemoteFileBusy if another live candidate already owns a (peer,
 // filename) pair among files.
 //
+// deadline carries the same meaning as in ActivateCandidateWithTransfers: the
+// time the created PENDING transfers are considered overdue at, normally
+// now + pipeline.transfer_deadline, and never now itself (#441).
+//
 // Callers are expected to pre-validate files before calling: non-empty,
 // unique non-blank filenames, and non-negative sizes. The HTTP handler
 // (validateCreateJobRequest in internal/observ) does this.
-func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []ManualJobFile, now time.Time) (core.AlbumJob, error) {
+func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []ManualJobFile, deadline, now time.Time) (core.AlbumJob, error) {
 	candidateFiles := make([]core.CandidateFile, len(files))
 	for i, f := range files {
 		candidateFiles[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
@@ -88,10 +92,10 @@ func (s *Store) CreateManualJob(ctx context.Context, title, artistName, peer, al
 		`INSERT INTO transfers
 		   (candidate_id, username, filename, state, bytes_total, deadline, updated_at)
 		 SELECT $1, $2, f.value->>'filename', $3,
-		        (f.value->>'size')::bigint, $4, $4
-		   FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY AS f(value, ord)
+		        (f.value->>'size')::bigint, $4, $5
+		   FROM jsonb_array_elements($6::jsonb) WITH ORDINALITY AS f(value, ord)
 		  ORDER BY f.ord`,
-		candidateID, peer, string(core.TransferPending), now, string(filesJSON)); err != nil {
+		candidateID, peer, string(core.TransferPending), deadline, now, string(filesJSON)); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_transfers_live_remote_owner" {
 			return core.AlbumJob{}, ErrRemoteFileBusy

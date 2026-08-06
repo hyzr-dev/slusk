@@ -92,7 +92,7 @@ func TestBulkRetryJobsRevivesManualJobs(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}

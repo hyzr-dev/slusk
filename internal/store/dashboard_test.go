@@ -961,7 +961,7 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestRetryManualJobClearsFailReasonAndImportSubmittedAt(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1091,7 +1091,7 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestRetryManualJobNoopWithoutCandidates(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "bob", "",
-		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1226,7 +1226,7 @@ func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1253,7 +1253,7 @@ func TestRetryJobsNoopForNotImportedJob(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1859,7 +1859,7 @@ func TestListJobsWithTransferPrefersActiveOverNewerNeverTried(t *testing.T) {
 		t.Fatalf("expected active_peer picked first (best score), got %q", winner.Username)
 	}
 
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -1912,7 +1912,7 @@ func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -1983,7 +1983,7 @@ func TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow(t *testing.
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -2228,7 +2228,7 @@ func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
