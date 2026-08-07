@@ -64,7 +64,10 @@ export const t = {
     },
     setup: {
       title: 'Setup',
-      subtitle: 'slusk validates the config you already wrote — it never writes it',
+      // Describes what this view does, not what slusk does with config.toml.
+      // The previous wording claimed slusk never writes the file, which #134
+      // made false — see the same note on the `setup` content key below.
+      subtitle: 'Probes what your config points at — Lidarr, Soulseek, shares',
     },
     settings: {
       title: 'Config',
