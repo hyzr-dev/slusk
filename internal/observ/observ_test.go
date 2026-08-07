@@ -512,6 +512,14 @@ func TestPagedJobsEndpointParsesInflightFinishedAndFacets(t *testing.T) {
 			suffix: "?filter=failures&sort=recent&dir=desc&pageSize=8&facets=0",
 			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "failures", Source: "all", PageSize: 8, SkipFacets: true},
 		},
+		{
+			// The Jobs page's NOT IMPORTED chip (issue #368) — a status
+			// filter, unlike the three above, so it is the same drift risk
+			// through a different door: the store learned "notImported" and
+			// this parser had to learn it in the same change.
+			suffix: "?filter=notImported&sort=st&dir=asc",
+			want:   PagedJobsQuery{Page: 0, Sort: "st", Dir: "asc", Filter: "notImported", Source: "all", PageSize: 12},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.suffix, func(t *testing.T) {

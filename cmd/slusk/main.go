@@ -359,6 +359,7 @@ func main() {
 					Wanted: page.Facets.Status.Wanted, Stalled: page.Facets.Status.Stalled,
 					Failed: page.Facets.Status.Failed,
 					Parked: page.Facets.Status.Parked, Done: page.Facets.Status.Done,
+					NotImported: page.Facets.Status.NotImported,
 				},
 				Source: observ.JobSourceFacets{
 					All: page.Facets.Source.All, Manual: page.Facets.Source.Manual,

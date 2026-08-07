@@ -190,7 +190,7 @@ describe('paged jobs transport', () => {
       jobs: [makeJob({ id: 2 }), makeJob({ id: 1 })],
       total: 25,
       facets: {
-        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4 },
+        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4, notImported: 0 },
         source: { all: 25, manual: 5, lidarr: 20 },
       },
     };
@@ -316,7 +316,7 @@ describe('useJobs live replace', () => {
       jobs: [makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })],
       total: 1,
       facets: {
-        status: { all: 1, wanted: 0, selecting: 0, queued: 0, active: 1, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0 },
+        status: { all: 1, wanted: 0, selecting: 0, queued: 0, active: 1, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0, notImported: 0 },
         source: { all: 1, manual: 0, lidarr: 1 },
       },
     };
@@ -365,7 +365,7 @@ describe('useJobs live replace across accumulated frames', () => {
       ],
       total: 2,
       facets: {
-        status: { all: 2, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0 },
+        status: { all: 2, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0, notImported: 0 },
         source: { all: 2, manual: 0, lidarr: 2 },
       },
     };

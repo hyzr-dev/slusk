@@ -2092,6 +2092,11 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 		// A legacy state nothing in production writes any more (issue #416):
 		// every dead pre-download state falls to the CASE's ELSE, 'wanted'.
 		{9011, core.AlbumJobState("COOLDOWN"), "", "", "wanted"},
+		// Given a COMPLETED transfer deliberately (issue #368): that is the
+		// aggregate shape a real NOT_IMPORTED job has, and it is exactly what
+		// the 'waiting'/'queued' fallbacks would claim if the job-level branch
+		// above them ever stopped winning.
+		{9012, core.StateNotImported, core.TransferCompleted, "peer_not_imported", "notImported"},
 	}
 	statusByID := map[int64]string{}
 	for i, f := range fixtures {
@@ -2177,11 +2182,9 @@ func TestListDashboardJobsStatusInProgressOutranksCompleted(t *testing.T) {
 // otherwise (wrongly) read it as "queued" - a NOT_IMPORTED job's completed
 // transfers leave agg.in_progress/stalled/live/failed all at their zero
 // values, which is exactly the shape the ELSE 'queued' branch matches.
-// Deliberately not folded into
-// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter's fixture table:
-// "notImported" is not (yet) an accepted dashboard Filter value, so this
-// checks the JobView projection directly instead of round-tripping through
-// ListDashboardJobs's filter.
+// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter now carries the same
+// fixture through the list/filter/facet path; this one stays because it enters
+// through JobWithTransfer, a separate projection of the same CASE.
 func TestJobViewStatusNotImportedForNotImportedState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -2581,9 +2584,33 @@ func TestListDashboardJobsNotImportedStatus(t *testing.T) {
 	if page.Jobs[0].Status != "notImported" {
 		t.Errorf("status = %q, want %q", page.Jobs[0].Status, "notImported")
 	}
-	if page.Facets.Status.All != 1 {
-		t.Errorf("facets.status.all = %d, want 1 (a NOT_IMPORTED job still counts under ALL, "+
-			"even though it has no facet or filter of its own yet — #368)", page.Facets.Status.All)
+	if page.Facets.Status.All != 1 || page.Facets.Status.NotImported != 1 {
+		t.Errorf("facets.status = %+v, want all=1 notImported=1 (#368: the status carries "+
+			"its own facet, so the chips still sum to ALL)", page.Facets.Status)
+	}
+}
+
+// TestListDashboardJobsFilterNotImported covers #368's second half: the status
+// is an accepted Filter value, and it selects exactly the NOT_IMPORTED jobs -
+// not the DONE ones beside them, which share the "download finished" shape.
+func TestListDashboardJobsFilterNotImported(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	want := insertDashboardTestJob(t, s, 0, core.SourceManual, core.StateNotImported, "", "Kid A", "Radiohead", "peer1", 0, now.Add(-time.Minute))
+	insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "OK Computer", "Radiohead", "peer2", 0, now.Add(-time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "notImported", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != want {
+		t.Fatalf("filter=notImported returned %+v, want just job %d", page.Jobs, want)
+	}
+	// Facets ignore the status filter, so both jobs are still counted.
+	if page.Facets.Status.All != 2 || page.Facets.Status.NotImported != 1 || page.Facets.Status.Done != 1 {
+		t.Errorf("facets = %+v, want all=2 notImported=1 done=1", page.Facets.Status)
 	}
 }
 

@@ -37,13 +37,16 @@ function bulkRetryFilter(status: JobStatusFilter): BulkRetryFilter | null {
 }
 
 // The approved status row (issue #416 adds WANTED/SELECTING/WAITING to the
-// original seven, ten in total). IMPORTING, INFLIGHT, FINISHED and FAILURES
-// (issues #287, #310) are all server-only filter values used by Overview's
-// own useJobs calls, not chips a user picks here — JobStatusFacets has no
-// count for any of them, and IMPORTING is otherwise represented under ALL by
-// its IM tag. Ordered to mirror the backend's `sort=st` ranking.
+// original seven; issue #368 adds NOT IMPORTED, eleven in total). IMPORTING,
+// INFLIGHT, FINISHED and FAILURES (issues #287, #310) are all server-only
+// filter values used by Overview's own useJobs calls, not chips a user picks
+// here — JobStatusFacets has no count for any of them, and IMPORTING is
+// otherwise represented under ALL by its IM tag. Ordered to mirror the
+// backend's `sort=st` ranking, which puts notImported last among the real
+// statuses. Every chip here must have a JobStatusFacets counter, or the row
+// stops summing to ALL — which is the bug #368 closed.
 type ChipKey = Exclude<JobStatusFilter, 'importing' | 'inflight' | 'finished' | 'failures'>;
-const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting', 'wanted', 'stalled', 'failed', 'parked', 'done'];
+const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting', 'wanted', 'stalled', 'failed', 'parked', 'done', 'notImported'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
 // mock doesn't draw this control — its designer was working against a data
