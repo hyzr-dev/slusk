@@ -197,14 +197,15 @@ of putting it behind a VPN: you need a provider and a gluetun setup that support
 forwarding, and the port you get is assigned dynamically rather than chosen.
 
 slusk handles that by asking gluetun what the port is. Set `[soulseek.gluetun]` in the
-config and, at startup, it fetches `GET {control_url}/v1/portforward` and listens on the
-port gluetun reports. Only the port half of `soulseek.listen_addr` is replaced — the host
-half is still used — so the static port you configured is ignored in this mode.
+config and it fetches `GET {control_url}/v1/portforward` and listens on the port gluetun
+reports. Only the port half of `soulseek.listen_addr` is replaced — the host half is
+still used — so the static port you configured is ignored in this mode.
 
 ```toml
 [soulseek.gluetun]
 control_url = "http://127.0.0.1:8000"
 api_key = "CHANGEME"
+poll_interval = "5m"   # optional; this is the default
 ```
 
 This only works if slusk shares gluetun's network namespace, so that `127.0.0.1` reaches
@@ -223,9 +224,18 @@ Two things worth knowing before you debug it at 2am:
   listening. Grant the route to the same key you put in `soulseek.gluetun.api_key`; on
   older gluetun no auth is needed and the key is simply unused. slusk names the config
   key in the error when it sees a 401 or 403, so the log will say which knob to turn.
-- **The port is fetched once, at startup, and never again.** If gluetun's forwarded port
-  changes while slusk is running — a reconnect, a server change — slusk keeps listening
-  on the old one and quietly stops being reachable. Restart slusk to pick up the new port.
+- **The port is re-fetched every `poll_interval` (5m by default), not only at startup.**
+  If gluetun's forwarded port changes while slusk is running — a reconnect, a server
+  change — slusk binds a new listener on the new port, tells the Soulseek server about it
+  without waiting for a reconnect, and logs the change. Connections already established
+  are not broken by the swap, so an in-flight transfer survives it. Until the next poll
+  lands, though, slusk is listening on a port nothing reaches: `poll_interval` is the
+  upper bound on how long that window lasts, so shorten it if your provider rotates
+  aggressively.
+- **A failed poll never tears down a working listener.** A control server that is down,
+  answers 401, or reports port 0 is logged and otherwise ignored — none of those are
+  evidence that the port slusk is bound to has stopped working. The same goes for a new
+  port slusk cannot bind: it stays where it is and retries on the next poll.
 
 Starting slusk and gluetun together is fine. A control server that isn't up yet, or a
 gluetun that reports port 0 because forwarding hasn't been established, are both treated

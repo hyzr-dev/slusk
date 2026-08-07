@@ -2,15 +2,20 @@ package soulseek
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/server"
 )
 
 // freePort reserves an OS-assigned free TCP port on 127.0.0.1 and returns
@@ -258,6 +263,343 @@ func TestFetchGluetunPortRespectsTimeout(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("fetchGluetunPort took %v, want it bounded by gluetunTimeout (50ms)", elapsed)
+	}
+}
+
+// startGluetunLifecycle starts c's lifecycle with ln installed as the peer
+// listener, mirroring what Run does minus the accept loop: the tests below
+// accept on the initial listener themselves, so they can hold an established
+// connection across a rebind. Teardown closes whatever listener is current at
+// the time, which is the point - the rebind replaces it.
+func startGluetunLifecycle(t *testing.T, c *Client, ln net.Listener) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	runCtx, err := c.beginLifecycle(ctx)
+	if err != nil {
+		t.Fatalf("beginLifecycle: %v", err)
+	}
+	if _, ok := c.setPeerListener(ln); !ok {
+		t.Fatal("setPeerListener on a fresh lifecycle = !ok")
+	}
+	c.listenPort.Store(int64(ln.Addr().(*net.TCPAddr).Port))
+	t.Cleanup(func() {
+		cancel()
+		c.stopLifecycle()
+	})
+	return runCtx
+}
+
+// gluetunPortServer serves a control server whose reported forwarded port is
+// whatever port currently holds, so a test can rotate it mid-run.
+func gluetunPortServer(t *testing.T, port *atomic.Int64) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]int{"port": int(port.Load())})
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// portAccepts reports whether a TCP connection to 127.0.0.1:port is accepted.
+func portAccepts(port int) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// TestRefreshGluetunPortRebindsOnRotation locks the core of issue #395: a
+// forwarded port that changes while the client is running moves the peer
+// listener to the new port and abandons the old one.
+func TestRefreshGluetunPortRebindsOnRotation(t *testing.T) {
+	oldPort := freePort(t)
+	newPort := freePort(t)
+	reported := &atomic.Int64{}
+	reported.Store(int64(oldPort))
+	ts := gluetunPortServer(t, reported)
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+	c.cfg.GluetunControlURL = ts.URL
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	reported.Store(int64(newPort))
+	c.refreshGluetunPort(ctx)
+
+	if got := int(c.listenPort.Load()); got != newPort {
+		t.Errorf("listenPort = %d, want %d (the rotated forwarded port)", got, newPort)
+	}
+	if !portAccepts(newPort) {
+		t.Errorf("port %d does not accept, want the rebound listener there", newPort)
+	}
+	if portAccepts(oldPort) {
+		t.Errorf("port %d still accepts, want the old listener closed", oldPort)
+	}
+	if got := c.Status().ListenAddr; got != net.JoinHostPort("127.0.0.1", strconv.Itoa(newPort)) {
+		t.Errorf("Status().ListenAddr = %q, want it to follow the rebind", got)
+	}
+}
+
+// TestRefreshGluetunPortKeepsEstablishedConnections locks that a rebind only
+// replaces the listener: sockets accepted from the old one are independent of
+// it and must keep carrying data, so an in-flight transfer is not broken.
+func TestRefreshGluetunPortKeepsEstablishedConnections(t *testing.T) {
+	oldPort := freePort(t)
+	newPort := freePort(t)
+	reported := &atomic.Int64{}
+	reported.Store(int64(oldPort))
+	ts := gluetunPortServer(t, reported)
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+	c.cfg.GluetunControlURL = ts.URL
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			close(accepted)
+			return
+		}
+		accepted <- conn
+	}()
+	peer, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort)))
+	if err != nil {
+		t.Fatalf("dial old listener: %v", err)
+	}
+	defer peer.Close()
+	server, ok := <-accepted
+	if !ok {
+		t.Fatal("accept on the old listener failed")
+	}
+	defer server.Close()
+
+	reported.Store(int64(newPort))
+	c.refreshGluetunPort(ctx)
+
+	if _, err := server.Write([]byte("still here")); err != nil {
+		t.Fatalf("write on a connection accepted before the rebind: %v", err)
+	}
+	buf := make([]byte, len("still here"))
+	if err := peer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(peer, buf); err != nil {
+		t.Fatalf("read on a connection accepted before the rebind: %v", err)
+	}
+	if string(buf) != "still here" {
+		t.Errorf("read %q, want %q", buf, "still here")
+	}
+}
+
+// TestRefreshGluetunPortKeepsListenerOnFetchFailure locks the rule the issue
+// calls out explicitly: gluetun being down, unauthorized, or reporting port 0
+// leaves the working listener exactly where it is.
+func TestRefreshGluetunPortKeepsListenerOnFetchFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"port zero", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]int{"port": 0})
+		}},
+		{"unauthorized", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}},
+		{"server error", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(tc.handler)
+			defer ts.Close()
+
+			port := freePort(t)
+			ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+			if err != nil {
+				t.Fatalf("bind initial listener: %v", err)
+			}
+			c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+			c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+			c.cfg.GluetunControlURL = ts.URL
+			ctx := startGluetunLifecycle(t, c, ln)
+
+			c.refreshGluetunPort(ctx)
+
+			if got := int(c.listenPort.Load()); got != port {
+				t.Errorf("listenPort = %d, want it left at %d", got, port)
+			}
+			if !portAccepts(port) {
+				t.Errorf("port %d no longer accepts; a failed fetch tore down a working listener", port)
+			}
+		})
+	}
+}
+
+// TestRefreshGluetunPortKeepsListenerWhenRebindFails locks that a bind failure
+// on the new port is equally non-destructive: gluetun may report a port
+// something else already holds, and losing the working listener over that
+// would be worse than staying on the stale one.
+func TestRefreshGluetunPortKeepsListenerWhenRebindFails(t *testing.T) {
+	oldPort := freePort(t)
+	blocked, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind blocking listener: %v", err)
+	}
+	defer blocked.Close()
+	takenPort := blocked.Addr().(*net.TCPAddr).Port
+
+	reported := &atomic.Int64{}
+	reported.Store(int64(takenPort))
+	ts := gluetunPortServer(t, reported)
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+	c.cfg.GluetunControlURL = ts.URL
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	c.refreshGluetunPort(ctx)
+
+	if got := int(c.listenPort.Load()); got != oldPort {
+		t.Errorf("listenPort = %d, want it left at %d after a failed rebind", got, oldPort)
+	}
+	if !portAccepts(oldPort) {
+		t.Errorf("port %d no longer accepts; a failed rebind tore down a working listener", oldPort)
+	}
+}
+
+// TestRefreshGluetunPortUnchangedIsANoOp locks that the common case - the
+// forwarded port has not moved - does not rebind at all, since a needless
+// rebind would churn the listener on every poll.
+func TestRefreshGluetunPortUnchangedIsANoOp(t *testing.T) {
+	port := freePort(t)
+	reported := &atomic.Int64{}
+	reported.Store(int64(port))
+	ts := gluetunPortServer(t, reported)
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	c.cfg.GluetunControlURL = ts.URL
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	c.refreshGluetunPort(ctx)
+
+	c.lnMu.Lock()
+	current := c.listener
+	c.lnMu.Unlock()
+	if current != ln {
+		t.Error("listener was replaced even though the forwarded port did not change")
+	}
+}
+
+// TestRefreshGluetunPortAdvertisesNewPortToServer locks the third part of
+// issue #395: the server learns the new port on the live connection, rather
+// than staying on the stale one until the next reconnect.
+func TestRefreshGluetunPortAdvertisesNewPortToServer(t *testing.T) {
+	oldPort := freePort(t)
+	newPort := freePort(t)
+	reported := &atomic.Int64{}
+	reported.Store(int64(oldPort))
+	ts := gluetunPortServer(t, reported)
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(oldPort))
+	c.cfg.GluetunControlURL = ts.URL
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	c.mu.Lock()
+	c.serverConn = clientConn
+	c.serverGeneration = 1
+	c.mu.Unlock()
+
+	frames := make(chan []byte, 1)
+	go func() {
+		payload, err := readFramePayload(serverConn)
+		if err != nil {
+			close(frames)
+			return
+		}
+		frames <- payload
+	}()
+
+	reported.Store(int64(newPort))
+	c.refreshGluetunPort(ctx)
+
+	select {
+	case payload, ok := <-frames:
+		if !ok {
+			t.Fatal("reading the announced frame failed")
+		}
+		if code := binary.LittleEndian.Uint32(payload[:4]); code != uint32(server.CodeSetListenPort) {
+			t.Fatalf("frame code = %d, want %d (SetListenPort)", code, server.CodeSetListenPort)
+		}
+		if got := int(binary.LittleEndian.Uint32(payload[4:8])); got != newPort {
+			t.Errorf("announced port = %d, want %d", got, newPort)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SetListenPort announced after the port rotated")
+	}
+}
+
+// TestWatchGluetunPortPollsAtInterval locks that the watcher actually polls
+// rather than merely being startable, and that it stops on ctx cancellation.
+func TestWatchGluetunPortPollsAtInterval(t *testing.T) {
+	port := freePort(t)
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]int{"port": port})
+	}))
+	defer ts.Close()
+
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("bind initial listener: %v", err)
+	}
+	c := New(Config{Address: "unused:0", Username: "u", Password: "p"}, testLogger())
+	c.cfg.ListenAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	c.cfg.GluetunControlURL = ts.URL
+	c.cfg.GluetunPollInterval = 10 * time.Millisecond
+	ctx := startGluetunLifecycle(t, c, ln)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.watchGluetunPort(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls.Load(); got < 2 {
+		t.Fatalf("gluetun fetch count = %d, want >= 2 within the poll deadline", got)
 	}
 }
 

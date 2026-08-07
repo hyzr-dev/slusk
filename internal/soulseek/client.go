@@ -64,6 +64,11 @@ const (
 	defaultListenAddr = "127.0.0.1:0"
 	// defaultGluetunTimeout bounds one gluetun control-server fetch.
 	defaultGluetunTimeout = 5 * time.Second
+	// defaultGluetunPollInterval backs GluetunPollInterval for callers that
+	// construct a Client directly (tests, the manual probe). Production goes
+	// through config.SoulseekConfig, which defaults the same value first and
+	// carries the rationale for it.
+	defaultGluetunPollInterval = 5 * time.Minute
 	// defaultShareScanLogInterval is how often scanShares logs progress
 	// during a share rescan.
 	defaultShareScanLogInterval = 30 * time.Second
@@ -117,6 +122,12 @@ type Config struct {
 	// GluetunAPIKey, when nonempty, is sent as X-API-Key on the gluetun
 	// control-server request.
 	GluetunAPIKey string
+	// GluetunPollInterval is how often the forwarded port is re-fetched while
+	// the client runs, so a port gluetun rotates mid-session is picked up
+	// instead of leaving the client listening on a dead one (issue #395).
+	// Defaults to 5 minutes when zero or negative. Only consulted when
+	// GluetunControlURL is set.
+	GluetunPollInterval time.Duration
 
 	// DownloadDir is the local root directory native downloads (issue #55)
 	// are written under, in the same completeDir/<leaf>/<basename> layout
@@ -282,15 +293,24 @@ type Client struct {
 	addrMu       sync.Mutex
 	pendingAddrs map[string][]chan addrResult
 
-	// listenPort is the actual bound port of the peer listener started once
-	// by Run (see listener.go), advertised to the server via SetListenPort.
-	// It is written exactly once, before Run's reconnect loop starts, and
-	// only ever read afterward (by the same goroutine chain, via
-	// serveConnected), so it needs no synchronization.
-	listenPort int
+	// listenPort is the actual bound port of the current peer listener (see
+	// listener.go), advertised to the server via SetListenPort. It is atomic
+	// because the gluetun poller (issue #395) can rebind the listener onto a
+	// rotated forwarded port concurrently with serveConnected reading it.
+	listenPort atomic.Int64
 	// boundListenAddr holds the peer listener's bound address (host:port),
-	// for Status(). Set once by Run.
+	// for Status(). Follows every rebind.
 	boundListenAddr atomic.Pointer[string]
+
+	// lnMu guards the current peer listener and the lifecycle's teardown flag
+	// for it. The accept loop itself never takes it: each listener gets its
+	// own acceptPeers goroutine, so a rebind is "start the new loop, then
+	// close the old listener" rather than a swap the hot path has to observe.
+	// Never take lifeMu while holding this - setPeerListener's callers start
+	// tracked goroutines outside the lock precisely to keep that ordering.
+	lnMu           sync.Mutex
+	listener       net.Listener
+	listenerClosed bool
 
 	// pendingMu guards pending, the in-flight indirect (NAT-traversal)
 	// ConnectPeer attempts (see peers.go), keyed by the token sent in the
@@ -465,6 +485,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	if cfg.gluetunTimeout <= 0 {
 		cfg.gluetunTimeout = defaultGluetunTimeout
 	}
+	if cfg.GluetunPollInterval <= 0 {
+		cfg.GluetunPollInterval = defaultGluetunPollInterval
+	}
 	if cfg.shareScanLogInterval <= 0 {
 		cfg.shareScanLogInterval = defaultShareScanLogInterval
 	}
@@ -605,9 +628,10 @@ func (c *Client) Status() Status {
 // completes. Both startup and the server connection are resilient to
 // transient failures: a transiently-held listen port (bind) or a dropped
 // server connection are retried with exponential backoff rather than
-// stopping soulseek for the life of the process. The peer listener, once
-// bound, lives across every server reconnect. Run returns nil when ctx is
-// cancelled; it returns a non-nil error only for a terminal server failure
+// stopping soulseek for the life of the process. The peer listener lives
+// across every server reconnect; the only thing that replaces it is a gluetun
+// forwarded port that rotates mid-run (see watchGluetunPort). Run returns nil
+// when ctx is cancelled; it returns a non-nil error only for a terminal server failure
 // (invalid credentials, outdated protocol version, or the account logging in
 // elsewhere), after which it never reconnects.
 func (c *Client) Run(ctx context.Context) error {
@@ -615,31 +639,36 @@ func (c *Client) Run(ctx context.Context) error {
 	if ln == nil {
 		return nil // ctx cancelled during startup — a clean shutdown, not a failure
 	}
-	c.listenPort = ln.Addr().(*net.TCPAddr).Port
-	boundAddr := ln.Addr().String()
-	c.boundListenAddr.Store(&boundAddr)
-
 	runCtx, err := c.beginLifecycle(ctx)
 	if err != nil {
 		_ = ln.Close()
 		return err
 	}
-	defer c.stopLifecycle(ln)
+	defer c.stopLifecycle()
+	// From here on the deferred stopLifecycle owns closing whichever listener
+	// is current, so these failure paths no longer close ln themselves - after
+	// a rebind (see watchGluetunPort) ln is not necessarily that listener.
 	if !c.startTracked(func() { c.uploads.dispatch(runCtx) }) {
 		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before upload dispatcher start")
 	}
-	if !c.startTracked(func() { c.acceptPeers(runCtx, ln) }) {
-		_ = ln.Close()
-		return errors.New("soulseek: lifecycle stopped before listener start")
+	if err := c.installPeerListener(runCtx, ln); err != nil {
+		return err
 	}
 	if !c.startTracked(func() { c.runInitialShareScan(runCtx) }) {
-		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before initial share scan start")
 	}
 	if !c.startTracked(func() { c.sampleThroughput(runCtx) }) {
-		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before throughput sampler start")
+	}
+	// The forwarded port gluetun hands out is not stable for the life of the
+	// process: a VPN reconnect or server switch rotates it, and without this
+	// poller the client keeps listening on - and advertising - a port nothing
+	// reaches any more, with no error anywhere to say so (issue #395).
+	if c.cfg.GluetunControlURL != "" {
+		if !c.startTracked(func() { c.watchGluetunPort(runCtx) }) {
+			return errors.New("soulseek: lifecycle stopped before gluetun port watcher start")
+		}
 	}
 	// The message worker spans reconnects rather than living inside
 	// serveConnected: a message only needs a live connection for its ack, and
@@ -647,7 +676,6 @@ func (c *Client) Run(ctx context.Context) error {
 	// refused instead of landing in a newer session.
 	if c.cfg.MessageSink != nil {
 		if !c.startTracked(func() { c.runMessageWorker(runCtx) }) {
-			_ = ln.Close()
 			return errors.New("soulseek: lifecycle stopped before message worker start")
 		}
 	}
@@ -720,20 +748,34 @@ func (c *Client) retryStartup(ctx context.Context) net.Listener {
 // connection (see runInitialShareScan), so a slow or stalled scan can never
 // delay connecting to the server.
 func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
-	addr := c.cfg.ListenAddr
-	if c.cfg.GluetunControlURL != "" {
-		port, err := c.fetchGluetunPort(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("gluetun forwarded port: %w", err)
-		}
-		host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
-		if err != nil {
-			return nil, fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
-		}
-		addr = net.JoinHostPort(host, strconv.Itoa(port))
-		c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
+	if c.cfg.GluetunControlURL == "" {
+		return c.listenForPeers(ctx, c.cfg.ListenAddr)
 	}
+	port, err := c.fetchGluetunPort(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gluetun forwarded port: %w", err)
+	}
+	addr, err := c.peerListenAddrOnPort(port)
+	if err != nil {
+		return nil, err
+	}
+	c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
+	return c.listenForPeers(ctx, addr)
+}
 
+// peerListenAddrOnPort substitutes port into ListenAddr, keeping its host.
+// Shared by the startup bind and the mid-run rebind (issue #395) so the two
+// cannot disagree about how a gluetun port becomes an address.
+func (c *Client) peerListenAddrOnPort(port int) (string, error) {
+	host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
+	if err != nil {
+		return "", fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// listenForPeers binds the peer listener on addr.
+func (c *Client) listenForPeers(ctx context.Context, addr string) (net.Listener, error) {
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen for peer connections on %s: %w", addr, err)
@@ -866,7 +908,7 @@ func (c *Client) serveConnected(ctx context.Context, conn net.Conn) error {
 		c.failAllPendingAttempts(errNoServerConnection)
 	}()
 
-	if err := sendToServerGeneration(c, generation, &server.SetListenPort{Port: c.listenPort, ObfuscatedPort: 0}); err != nil {
+	if err := sendToServerGeneration(c, generation, &server.SetListenPort{Port: int(c.listenPort.Load()), ObfuscatedPort: 0}); err != nil {
 		return fmt.Errorf("write set listen port: %w", err)
 	}
 	if err := c.tree.activate(generation); err != nil {
@@ -1174,6 +1216,11 @@ func (c *Client) beginLifecycle(parent context.Context) (context.Context, error)
 	// A new lifecycle never inherits queue or token routing state from a prior
 	// run, including a prior run that stopped during negotiation.
 	c.uploads.reset()
+	// A prior run's teardown left the listener latched closed; a new one is
+	// allowed to install its own.
+	c.lnMu.Lock()
+	c.listenerClosed = false
+	c.lnMu.Unlock()
 	c.lifeCtx, c.lifeCancel = context.WithCancel(parent)
 	c.lifeActive = true
 	c.lifeStopping = false
@@ -1216,7 +1263,72 @@ func (c *Client) startTracked(fn func()) bool {
 	return true
 }
 
-func (c *Client) stopLifecycle(ln net.Listener) {
+// errListenerLifecycleStopping reports that the lifecycle went down while a
+// peer listener was being installed, so the caller's listener was not adopted.
+var errListenerLifecycleStopping = errors.New("soulseek: lifecycle stopped before listener start")
+
+// installPeerListener starts ln's accept loop, makes ln the current peer
+// listener, and closes whichever listener it replaced - in that order, which
+// is the whole point of having one function for it. The overlap keeps inbound
+// connections arriving throughout a rebind, where closing the old listener
+// first would open a window in which nothing is listening at all. On any
+// error ln is closed and the client keeps the listener it already had.
+//
+// Both callers go through here: Run's initial bind (where there is nothing to
+// replace) and rebindPeerListener's swap onto a rotated gluetun port.
+func (c *Client) installPeerListener(ctx context.Context, ln net.Listener) error {
+	// startTracked takes lifeMu, so it must not run under lnMu - see the lnMu
+	// field comment for the ordering this preserves.
+	if !c.startTracked(func() { c.acceptPeers(ctx, ln) }) {
+		_ = ln.Close()
+		return errListenerLifecycleStopping
+	}
+	replaced, ok := c.setPeerListener(ln)
+	if !ok {
+		_ = ln.Close() // teardown won the race; the accept loop exits on ErrClosed
+		return errListenerLifecycleStopping
+	}
+	if replaced != nil {
+		_ = replaced.Close()
+	}
+	return nil
+}
+
+// setPeerListener installs ln as the current peer listener and returns the
+// listener it replaces (nil on the first install). ok is false when the
+// lifecycle has already closed the listener, in which case ln is not installed
+// and the caller owns closing it - otherwise a listener bound during teardown
+// would be left open for the life of the process.
+//
+// Call installPeerListener rather than this: on its own this publishes ln's
+// port before anything accepts on it.
+func (c *Client) setPeerListener(ln net.Listener) (replaced net.Listener, ok bool) {
+	c.lnMu.Lock()
+	defer c.lnMu.Unlock()
+	if c.listenerClosed {
+		return nil, false
+	}
+	replaced, c.listener = c.listener, ln
+	addr := ln.Addr().String()
+	c.boundListenAddr.Store(&addr)
+	c.listenPort.Store(int64(ln.Addr().(*net.TCPAddr).Port))
+	return replaced, true
+}
+
+// closePeerListener closes the current peer listener and refuses any further
+// install, so a rebind racing teardown cannot resurrect one.
+func (c *Client) closePeerListener() {
+	c.lnMu.Lock()
+	ln := c.listener
+	c.listener = nil
+	c.listenerClosed = true
+	c.lnMu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
+}
+
+func (c *Client) stopLifecycle() {
 	c.lifeMu.Lock()
 	if !c.lifeActive || c.lifeStopping {
 		c.lifeMu.Unlock()
@@ -1228,7 +1340,7 @@ func (c *Client) stopLifecycle(ln net.Listener) {
 
 	// Cancellation precedes reset/close of generation-owned work.
 	cancel()
-	_ = ln.Close()
+	c.closePeerListener()
 	c.closeHandshakes()
 	c.sessions.CloseAll(context.Canceled)
 	c.searches.failAll(context.Canceled)

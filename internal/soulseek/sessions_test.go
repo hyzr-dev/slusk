@@ -28,9 +28,12 @@ func startSessionLifecycle(t *testing.T, c *Client) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	if _, ok := c.setPeerListener(ln); !ok {
+		t.Fatal("setPeerListener on a fresh lifecycle = !ok")
+	}
 	t.Cleanup(func() {
 		cancel()
-		c.stopLifecycle(ln)
+		c.stopLifecycle()
 	})
 }
 
