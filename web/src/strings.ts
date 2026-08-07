@@ -97,6 +97,15 @@ export const t = {
     throughputSeparator: '·',
     idle: 'idle',
     statusRegion: 'Application status',
+    // AGPL § 13 requires a network-interacting version to "prominently offer"
+    // its Corresponding Source (issue #391, deriving from #380). The visible
+    // label is a bare word to sit inside the brand cell's terminal idiom; the
+    // accessible name spells out what it offers, because "SOURCE" alone read
+    // out of context could equally mean a download source or a search source.
+    // The visible text is contained in the accessible name, so WCAG 2.5.3
+    // (Label in Name) still holds for anyone driving this by voice.
+    sourceLabel: 'SOURCE',
+    sourceLabelAccessible: 'Source code for this version',
   },
   // Shared query-state copy. Every view renders the same three states for a
   // GET — loading, failed, stale — so the two that are not view-specific live

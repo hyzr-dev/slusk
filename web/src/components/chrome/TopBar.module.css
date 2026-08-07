@@ -24,6 +24,21 @@
    .brand already aligns on the baseline with a 10px gap for exactly this. */
 .brandVersion { color: var(--text-dim); font-size: 10.5px; letter-spacing: 0.5px; }
 
+/* The AGPL § 13 source offer (#391). Sized and coloured as the version beside
+   it, because the two are one statement: which build this is, and where its
+   source lives. No new hue — colour is signal in this interface, and a link is
+   not a status. It reads as interactive through the same --text-dim → --fg
+   hover the logout control uses, plus an underline that only appears on hover,
+   so at rest the brand cell stays a flat terminal line rather than a web page's
+   blue-underlined link. */
+.sourceLink {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  text-decoration: none;
+}
+.sourceLink:hover { color: var(--fg); text-decoration: underline; }
+
 .dot { width: 6px; height: 6px; background: var(--ok); animation: tui-pulse 1.8s infinite; }
 .dotStale { width: 6px; height: 6px; background: var(--bad); }
 
