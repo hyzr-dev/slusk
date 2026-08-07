@@ -439,6 +439,19 @@ func TestLoadSoulseekGluetunPollIntervalMustBePositive(t *testing.T) {
 	}
 }
 
+func TestLoadSoulseekGluetunPollIntervalWithoutControlURL(t *testing.T) {
+	body := gluetunConfigWith(t, `poll_interval = "1m"`)
+	body = strings.Replace(body, "control_url = \"http://127.0.0.1:8000\"\n", "", 1)
+	body = strings.Replace(body, "api_key = \"gluetun-key\"\n", "", 1)
+	_, err := LoadBytes([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for soulseek.gluetun.poll_interval without control_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.gluetun.poll_interval") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
 // gluetunConfigWith returns the known-valid gluetun fixture with extra
 // appended to its [soulseek.gluetun] table, so these tests differ from the
 // passing baseline by exactly the key under test.

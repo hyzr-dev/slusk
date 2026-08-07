@@ -57,11 +57,10 @@ const (
 	defaultListenAddr = "127.0.0.1:0"
 	// defaultGluetunTimeout bounds one gluetun control-server fetch.
 	defaultGluetunTimeout = 5 * time.Second
-	// defaultGluetunPollInterval is how often the forwarded port is re-fetched
-	// while the client runs (issue #395). Port rotation happens on VPN
-	// reconnects and server switches, not continuously, so minutes is the
-	// right order of magnitude: a shorter interval only adds control-server
-	// traffic, and the cost of a late rebind is bounded by this value.
+	// defaultGluetunPollInterval backs GluetunPollInterval for callers that
+	// construct a Client directly (tests, the manual probe). Production goes
+	// through config.SoulseekConfig, which defaults the same value first and
+	// carries the rationale for it.
 	defaultGluetunPollInterval = 5 * time.Minute
 	// defaultShareScanLogInterval is how often scanShares logs progress
 	// during a share rescan.
@@ -632,18 +631,15 @@ func (c *Client) Run(ctx context.Context) error {
 		return err
 	}
 	defer c.stopLifecycle()
-	if _, ok := c.setPeerListener(ln); !ok {
-		_ = ln.Close()
-		return errors.New("soulseek: lifecycle stopped before listener install")
-	}
 	// From here on the deferred stopLifecycle owns closing whichever listener
 	// is current, so these failure paths no longer close ln themselves - after
 	// a rebind (see watchGluetunPort) ln is not necessarily that listener.
 	if !c.startTracked(func() { c.uploads.dispatch(runCtx) }) {
+		_ = ln.Close()
 		return errors.New("soulseek: lifecycle stopped before upload dispatcher start")
 	}
-	if !c.startTracked(func() { c.acceptPeers(runCtx, ln) }) {
-		return errors.New("soulseek: lifecycle stopped before listener start")
+	if err := c.installPeerListener(runCtx, ln); err != nil {
+		return err
 	}
 	if !c.startTracked(func() { c.runInitialShareScan(runCtx) }) {
 		return errors.New("soulseek: lifecycle stopped before initial share scan start")
@@ -738,20 +734,34 @@ func (c *Client) retryStartup(ctx context.Context) net.Listener {
 // connection (see runInitialShareScan), so a slow or stalled scan can never
 // delay connecting to the server.
 func (c *Client) trySetup(ctx context.Context) (net.Listener, error) {
-	addr := c.cfg.ListenAddr
-	if c.cfg.GluetunControlURL != "" {
-		port, err := c.fetchGluetunPort(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("gluetun forwarded port: %w", err)
-		}
-		host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
-		if err != nil {
-			return nil, fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
-		}
-		addr = net.JoinHostPort(host, strconv.Itoa(port))
-		c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
+	if c.cfg.GluetunControlURL == "" {
+		return c.listenForPeers(ctx, c.cfg.ListenAddr)
 	}
+	port, err := c.fetchGluetunPort(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gluetun forwarded port: %w", err)
+	}
+	addr, err := c.peerListenAddrOnPort(port)
+	if err != nil {
+		return nil, err
+	}
+	c.logger.Info("gluetun forwarded port fetched", "port", port, "listen_addr", addr)
+	return c.listenForPeers(ctx, addr)
+}
 
+// peerListenAddrOnPort substitutes port into ListenAddr, keeping its host.
+// Shared by the startup bind and the mid-run rebind (issue #395) so the two
+// cannot disagree about how a gluetun port becomes an address.
+func (c *Client) peerListenAddrOnPort(port int) (string, error) {
+	host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
+	if err != nil {
+		return "", fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// listenForPeers binds the peer listener on addr.
+func (c *Client) listenForPeers(ctx context.Context, addr string) (net.Listener, error) {
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen for peer connections on %s: %w", addr, err)
@@ -1239,16 +1249,45 @@ func (c *Client) startTracked(fn func()) bool {
 	return true
 }
 
+// errListenerLifecycleStopping reports that the lifecycle went down while a
+// peer listener was being installed, so the caller's listener was not adopted.
+var errListenerLifecycleStopping = errors.New("soulseek: lifecycle stopped before listener start")
+
+// installPeerListener starts ln's accept loop, makes ln the current peer
+// listener, and closes whichever listener it replaced - in that order, which
+// is the whole point of having one function for it. The overlap keeps inbound
+// connections arriving throughout a rebind, where closing the old listener
+// first would open a window in which nothing is listening at all. On any
+// error ln is closed and the client keeps the listener it already had.
+//
+// Both callers go through here: Run's initial bind (where there is nothing to
+// replace) and rebindPeerListener's swap onto a rotated gluetun port.
+func (c *Client) installPeerListener(ctx context.Context, ln net.Listener) error {
+	// startTracked takes lifeMu, so it must not run under lnMu - see the lnMu
+	// field comment for the ordering this preserves.
+	if !c.startTracked(func() { c.acceptPeers(ctx, ln) }) {
+		_ = ln.Close()
+		return errListenerLifecycleStopping
+	}
+	replaced, ok := c.setPeerListener(ln)
+	if !ok {
+		_ = ln.Close() // teardown won the race; the accept loop exits on ErrClosed
+		return errListenerLifecycleStopping
+	}
+	if replaced != nil {
+		_ = replaced.Close()
+	}
+	return nil
+}
+
 // setPeerListener installs ln as the current peer listener and returns the
 // listener it replaces (nil on the first install). ok is false when the
 // lifecycle has already closed the listener, in which case ln is not installed
 // and the caller owns closing it - otherwise a listener bound during teardown
 // would be left open for the life of the process.
 //
-// Callers must have started ln's accept loop before calling this and must
-// close the returned listener afterwards, in that order: the overlap keeps
-// inbound connections arriving throughout the swap, where closing first would
-// open a window in which nothing is listening at all.
+// Call installPeerListener rather than this: on its own this publishes ln's
+// port before anything accepts on it.
 func (c *Client) setPeerListener(ln net.Listener) (replaced net.Listener, ok bool) {
 	c.lnMu.Lock()
 	defer c.lnMu.Unlock()

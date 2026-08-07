@@ -326,7 +326,9 @@ type GluetunConfig struct {
 	APIKey     string `toml:"api_key"`
 	// PollInterval is how often the forwarded port is re-fetched while slusk
 	// runs, so a port gluetun rotates on a VPN reconnect is picked up rather
-	// than leaving slusk listening on a dead one. Defaults to 5m when unset.
+	// than leaving slusk listening on a dead one. Absent (or "0s", which is
+	// indistinguishable from absent once decoded) means the 5m default;
+	// a negative value is rejected.
 	PollInterval Duration `toml:"poll_interval"`
 }
 
@@ -627,11 +629,18 @@ func (c Config) Validate() error {
 			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 				problems = append(problems, "soulseek.gluetun.control_url must be an http(s) URL")
 			}
-		} else if g.APIKey != "" {
-			problems = append(problems, "soulseek.gluetun.api_key requires soulseek.gluetun.control_url")
-		}
-		if c.Soulseek.Gluetun.ControlURL != "" && c.Soulseek.Gluetun.PollInterval.Duration <= 0 {
-			problems = append(problems, "soulseek.gluetun.poll_interval must be > 0")
+			// applyDefaults has already filled a blank interval, so this can
+			// only fire on a value the user actually wrote.
+			if g.PollInterval.Duration <= 0 {
+				problems = append(problems, "soulseek.gluetun.poll_interval must be > 0")
+			}
+		} else {
+			if g.APIKey != "" {
+				problems = append(problems, "soulseek.gluetun.api_key requires soulseek.gluetun.control_url")
+			}
+			if g.PollInterval.Duration != 0 {
+				problems = append(problems, "soulseek.gluetun.poll_interval requires soulseek.gluetun.control_url")
+			}
 		}
 		if c.Soulseek.UploadSlots <= 0 {
 			problems = append(problems, "soulseek.upload_slots must be > 0")

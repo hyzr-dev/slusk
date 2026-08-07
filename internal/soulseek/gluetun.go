@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -65,11 +63,13 @@ func (c *Client) refreshGluetunPort(ctx context.Context) {
 
 	// The server holds the port from the SetListenPort sent at login, so
 	// without this it keeps handing peers the dead one until the next
-	// reconnect. A failure here is not fatal: the write path already tears
-	// down the connection it failed on, and the reconnect re-announces the
-	// current port from c.listenPort.
+	// reconnect. A failure here is not fatal, but it is not free either:
+	// sendToServer closes the connection it failed to write to, so a failed
+	// announce forces the reconnect this send exists to avoid. The reconnect
+	// then re-announces the current port from c.listenPort, so the port is
+	// right either way - it just costs a session.
 	if err := sendToServer(c, &server.SetListenPort{Port: port, ObfuscatedPort: 0}); err != nil {
-		c.logger.Warn("announcing the new listen port to the server failed; it will be sent on the next reconnect",
+		c.logger.Warn("announcing the new listen port failed; the server connection is dropped and will re-announce it on reconnect",
 			"err", err, "listen_port", port)
 	}
 }
@@ -77,38 +77,20 @@ func (c *Client) refreshGluetunPort(ctx context.Context) {
 // rebindPeerListener binds a second peer listener on port and makes it the
 // current one, leaving the old listener's already-accepted sockets alone: an
 // accepted connection is independent of the listener it came from, so
-// in-flight transfers survive. The new listener starts accepting before the
-// old one closes, so the swap has an overlap rather than a gap.
+// in-flight transfers survive the swap.
 //
 // On any failure the client is left exactly as it was, still bound to the old
 // port.
 func (c *Client) rebindPeerListener(ctx context.Context, port int) error {
-	host, _, err := net.SplitHostPort(c.cfg.ListenAddr)
+	addr, err := c.peerListenAddrOnPort(port)
 	if err != nil {
-		return fmt.Errorf("split listen addr %s: %w", c.cfg.ListenAddr, err)
+		return err
 	}
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+	ln, err := c.listenForPeers(ctx, addr)
 	if err != nil {
-		return fmt.Errorf("listen for peer connections on %s: %w", addr, err)
+		return err
 	}
-
-	// Started before the install so no inbound connection can land on an
-	// unattended listener, and outside lnMu so this never takes lifeMu while
-	// holding lnMu (see the lnMu field comment).
-	if !c.startTracked(func() { c.acceptPeers(ctx, ln) }) {
-		_ = ln.Close()
-		return fmt.Errorf("lifecycle stopping")
-	}
-	old, ok := c.setPeerListener(ln)
-	if !ok {
-		_ = ln.Close() // teardown won the race; its accept loop exits on ErrClosed
-		return fmt.Errorf("lifecycle stopping")
-	}
-	if old != nil {
-		_ = old.Close()
-	}
-	return nil
+	return c.installPeerListener(ctx, ln)
 }
 
 // fetchGluetunPort queries the gluetun control server configured via
