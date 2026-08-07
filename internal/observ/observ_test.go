@@ -83,6 +83,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 	return ServerDeps{
 		Registry:         reg,
 		Status:           func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil },
+		JobProgress:      func(ctx context.Context) (JobProgressReport, error) { return JobProgressReport{}, nil },
 		Jobs:             func(ctx context.Context) ([]core.JobView, error) { return nil, nil },
 		PagedJobs:        noopPagedJobs,
 		Cancel:           func(ctx context.Context, jobID int64) error { return nil },

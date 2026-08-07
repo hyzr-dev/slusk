@@ -553,6 +553,28 @@ export const t = {
     // counters sourced from the same JSON the rest of this page already reads
     // (useStatus/useUploads/useShares) — the real Prometheus surface is linked
     // via metricsMeta instead of being named row by row.
+    // Job-progress panel (#442). The module cards above report whether each
+    // module is *ticking*; these rows report whether the *work* is moving.
+    // Three downloads once sat untouched for four weeks while every card above
+    // them read OK, because doing nothing is a tick's normal outcome and so has
+    // no signature. The heading says "progress" rather than "staleness" for the
+    // same reason the rows carry no warning colour: how old is too old depends
+    // on the library and the peer, and slusk does not know the answer — it
+    // reports the age and lets the reader judge.
+    progressHeading: 'JOB PROGRESS',
+    progressMeta: 'oldest update per state',
+    progressEmpty: 'No jobs in progress.',
+    // Column headers for the per-state rows.
+    progressColumnState: 'state',
+    progressColumnCount: 'jobs',
+    progressColumnAge: 'oldest',
+    // The one row that *is* a defect rather than a reading: a job in
+    // DOWNLOADING or IMPORTING with no active candidate is skipped by its
+    // module on every pass while holding one of the concurrency slots, and
+    // nothing anywhere reports a failure. Non-zero always means stuck.
+    progressNoCandidate: 'stuck without a candidate',
+    progressNoCandidateTitle:
+      'Jobs downloading or importing with no active candidate. Their module skips them on every pass while they hold a slot, so they never fail and never finish. Retry or cancel them from the job list.',
     metricsHeading: 'METRICS',
     metricsMeta: 'full set at /metrics',
     // The seven /status rows all count jobs, in the Jobs page's status

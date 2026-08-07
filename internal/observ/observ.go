@@ -30,6 +30,11 @@ type Metrics struct {
 	DownloadsActive     prometheus.Gauge
 	AlbumReleasesErrors prometheus.Counter
 	AlbumTracksErrors   prometheus.Counter
+	// JobsInState and JobOldestUpdateAge are labelled by job state and are
+	// rebuilt wholesale on every publish - see SetJobProgress.
+	JobsInState                *prometheus.GaugeVec
+	JobOldestUpdateAge         *prometheus.GaugeVec
+	JobsWithoutActiveCandidate prometheus.Gauge
 }
 
 // NewMetrics constructs and registers the collectors on reg.
@@ -50,8 +55,20 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		AlbumTracksErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "slusk_album_tracks_errors_total", Help: "Total failed Lidarr AlbumTracks calls during discovery.",
 		}),
+		JobsInState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "slusk_jobs_in_state", Help: "Jobs currently in each non-terminal state.",
+		}, []string{"state"}),
+		JobOldestUpdateAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "slusk_job_oldest_update_age_seconds",
+			Help: "Age of the least recently updated job in each non-terminal state.",
+		}, []string{"state"}),
+		JobsWithoutActiveCandidate: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "slusk_jobs_without_active_candidate",
+			Help: "Jobs in DOWNLOADING or IMPORTING with no ACTIVE candidate, which both modules skip indefinitely.",
+		}),
 	}
-	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors)
+	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors,
+		m.JobsInState, m.JobOldestUpdateAge, m.JobsWithoutActiveCandidate)
 	return m
 }
 
@@ -423,6 +440,10 @@ type ServerDeps struct {
 	Version string
 	// Status reports the pipeline snapshot served at /status.
 	Status StatusFunc
+	// JobProgress reports per-state job staleness for /status, so the Health
+	// view can show whether the work is moving next to whether the modules are
+	// ticking (issue #442).
+	JobProgress JobProgressFunc
 	// Jobs lists every job view, unpaged, for GET /api/stream's hub (issue
 	// #268 removed its other consumer, GET /api/jobs/all — every REST job
 	// list is paged now).
@@ -633,6 +654,11 @@ func NewServer(deps ServerDeps) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		progress, err := deps.JobProgress(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		type moduleStatusDTO struct {
 			LastAttempt         string `json:"lastAttempt"`
 			LastCompleted       string `json:"lastCompleted"`
@@ -680,12 +706,14 @@ func NewServer(deps ServerDeps) http.Handler {
 			Orphaned      int                        `json:"orphaned"`
 			Modules       map[string]string          `json:"modules"`
 			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
+			JobProgress   jobProgressDTO             `json:"jobProgress"`
 			Version       string                     `json:"version"`
 		}{
 			StatusReport:  report,
 			Orphaned:      report.Parked,
 			Modules:       moduleTicks,
 			ModuleDetails: moduleDetails,
+			JobProgress:   newJobProgressDTO(progress),
 			Version:       deps.Version,
 		}
 		w.Header().Set("Content-Type", "application/json")

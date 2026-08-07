@@ -6,9 +6,17 @@ import Page from '../components/tui/Page';
 import Panel from '../components/tui/Panel';
 import QueryNotice, { hasData, queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
-import { formatTime } from '../format';
+import { formatAge, formatTime } from '../format';
 import { t } from '../strings';
 import styles from './Health.module.css';
+
+// stateLabel renders a job state in the same words the rest of the UI uses,
+// falling back to the raw name for a state t.state does not map. Showing the
+// raw name is the honest fallback: a state only a reader of internal/pipeline
+// would recognise is a gap worth seeing, not one worth papering over.
+function stateLabel(state: string): string {
+  return t.state[state as keyof typeof t.state] ?? state;
+}
 
 export default function Health() {
   const statusQuery = useStatus();
@@ -27,6 +35,11 @@ export default function Health() {
   // pipeline modules generically rather than a hardcoded module→dependency map.
   const modules = status?.moduleDetails ?? {};
   const names = Object.keys(modules).sort();
+
+  // Absent on a server predating #442; the panel is then omitted entirely
+  // rather than drawn with zeroes, which would read as "nothing is stale".
+  const progress = status?.jobProgress;
+  const wedged = progress?.jobsWithoutActiveCandidate ?? 0;
 
   // Human-readable counters, not Prometheus metric names — see strings.ts
   // health.metricsHeading for why the mock's slusk_* row labels aren't used.
@@ -86,6 +99,39 @@ export default function Health() {
             })}
           </div>
         ))}
+
+      {/* Deliberately directly under the module cards: those reported OK
+          throughout the four weeks nothing moved (#442), so the two readings
+          have to be seen together to be worth anything. */}
+      {progress && (
+        <Panel>
+          <SectionHeader label={t.health.progressHeading} meta={t.health.progressMeta} />
+          {progress.states.length === 0 ? (
+            <EmptyState message={t.health.progressEmpty} />
+          ) : (
+            <>
+              <div className={`${styles.progressRow} ${styles.progressHead}`}>
+                <span>{t.health.progressColumnState}</span>
+                <span>{t.health.progressColumnCount}</span>
+                <span>{t.health.progressColumnAge}</span>
+              </div>
+              {progress.states.map((s) => (
+                <div key={s.state} className={styles.progressRow}>
+                  <span className={styles.progressState}>{stateLabel(s.state)}</span>
+                  <span className={styles.progressValue}>{s.count}</span>
+                  <span className={styles.progressValue}>
+                    {formatAge(s.oldestUpdateAgeSeconds)}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
+          <div className={styles.wedgeRow} title={t.health.progressNoCandidateTitle}>
+            <span className={styles.metricKey}>{t.health.progressNoCandidate}</span>
+            <span className={wedged > 0 ? styles.wedgeValueBad : styles.metricValue}>{wedged}</span>
+          </div>
+        </Panel>
+      )}
 
       <QueryNotice phase={chartsPhase} />
       <div className={styles.chartsGrid}>

@@ -60,6 +60,7 @@ export function normalizeStatusReport(report: WireStatusReport): StatusReport {
     parked: report.parked ?? report.orphaned ?? 0,
     modules: report.modules,
     moduleDetails: report.moduleDetails,
+    ...(report.jobProgress === undefined ? {} : { jobProgress: report.jobProgress }),
     ...(report.version === undefined ? {} : { version: report.version }),
   };
 }

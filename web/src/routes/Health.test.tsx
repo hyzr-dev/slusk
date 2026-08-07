@@ -211,6 +211,87 @@ describe('Health loading vs empty', () => {
   });
 });
 
+function renderHealthWithProgress(jobProgress: StatusReport['jobProgress']) {
+  stubFetchIndefinitely();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(queryKeys.status, {
+    wanted: 0,
+    selecting: 0,
+    waiting: 0,
+    queued: 0,
+    active: 0,
+    stalled: 0,
+    parked: 0,
+    modules: {},
+    moduleDetails: { importer: makeModule() },
+    ...(jobProgress === undefined ? {} : { jobProgress }),
+  } satisfies StatusReport);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <Health />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe('Health job progress', () => {
+  it('renders one row per non-terminal state with its count and oldest-update age', () => {
+    renderHealthWithProgress({
+      states: [
+        { state: 'DOWNLOADING', count: 3, oldestUpdateAgeSeconds: 2_419_200 },
+        { state: 'IMPORTING', count: 1, oldestUpdateAgeSeconds: 45 },
+      ],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(screen.getByText(t.state.DOWNLOADING)).toBeInTheDocument();
+    expect(screen.getByText('28d')).toBeInTheDocument();
+    expect(screen.getByText(t.state.IMPORTING)).toBeInTheDocument();
+    expect(screen.getByText('45s')).toBeInTheDocument();
+  });
+
+  // A state slusk's own copy does not name must still be readable rather than
+  // silently dropped — the raw name is the honest fallback.
+  it('falls back to the raw state name for a state with no mapped label', () => {
+    renderHealthWithProgress({
+      states: [{ state: 'COOLDOWN', count: 2, oldestUpdateAgeSeconds: 60 }],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(screen.getByText('COOLDOWN')).toBeInTheDocument();
+  });
+
+  // The panel omits itself entirely on a server predating #442. Drawing zeroes
+  // would read as "nothing is stale" about a backend that said nothing at all.
+  it('omits the progress panel when the server sends no jobProgress', () => {
+    renderHealthWithProgress(undefined);
+    expect(screen.queryByText(t.health.progressHeading)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.health.progressNoCandidate)).not.toBeInTheDocument();
+  });
+
+  it('shows the empty message but keeps the wedge count when no state has jobs', () => {
+    renderHealthWithProgress({ states: [], jobsWithoutActiveCandidate: 0 });
+    expect(screen.getByText(t.health.progressEmpty, { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(t.health.progressNoCandidate)).toBeInTheDocument();
+  });
+
+  it('marks a non-zero stuck-without-a-candidate count but leaves zero unmarked', () => {
+    const { unmount } = renderHealthWithProgress({
+      states: [],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(
+      screen.getByTitle(t.health.progressNoCandidateTitle).querySelector('span:last-child')
+        ?.className,
+    ).not.toMatch(/wedgeValueBad/);
+    unmount();
+
+    renderHealthWithProgress({ states: [], jobsWithoutActiveCandidate: 2 });
+    const row = screen.getByTitle(t.health.progressNoCandidateTitle);
+    expect(row.querySelector('span:last-child')?.className).toMatch(/wedgeValueBad/);
+    expect(row.textContent).toContain('2');
+  });
+});
+
 describe('Health module states', () => {
   it('shows the never-run label for a module with no lastAttempt, not a formatted date', () => {
     renderHealth({ importer: makeModule({ lastAttempt: '' }) });

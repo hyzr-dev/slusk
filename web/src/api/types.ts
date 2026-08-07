@@ -341,6 +341,33 @@ export interface ModuleStatus {
   ready: boolean;
 }
 
+/** internal/observ/progress.go jobProgressStateDTO */
+export interface JobProgressState {
+  state: string;
+  count: number;
+  /**
+   * How long ago the least recently updated job in this state was touched.
+   * Raw seconds, not a stale/fresh verdict: the threshold belongs to whoever
+   * reads it, and the backend deliberately ships no opinion about one.
+   */
+  oldestUpdateAgeSeconds: number;
+}
+
+/**
+ * internal/observ/progress.go jobProgressDTO — whether the *work* is moving,
+ * as opposed to whether the modules are ticking (issue #442). A state with no
+ * jobs is absent from `states` rather than present with zeroes.
+ */
+export interface JobProgress {
+  states: JobProgressState[];
+  /**
+   * Jobs in DOWNLOADING or IMPORTING with no active candidate. Both modules
+   * skip such a job indefinitely while it holds a slot, so any non-zero value
+   * is work that has stopped without anything reporting a failure.
+   */
+  jobsWithoutActiveCandidate: number;
+}
+
 /**
  * GET /status
  *
@@ -369,6 +396,12 @@ export interface StatusReport {
   parked: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
+  /**
+   * Optional because a server predating issue #442 omits it entirely, and the
+   * Health view then draws no progress panel rather than a row of zeroes that
+   * would read as "everything is fresh".
+   */
+  jobProgress?: JobProgress;
   /**
    * The running build: a `v*` tag in a deployed container, `dev` for a binary
    * built without the ldflag. Optional because an older server predating
