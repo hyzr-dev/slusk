@@ -50,6 +50,13 @@ const (
 	// defaultDownloadQueueTimeout bounds how long a queued download waits for
 	// the peer to send its TransferRequest before giving up.
 	defaultDownloadQueueTimeout = 10 * time.Minute
+	// defaultRemoveDrainTimeout bounds how long Remove waits for a transfer's
+	// orchestration goroutine to finish before deleting its ".part" file. It
+	// is deliberately tiny next to the pipeline's tick timeout (5m by
+	// default): Remove runs inside a downloading tick, possibly several times
+	// per tick, and a stalled orchestration must never be able to stall that
+	// tick. A stray empty ".part" is the cheaper failure.
+	defaultRemoveDrainTimeout = 2 * time.Second
 	// defaultListenAddr is used only when Config.ListenAddr is left blank,
 	// which production configuration never does (see config.SoulseekConfig);
 	// it exists so tests that don't care about the peer listener don't have
@@ -219,6 +226,10 @@ type Config struct {
 	// downloadQueueTimeout bounds how long a queued download waits for the
 	// peer to send its TransferRequest before giving up. Default 10m.
 	downloadQueueTimeout time.Duration
+	// removeDrainTimeout bounds how long Remove waits for a transfer's
+	// orchestration goroutine to finish before unlinking its ".part" file.
+	// Default 2s.
+	removeDrainTimeout time.Duration
 	// uploadNegotiationTimeout bounds waiting for TransferResponse.
 	uploadNegotiationTimeout time.Duration
 	// serverWriteTimeout bounds a single write to the central server connection
@@ -438,6 +449,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.downloadNegotiationTimeout <= 0 {
 		cfg.downloadNegotiationTimeout = defaultDownloadNegotiationTimeout
+	}
+	if cfg.removeDrainTimeout <= 0 {
+		cfg.removeDrainTimeout = defaultRemoveDrainTimeout
 	}
 	if cfg.downloadQueueTimeout <= 0 {
 		cfg.downloadQueueTimeout = defaultDownloadQueueTimeout

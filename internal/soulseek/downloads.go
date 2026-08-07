@@ -185,6 +185,16 @@ type transfer struct {
 	// whichever step of the orchestration goroutine is currently running.
 	cancel context.CancelFunc
 
+	// done is closed by runDownload on its way out (via defer, so every exit
+	// path including a panic closes it) and by Enqueue when the orchestration
+	// goroutine never starts at all. Once it is closed nothing will touch the
+	// transfer's destination files again, which is what lets Remove unlink the
+	// ".part" file without racing a streamFile that is about to recreate it
+	// (issue #386). It is deliberately separate from runDownload's internal
+	// watchDone channel: that one is closed the moment streamFile returns,
+	// which is a different - and earlier - point in the lifecycle.
+	done chan struct{}
+
 	// transferRequestCh, fileConnCh and failCh are how the P-session download
 	// hooks (Group E) and handleInboundFileConn (this group) deliver protocol
 	// events to the orchestration goroutine waiting on them (Group E's
@@ -229,6 +239,7 @@ func newTransfer(id, username, filename string, size int64) *transfer {
 		transferRequestCh: make(chan peer.TransferRequest, 1),
 		fileConnCh:        make(chan fileConnHandoff, 1),
 		failCh:            make(chan transferFailure, 1),
+		done:              make(chan struct{}),
 	}
 }
 
@@ -602,6 +613,10 @@ func (c *Client) Enqueue(ctx context.Context, username, filename string, size in
 
 	if !c.startTracked(func() { c.runDownload(trCtx, tr) }) {
 		cancel()
+		// runDownload never ran, so nothing else will ever close tr.done. A
+		// Remove racing this rejection must not sit out its full drain timeout
+		// waiting for a goroutine that does not exist.
+		close(tr.done)
 		setTransferErrored(tr, "soulseek: client lifecycle is stopping", true)
 		c.downloads.remove(tr)
 	}
@@ -679,6 +694,18 @@ func (c *Client) Cancel(ctx context.Context, username, id string) error {
 // Remove purges id's registry entry and deletes any partial (".part") file
 // left on disk for it, cancelling its orchestration first if still active.
 // Implements pipeline.PeerNetwork.
+//
+// Once Remove returns nil a caller can rely on the transfer's orchestration
+// goroutine having finished, so no ".part" file for it remains or can appear
+// afterwards - the unlink is ordered after the goroutine's exit rather than
+// merely racing it (issue #386).
+//
+// The one exception is a goroutine that does not finish within a short
+// internal drain timeout (2s): Remove then unlinks anyway and still returns,
+// because it runs inside a pipeline tick that must not be allowed to stall.
+// In that case the guarantee degrades to the racy-but-harmless older
+// behavior, where a stray zero-byte ".part" can be recreated by the stream
+// after the unlink; the next download to the same destination discards it.
 func (c *Client) Remove(ctx context.Context, username, id string) error {
 	tr := c.downloads.lookupByID(id)
 	if tr == nil {
@@ -703,6 +730,22 @@ func (c *Client) Remove(ctx context.Context, username, id string) error {
 		tr.cancel()
 	}
 	c.downloads.remove(tr)
+
+	// Cancel first, wait second: the wait must not delay the cancel that
+	// unblocks the stream, or every Remove of an active download would cost
+	// the full drain timeout. Waiting here - after the cancel, before the
+	// unlink - is what makes the ordering deterministic instead of probable.
+	// runDownload can otherwise be parked between streamFile's resume-offset
+	// write and its os.OpenFile, and recreate the ".part" file the unlink
+	// below has already deleted (issue #386).
+	drain := time.NewTimer(c.cfg.removeDrainTimeout)
+	select {
+	case <-tr.done:
+	case <-drain.C:
+		// Degrade to the pre-#386 behavior rather than hold up the tick. See
+		// the doc comment above.
+	}
+	drain.Stop()
 
 	dest, err := safeDownloadDest(c.cfg.DownloadDir, tr.filename)
 	if err != nil {
@@ -839,6 +882,11 @@ func (c *Client) sendTransferAccept(ctx context.Context, tr *transfer, token sou
 // disk with streamFile. It is started exactly once per transfer, by Enqueue,
 // and owns every write to tr's state from that point until it returns.
 func (c *Client) runDownload(ctx context.Context, tr *transfer) {
+	// Signal completion on every exit path - normal return, early error, or
+	// panic - so a Remove waiting on tr.done can never be left hanging until
+	// its timeout by an exit this function grows later (issue #386).
+	defer close(tr.done)
+
 	session, err := c.getOrConnectPeerSession(ctx, tr.username)
 	if err != nil {
 		setTransferErrored(tr, "peer offline: "+err.Error(), true)

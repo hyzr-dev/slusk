@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -493,6 +494,17 @@ type stalledDownload struct {
 // can only have been closed by the client.
 func startStalledDownload(t *testing.T, filename string, transferToken soul.Token) *stalledDownload {
 	t.Helper()
+	return startStalledDownloadAt(t, filename, transferToken, true)
+}
+
+// startStalledDownloadAt is startStalledDownload with control over how far the
+// fixture waits before returning. awaitHalf=true is the half-payload mark
+// described above; awaitHalf=false returns as soon as Enqueue has registered
+// the transfer, for a caller that parks the stream earlier than that (via
+// beforeOpenPartHook) and would otherwise wait for a mark the parked stream can
+// never reach.
+func startStalledDownloadAt(t *testing.T, filename string, transferToken soul.Token, awaitHalf bool) *stalledDownload {
+	t.Helper()
 	payload := bytes.Repeat([]byte("soulseek-abort-payload-"), 100)
 	size := int64(len(payload))
 	half := size / 2
@@ -627,6 +639,10 @@ func startStalledDownload(t *testing.T, filename string, transferToken soul.Toke
 		t.Fatalf("Enqueue: %v", err)
 	}
 
+	if !awaitHalf {
+		return &stalledDownload{client: c, id: id, filename: filename, fconnClosed: fconnClosed}
+	}
+
 	// Return only once the stream is demonstrably in flight (half the payload
 	// landed), so the caller's Cancel/Remove genuinely lands mid-stream rather
 	// than before it started.
@@ -751,9 +767,9 @@ func TestDownloadRemoveAbortsActiveStream(t *testing.T) {
 	}
 	s.awaitAbortedFileConn(t, "Remove")
 
-	// Let the orchestration goroutine run its post-stream branches before
-	// reading the state it would have written.
-	time.Sleep(100 * time.Millisecond)
+	// No wait needed for the orchestration goroutine's post-stream branches:
+	// since issue #386 Remove itself joins that goroutine before returning, so
+	// every state it was going to write has been written by now.
 	tr.mu.Lock()
 	state, failure := tr.state, tr.failure
 	tr.mu.Unlock()
@@ -771,6 +787,72 @@ func TestDownloadRemoveAbortsActiveStream(t *testing.T) {
 	}
 	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat .part after remove: err = %v, want os.ErrNotExist — Remove must leave no partial behind", err)
+	}
+	s.awaitReleasedInboundLease(t)
+}
+
+// TestRemoveWaitsForTheStreamBeforeUnlinkingPart is the regression guard for
+// issue #386. Remove used to cancel the transfer and unlink its ".part" file
+// without any ordering against the orchestration goroutine, so a stream parked
+// between streamFile's resume-offset write and its os.OpenFile could recreate
+// the file microseconds after the unlink and leave a zero-byte ".part" behind a
+// Remove that had reported success.
+//
+// The window is a handful of instructions wide, so the test parks a real stream
+// inside it with beforeOpenPartHook rather than trying to hit it by timing —
+// there is no sleep here and no timing tolerance to tune. It releases the park
+// only after observing the F connection close, which is the deterministic proof
+// that Remove's cancel has landed; if Remove has nonetheless already returned by
+// then, the unlink raced the stream instead of being ordered after it.
+func TestRemoveWaitsForTheStreamBeforeUnlinkingPart(t *testing.T) {
+	var (
+		parked     = make(chan struct{})
+		release    = make(chan struct{})
+		removeDone = make(chan struct{})
+		parkOnce   sync.Once
+	)
+	beforeOpenPartHook = func() {
+		parkOnce.Do(func() {
+			close(parked)
+			<-release
+			select {
+			case <-removeDone:
+				t.Error("Remove returned before the stream reached the part-file open — the unlink raced the stream instead of being ordered after it")
+			default:
+			}
+		})
+	}
+	// Restored below, once Remove has returned and the streaming goroutine it
+	// waited for is provably gone; clearing it any earlier would race that
+	// goroutine's own read of the hook.
+	defer func() { beforeOpenPartHook = nil }()
+
+	s := startStalledDownloadAt(t, `Artist - Album\04 Track.flac`, soul.Token(9004), false)
+	c := s.client
+
+	// The stream is now past the resume-offset write (the fake peer read it and
+	// answered with payload) and has not yet opened the ".part" file.
+	<-parked
+
+	var removeErr error
+	go func() {
+		removeErr = c.Remove(context.Background(), "friend", s.id)
+		close(removeDone)
+	}()
+
+	s.awaitAbortedFileConn(t, "Remove")
+	close(release)
+	<-removeDone
+
+	if removeErr != nil {
+		t.Fatalf("Remove: %v", removeErr)
+	}
+	destPath := downloadDestPath(c.cfg.DownloadDir, s.filename)
+	if _, err := os.Stat(destPath + ".part"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat .part after Remove: err = %v, want os.ErrNotExist — the stream recreated the partial after the unlink", err)
+	}
+	if got := c.downloads.lookupByID(s.id); got != nil {
+		t.Errorf("lookupByID(%s) after Remove = %v, want nil", s.id, got)
 	}
 	s.awaitReleasedInboundLease(t)
 }
