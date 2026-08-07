@@ -319,11 +319,15 @@ type SharedFolderConfig struct {
 }
 
 // GluetunConfig lets the native Soulseek client fetch its listen port from a
-// gluetun VPN container's control server at startup instead of using the
-// static port in ListenAddr. Absent (blank ControlURL) means disabled.
+// gluetun VPN container's control server instead of using the static port in
+// ListenAddr. Absent (blank ControlURL) means disabled.
 type GluetunConfig struct {
 	ControlURL string `toml:"control_url"`
 	APIKey     string `toml:"api_key"`
+	// PollInterval is how often the forwarded port is re-fetched while slusk
+	// runs, so a port gluetun rotates on a VPN reconnect is picked up rather
+	// than leaving slusk listening on a dead one. Defaults to 5m when unset.
+	PollInterval Duration `toml:"poll_interval"`
 }
 
 type SoulseekConfig struct {
@@ -377,7 +381,16 @@ func (s *SoulseekConfig) applyDefaults() {
 	if s.UploadSlots == 0 {
 		s.UploadSlots = 2
 	}
+	if s.Gluetun.ControlURL != "" && s.Gluetun.PollInterval.Duration == 0 {
+		s.Gluetun.PollInterval.Duration = defaultGluetunPollInterval
+	}
 }
+
+// defaultGluetunPollInterval is how often the forwarded port is re-fetched
+// while slusk runs. Rotation happens on VPN reconnects, not continuously, so
+// minutes is the right order of magnitude; the cost of a late rebind is
+// bounded by this value.
+const defaultGluetunPollInterval = 5 * time.Minute
 
 const defaultMusicBrainzBaseURL = "https://musicbrainz.org"
 const defaultMusicBrainzTimeout = 10 * time.Second
@@ -616,6 +629,9 @@ func (c Config) Validate() error {
 			}
 		} else if g.APIKey != "" {
 			problems = append(problems, "soulseek.gluetun.api_key requires soulseek.gluetun.control_url")
+		}
+		if c.Soulseek.Gluetun.ControlURL != "" && c.Soulseek.Gluetun.PollInterval.Duration <= 0 {
+			problems = append(problems, "soulseek.gluetun.poll_interval must be > 0")
 		}
 		if c.Soulseek.UploadSlots <= 0 {
 			problems = append(problems, "soulseek.upload_slots must be > 0")

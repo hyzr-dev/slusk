@@ -246,17 +246,23 @@ listen_addr = "0.0.0.0:2234"
 # api_key = "CHANGEME"
 
 # --- Option: run behind gluetun with VPN port forwarding ---
-# At startup slusk asks gluetun's control server for the currently forwarded
-# port and listens on it instead — the port part of soulseek.listen_addr is
-# ignored (its host is still used); startup waits and retries with backoff until
-# gluetun reports a nonzero port. The Docker port-mapping caveat on listen_addr
-# does not apply here, since with gluetun you run slusk with
+# slusk asks gluetun's control server for the currently forwarded port and
+# listens on it instead — the port part of soulseek.listen_addr is ignored (its
+# host is still used); startup waits and retries with backoff until gluetun
+# reports a nonzero port. The Docker port-mapping caveat on listen_addr does not
+# apply here, since with gluetun you run slusk with
 # network_mode: service:gluetun (see docker-compose.example.yml) rather than
 # publishing a port of its own.
+#
+# poll_interval is how often the forwarded port is re-fetched while slusk runs,
+# so a port gluetun rotates on a VPN reconnect moves the listener instead of
+# stranding it on a dead port. Defaults to 5m; a failed poll leaves the working
+# listener alone.
 #
 # [soulseek.gluetun]
 # control_url = "http://127.0.0.1:8000"
 # api_key = "CHANGEME"
+# poll_interval = "5m"
 
 # --- Option: share folders back to the Soulseek network ---
 # Shares use explicit public names so local host/container paths never appear in

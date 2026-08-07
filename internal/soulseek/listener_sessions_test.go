@@ -35,7 +35,7 @@ func TestInboundCapCountsHandshakesAndRetainedSessions(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- c.Run(ctx) }()
 	waitForState(t, c, StateConnected, 2*time.Second)
-	addr := net.JoinHostPort("127.0.0.1", fmtPort(c.listenPort))
+	addr := net.JoinHostPort("127.0.0.1", fmtPort(int(c.listenPort.Load())))
 
 	stalled, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestInboundPeerInitLimitsAndIdentityValidation(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- c.Run(ctx) }()
 	waitForState(t, c, StateConnected, 2*time.Second)
-	addr := net.JoinHostPort("127.0.0.1", fmtPort(c.listenPort))
+	addr := net.JoinHostPort("127.0.0.1", fmtPort(int(c.listenPort.Load())))
 
 	writePeerInit := func(conn net.Conn, username string, connType soul.ConnectionType) error {
 		var payload bytes.Buffer
