@@ -81,13 +81,11 @@ function facetsFor(jobs: Job[]): JobFacets {
     failed: 0,
     parked: 0,
     done: 0,
+    notImported: 0,
   };
   for (const job of jobs) {
     if (job.state === 'IMPORTING') status.importing += 1;
-    // 'notImported' has no facet of its own (JobStatusFacets predates issue
-    // #59) — it doesn't fold into any of the counters above. Tracked as #368;
-    // this branch goes away once that lands.
-    else if (job.status !== 'notImported') status[job.status] += 1;
+    else status[job.status] += 1;
   }
   return {
     status,
@@ -268,7 +266,7 @@ describe('server-owned filters and facets', () => {
   it('shows global status and source facet counts rather than counting the current page', () => {
     stubFetchIndefinitely();
     const facets: JobFacets = {
-      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
+      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5, notImported: 0 },
       source: { all: 31, manual: 11, lidarr: 20 },
     };
     renderJobs([makeJob()], undefined, 42, facets);
@@ -281,22 +279,58 @@ describe('server-owned filters and facets', () => {
     expect(sourceGroup().queryByRole('button', { name: statusChipName(t.jobs.sourceChipLabel.manual) })).not.toBeInTheDocument();
   });
 
-  // Issue #416: all ten status chips render, in the order that mirrors the
-  // backend's sort=st ranking, each with its own facet count.
-  it('renders all ten status chips with their facet counts, including the three new pre-transfer ones', () => {
+  // Issue #416 brought the row to ten chips; issue #368 added the eleventh.
+  // They render in the order that mirrors the backend's sort=st ranking, each
+  // with its own facet count.
+  it('renders all eleven status chips with their facet counts', () => {
     stubFetchIndefinitely();
     const facets: JobFacets = {
-      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5 },
+      status: { all: 42, wanted: 3, selecting: 2, queued: 1, active: 9, importing: 2, waiting: 8, stalled: 7, failed: 6, parked: 5, done: 5, notImported: 4 },
       source: { all: 31, manual: 11, lidarr: 20 },
     };
     renderJobs([makeJob()], undefined, 42, facets);
 
     const group = statusGroup();
-    expect(group.getAllByRole('button')).toHaveLength(10);
+    expect(group.getAllByRole('button')).toHaveLength(11);
     expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.wanted) })).getByText('3')).toBeInTheDocument();
     expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.selecting) })).getByText('2')).toBeInTheDocument();
     expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.queued) })).getByText('1')).toBeInTheDocument();
     expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.waiting) })).getByText('8')).toBeInTheDocument();
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.notImported) })).getByText('4')).toBeInTheDocument();
+  });
+
+  // The whole point of #368. The fixture keeps `importing` at 0 deliberately:
+  // that status has no chip by design (see CHIP_ORDER), so it is the one
+  // status ALL can legitimately exceed the chips by. 'notImported' was a
+  // second, unintended hole in the same sum — counted under `all` and nowhere
+  // else, which made the row silently lie.
+  it('counts a notImported job under its own chip so the chips account for ALL', () => {
+    stubFetchIndefinitely();
+    const facets: JobFacets = {
+      status: { all: 2, wanted: 0, selecting: 0, queued: 0, active: 1, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0, notImported: 1 },
+      source: { all: 2, manual: 1, lidarr: 1 },
+    };
+    renderJobs([makeJob()], undefined, 2, facets);
+
+    const group = statusGroup();
+    const { all, ...rest } = facets.status;
+    expect(Object.values(rest).reduce((sum, n) => sum + n, 0)).toBe(all);
+    expect(within(group.getByRole('button', { name: statusChipName(t.jobs.chipLabel.notImported) })).getByText('1')).toBeInTheDocument();
+  });
+
+  it('asks the server for filter=notImported when its chip is clicked', async () => {
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      requested.push(url);
+      const jobs = [makeJob({ id: 3, title: 'Rounds', status: 'notImported', state: 'NOT_IMPORTED' })];
+      return Promise.resolve(new Response(JSON.stringify(pageFor(jobs)), { status: 200 }));
+    }));
+    renderJobs([makeJob()]);
+
+    fireEvent.click(statusGroup().getByRole('button', { name: statusChipName(t.jobs.chipLabel.notImported) }));
+
+    await waitFor(() => expect(requested.some((url) => url.includes('filter=notImported'))).toBe(true));
+    expect(await screen.findByText('Rounds')).toBeInTheDocument();
   });
 
   it('requests source and status filters from the server instead of page-local filtering', async () => {
@@ -877,7 +911,7 @@ describe('bulk retry', () => {
     status: {
       all: failed + parked,
       wanted: 0, selecting: 0, waiting: 0,
-      active: 0, importing: 0, queued: 0, stalled: 0, failed, parked, done: 0,
+      active: 0, importing: 0, queued: 0, stalled: 0, failed, parked, done: 0, notImported: 0,
     },
     source: { all: failed + parked, manual: 0, lidarr: failed + parked },
   });

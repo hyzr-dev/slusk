@@ -348,6 +348,10 @@ export const t = {
       failed: 'FAILED',
       parked: 'PARKED',
       done: 'DONE',
+      // Spelled out rather than reusing the row tag's 'NI' (Tag.tsx): the tag
+      // sits in a column the user has already learned, while a chip is the
+      // only place this status names itself.
+      notImported: 'NOT IMPORTED',
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
     // the mock, but source filtering is an approved Jobs control. The group's

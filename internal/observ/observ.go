@@ -98,9 +98,11 @@ func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) 
 // store.CountDashboardStatuses; deriving any of them another way reintroduces
 // exactly the disagreement this struct was fixed to remove.
 //
-// The seven are deliberately a subset of the dashboard's eleven facets: the
-// remaining four (importing, failed, done, all) come free from the same query
-// but exposing them is a separate API decision that was not taken.
+// The seven are deliberately a subset of the dashboard's twelve facets: the
+// remaining five (importing, failed, done, notImported, all) come free from the
+// same query but exposing them is a separate API decision that was not taken.
+// notImported joined that remainder with issue #368 rather than this report —
+// the Jobs page needed a chip for it, /status was not asked to grow a field.
 type StatusReport struct {
 	// Wanted is jobs never searched, with no candidates yet.
 	Wanted int `json:"wanted"`
@@ -320,6 +322,10 @@ type JobStatusFacets struct {
 	Failed    int64 `json:"failed"`
 	Parked    int64 `json:"parked"`
 	Done      int64 `json:"done"`
+	// NotImported is the terminal manual-job outcome from issue #59 (download
+	// finished, no Lidarr album to import into). Counted separately from Done
+	// and Failed (issue #368) so the client's chips sum to All.
+	NotImported int64 `json:"notImported"`
 }
 
 // JobSourceFacets contains counts for every persisted source. All ignores the
@@ -1048,7 +1054,11 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	// (issue #310 shipped exactly that until a lab run caught it).
 	// "failures" and "failed" are deliberately both present and deliberately
 	// different — see the case comments in store.dashboardJobsWhere.
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
+	// Must stay identical to store.validateDashboardJobsQuery's own switch —
+	// two independent allowlists over the same value have already drifted once
+	// in this repo, and a value accepted here but refused there 500s instead of
+	// 400s.
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

@@ -77,6 +77,7 @@ export type JobStatusFilter =
   | 'failed'
   | 'parked'
   | 'done'
+  | 'notImported'
   | 'inflight'
   | 'finished'
   | 'failures';
@@ -116,6 +117,7 @@ export interface JobStatusFacets {
   failed: number;
   parked: number;
   done: number;
+  notImported: number;
 }
 
 export interface JobSourceFacets {

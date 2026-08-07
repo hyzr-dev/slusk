@@ -346,6 +346,11 @@ type DashboardStatusFacets struct {
 	Failed    int64
 	Parked    int64
 	Done      int64
+	// NotImported is the terminal manual-job outcome from issue #59: the
+	// download finished with no Lidarr album to import into. It gets a
+	// counter of its own (issue #368) rather than folding into Done or
+	// Failed, so the rendered chips still sum to All.
+	NotImported int64
 }
 
 // DashboardSourceFacets contains counts for each persisted job source. All
@@ -406,7 +411,10 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	// dashboardJobsWhere's default case — it is NOT the same set as
 	// "failures" below; see that case's comment for why the two must never
 	// be merged.
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "wanted", "selecting", "waiting", "inflight", "finished", "failures":
+	// "notImported" (issue #368) is status-derived like the rest of this row;
+	// its twin in internal/observ/observ.go must accept exactly the same set,
+	// or a value passes one gate and is refused by the other.
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "wanted", "selecting", "waiting", "notImported", "inflight", "finished", "failures":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -511,7 +519,7 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 			WHEN 'active' THEN 1 WHEN 'importing' THEN 2 WHEN 'waiting' THEN 3
 			WHEN 'queued' THEN 4 WHEN 'selecting' THEN 5 WHEN 'wanted' THEN 6
 			WHEN 'stalled' THEN 7 WHEN 'failed' THEN 8 WHEN 'parked' THEN 9
-			WHEN 'done' THEN 10 ELSE 11 END ` + direction + `, j.id ASC`
+			WHEN 'done' THEN 10 WHEN 'notImported' THEN 11 ELSE 12 END ` + direction + `, j.id ASC`
 	case "album":
 		return " ORDER BY lower(j.title) " + direction + ", lower(j.artist_name) " + direction + ", j.id ASC"
 	case "peer":
@@ -662,7 +670,8 @@ func dashboardStatusFacetSQL(where string) string {
 		COUNT(*) FILTER (WHERE status = 'stalled'),
 		COUNT(*) FILTER (WHERE status = 'failed'),
 		COUNT(*) FILTER (WHERE status = 'parked'),
-		COUNT(*) FILTER (WHERE status = 'done')
+		COUNT(*) FILTER (WHERE status = 'done'),
+		COUNT(*) FILTER (WHERE status = 'notImported')
 		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + where + `) dashboard_jobs`
 }
 
@@ -673,7 +682,7 @@ func scanDashboardStatusFacets(row *sql.Row, facets *DashboardStatusFacets) erro
 		&facets.All, &facets.Active, &facets.Importing,
 		&facets.Queued, &facets.Waiting, &facets.Selecting,
 		&facets.Wanted, &facets.Stalled, &facets.Failed,
-		&facets.Parked, &facets.Done,
+		&facets.Parked, &facets.Done, &facets.NotImported,
 	)
 }
 
