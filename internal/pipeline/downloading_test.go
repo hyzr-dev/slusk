@@ -63,7 +63,27 @@ func seedActiveCandidate(t *testing.T, st *store.Store, albumID int64, username 
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidate: %v activated=%v", err, activated)
 	}
+	registerSeedFolders(t, st, job.ID, files, now)
 	return job.ID, cand.ID
+}
+
+// registerSeedFolders stands in for what topUpCandidate does in production:
+// record the local folder each enqueued file is written into (issue #314).
+// Seeding helpers drive the store directly rather than through topUpCandidate,
+// so without this the register would be empty and every cleanup path would
+// correctly find nothing to do.
+func registerSeedFolders(t *testing.T, st *store.Store, jobID int64, files []core.CandidateFile, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	for _, f := range files {
+		leaf := commonLeaf([]string{f.Filename})
+		if leaf == "" {
+			continue
+		}
+		if err := st.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
+			t.Fatalf("RegisterDownloadFolder: %v", err)
+		}
+	}
 }
 
 // txfOpts describes a transfer to seed via seedTransfer.

@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/hyzr-dev/slusk/internal/core"
 )
 
 func TestAlbumFolder(t *testing.T) {
@@ -86,6 +89,26 @@ func TestCommonLeafEmptyWhenAmbiguous(t *testing.T) {
 	}
 }
 
+// fakeFolderRegistry is an in-memory DownloadFolderRegistry: the leaves a job
+// registered while downloading, minus the ones cleanup has already stamped.
+type fakeFolderRegistry struct {
+	leaves  []string
+	cleaned []string
+	err     error
+}
+
+func (f *fakeFolderRegistry) DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.leaves, nil
+}
+
+func (f *fakeFolderRegistry) MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+	f.cleaned = append(f.cleaned, leaf)
+	return nil
+}
+
 // newTestLogger returns a *slog.Logger writing to buf, so cleanupCompletedFolder
 // tests can assert on the specific log level (Info vs Error) emitted.
 func newTestLogger(buf *bytes.Buffer) *slog.Logger {
@@ -98,16 +121,16 @@ func TestCleanupCompletedFolderRemovesEmptyDir(t *testing.T) {
 	if err := os.Mkdir(folder, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	files := []string{
-		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
-		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
-	}
+	reg := &fakeFolderRegistry{leaves: []string{"1000 Forms of Fear (2014)"}}
 
 	var buf bytes.Buffer
-	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+	cleanupCompletedFolder(context.Background(), reg, newTestLogger(&buf), 1, completeDir, time.Now())
 
 	if _, err := os.Stat(folder); !os.IsNotExist(err) {
 		t.Errorf("expected empty folder to be removed, stat err = %v", err)
+	}
+	if len(reg.cleaned) != 1 || reg.cleaned[0] != "1000 Forms of Fear (2014)" {
+		t.Errorf("cleaned = %v, want the removed folder stamped once", reg.cleaned)
 	}
 	logged := buf.String()
 	if strings.Contains(logged, "level=ERROR") {
@@ -127,16 +150,16 @@ func TestCleanupCompletedFolderSkipsNonEmptyDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "leftover.txt"), []byte("junk"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	files := []string{
-		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
-		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
-	}
+	reg := &fakeFolderRegistry{leaves: []string{"1000 Forms of Fear (2014)"}}
 
 	var buf bytes.Buffer
-	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+	cleanupCompletedFolder(context.Background(), reg, newTestLogger(&buf), 1, completeDir, time.Now())
 
 	if _, err := os.Stat(folder); err != nil {
 		t.Errorf("expected non-empty folder to remain, stat err = %v", err)
+	}
+	if len(reg.cleaned) != 1 {
+		t.Errorf("cleaned = %v, want the deliberate leave-in-place stamped once", reg.cleaned)
 	}
 	logged := buf.String()
 	if strings.Contains(logged, "level=ERROR") {
@@ -147,32 +170,39 @@ func TestCleanupCompletedFolderSkipsNonEmptyDir(t *testing.T) {
 	}
 }
 
-func TestCleanupCompletedFolderSkipsAmbiguousLeaf(t *testing.T) {
+// TestCleanupCompletedFolderLogsEmptyRegister pins the defect issue #314 was
+// filed about: a job with nothing to clean up used to return in total silence -
+// no log line, no job_event - so a folder left on disk was untraceable. An empty
+// register must say so.
+func TestCleanupCompletedFolderLogsEmptyRegister(t *testing.T) {
 	completeDir := t.TempDir()
-	// Files don't share a common directory -> commonLeaf returns "".
-	files := []string{`a\1.flac`, `b\2.flac`}
+	reg := &fakeFolderRegistry{}
 
 	var buf bytes.Buffer
-	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+	cleanupCompletedFolder(context.Background(), reg, newTestLogger(&buf), 1, completeDir, time.Now())
 
-	if logged := buf.String(); logged != "" {
-		t.Errorf("expected no filesystem interaction or logging for an ambiguous leaf, got %q", logged)
+	logged := buf.String()
+	if !strings.Contains(logged, "no registered download folder") {
+		t.Errorf("expected an INFO line naming the empty register, got %q", logged)
+	}
+	if strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line, got %q", logged)
 	}
 }
 
 func TestCleanupCompletedFolderLogsMissingDirQuietly(t *testing.T) {
 	completeDir := t.TempDir()
-	files := []string{
-		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
-		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
-	}
+	reg := &fakeFolderRegistry{leaves: []string{"1000 Forms of Fear (2014)"}}
 
 	var buf bytes.Buffer
-	cleanupCompletedFolder(newTestLogger(&buf), 1, completeDir, files)
+	cleanupCompletedFolder(context.Background(), reg, newTestLogger(&buf), 1, completeDir, time.Now())
 
 	logged := buf.String()
 	if strings.Contains(logged, "level=ERROR") {
 		t.Errorf("expected no ERROR log line for a missing folder, got %q", logged)
+	}
+	if len(reg.cleaned) != 1 {
+		t.Errorf("cleaned = %v, want an already-absent folder stamped (local os.ReadDir is trustworthy evidence)", reg.cleaned)
 	}
 	if !strings.Contains(logged, "level=INFO") {
 		t.Errorf("expected an INFO log line, got %q", logged)
@@ -298,19 +328,11 @@ func TestQuarantineFolderSuffixesOnCollision(t *testing.T) {
 // which is recursive on both backends and would destroy every album quarantined
 // so far.
 func TestCleanupFolderRefusesQuarantineDir(t *testing.T) {
-	files := []string{
-		`music\Sia\` + quarantineDirName + `\01 - Chandelier.flac`,
-		`music\Sia\` + quarantineDirName + `\02 - Big Girls Cry.flac`,
-	}
-	// Guard the premise: without the guard this is exactly the name that reaches
-	// DeleteDownloadFolder.
-	if got := commonLeaf(files); got != quarantineDirName {
-		t.Fatalf("commonLeaf = %q, want %q (premise of this test)", got, quarantineDirName)
-	}
+	reg := &fakeFolderRegistry{leaves: []string{quarantineDirName}}
 
 	var buf bytes.Buffer
 	peers := &fakeSearcher{}
-	cleanupFolder(context.Background(), peers, newTestLogger(&buf), 7, files)
+	cleanupFolder(context.Background(), peers, reg, newTestLogger(&buf), 7, time.Now())
 
 	if len(peers.deletedFolders) != 0 {
 		t.Errorf("DeleteDownloadFolder called with %v, want no call at all", peers.deletedFolders)
@@ -328,15 +350,99 @@ func TestCleanupFolderRefusesQuarantineDir(t *testing.T) {
 // folder must still be deleted, so the guard above cannot pass by disabling
 // cleanup outright.
 func TestCleanupFolderDeletesOrdinaryLeaf(t *testing.T) {
-	files := []string{
-		`music\Sia\1000 Forms of Fear (2014)\01 - Chandelier.flac`,
-		`music\Sia\1000 Forms of Fear (2014)\02 - Big Girls Cry.flac`,
-	}
+	reg := &fakeFolderRegistry{leaves: []string{"1000 Forms of Fear (2014)"}}
 	var buf bytes.Buffer
 	peers := &fakeSearcher{}
-	cleanupFolder(context.Background(), peers, newTestLogger(&buf), 7, files)
+	cleanupFolder(context.Background(), peers, reg, newTestLogger(&buf), 7, time.Now())
 
 	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "1000 Forms of Fear (2014)" {
 		t.Errorf("deletedFolders = %v, want [%q]", peers.deletedFolders, "1000 Forms of Fear (2014)")
+	}
+	if len(reg.cleaned) != 1 || reg.cleaned[0] != "1000 Forms of Fear (2014)" {
+		t.Errorf("cleaned = %v, want the deleted folder stamped", reg.cleaned)
+	}
+}
+
+// TestCleanupFolderDeletesEveryRegisteredFolder is the reason the register is
+// per-job rather than per-candidate: a job that retried has written to several
+// peers' folders across several search cycles, and ResetJobToWanted deleted the
+// transfer rows that used to be the only way to name the earlier ones.
+func TestCleanupFolderDeletesEveryRegisteredFolder(t *testing.T) {
+	reg := &fakeFolderRegistry{leaves: []string{"First Peer Album", "Second Peer Album"}}
+	var buf bytes.Buffer
+	peers := &fakeSearcher{}
+	cleanupFolder(context.Background(), peers, reg, newTestLogger(&buf), 7, time.Now())
+
+	if len(peers.deletedFolders) != 2 {
+		t.Fatalf("deletedFolders = %v, want both registered folders", peers.deletedFolders)
+	}
+	if len(reg.cleaned) != 2 {
+		t.Errorf("cleaned = %v, want both stamped", reg.cleaned)
+	}
+}
+
+// TestCleanupFolderLogsEmptyRegister is cleanupFolder's half of the silence
+// defect (see TestCleanupCompletedFolderLogsEmptyRegister).
+func TestCleanupFolderLogsEmptyRegister(t *testing.T) {
+	reg := &fakeFolderRegistry{}
+	var buf bytes.Buffer
+	peers := &fakeSearcher{}
+	cleanupFolder(context.Background(), peers, reg, newTestLogger(&buf), 7, time.Now())
+
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("deletedFolders = %v, want no call", peers.deletedFolders)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "no registered download folder") {
+		t.Errorf("expected an INFO line naming the empty register, got %q", logged)
+	}
+}
+
+// TestCleanupFolderDoesNotStampOnRemoteNotFound is the safety property that
+// keeps issue #314's own defect from coming back through its fix: the slskd
+// adapter maps every 404 to core.ErrRemoteNotFound, including one caused by a
+// wrong base URL, so a 404 is not evidence the folder is gone. Stamping on it
+// would let a misconfigured backend mark every job's folders cleaned while the
+// files sit on disk, invisible to every later cleanup.
+func TestCleanupFolderDoesNotStampOnRemoteNotFound(t *testing.T) {
+	reg := &fakeFolderRegistry{leaves: []string{"Album"}}
+	peers := &notFoundCleaner{}
+	var buf bytes.Buffer
+	cleanupFolder(context.Background(), peers, reg, newTestLogger(&buf), 7, time.Now())
+
+	if len(reg.cleaned) != 0 {
+		t.Errorf("cleaned = %v, want nothing stamped on a 404", reg.cleaned)
+	}
+	if logged := buf.String(); strings.Contains(logged, "level=ERROR") {
+		t.Errorf("expected no ERROR log line for the routine 404, got %q", logged)
+	}
+}
+
+// notFoundCleaner is a FolderCleaner whose delete always 404s.
+type notFoundCleaner struct{ calls []string }
+
+func (c *notFoundCleaner) DeleteDownloadFolder(ctx context.Context, name string) error {
+	c.calls = append(c.calls, name)
+	return core.ErrRemoteNotFound
+}
+
+// TestCleanupCompletedFolderRefusesQuarantineDir mirrors
+// TestCleanupFolderRefusesQuarantineDir: the quarantine directory is not a
+// completed job's to remove either, even on the days it happens to be empty.
+func TestCleanupCompletedFolderRefusesQuarantineDir(t *testing.T) {
+	completeDir := t.TempDir()
+	self := filepath.Join(completeDir, quarantineDirName)
+	if err := os.Mkdir(self, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	reg := &fakeFolderRegistry{leaves: []string{quarantineDirName}}
+
+	var buf bytes.Buffer
+	cleanupCompletedFolder(context.Background(), reg, newTestLogger(&buf), 1, completeDir, time.Now())
+
+	if _, err := os.Stat(self); err != nil {
+		t.Errorf("expected the quarantine dir untouched, stat err = %v", err)
+	}
+	if len(reg.cleaned) != 0 {
+		t.Errorf("cleaned = %v, want the skipped quarantine dir left alone", reg.cleaned)
 	}
 }
