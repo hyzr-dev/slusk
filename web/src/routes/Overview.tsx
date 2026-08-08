@@ -139,10 +139,11 @@ export default function Overview() {
 
   // Only the in-flight rows: a finished job is terminal, so the stream never
   // sends deltas for it and there is no reason to make the backend track it.
-  // This does NOT make the finished panel immune to live replacement: useJobs
-  // runs replaceLiveJobPage over every page it returns regardless of scope,
-  // so a job that just transitioned to DONE can still be rendered from its
-  // last in-flight live frame until framedAt ages past LIVE_JOB_FRESH_MS.
+  // Scope alone would not keep the finished and failed panels free of live
+  // rows — it governs what the backend sends, not what the client merges, and
+  // useJobs used to run replaceLiveJobPage over every page regardless (issue
+  // #291). What keeps them clean is that both read a terminal filter, which
+  // useJobs excludes from the merge; see isTerminalJobFilter in api/queries.ts.
   useJobScope(transferRows.map((job) => job.id));
   // Overview is the only sparkline consumer of the live stream (issue
   // #265), so it's the only route that needs the connection opted into

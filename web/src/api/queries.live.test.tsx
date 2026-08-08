@@ -4,6 +4,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_JOB_PAGE_PARAMS,
+  isTerminalJobFilter,
   jobsPageUrl,
   replaceLiveJobPage,
   pickJobDetail,
@@ -13,7 +14,7 @@ import {
   useJobDetail,
   useJobs,
 } from './queries';
-import type { Job, JobDetail, JobPage, ScopedLivePayload, ThroughputSample, WireJob } from './types';
+import type { Job, JobDetail, JobPage, JobStatusFilter, ScopedLivePayload, ThroughputSample, WireJob } from './types';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -388,6 +389,100 @@ describe('useJobs live replace across accumulated frames', () => {
     rerender();
     expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 20 });
     expect(result.current.data?.jobs[1]).toMatchObject({ state: 'IMPORTING', bytesDone: 49_000_000 });
+  });
+});
+
+describe('isTerminalJobFilter', () => {
+  // Declared as an exhaustive Record over the union rather than a hand-written
+  // array of the terminal ones: adding a member to JobStatusFilter without
+  // classifying it here is a type error, so a new filter cannot quietly
+  // inherit the live merge (or quietly lose it).
+  const EXPECTED: Record<JobStatusFilter, boolean> = {
+    all: false,
+    wanted: false,
+    selecting: false,
+    queued: false,
+    waiting: false,
+    active: false,
+    importing: false,
+    stalled: false,
+    // Status-derived, and deliberately NOT terminal: it also matches a job
+    // still DOWNLOADING whose current candidate's transfers all errored and
+    // which the pipeline will retry (see dashboardJobsWhere's default case).
+    // That job is genuinely live and must keep its streamed row.
+    failed: false,
+    parked: true,
+    done: true,
+    notImported: true,
+    inflight: false,
+    finished: true,
+    failures: true,
+  };
+
+  it('classifies every job filter', () => {
+    for (const [filter, want] of Object.entries(EXPECTED)) {
+      expect(isTerminalJobFilter(filter as JobStatusFilter)).toBe(want);
+    }
+  });
+});
+
+function makePage(jobs: Job[]): JobPage {
+  return {
+    jobs,
+    total: jobs.length,
+    facets: {
+      status: { all: jobs.length, wanted: 0, selecting: 0, queued: 0, active: 0, importing: 0, waiting: 0, stalled: 0, failed: 0, parked: 0, done: 0, notImported: 0 },
+      source: { all: jobs.length, manual: 0, lidarr: jobs.length },
+    },
+  };
+}
+
+describe('useJobs on a terminal filter', () => {
+  // Issue #291, symptom 2: the live payload accumulated by stream.tsx used to
+  // be merged into every page useJobs returned, including RECENTLY FINISHED's.
+  // A row whose framedAt was still fresh therefore won over the settled REST
+  // row and rendered an ACTIVE/DL tag — plus its pre-completion updatedAt in
+  // the WHEN column — inside a panel of terminal jobs. This is the case no
+  // browser session ever managed to catch inside the freshness window.
+  it('ignores a fresh streamed row on a finished page', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const params = { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'finished' as const, sort: 'recent' as const, dir: 'desc' as const, skipFacets: true };
+    const settled = makeJob({ id: 1, state: 'DONE', status: 'done', updatedAt: '2026-07-01T10:05:00Z' });
+    queryClient.setQueryData(queryKeys.jobsPage(params), makePage([settled]));
+
+    const { result, rerender } = renderHook(() => useJobs(params), { wrapper: makeWrapper(queryClient) });
+
+    // framedAt defaults to "just now", i.e. comfortably inside
+    // LIVE_JOB_FRESH_MS — exactly the row that used to win here.
+    queryClient.setQueryData(queryKeys.live, {
+      jobs: [makeJob({ id: 1, state: 'DOWNLOADING', status: 'active', speed: 4000, updatedAt: '2026-07-01T10:00:00Z' })],
+      down: 4000,
+      up: 0,
+    });
+    rerender();
+
+    expect(result.current.data?.jobs[0]).toEqual(settled);
+    expect(result.current.data?.jobs[0].status).toBe('done');
+    expect(result.current.data?.jobs[0].updatedAt).toBe('2026-07-01T10:05:00Z');
+  });
+
+  it('still merges live data into the in-flight page', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const params = { ...DEFAULT_JOB_PAGE_PARAMS, filter: 'inflight' as const, sort: 'transfer' as const };
+    queryClient.setQueryData(queryKeys.jobsPage(params), makePage([makeJob({ id: 1, bytesDone: 50, bytesTotal: 100 })]));
+
+    const { result, rerender } = renderHook(() => useJobs(params), { wrapper: makeWrapper(queryClient) });
+
+    queryClient.setQueryData(queryKeys.live, {
+      jobs: [makeJob({ id: 1, bytesDone: 80, bytesTotal: 100, speed: 4000 })],
+      down: 4000,
+      up: 0,
+    });
+    rerender();
+
+    expect(result.current.data?.jobs[0]).toMatchObject({ bytesDone: 80, speed: 4000 });
   });
 });
 

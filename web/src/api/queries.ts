@@ -29,6 +29,7 @@ import type {
   JobEvent,
   JobPage,
   JobPageParams,
+  JobStatusFilter,
   LidarrAddOptions,
   LidarrArtistMatch,
   LidarrMatch,
@@ -267,6 +268,44 @@ export function replaceLiveJobs(jobs: Job[] | undefined, live: WireJob[] | undef
   });
 }
 
+// Filters whose selection is terminal by construction: every row such a page
+// can contain describes a job the pipeline is done with, so a streamed frame —
+// which only ever describes an in-flight job — has nothing true to say about
+// it and must not be merged in (issue #291).
+//
+// Membership follows the backend's own predicates in
+// internal/store/dashboard.go (dashboardJobsWhere and dashboardJobStatusSQL):
+//
+//   - 'finished' and 'failures' are state-keyed (DONE/FAILED/NOT_IMPORTED and
+//     FAILED respectively) and are Overview's terminal panels.
+//   - 'done', 'notImported' and 'parked' are status-derived, but each maps
+//     one-to-one onto a terminal j.state (DONE/COMPLETED, NOT_IMPORTED,
+//     PARKED/ORPHANED) with no transfer-aggregate fallback.
+//   - 'failed' is deliberately absent. It is status-derived and also matches a
+//     job still DOWNLOADING whose current candidate's transfers all errored
+//     and which the pipeline will retry — that job is genuinely live, and its
+//     streamed row is the truthful one.
+const TERMINAL_JOB_FILTERS: ReadonlySet<JobStatusFilter> = new Set<JobStatusFilter>([
+  'finished',
+  'failures',
+  'done',
+  'notImported',
+  'parked',
+]);
+
+/**
+ * True when a page fetched with this filter holds only jobs the pipeline has
+ * finished with, and therefore must not adopt streamed live rows.
+ *
+ * Derived from the filter rather than taken as a per-caller opt-out on
+ * purpose: terminality is a property of the query, so no view can forget to
+ * ask for it, and adding one more panel over an existing terminal filter needs
+ * no thought about the live merge at all.
+ */
+export function isTerminalJobFilter(filter: JobStatusFilter): boolean {
+  return TERMINAL_JOB_FILTERS.has(filter);
+}
+
 // A page is an ordered server result, so live data may replace existing rows
 // only. It must never splice stream-only IDs into the page or disturb its
 // metadata.
@@ -484,6 +523,11 @@ export function useJobs(params: JobPageParams) {
     refetchOnWindowFocus: true,
   });
   const live = useLiveData();
+  // A terminal page is a settled record, so it takes REST's row as-is — see
+  // isTerminalJobFilter. The hook still subscribes to the live cache
+  // unconditionally (hooks cannot be called conditionally, and the
+  // subscription costs nothing but a re-render that yields the same page).
+  if (isTerminalJobFilter(params.filter)) return jobsQuery;
   return { ...jobsQuery, data: replaceLiveJobPage(jobsQuery.data, live?.jobs) };
 }
 
