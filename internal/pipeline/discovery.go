@@ -30,7 +30,9 @@ type DiscoveryStore interface {
 	RunnableJobsInState(ctx context.Context, state core.AlbumJobState, now time.Time, limit int) ([]core.AlbumJob, error)
 	// InsertCandidates caches a job's surviving ranked candidates and resets
 	// its search cycle (retries=0, empty_searches=0, not_before=NULL) in the
-	// same transaction.
+	// same transaction. The reset is guarded on the job still being WANTED -
+	// the state this module reads it in - so it silently skips the reset (but
+	// still caches the candidates) for a job cancelled underneath this tick.
 	InsertCandidates(ctx context.Context, jobID int64, cands []store.NewCandidate, now time.Time) error
 	// RejectedCandidates lists the (username, release directory) pairs this
 	// job has already tried and failed, across every earlier search cycle.

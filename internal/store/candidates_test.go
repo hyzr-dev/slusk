@@ -231,6 +231,77 @@ func TestInsertCandidatesResetsSearchCycle(t *testing.T) {
 	}
 }
 
+// TestInsertCandidatesLeavesTerminalJobUntouched pins the state guard from
+// issue #294: the job-side search-cycle reset must bounce on a job that is no
+// longer WANTED. The Overview panel reads updated_at as a completion stamp for
+// DONE/FAILED jobs, so renewing it here would resurrect an old job in "recently
+// finished" with nothing else in the system to contradict it.
+//
+// DONE and FAILED are the states the issue is about; CANCELLED is here because
+// it is the one non-WANTED state a real tick can actually reach - WantedSync
+// can cancel the job between RunnableJobsInState and this write.
+func TestInsertCandidatesLeavesTerminalJobUntouched(t *testing.T) {
+	for _, terminal := range []core.AlbumJobState{core.StateDone, core.StateFailed, core.StateCancelled} {
+		t.Run(string(terminal), func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			job, err := s.UpsertWantedJob(ctx, 102, now)
+			if err != nil {
+				t.Fatalf("UpsertWantedJob: %v", err)
+			}
+			// Give the job a search cycle worth resetting, so a bounced guard is
+			// distinguishable from a reset that happened to write the same values.
+			if err := s.SetJobBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
+				t.Fatalf("SetJobBackoff: %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, terminal, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
+
+			later := now.Add(2 * time.Hour)
+			cands := []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}
+			if err := s.InsertCandidates(ctx, job.ID, cands, later); err != nil {
+				t.Fatalf("InsertCandidates: %v", err)
+			}
+
+			var state string
+			var retries int
+			var updatedAt time.Time
+			var notBefore *time.Time
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT state, retries, updated_at, not_before FROM album_jobs WHERE id = $1`,
+				job.ID).Scan(&state, &retries, &updatedAt, &notBefore); err != nil {
+				t.Fatalf("read job: %v", err)
+			}
+			if core.AlbumJobState(state) != terminal {
+				t.Errorf("state = %q, want %q", state, terminal)
+			}
+			if !updatedAt.Equal(now) {
+				t.Errorf("updated_at = %v, want it untouched at %v", updatedAt, now)
+			}
+			if retries != 3 {
+				t.Errorf("retries = %d, want 3 (untouched)", retries)
+			}
+			if notBefore == nil {
+				t.Error("not_before was cleared on a terminal job")
+			}
+
+			// The candidate rows themselves are still written: only the job-side
+			// reset is guarded, so a job cancelled mid-search keeps the inert
+			// candidates Discovery already documented as acceptable.
+			cached, err := s.CandidatesForJob(ctx, job.ID)
+			if err != nil {
+				t.Fatalf("CandidatesForJob: %v", err)
+			}
+			if len(cached) != 1 {
+				t.Errorf("got %d candidates, want 1", len(cached))
+			}
+		})
+	}
+}
+
 func TestActivateCandidateRespectsMaxActive(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -985,10 +1056,11 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 	// Seed an empty-search streak (issue #334) on the now-CANCELLED job:
-	// UpsertWantedJob's CANCELLED-reentry clean-slate reset must wipe it
-	// too. InsertCandidates above already zeroes empty_searches on a
-	// successful search, so this has to happen after it to actually
-	// exercise the reset under test.
+	// UpsertWantedJob's CANCELLED-reentry clean-slate reset must wipe it too.
+	// The ordering used to matter because InsertCandidates zeroed the counters
+	// unconditionally; since issue #294 guarded that reset on WANTED it bounces
+	// here (the job is SELECTING), so the retries=4 seeded above also survives
+	// into the re-entry and is genuinely reset by the code under test.
 	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
 		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
 	}
