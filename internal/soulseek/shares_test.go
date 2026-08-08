@@ -684,10 +684,17 @@ func TestShareSnapshotMatchExcludedPhrases(t *testing.T) {
 			want: []string{`Music\A Bryan Adams\Summer.flac`, `Music\B Keep\Track.flac`},
 		},
 		{
-			// The phrase covers the query but no path, so nothing is dropped:
-			// the rule is about paths, not about the incoming query (#319 is
-			// the query-side heuristic and has different semantics).
-			name: "phrase matched against path not query", query: "music", limit: 10, excluded: phrases("music"),
+			// "bryan adams" appears in no query above, only in a path - which
+			// is what proves the rule is applied to the path. This case is the
+			// other end of it: a phrase every path contains empties the whole
+			// response, however innocuous the query was.
+			name: "phrase in every path empties the response", query: "music", limit: 10, excluded: phrases("music"),
+			want: nil,
+		},
+		{
+			// The phrase spans a directory name, not a filename: the check is
+			// against the whole virtual path.
+			name: "phrase in a parent directory is enough", query: "summer", limit: 10, excluded: phrases(`a bryan adams\summer`),
 			want: nil,
 		},
 		{
@@ -731,14 +738,15 @@ func TestRespondToSearchHonoursExcludedPhrases(t *testing.T) {
 	c.excludedPhrases.Store(&phrases)
 	c.respondToSearch("requester", 21, "track")
 
-	deadline := time.Now().Add(time.Second)
-	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Do not poll c.shareWorkers here: the match slot is released before the
+	// delivery leg runs (see respondToSearch), so an empty pool does not mean
+	// the send has happened. This assertion is negative, and a false green in
+	// one is silent - wait long enough that an unfiltered response would have
+	// arrived instead.
 	select {
 	case <-session.writes:
 		t.Fatal("responded with a file whose path contains an excluded phrase")
-	default:
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
