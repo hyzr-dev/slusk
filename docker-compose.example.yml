@@ -10,6 +10,11 @@
 # Postgres, an existing arr network, gluetun with VPN port forwarding, and
 # building from source.
 #
+# This file assumes you already run Lidarr, which is the normal case — slusk does
+# nothing until a Lidarr holds wanted albums. If you do not, copy
+# docker-compose.with-lidarr.example.yml instead; it adds a lidarr service and
+# refers back here for every variant above.
+#
 # State lives in PostgreSQL, which this file bundles — slusk itself keeps no
 # data volume, so it needs no writable state mount of its own.
 #
