@@ -152,7 +152,7 @@ func TestDiscoveryCachesRankedCandidates(t *testing.T) {
 			break
 		}
 	}
-	wantRejectionDetail := "rejected 1 candidates: 1 above maximum track count, 0 below minimum track count, 0 not matching the requested album"
+	wantRejectionDetail := "rejected 1 candidates: 1 above maximum track count, 0 below minimum track count, 0 not matching the requested album, 0 already failed for this job"
 	if rejectionDetail != wantRejectionDetail {
 		t.Errorf("candidate rejection detail = %q, want %q; events %+v", rejectionDetail, wantRejectionDetail, events)
 	}
@@ -204,7 +204,7 @@ func TestDiscoverySummarizesThousandsOfRejectedCandidates(t *testing.T) {
 	if len(rejectionEvents) != 1 {
 		t.Fatalf("candidate rejection events = %d, want 1; all events %+v", len(rejectionEvents), events)
 	}
-	wantDetail := "rejected 2000 candidates: 2000 above maximum track count, 0 below minimum track count, 0 not matching the requested album"
+	wantDetail := "rejected 2000 candidates: 2000 above maximum track count, 0 below minimum track count, 0 not matching the requested album, 0 already failed for this job"
 	if rejectionEvents[0].Detail != wantDetail {
 		t.Errorf("rejection detail = %q, want %q", rejectionEvents[0].Detail, wantDetail)
 	}
@@ -1280,5 +1280,153 @@ func TestDiscoverySkipsAndFailsManualJob(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected EventJobFailed recorded, got %+v", events)
+	}
+}
+
+// TestDiscoverySkipsCandidateThatAlreadyFailed is issue #317 end to end: a
+// candidate that failed for this job must not be cached again on the next
+// search cycle, even though the search is unchanged and the network answers
+// with the same peers. Before the rejection history existed, the second Tick
+// re-cached "bad" and the job downloaded the same broken files again, once per
+// retry.
+func TestDiscoverySkipsCandidateThatAlreadyFailed(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	// "bad" outranks "good" on bitrate, so it is the candidate Selecting picks
+	// first and therefore the one that fails - the ordering matters, otherwise
+	// the assertion below could pass for the wrong reason.
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "bad", Filename: `bad\Artist - Album\01.flac`, Size: 10, BitRate: 1000},
+		{Username: "bad", Filename: `bad\Artist - Album\02.flac`, Size: 10, BitRate: 1000},
+		{Username: "good", Filename: `good\Artist - Album\01.flac`, Size: 10, BitRate: 900},
+		{Username: "good", Filename: `good\Artist - Album\02.flac`, Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+
+	// Walk the top candidate through the failure the pipeline would: activated
+	// by Selecting, then failed by Downloading or Importing.
+	cand, ok, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil || !ok {
+		t.Fatalf("NextNewCandidate: %v ok=%v", err, ok)
+	}
+	if cand.Username != "bad" {
+		t.Fatalf("expected the highest-scoring candidate to be %q, got %q", "bad", cand.Username)
+	}
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
+	if err != nil || !activated {
+		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
+	}
+	if _, err := st.RejectCandidateAndAdvance(ctx, cand.ID, job.ID, "import rejected", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	// Selecting's candidates-exhausted path: back to WANTED, candidate cache
+	// gone, retries bumped.
+	if err := st.ResetJobToWanted(ctx, job.ID, core.StateSelecting, 1, nil, now); err != nil {
+		t.Fatalf("ResetJobToWanted: %v", err)
+	}
+
+	later := now.Add(time.Hour)
+	if err := d.Tick(ctx, later); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+
+	cands, err := st.CandidatesForJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("CandidatesForJob: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected exactly 1 cached candidate on the second cycle, got %d (%+v)", len(cands), cands)
+	}
+	if cands[0].Username != "good" {
+		t.Errorf("expected the failed peer to be filtered out, got %q re-cached", cands[0].Username)
+	}
+
+	events, err := st.JobEvents(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	sawRejection := false
+	for _, e := range events {
+		if e.Event == core.EventCandidateRejected && strings.Contains(e.Detail, "1 already failed for this job") {
+			sawRejection = true
+		}
+	}
+	if !sawRejection {
+		t.Errorf("expected a candidate_rejected event naming the already-failed candidate, got %+v", events)
+	}
+}
+
+// TestDiscoveryStillCachesCandidateFromSamePeerInAnotherDirectory guards the
+// granularity choice: a rejection is keyed on (username, release directory),
+// not username alone. The same peer may well share the right album in a
+// different folder, and blacklisting the whole peer would throw that away.
+func TestDiscoveryStillCachesCandidateFromSamePeerInAnotherDirectory(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "alice", Filename: `alice\bad rip\Artist - Album\01.flac`, Size: 10, BitRate: 1000},
+		{Username: "alice", Filename: `alice\bad rip\Artist - Album\02.flac`, Size: 10, BitRate: 1000},
+		{Username: "alice", Filename: `alice\good rip\Artist - Album\01.flac`, Size: 10, BitRate: 900},
+		{Username: "alice", Filename: `alice\good rip\Artist - Album\02.flac`, Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	d := NewDiscovery(p)
+	if err := d.Tick(ctx, now); err != nil {
+		t.Fatalf("first Tick: %v", err)
+	}
+	cand, ok, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil || !ok {
+		t.Fatalf("NextNewCandidate: %v ok=%v", err, ok)
+	}
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
+	if err != nil || !activated {
+		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
+	}
+	if _, err := st.RejectCandidateAndAdvance(ctx, cand.ID, job.ID, "import rejected", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+	if err := st.ResetJobToWanted(ctx, job.ID, core.StateSelecting, 1, nil, now); err != nil {
+		t.Fatalf("ResetJobToWanted: %v", err)
+	}
+
+	if err := d.Tick(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatalf("second Tick: %v", err)
+	}
+
+	cands, err := st.CandidatesForJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("CandidatesForJob: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("expected the peer's other directory to still be cached, got %d candidates (%+v)", len(cands), cands)
+	}
+	if cands[0].Username != "alice" {
+		t.Fatalf("expected the surviving candidate to still be alice, got %q", cands[0].Username)
+	}
+	if got := cands[0].Files[0].Filename; !strings.Contains(got, "good rip") {
+		t.Errorf("expected the non-rejected directory to survive, got %q", got)
 	}
 }

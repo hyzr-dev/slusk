@@ -241,6 +241,15 @@ func (s *Store) RetryFailedJob(ctx context.Context, jobID int64, now time.Time) 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
 		return false, fmt.Errorf("retry failed job: delete candidates: %w", err)
 	}
+	// The rejection history (issue #317) goes with the clean slate, and only
+	// here: ResetJobToWanted, the automatic retry, must keep it - outliving that
+	// deletion is the entire point of the table. The rule is retries: a path
+	// that resets them to 0 is starting the job over and may try the failed
+	// peers again (one of them may since have fixed its share); a path that
+	// bumps them is continuing the same attempt.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM candidate_rejections WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("retry failed job: delete candidate rejections: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("retry failed job: commit: %w", err)
 	}
@@ -554,6 +563,10 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 			WHERE candidates.album_job_id = reentered.id
 			  AND (SELECT count(*) FROM deleted_transfers) >= 0
 			RETURNING candidates.id
+		), deleted_rejections AS (
+			DELETE FROM candidate_rejections AS rejections USING reentered
+			WHERE rejections.album_job_id = reentered.id
+			RETURNING rejections.album_job_id
 		)
 		SELECT (SELECT count(*) FROM reentered), (SELECT count(*) FROM deleted_transfers), (SELECT count(*) FROM deleted_candidates)`,
 		append(inputArgs, string(core.StateWanted), now, string(core.StateCancelled))...).Scan(&reentered, &deletedTransfers, &deletedCandidates); err != nil {
@@ -616,6 +629,10 @@ func (s *Store) SyncWantedJobs(ctx context.Context, releases []core.WantedReleas
 			WHERE candidates.album_job_id = revived.id
 			  AND (SELECT count(*) FROM deleted_transfers) >= 0
 			RETURNING candidates.id
+		), deleted_rejections AS (
+			DELETE FROM candidate_rejections AS rejections USING revived
+			WHERE rejections.album_job_id = revived.id
+			RETURNING rejections.album_job_id
 		)
 		SELECT (SELECT count(*) FROM revived), (SELECT count(*) FROM deleted_transfers), (SELECT count(*) FROM deleted_candidates)`,
 		string(core.StateWanted), now, string(core.StateFailed), failedCutoff, ids).Scan(&revivedRows, &deletedTransfers, &deletedCandidates); err != nil {
@@ -675,6 +692,16 @@ func (s *Store) UpsertWantedJob(ctx context.Context, lidarrAlbumID int64, now ti
 			`DELETE FROM candidates WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1 AND source = 'lidarr')`,
 			lidarrAlbumID); err != nil {
 			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete candidates: %w", err)
+		}
+		// The rejection history goes too - re-monitoring an album in Lidarr is
+		// a start-over, and this is the singular twin of SyncWantedJobs'
+		// reentered CTE, which clears it as well. Leaving it here would make
+		// the same user action behave differently depending on which path the
+		// album happened to arrive through.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM candidate_rejections WHERE album_job_id IN (SELECT id FROM album_jobs WHERE lidarr_album_id = $1 AND source = 'lidarr')`,
+			lidarrAlbumID); err != nil {
+			return core.AlbumJob{}, fmt.Errorf("re-enter cancelled job: delete candidate rejections: %w", err)
 		}
 	}
 
@@ -754,6 +781,11 @@ func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
 		return false, fmt.Errorf("force search job: delete candidates: %w", err)
 	}
+	// The rejection history deliberately survives a force search, unlike the
+	// retry paths: this button is the nudge a user reaches for when a job looks
+	// stuck, which is the very symptom issue #317 produces. Clearing here would
+	// send the next search straight back to re-downloading the files that have
+	// been failing import - the bug, one click away.
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("force search job: commit: %w", err)
 	}
