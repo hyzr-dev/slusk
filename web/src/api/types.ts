@@ -77,6 +77,7 @@ export type JobStatusFilter =
   | 'failed'
   | 'parked'
   | 'done'
+  | 'notImported'
   | 'inflight'
   | 'finished'
   | 'failures';
@@ -116,6 +117,7 @@ export interface JobStatusFacets {
   failed: number;
   parked: number;
   done: number;
+  notImported: number;
 }
 
 export interface JobSourceFacets {
@@ -341,14 +343,67 @@ export interface ModuleStatus {
   ready: boolean;
 }
 
-/** GET /status */
+/** internal/observ/progress.go jobProgressStateDTO */
+export interface JobProgressState {
+  state: string;
+  count: number;
+  /**
+   * How long ago the least recently updated job in this state was touched.
+   * Raw seconds, not a stale/fresh verdict: the threshold belongs to whoever
+   * reads it, and the backend deliberately ships no opinion about one.
+   */
+  oldestUpdateAgeSeconds: number;
+}
+
+/**
+ * internal/observ/progress.go jobProgressDTO — whether the *work* is moving,
+ * as opposed to whether the modules are ticking (issue #442). A state with no
+ * jobs is absent from `states` rather than present with zeroes.
+ */
+export interface JobProgress {
+  states: JobProgressState[];
+  /**
+   * Jobs in DOWNLOADING or IMPORTING with no active candidate. Both modules
+   * skip such a job indefinitely while it holds a slot, so any non-zero value
+   * is work that has stopped without anything reporting a failure.
+   */
+  jobsWithoutActiveCandidate: number;
+}
+
+/**
+ * GET /status
+ *
+ * The seven counts are counts of *jobs*, in the same status vocabulary the
+ * Jobs page uses (see JobStatus) — the server derives them from the query
+ * /api/jobs' facets come from, so the two surfaces cannot disagree about a
+ * word. Before issue #417 `active` counted transfer rows instead, which made
+ * a single downloading album with many files in flight read as seventeen
+ * "active downloads", while `queued` and `stalled` were served as a hardcoded
+ * zero the Health page rendered as fact.
+ */
 export interface StatusReport {
+  /** Never searched, no candidates yet. */
+  wanted: number;
+  /** Candidates cached, waiting for a max_active slot. */
+  selecting: number;
+  /** Downloading, at least one file delivered and none currently moving. */
+  waiting: number;
+  /** Standing in a peer's queue with nothing delivered yet. */
   queued: number;
+  /** A transfer is in progress. */
   active: number;
+  /** A transfer has stopped making progress. */
   stalled: number;
+  /** Parked or orphaned. */
   parked: number;
   modules: Record<string, string>;
   moduleDetails: Record<string, ModuleStatus>;
+  /**
+   * Optional because a server predating issue #442 omits it entirely, and the
+   * Health view then draws no progress panel rather than a row of zeroes that
+   * would read as "everything is fresh".
+   */
+  jobProgress?: JobProgress;
   /**
    * The running build: a `v*` tag in a deployed container, `dev` for a binary
    * built without the ldflag. Optional because an older server predating
@@ -358,10 +413,21 @@ export interface StatusReport {
   version?: string;
 }
 
-/** GET /status wire shape; old servers omit parked, new servers may omit orphaned. */
-export type WireStatusReport = Omit<StatusReport, 'parked'> & {
+/**
+ * GET /status wire shape; old servers omit parked, new servers may omit
+ * orphaned. A server predating issue #417 omits wanted/selecting/waiting
+ * entirely — the normalizer supplies 0 rather than letting undefined reach the
+ * Health rows.
+ */
+export type WireStatusReport = Omit<
+  StatusReport,
+  'parked' | 'wanted' | 'selecting' | 'waiting'
+> & {
   parked?: number;
   orphaned?: number;
+  wanted?: number;
+  selecting?: number;
+  waiting?: number;
 };
 
 /** internal/observ/config.go LidarrView */

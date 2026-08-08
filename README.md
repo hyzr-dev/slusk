@@ -14,8 +14,9 @@ peer and the files, and let the same pipeline download them.
 And it gives back: slusk shares folders and uploads to other peers itself, though you
 have to switch it on — see [Sharing and uploads](#sharing-and-uploads).
 
-Installing it is a compose file and a config file. `docker-compose.example.yml` brings
-its own Postgres along, so there is no database to set up separately.
+Installing it is a compose file and a config file. Both compose examples bring their own
+Postgres along, so there is no database to set up separately — and if you do not run
+Lidarr yet, `docker-compose.with-lidarr.example.yml` brings one of those too.
 
 Licensed under [AGPL-3.0-or-later](LICENSE).
 
@@ -58,7 +59,9 @@ than its reputation.
 
 ### Prerequisites
 
-- Lidarr, reachable from the container, and its API key.
+- Lidarr, reachable from the container, and its API key. If you do not run one yet, the
+  second compose file below brings a Lidarr with it — you still choose its API key
+  yourself.
 - Docker with Compose.
 - slskd and its API key — unless you use the native Soulseek backend, in which case you
   need Soulseek account credentials instead.
@@ -66,15 +69,33 @@ than its reputation.
 
 ### 1. Copy the compose file and the config
 
+There are two compose examples, and which one you copy depends on a single question:
+**do you already run Lidarr?**
+
 ```bash
+# Yes — the normal case.
 cp docker-compose.example.yml docker-compose.yml
+
+# No — this one brings a Lidarr of its own.
+cp docker-compose.with-lidarr.example.yml docker-compose.yml
+```
+
+```bash
 mkdir -p config && cp config.example.toml config/config.toml
 ```
 
-`docker-compose.example.yml` is the only compose file in the repo, and every deployment
-variant it supports — the slskd backend, external Postgres, an existing arr network,
-gluetun with VPN port forwarding, building from source — is a commented block at the
-bottom of it. Your `docker-compose.yml` copy is gitignored, so local edits stay yours.
+`docker-compose.example.yml` is the main file. Every deployment variant this project
+supports — the slskd backend, external Postgres, an existing arr network, gluetun with
+VPN port forwarding, building from source — is a commented block at the bottom of it, and
+each one applies to either copy. `docker-compose.with-lidarr.example.yml` differs only by
+adding a `lidarr` service, sharing the download path with it, and running both under the
+same `PUID`/`PGID`; for everything else it refers you back to the main file.
+
+Copy the with-Lidarr one only if you genuinely have no Lidarr. If you already run one, it
+would start a second, empty instance on port 8686 — a port clash if you are lucky, and
+slusk pointed at the wrong Lidarr with nothing in the logs to say so if you are not.
+
+Your `docker-compose.yml` copy is gitignored either way, so local edits stay yours.
 
 Both example files are set up for the native Soulseek backend, and they are meant to be
 read together: the download path and peer port in one have to match the other. There is
@@ -82,6 +103,12 @@ one value you **must** edit in the compose file before the first start — the h
 the downloads bind mount, which has no sensible default because Lidarr has to be able to
 see it too. It is left pointing at `/host/downloads` and configured to fail the `up` with
 a clear message rather than let Docker quietly create it for you.
+
+The with-Lidarr file asks for two more things before it will start: `/host/music`, the
+root folder Lidarr imports your collection into, and a `LIDARR_API_KEY` in a `.env` file
+next to the compose file. No fixed key is shipped in this repo — a known password on an
+API that can add root folders and delete files is not something to hand out — so pick
+your own, for instance with `openssl rand -hex 16`.
 
 `config/config.toml` must be a **directory** mount, not a single-file mount, if you want
 to edit settings from the dashboard: slusk writes the file back with an atomic rename,
@@ -96,6 +123,12 @@ could override, not what you have to. In practice that means your Lidarr URL and
 your Soulseek credentials, and a download path Lidarr can also see. `store.dsn` already
 matches the Postgres the compose file brings, so leave it alone unless you point slusk at
 your own instance.
+
+**On the with-Lidarr file, the API key has to be written twice.** Lidarr takes it from
+`LIDARR_API_KEY` in the environment; slusk reads no environment variables at all, so the
+same value also goes into `config/config.toml` as `lidarr.api_key`. Nothing checks that
+the two agree. If they drift, slusk gets a 401 from a Lidarr that is running perfectly
+well, and the dashboard reports a Lidarr problem rather than a typo in your own files.
 
 **Configuration is strict.** slusk rejects unknown keys at startup with
 `unknown config keys: ...` and has no silent defaults for required fields. A typo in a
@@ -197,14 +230,15 @@ of putting it behind a VPN: you need a provider and a gluetun setup that support
 forwarding, and the port you get is assigned dynamically rather than chosen.
 
 slusk handles that by asking gluetun what the port is. Set `[soulseek.gluetun]` in the
-config and, at startup, it fetches `GET {control_url}/v1/portforward` and listens on the
-port gluetun reports. Only the port half of `soulseek.listen_addr` is replaced — the host
-half is still used — so the static port you configured is ignored in this mode.
+config and it fetches `GET {control_url}/v1/portforward` and listens on the port gluetun
+reports. Only the port half of `soulseek.listen_addr` is replaced — the host half is
+still used — so the static port you configured is ignored in this mode.
 
 ```toml
 [soulseek.gluetun]
 control_url = "http://127.0.0.1:8000"
 api_key = "CHANGEME"
+poll_interval = "5m"   # optional; this is the default
 ```
 
 This only works if slusk shares gluetun's network namespace, so that `127.0.0.1` reaches
@@ -223,9 +257,18 @@ Two things worth knowing before you debug it at 2am:
   listening. Grant the route to the same key you put in `soulseek.gluetun.api_key`; on
   older gluetun no auth is needed and the key is simply unused. slusk names the config
   key in the error when it sees a 401 or 403, so the log will say which knob to turn.
-- **The port is fetched once, at startup, and never again.** If gluetun's forwarded port
-  changes while slusk is running — a reconnect, a server change — slusk keeps listening
-  on the old one and quietly stops being reachable. Restart slusk to pick up the new port.
+- **The port is re-fetched every `poll_interval` (5m by default), not only at startup.**
+  If gluetun's forwarded port changes while slusk is running — a reconnect, a server
+  change — slusk binds a new listener on the new port, tells the Soulseek server about it
+  without waiting for a reconnect, and logs the change. Connections already established
+  are not broken by the swap, so an in-flight transfer survives it. Until the next poll
+  lands, though, slusk is listening on a port nothing reaches: `poll_interval` is the
+  upper bound on how long that window lasts, so shorten it if your provider rotates
+  aggressively.
+- **A failed poll never tears down a working listener.** A control server that is down,
+  answers 401, or reports port 0 is logged and otherwise ignored — none of those are
+  evidence that the port slusk is bound to has stopped working. The same goes for a new
+  port slusk cannot bind: it stays where it is and retries on the next poll.
 
 Starting slusk and gluetun together is fine. A control server that isn't up yet, or a
 gluetun that reports port 0 because forwarding hasn't been established, are both treated
@@ -328,6 +371,11 @@ Go 1.26.3 and Node 22.
 make build   # builds the web UI, then the binary
 make test    # go test ./... && npm test
 ```
+
+`go install github.com/hyzr-dev/slusk/cmd/slusk@latest` is not a supported install path.
+The module path carries no `/v2` suffix, so `@latest` silently resolves to the last v1
+tag (currently v1.59.2) with no error or warning, and a pinned v2 version fails outright
+with an invalid-version error instead. Use `make build` or a tagged container image.
 
 To build the container instead, replace the `image:` line in your compose file with
 `build: .` and run `docker compose up -d --build`.

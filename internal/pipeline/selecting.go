@@ -24,15 +24,18 @@ type SelectingStore interface {
 	// ActivateCandidateWithTransfers atomically re-checks ownership, lifecycle
 	// eligibility, and MaxActive, then creates the complete PENDING transfer set
 	// before activating the candidate and advancing its job to DOWNLOADING.
-	ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (activated, capFull bool, err error)
+	// deadline is when those transfers become overdue; topUpCandidate rewrites
+	// it per file as each one is actually enqueued.
+	ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, deadline, now time.Time) (activated, capFull bool, err error)
 	// DeferSelectingJob moves a candidate-specific skip behind FIFO peers so a
 	// full batch of live-owner conflicts cannot starve later unrelated jobs.
 	DeferSelectingJob(ctx context.Context, jobID int64, now time.Time) error
-	// CandidatesForJob is only used once a job has terminally FAILED, to work
-	// out which download folders its attempts left behind (see
-	// quarantineLeftovers). Every candidate matters, not just the last one: a
-	// job's attempts span several peers whose remote folder names differ.
-	CandidatesForJob(ctx context.Context, jobID int64) ([]core.Candidate, error)
+	// DownloadFoldersForJob and MarkDownloadFolderCleaned are the register
+	// quarantineLeftovers reads once a job has terminally FAILED, to find every
+	// folder the job downloaded into — across all of its search cycles, not just
+	// the last one (issue #314).
+	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
+	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 
 	// The remaining methods are topUpDeps's store half (see topUpCandidate):
 	// declared again here, rather than embedding topUpDeps directly, so this
@@ -43,6 +46,7 @@ type SelectingStore interface {
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
 
 // SelectingParams configures a Selecting.
@@ -101,6 +105,10 @@ func (p SelectingParams) UpdateTransferProgress(ctx context.Context, transferID 
 
 func (p SelectingParams) AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error) {
 	return p.Store.AttachTransferID(ctx, transferID, remoteID, now)
+}
+
+func (p SelectingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+	return p.Store.RegisterDownloadFolder(ctx, jobID, leaf, now)
 }
 
 func (p SelectingParams) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
@@ -256,7 +264,7 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		return true, nil
 	}
 
-	activated, capFull, err := s.p.Store.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, s.p.MaxActive, now)
+	activated, capFull, err := s.p.Store.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, s.p.MaxActive, now.Add(s.p.TransferDeadline), now)
 	if err != nil {
 		return false, err
 	}
@@ -275,7 +283,7 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		return !capFull, nil
 	}
 
-	sent, err := topUpCandidate(ctx, s.p, cand.ID, now, s.p.MaxInflightPerPeer, s.p.MaxTransferRetries, s.p.TransferDeadline, s.log())
+	sent, err := topUpCandidate(ctx, s.p, job.ID, cand.ID, now, s.p.MaxInflightPerPeer, s.p.MaxTransferRetries, s.p.TransferDeadline, s.log())
 	if err != nil {
 		return false, err
 	}
@@ -295,44 +303,34 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 // removed each candidate's folder as it failed - so this is a no-op far more
 // often than not.
 //
-// The folder is derived per candidate rather than per job: a job's attempts
-// span several peers whose remote folder names differ, so commonLeaf over all
-// of a job's filenames would almost always be ambiguous and the move would
-// silently never happen. Identical leaves across candidates are moved once.
+// The folders come from the register (issue #314), which closes the two holes
+// the old per-candidate derivation left: a job terminated from Discovery has no
+// candidates or transfers to derive from at all, and ResetJobToWanted deletes
+// both on every non-terminal retry, so only the last search cycle's folders
+// were ever reachable. The register outlives both. It also removes the N+1
+// per-candidate transfer queries this used to run.
 //
 // It returns nothing and swallows every error: the FAILED transition has
 // already committed, and no filesystem or store problem here may be allowed to
-// turn that into a pipeline error. The N+1 transfer queries are bounded by
-// max_candidates_per_album and run once in a job's lifetime.
+// turn that into a pipeline error.
 func (s *Selecting) quarantineLeftovers(ctx context.Context, job core.AlbumJob, now time.Time) {
 	if s.p.CompleteDir == "" {
 		return
 	}
-	cands, err := s.p.Store.CandidatesForJob(ctx, job.ID)
+	leaves, err := registeredFolders(ctx, s.p.Store, s.log(), job.ID, "quarantine")
 	if err != nil {
-		s.log().Error("list candidates for quarantine failed", "album_job", job.ID, "err", err)
 		return
 	}
-	seen := make(map[string]bool, len(cands))
 	var moved []string
-	for _, cand := range cands {
-		transfers, err := s.p.Store.TransfersForCandidate(ctx, cand.ID)
-		if err != nil {
-			s.log().Error("list transfers for quarantine failed", "album_job", job.ID, "candidate", cand.ID, "err", err)
+	for _, leaf := range leaves {
+		dst, ok := quarantineFolder(s.log(), job.ID, s.p.CompleteDir, leaf)
+		if !ok {
 			continue
 		}
-		names := make([]string, 0, len(transfers))
-		for _, tr := range transfers {
-			names = append(names, tr.Filename)
-		}
-		leaf := commonLeaf(names)
-		if leaf == "" || seen[leaf] {
-			continue
-		}
-		seen[leaf] = true
-		if dst, ok := quarantineFolder(s.log(), job.ID, s.p.CompleteDir, leaf); ok {
-			moved = append(moved, dst)
-		}
+		moved = append(moved, dst)
+		// The folder is no longer where it was registered, so nothing should go
+		// looking for it there again.
+		markCleaned(ctx, s.p.Store, s.log(), job.ID, leaf, now)
 	}
 	if len(moved) == 0 {
 		return
@@ -351,6 +349,7 @@ func (s *Selecting) quarantineLeftovers(ctx context.Context, job core.AlbumJob, 
 type topUpDeps interface {
 	TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error)
 	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
@@ -375,7 +374,15 @@ type topUpDeps interface {
 // s/attempt/candidate/. Selecting calls this once, right after activating a
 // candidate; Downloading (task 9) calls it again on every tick to keep
 // topping up a still-downloading candidate as earlier files finish.
-func topUpCandidate(ctx context.Context, d topUpDeps, candidateID int64, now time.Time, maxInflightPerPeer, maxTransferRetries int, transferDeadline time.Duration, log *slog.Logger) (int, error) {
+//
+// This is also where the job's local download folder is registered (issue
+// #314). It is the single chokepoint every enqueue on either backend passes
+// through, and — unlike the backends themselves, whose Enqueue takes only
+// (username, filename, size) — it has the job id in hand. Registering here
+// keeps internal/soulseek and internal/slskd free of any store dependency,
+// which is why jobID is threaded down rather than the register being pushed
+// into them.
+func topUpCandidate(ctx context.Context, d topUpDeps, jobID, candidateID int64, now time.Time, maxInflightPerPeer, maxTransferRetries int, transferDeadline time.Duration, log *slog.Logger) (int, error) {
 	transfers, err := d.TransfersForCandidate(ctx, candidateID)
 	if err != nil {
 		return 0, err
@@ -407,6 +414,17 @@ func topUpCandidate(ctx context.Context, d topUpDeps, candidateID int64, now tim
 		}
 		if !ok {
 			return sent, nil
+		}
+		// Register before the enqueue, not after: the register's job is to name
+		// every folder bytes could have landed in, and a registration that turns
+		// out to be premature is inert (the folder simply isn't there, so cleanup
+		// no-ops). A failure here must never block the download — same contract as
+		// cleanupFolder's — and an unregisterable leaf is one this file was never
+		// going to be written into anyway (the backends fall back to the root).
+		if leaf := commonLeaf([]string{p.Filename}); leaf != "" {
+			if err := d.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
+				log.Error("register download folder failed", "album_job", jobID, "folder", leaf, "err", err)
+			}
 		}
 		remoteID, err := d.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
 		if err != nil {

@@ -86,6 +86,13 @@ type DownloadingStore interface {
 
 	// --- Top-up phase (topUpDeps's store half; see selecting.go) ---
 	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
+	// RegisterDownloadFolder records the local folder a file is about to be
+	// downloaded into, so cleanup can look it up rather than re-derive it
+	// (issue #314). Shared by the top-up phase; the two methods below are the
+	// resolve phase's cleanupFolder half of the same register.
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
+	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
+	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
 
 // DownloadingParams configures a Downloading.
@@ -114,6 +121,10 @@ type DownloadingParams struct {
 // deps struct.
 func (p DownloadingParams) TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error) {
 	return p.Store.TransfersForCandidate(ctx, candidateID)
+}
+
+func (p DownloadingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+	return p.Store.RegisterDownloadFolder(ctx, jobID, leaf, now)
 }
 
 func (p DownloadingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error) {
@@ -358,7 +369,38 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// Still live in slskd: it MUST be cancelled there before we record it
 			// cancelled, otherwise we orphan an in-flight download.
 			if err := d.p.Network.Cancel(ctx, tr.Username, effectiveID); err != nil {
-				// Leave non-terminal; the next pass retries.
+				// Leave non-terminal; the next pass retries - but only for a
+				// bounded while. An unbounded retry here is invisible: the row
+				// never leaves QUEUED, no stat increments so the reconcile
+				// heartbeat stays silent, and resolveDownloadingJob keeps
+				// returning (false, nil) because nothing is terminal. The job
+				// then holds a MaxActive slot indefinitely with module health
+				// green, which is how #443's wedge runs for weeks.
+				//
+				// Past the grace period the invariant above no longer protects
+				// anything worth protecting: a backend that has refused to
+				// confirm the cancellation for this long has most likely lost
+				// the peer, so there is no in-flight download left to orphan.
+				// Park rather than fail the candidate - parking wants a human,
+				// and unlike the fail path it does not run cleanupFolder, so a
+				// download that somehow is still alive keeps its folder.
+				if now.Sub(tr.Deadline) <= d.p.TransferDeadline {
+					continue
+				}
+				d.log().Warn("remote cancel still failing past grace, parking job",
+					"transfer", tr.ID, "candidate", tr.CandidateID, "user", tr.Username,
+					"remote_id", effectiveID, "overdue_by", now.Sub(tr.Deadline), "err", err)
+				parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
+					core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+				if perr != nil {
+					return stats, fmt.Errorf("park job for uncancellable transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, effectiveID, perr)
+				}
+				// Only count a job this call actually flipped, same as the lost
+				// transfer path: on a race the transfer write still commits.
+				if parked {
+					stats.Parked++
+				}
+				handled[tr.ID] = true
 				continue
 			}
 		}
@@ -621,11 +663,7 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 		failedDetail := fmt.Sprintf("candidate %s download failed, trying next candidate", cand.Username)
 		d.log().Info(failedDetail, "album_job", job.ID, "candidate", cand.ID)
 		d.recordEvent(ctx, job.ID, core.EventAttemptFailed, failedDetail, now)
-		names := make([]string, 0, len(transfers))
-		for _, t := range transfers {
-			names = append(names, t.Filename)
-		}
-		cleanupFolder(ctx, d.p.Peers, d.log(), job.ID, names)
+		cleanupFolder(ctx, d.p.Peers, d.p.Store, d.log(), job.ID, now)
 		d.recordOutcome(ctx, job, cand.Username, false, now)
 		// Fail the candidate and return the job to SELECTING atomically: the two
 		// writes commit together or not at all, so the job can never be stranded
@@ -687,7 +725,7 @@ func (d *Downloading) topUpDownloads(ctx context.Context, now time.Time) error {
 		if !found {
 			continue
 		}
-		sent, err := topUpCandidate(ctx, d.p, cand.ID, now, d.p.MaxInflightPerPeer, d.p.MaxTransferRetries, d.p.TransferDeadline, d.log())
+		sent, err := topUpCandidate(ctx, d.p, job.ID, cand.ID, now, d.p.MaxInflightPerPeer, d.p.MaxTransferRetries, d.p.TransferDeadline, d.log())
 		if err != nil {
 			d.log().Error("top up downloads failed", "album_job", job.ID, "err", err)
 		}

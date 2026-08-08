@@ -186,6 +186,32 @@ describe('Peers sorting', () => {
     const header = screen.getByRole('columnheader', { name: t.peers.gridHead.lastSeen });
     expect(within(header).queryByRole('button')).not.toBeInTheDocument();
   });
+
+  // Below 640px the stylesheet hides OK and FAIL so the username gets room
+  // (#433). jsdom computes no layout, so the rule itself can never be tested
+  // here — what can is the pairing it rests on: the header cell and every row
+  // cell of those two columns must carry the same class, or at a narrow width
+  // the headers shift one track out of step with their values while every
+  // assertion in this file still passes.
+  it('marks the OK and FAIL headers and their cells with the same narrow-width class', () => {
+    renderPeers();
+    const table = screen.getByRole('table');
+    const okHeader = within(table).getByRole('columnheader', { name: t.peers.gridHead.ok });
+    const failHeader = within(table).getByRole('columnheader', { name: t.peers.gridHead.fail });
+    const hideClass = okHeader.className;
+    expect(hideClass).not.toBe('');
+    expect(failHeader.className).toBe(hideClass);
+
+    const cells = within(table).getAllByRole('cell');
+    peers.forEach((_, i) => {
+      // Five cells per row, OK third and FAIL fourth.
+      expect(cells[i * 5 + 2].className.split(' ')).toContain(hideClass);
+      expect(cells[i * 5 + 3].className.split(' ')).toContain(hideClass);
+    });
+    // The columns that must survive keep no such marker.
+    const scoreHeader = within(table).getByRole('columnheader', { name: t.peers.gridHead.score });
+    expect(scoreHeader.className).not.toBe(hideClass);
+  });
 });
 
 describe('Peers paging', () => {
@@ -207,6 +233,13 @@ describe('Peers paging', () => {
     const fetchMock = renderPaged(97);
     fireEvent.click(screen.getByLabelText(t.pager.pageLabel(3)));
     expect(listRequests(fetchMock)).toContain('/api/peers?page=2&sort=score&dir=desc');
+  });
+
+  // This view binds no keys, so its pager may not advertise any (#434).
+  it('shows no keyboard hint on the prev/next buttons', () => {
+    renderPaged(97);
+    expect(screen.getByRole('button', { name: t.pager.previousPage })).toHaveTextContent(/^PREV$/);
+    expect(screen.getByRole('button', { name: t.pager.nextPage })).toHaveTextContent(/^NEXT$/);
   });
 
   it('offers as many pages as the total implies, not as many as the page holds', () => {

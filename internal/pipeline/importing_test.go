@@ -74,7 +74,7 @@ func seedImportingManualJob(t *testing.T, st *store.Store, username, albumMBID s
 	for i, f := range files {
 		manualFiles[i] = store.ManualJobFile{Filename: f.Filename, Size: f.Size}
 	}
-	job, err := st.CreateManualJob(ctx, "Album", "Artist", username, albumMBID, manualFiles, now)
+	job, err := st.CreateManualJob(ctx, "Album", "Artist", username, albumMBID, manualFiles, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -91,6 +91,7 @@ func seedImportingManualJob(t *testing.T, st *store.Store, username, albumMBID s
 			t.Fatalf("UpdateTransferProgress: %v", err)
 		}
 	}
+	registerSeedFolders(t, st, job.ID, files, now)
 	if err := st.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
@@ -366,7 +367,7 @@ func TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt(t *testing.T
 	p, st := newImportingParams(t, music, peers)
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "bob", "a1b2c3d4-e5f6-4789-a012-3456789abcde",
-		[]store.ManualJobFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+		[]store.ManualJobFile{{Filename: `A\01.mp3`, Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -403,7 +404,7 @@ func TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt(t *testing.T
 
 	// Drive the revived candidate back through DOWNLOADING to IMPORTING, the
 	// same shape seedImportingJob uses for a lidarr job.
-	activated, capFull, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, later)
+	activated, capFull, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, later.Add(time.Hour), later)
 	if err != nil {
 		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
 	}

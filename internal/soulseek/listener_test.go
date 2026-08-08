@@ -281,7 +281,7 @@ func TestClientSendsSetListenPortAfterLogin(t *testing.T) {
 	go func() { _ = c.Run(ctx) }()
 
 	waitForState(t, c, StateConnected, 2*time.Second)
-	wantPort := c.listenPort
+	wantPort := int(c.listenPort.Load())
 	if wantPort == 0 {
 		t.Fatal("listenPort = 0, want the actual bound port")
 	}
@@ -320,7 +320,7 @@ func TestPeerListenerToleratesGarbageAndRecovers(t *testing.T) {
 	go func() { _ = c.Run(ctx) }()
 
 	waitForState(t, c, StateConnected, 2*time.Second)
-	listenAddr := fmt.Sprintf("127.0.0.1:%d", c.listenPort)
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", int(c.listenPort.Load()))
 
 	// 1. Garbage bytes, then close.
 	conn1, err := net.Dial("tcp", listenAddr)

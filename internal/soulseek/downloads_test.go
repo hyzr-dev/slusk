@@ -561,6 +561,11 @@ func TestRemoveDeletesPartialDownloadAndRegistryEntry(t *testing.T) {
 	tr := newTransfer("id1", "alice", filename, 100)
 	_, cancel := context.WithCancel(context.Background())
 	tr.cancel = cancel
+	// This transfer is fabricated, so no runDownload will ever close tr.done
+	// for it. Close it here to stand for an orchestration that has already
+	// finished — the ordinary case for a Remove — rather than have Remove sit
+	// out its full drain timeout against a goroutine that never existed.
+	close(tr.done)
 	c.downloads.insert(tr)
 
 	partPath := downloadDestPath(c.cfg.DownloadDir, filename) + ".part"
@@ -576,6 +581,100 @@ func TestRemoveDeletesPartialDownloadAndRegistryEntry(t *testing.T) {
 	}
 	if _, err := os.Stat(partPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("stat .part after Remove: err = %v, want os.ErrNotExist", err)
+	}
+	if got := c.downloads.lookupByID("id1"); got != nil {
+		t.Error("transfer still present in the registry after Remove")
+	}
+}
+
+// TestRemoveOnNonStreamingTransfersIsUnchanged pins the issue-#386 acceptance
+// item that the new drain must not alter Remove for the transfers that were
+// never mid-stream to begin with: one still queued, and one that already
+// finished. Both must be deregistered promptly, and a completed transfer must
+// keep its successful terminal state rather than be flipped to Cancelled.
+func TestRemoveOnNonStreamingTransfersIsUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state core.TransferState
+		want  core.TransferState
+	}{
+		{"queued", core.TransferQueued, core.TransferCancelled},
+		{"completed", core.TransferCompleted, core.TransferCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+			c.cfg.DownloadDir = t.TempDir()
+
+			tr := newTransfer("id1", "alice", `Music\Artist - Album\01 track.flac`, 100)
+			tr.state = tc.state
+			_, cancel := context.WithCancel(context.Background())
+			tr.cancel = cancel
+			// The orchestration goroutine is over (or, for the queued case,
+			// unwound by the cancel below), so the drain returns at once.
+			close(tr.done)
+			c.downloads.insert(tr)
+
+			start := time.Now()
+			if err := c.Remove(context.Background(), "alice", "id1"); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Errorf("Remove took %v against a finished orchestration, want no measurable wait", elapsed)
+			}
+			tr.mu.Lock()
+			state := tr.state
+			tr.mu.Unlock()
+			if state != tc.want {
+				t.Errorf("state after Remove = %q, want %q", state, tc.want)
+			}
+			if got := c.downloads.lookupByID("id1"); got != nil {
+				t.Error("transfer still present in the registry after Remove")
+			}
+		})
+	}
+}
+
+// TestRemoveUnlinksAfterDrainTimeout covers the degradation half of issue
+// #386: Remove waits for the orchestration goroutine before unlinking, but that
+// wait is bounded, because Remove runs inside a pipeline tick that must never be
+// held up by a stuck orchestration. When the signal never arrives it must still
+// unlink and still return — falling back to the pre-#386 behavior.
+func TestRemoveUnlinksAfterDrainTimeout(t *testing.T) {
+	c := New(Config{Address: "unused:0", Username: "me", Password: "p"}, testLogger())
+	c.cfg.DownloadDir = t.TempDir()
+	c.cfg.removeDrainTimeout = 50 * time.Millisecond
+
+	const filename = `Music\Artist - Album\01 track.flac`
+	// tr.done is deliberately left open: this stands for an orchestration
+	// goroutine that is wedged and will never signal completion.
+	tr := newTransfer("id1", "alice", filename, 100)
+	_, cancel := context.WithCancel(context.Background())
+	tr.cancel = cancel
+	c.downloads.insert(tr)
+
+	partPath := downloadDestPath(c.cfg.DownloadDir, filename) + ".part"
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(partPath, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("seed .part: %v", err)
+	}
+
+	start := time.Now()
+	if err := c.Remove(context.Background(), "alice", "id1"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < c.cfg.removeDrainTimeout {
+		t.Errorf("Remove returned after %v, want at least the %v drain timeout — it did not wait for the orchestration at all", elapsed, c.cfg.removeDrainTimeout)
+	}
+	// Generous, because this only has to catch an unbounded wait, not measure
+	// scheduling latency.
+	if elapsed > 5*time.Second {
+		t.Errorf("Remove took %v, want a bounded wait — a stuck orchestration must not stall the pipeline tick", elapsed)
+	}
+	if _, err := os.Stat(partPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stat .part after a timed-out Remove: err = %v, want os.ErrNotExist — the fallback must still unlink", err)
 	}
 	if got := c.downloads.lookupByID("id1"); got != nil {
 		t.Error("transfer still present in the registry after Remove")

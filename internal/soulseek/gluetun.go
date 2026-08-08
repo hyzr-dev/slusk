@@ -6,7 +6,92 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/hyzr-dev/slusk/internal/soulseek/soul/server"
 )
+
+// watchGluetunPort re-fetches the forwarded port every GluetunPollInterval for
+// as long as ctx lives, moving the peer listener whenever gluetun starts
+// reporting a different one (issue #395). Before this existed the port was
+// fetched exactly once at startup, so a VPN reconnect that rotated it left the
+// client listening on a port no peer could reach — silently, since nothing
+// about that state looks like a failure from the inside.
+//
+// Started by Run only when GluetunControlURL is set.
+func (c *Client) watchGluetunPort(ctx context.Context) {
+	ticker := time.NewTicker(c.cfg.GluetunPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.refreshGluetunPort(ctx)
+		}
+	}
+}
+
+// refreshGluetunPort performs one poll: fetch, compare, and rebind if the port
+// moved. Every failure mode short of "gluetun reports a different, bindable
+// port" leaves the current listener untouched — a control server that is down,
+// unauthorized, or still reporting port 0 is not evidence that the port we are
+// bound to has stopped working, and tearing a healthy listener down over it
+// would turn a cosmetic outage into a real one.
+func (c *Client) refreshGluetunPort(ctx context.Context) {
+	current := int(c.listenPort.Load())
+	port, err := c.fetchGluetunPort(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			c.logger.Warn("gluetun forwarded port refresh failed; keeping current peer listener",
+				"err", err, "listen_port", current)
+		}
+		return
+	}
+	if port == current {
+		return
+	}
+	if err := c.rebindPeerListener(ctx, port); err != nil {
+		if ctx.Err() == nil {
+			c.logger.Warn("gluetun forwarded port changed but rebinding failed; keeping current peer listener",
+				"err", err, "listen_port", current, "gluetun_port", port)
+		}
+		return
+	}
+	c.logger.Info("gluetun forwarded port changed; peer listener rebound",
+		"previous_port", current, "listen_port", port)
+
+	// The server holds the port from the SetListenPort sent at login, so
+	// without this it keeps handing peers the dead one until the next
+	// reconnect. A failure here is not fatal, but it is not free either:
+	// sendToServer closes the connection it failed to write to, so a failed
+	// announce forces the reconnect this send exists to avoid. The reconnect
+	// then re-announces the current port from c.listenPort, so the port is
+	// right either way - it just costs a session.
+	if err := sendToServer(c, &server.SetListenPort{Port: port, ObfuscatedPort: 0}); err != nil {
+		c.logger.Warn("announcing the new listen port failed; the server connection is dropped and will re-announce it on reconnect",
+			"err", err, "listen_port", port)
+	}
+}
+
+// rebindPeerListener binds a second peer listener on port and makes it the
+// current one, leaving the old listener's already-accepted sockets alone: an
+// accepted connection is independent of the listener it came from, so
+// in-flight transfers survive the swap.
+//
+// On any failure the client is left exactly as it was, still bound to the old
+// port.
+func (c *Client) rebindPeerListener(ctx context.Context, port int) error {
+	addr, err := c.peerListenAddrOnPort(port)
+	if err != nil {
+		return err
+	}
+	ln, err := c.listenForPeers(ctx, addr)
+	if err != nil {
+		return err
+	}
+	return c.installPeerListener(ctx, ln)
+}
 
 // fetchGluetunPort queries the gluetun control server configured via
 // c.cfg.GluetunControlURL for the currently forwarded port. It performs a

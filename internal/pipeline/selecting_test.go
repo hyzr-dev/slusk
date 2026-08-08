@@ -150,7 +150,7 @@ func TestTopUpCandidateStopsOnStalePendingSnapshot(t *testing.T) {
 			t.Fatalf("CancelJob: found=%v err=%v", found, err)
 		}
 	}
-	sent, err := topUpCandidate(ctx, deps, candidateID, now, 1, 3, time.Hour, p.Logger)
+	sent, err := topUpCandidate(ctx, deps, jobID, candidateID, now, 1, 3, time.Hour, p.Logger)
 	if err != nil {
 		t.Fatalf("topUpCandidate: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestTopUpCandidateCompensatesEnqueueReturningAfterLifecycleBarrier(t *testi
 			jobID, candidateID := seedActiveCandidate(t, st, 902, "peer", []core.CandidateFile{{Filename: "album/01.flac", Size: 10}}, now)
 			searcher.enqueueHook = func() { tc.barrier(ctx, st, jobID, now.Add(time.Second)) }
 
-			sent, err := topUpCandidate(ctx, p, candidateID, now, 1, 3, time.Hour, p.Logger)
+			sent, err := topUpCandidate(ctx, p, jobID, candidateID, now, 1, 3, time.Hour, p.Logger)
 			if err != nil {
 				t.Fatalf("topUpCandidate: %v", err)
 			}
@@ -295,8 +295,9 @@ func TestSelectingLiveOwnerConflictDoesNotStarveLaterJob(t *testing.T) {
 		return job, cand
 	}
 
-	ownerJob, owner := seed(13, "shared", "same.flac", now.Add(-5*time.Minute))
-	if activated, _, err := st.ActivateCandidateWithTransfers(ctx, owner.ID, ownerJob.ID, p.MaxActive, now.Add(-5*time.Minute)); err != nil || !activated {
+	ownerSeededAt := now.Add(-5 * time.Minute)
+	ownerJob, owner := seed(13, "shared", "same.flac", ownerSeededAt)
+	if activated, _, err := st.ActivateCandidateWithTransfers(ctx, owner.ID, ownerJob.ID, p.MaxActive, ownerSeededAt.Add(time.Hour), ownerSeededAt); err != nil || !activated {
 		t.Fatalf("activate live owner: activated=%v err=%v", activated, err)
 	}
 
@@ -356,6 +357,7 @@ func TestSelectingExhaustionBacksOffToWanted(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
+	registerSeedFolders(t, st, job.ID, cand.Files, now)
 	if err := st.FailCandidate(ctx, cand.ID, "timeout", now); err != nil {
 		t.Fatalf("FailCandidate: %v", err)
 	}
@@ -407,6 +409,7 @@ func TestSelectingExhaustionAtMaxRetriesFails(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
+	registerSeedFolders(t, st, job.ID, cand.Files, now)
 	if err := st.FailCandidate(ctx, cand.ID, "timeout", now); err != nil {
 		t.Fatalf("FailCandidate: %v", err)
 	}
@@ -452,10 +455,11 @@ func seedExhaustedJobWithLeftovers(t *testing.T, ctx context.Context, st *store.
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
 	// Activation is what writes the transfer rows quarantineLeftovers reads.
-	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, p.MaxActive, now.Add(time.Hour), now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
 	}
+	registerSeedFolders(t, st, job.ID, cand.Files, now)
 	if err := st.FailCandidate(ctx, cand.ID, "timeout", now); err != nil {
 		t.Fatalf("FailCandidate: %v", err)
 	}
@@ -662,7 +666,7 @@ func TestSelectingManualJobExhaustionFailsOnFirstFailure(t *testing.T) {
 	p.MaxRetries = 3 // would NOT be terminal for a lidarr job at this retry count
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
-		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -718,7 +722,7 @@ func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "", []store.ManualJobFile{
 		{Filename: `music\` + leaf + `\01.flac`, Size: 1},
-	}, now)
+	}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -726,6 +730,7 @@ func TestSelectingManualJobExhaustionQuarantinesLeftovers(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
 	}
+	registerSeedFolders(t, st, job.ID, cand.Files, now)
 	if _, err := st.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
 		t.Fatalf("FailCandidateAndAdvance: %v", err)
 	}
@@ -768,7 +773,7 @@ func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	p.CandidateTTL = 24 * time.Hour
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
-		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt)
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, createdAt.Add(time.Hour), createdAt)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -800,5 +805,76 @@ func TestSelectingManualJobIgnoresCandidateTTL(t *testing.T) {
 	}
 	if len(searcher.enqueued) == 0 {
 		t.Errorf("expected the revived candidate enqueued, got none")
+	}
+}
+
+// TestSelectingRegistersDownloadFolderOnce pins the registration seam (issue
+// #314): topUpCandidate is the single chokepoint every enqueue on either
+// backend passes through, and it registers the local folder each file is
+// written into. Three files in one remote folder must leave exactly one row —
+// the idempotence the UNIQUE (album_job_id, leaf) constraint buys.
+func TestSelectingRegistersDownloadFolderOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	p, st := newSelectingParams(t, &fakeSearcher{})
+	p.MaxInflightPerPeer = 3 // send all three files in one go
+
+	job, err := st.UpsertWantedJob(ctx, 77, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.InsertCandidates(ctx, job.ID, []store.NewCandidate{{
+		Username: "alice", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: `music\Sia\1000 Forms of Fear (2014)\01.flac`, Size: 10},
+			{Filename: `music\Sia\1000 Forms of Fear (2014)\02.flac`, Size: 10},
+			{Filename: `music\Sia\1000 Forms of Fear (2014)\03.flac`, Size: 10},
+		},
+	}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	leaves, err := st.DownloadFoldersForJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("DownloadFoldersForJob: %v", err)
+	}
+	if len(leaves) != 1 || leaves[0] != "1000 Forms of Fear (2014)" {
+		t.Errorf("registered leaves = %v, want exactly [1000 Forms of Fear (2014)]", leaves)
+	}
+}
+
+// TestRegisteredLeafMatchesAlbumFolder locks the register against the import
+// scan: the leaf topUpCandidate registers must be the same folder AlbumFolder
+// tells Lidarr to scan, or cleanup would be pointed at a directory nothing ever
+// downloaded into. A filename with no usable folder registers nothing, matching
+// AlbumFolder's fallback to the download root.
+func TestRegisteredLeafMatchesAlbumFolder(t *testing.T) {
+	const completeDir = "/music/dl"
+	for _, f := range []string{
+		`Music\Artist - Album\01 Track.flac`,
+		"Music/Artist - Album/02 Track.flac",
+		`@@abcd\Shared\Some Album [2020]\1-01 Intro.mp3`,
+		"single-level/file.flac",
+		"noleaf.flac",
+		`..\track.flac`,
+	} {
+		leaf := commonLeaf([]string{f})
+		folder := AlbumFolder(completeDir, []string{f})
+		if leaf == "" {
+			if folder != completeDir {
+				t.Errorf("%q registers nothing but AlbumFolder = %q, want the root", f, folder)
+			}
+			continue
+		}
+		if want := filepath.Join(completeDir, leaf); folder != want {
+			t.Errorf("%q registers leaf %q but AlbumFolder = %q, want %q", f, leaf, folder, want)
+		}
 	}
 }

@@ -28,7 +28,7 @@ func helperActivateFiles(t *testing.T, s *Store, albumID int64, username string,
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: %v ok=%v", err, ok)
 	}

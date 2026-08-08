@@ -961,7 +961,7 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestRetryManualJobClearsFailReasonAndImportSubmittedAt(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1091,7 +1091,7 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestRetryManualJobNoopWithoutCandidates(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "bob", "",
-		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "track.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1226,7 +1226,7 @@ func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1253,7 +1253,7 @@ func TestRetryJobsNoopForNotImportedJob(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 	job, err := s.CreateManualJob(ctx, "Album", "Artist", "peer_one", "",
-		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now)
+		[]ManualJobFile{{Filename: "f1.flac", Size: 10}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1859,7 +1859,7 @@ func TestListJobsWithTransferPrefersActiveOverNewerNeverTried(t *testing.T) {
 		t.Fatalf("expected active_peer picked first (best score), got %q", winner.Username)
 	}
 
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -1912,7 +1912,7 @@ func TestListJobsWithTransferPrefersSucceededOverNeverTried(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, winner.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -1983,7 +1983,7 @@ func TestListJobsWithTransferAggregateActiveOutranksLatestUpdatedRow(t *testing.
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -2092,6 +2092,11 @@ func TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter(t *testing.T) {
 		// A legacy state nothing in production writes any more (issue #416):
 		// every dead pre-download state falls to the CASE's ELSE, 'wanted'.
 		{9011, core.AlbumJobState("COOLDOWN"), "", "", "wanted"},
+		// Given a COMPLETED transfer deliberately (issue #368): that is the
+		// aggregate shape a real NOT_IMPORTED job has, and it is exactly what
+		// the 'waiting'/'queued' fallbacks would claim if the job-level branch
+		// above them ever stopped winning.
+		{9012, core.StateNotImported, core.TransferCompleted, "peer_not_imported", "notImported"},
 	}
 	statusByID := map[int64]string{}
 	for i, f := range fixtures {
@@ -2177,11 +2182,9 @@ func TestListDashboardJobsStatusInProgressOutranksCompleted(t *testing.T) {
 // otherwise (wrongly) read it as "queued" - a NOT_IMPORTED job's completed
 // transfers leave agg.in_progress/stalled/live/failed all at their zero
 // values, which is exactly the shape the ELSE 'queued' branch matches.
-// Deliberately not folded into
-// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter's fixture table:
-// "notImported" is not (yet) an accepted dashboard Filter value, so this
-// checks the JobView projection directly instead of round-tripping through
-// ListDashboardJobs's filter.
+// TestListDashboardJobsPerRowStatusMatchesFacetsAndFilter now carries the same
+// fixture through the list/filter/facet path; this one stays because it enters
+// through JobWithTransfer, a separate projection of the same CASE.
 func TestJobViewStatusNotImportedForNotImportedState(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -2228,7 +2231,7 @@ func TestListDashboardJobsAggregateActiveMatchesFacetAndFilter(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -2581,9 +2584,33 @@ func TestListDashboardJobsNotImportedStatus(t *testing.T) {
 	if page.Jobs[0].Status != "notImported" {
 		t.Errorf("status = %q, want %q", page.Jobs[0].Status, "notImported")
 	}
-	if page.Facets.Status.All != 1 {
-		t.Errorf("facets.status.all = %d, want 1 (a NOT_IMPORTED job still counts under ALL, "+
-			"even though it has no facet or filter of its own yet — #368)", page.Facets.Status.All)
+	if page.Facets.Status.All != 1 || page.Facets.Status.NotImported != 1 {
+		t.Errorf("facets.status = %+v, want all=1 notImported=1 (#368: the status carries "+
+			"its own facet, so the chips still sum to ALL)", page.Facets.Status)
+	}
+}
+
+// TestListDashboardJobsFilterNotImported covers #368's second half: the status
+// is an accepted Filter value, and it selects exactly the NOT_IMPORTED jobs -
+// not the DONE ones beside them, which share the "download finished" shape.
+func TestListDashboardJobsFilterNotImported(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	want := insertDashboardTestJob(t, s, 0, core.SourceManual, core.StateNotImported, "", "Kid A", "Radiohead", "peer1", 0, now.Add(-time.Minute))
+	insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "OK Computer", "Radiohead", "peer2", 0, now.Add(-time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "notImported", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != want {
+		t.Fatalf("filter=notImported returned %+v, want just job %d", page.Jobs, want)
+	}
+	// Facets ignore the status filter, so both jobs are still counted.
+	if page.Facets.Status.All != 2 || page.Facets.Status.NotImported != 1 || page.Facets.Status.Done != 1 {
+		t.Errorf("facets = %+v, want all=2 notImported=1 done=1", page.Facets.Status)
 	}
 }
 
@@ -2840,4 +2867,67 @@ func TestLatestFailureDetails(t *testing.T) {
 			t.Errorf("job C should be absent, got %q", got[jobC.ID])
 		}
 	})
+}
+
+// TestCountDashboardStatusesMatchesListFacets is the regression test for
+// issue #417: /status used to derive its counts itself (and left two of them
+// unassigned), so it disagreed with the Jobs page about the word "queued" —
+// a live instance reported queued=0 while /api/jobs reported 2. Both surfaces
+// now read the same facet query, and this pins that they agree field for
+// field over one fixture of every dashboard status.
+//
+// A second derivation is exactly the drift issue #269 removed; if anyone
+// gives CountDashboardStatuses its own counting rule, this fails.
+func TestCountDashboardStatusesMatchesListFacets(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+
+	fixtures := []struct {
+		id     int64
+		state  core.AlbumJobState
+		tstate core.TransferState
+		peer   string
+	}{
+		{9101, core.StateDownloading, core.TransferInProgress, "peer_active"},
+		{9102, core.StateImporting, "", ""},
+		{9103, core.StateWanted, "", ""},
+		{9104, core.StateDownloading, core.TransferStalled, "peer_stalled"},
+		{9105, core.StateDownloading, core.TransferErrored, "peer_failed"},
+		{9106, core.StateParked, "", ""},
+		{9107, core.StateOrphaned, "", ""},
+		{9108, core.StateDone, "", ""},
+		{9109, core.StateSelecting, "", ""},
+		{9110, core.StateDownloading, core.TransferPending, "peer_queued"},
+		{9111, core.StateDownloading, core.TransferCompleted, "peer_waiting"},
+		// Cancelled jobs are outside the facet query's row scope; the
+		// counts-only query must use the same scope, so this must not
+		// appear in All.
+		{9112, core.StateCancelled, "", ""},
+	}
+	for i, f := range fixtures {
+		insertDashboardTestJob(t, s, f.id, core.SourceLidarr, f.state, f.tstate, fmt.Sprintf("Job %d", i), "Artist", f.peer, 0, now.Add(time.Duration(i)*time.Second))
+	}
+
+	page, err := s.ListDashboardJobs(ctx, DashboardJobsQuery{Sort: "st", Dir: "asc", Filter: "all", Source: "all"})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	counts, err := s.CountDashboardStatuses(ctx)
+	if err != nil {
+		t.Fatalf("CountDashboardStatuses: %v", err)
+	}
+	if counts != page.Facets.Status {
+		t.Fatalf("CountDashboardStatuses = %+v, want the /api/jobs facets %+v", counts, page.Facets.Status)
+	}
+
+	// Pin the fixture's own shape too, so a change that broke both queries
+	// identically would still be caught.
+	want := DashboardStatusFacets{
+		All: 11, Active: 1, Importing: 1, Queued: 1, Waiting: 1, Selecting: 1,
+		Wanted: 1, Stalled: 1, Failed: 1, Parked: 2, Done: 1,
+	}
+	if counts != want {
+		t.Errorf("CountDashboardStatuses = %+v, want %+v", counts, want)
+	}
 }

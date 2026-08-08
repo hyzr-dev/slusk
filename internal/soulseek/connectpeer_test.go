@@ -157,7 +157,7 @@ func startConnectedClient(t *testing.T, handle func(conn net.Conn)) (*Client, st
 	go func() { _ = c.Run(ctx) }()
 
 	waitForState(t, c, StateConnected, 2*time.Second)
-	return c, fmt.Sprintf("127.0.0.1:%d", c.listenPort)
+	return c, fmt.Sprintf("127.0.0.1:%d", int(c.listenPort.Load()))
 }
 
 func TestConnectPeerDirectSuccess(t *testing.T) {

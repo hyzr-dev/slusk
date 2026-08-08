@@ -262,7 +262,14 @@ func (s *Store) MarkImportSubmitted(ctx context.Context, candidateID int64, now 
 // live remote-file ownership conflict is an expected skip (false, false, nil):
 // the candidate remains NEW for a later tick while Selecting continues with
 // unrelated jobs.
-func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, now time.Time) (activated, capFull bool, err error) {
+//
+// deadline is the wall-clock time the created transfers are considered overdue
+// at, normally now + pipeline.transfer_deadline. RecordEnqueueIntent rewrites
+// it when a file is actually handed to the peer, so this initial value only
+// covers the PENDING window - but it must still be in the future (#441): a row
+// created past its own deadline reads as overdue to anything that later widens
+// the deadline sweep to include PENDING.
+func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID, jobID int64, maxActive int, deadline, now time.Time) (activated, capFull bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, false, err
@@ -335,10 +342,10 @@ func (s *Store) ActivateCandidateWithTransfers(ctx context.Context, candidateID,
 		`INSERT INTO transfers
 		   (candidate_id, username, filename, state, bytes_total, deadline, updated_at)
 		 SELECT $1, $2, f.value->>'filename', $3,
-		        (f.value->>'size')::bigint, $4, $4
-		   FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY AS f(value, ord)
+		        (f.value->>'size')::bigint, $4, $5
+		   FROM jsonb_array_elements($6::jsonb) WITH ORDINALITY AS f(value, ord)
 		  ORDER BY f.ord`,
-		candidateID, username, string(core.TransferPending), now, string(files)); err != nil {
+		candidateID, username, string(core.TransferPending), deadline, now, string(files)); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_transfers_live_remote_owner" {
 			return false, false, nil

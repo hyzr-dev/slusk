@@ -64,7 +64,10 @@ export const t = {
     },
     setup: {
       title: 'Setup',
-      subtitle: 'slusk validates the config you already wrote — it never writes it',
+      // Describes what this view does, not what slusk does with config.toml.
+      // The previous wording claimed slusk never writes the file, which #134
+      // made false — see the same note on the `setup` content key below.
+      subtitle: 'Probes what your config points at — Lidarr, Soulseek, shares',
     },
     settings: {
       title: 'Config',
@@ -97,6 +100,15 @@ export const t = {
     throughputSeparator: '·',
     idle: 'idle',
     statusRegion: 'Application status',
+    // AGPL § 13 requires a network-interacting version to "prominently offer"
+    // its Corresponding Source (issue #391, deriving from #380). The visible
+    // label is a bare word to sit inside the brand cell's terminal idiom; the
+    // accessible name spells out what it offers, because "SOURCE" alone read
+    // out of context could equally mean a download source or a search source.
+    // The visible text is contained in the accessible name, so WCAG 2.5.3
+    // (Label in Name) still holds for anyone driving this by voice.
+    sourceLabel: 'SOURCE',
+    sourceLabelAccessible: 'Source code for this version',
   },
   // Shared query-state copy. Every view renders the same three states for a
   // GET — loading, failed, stale — so the two that are not view-specific live
@@ -231,8 +243,12 @@ export const t = {
   // `jobs.nextPage` on a control the Peers view also mounts would be a name
   // that lies about its scope.
   pager: {
-    previousPage: '[,] PREV',
-    nextPage: 'NEXT [.]',
+    // Plain, with no bracket glyph: only a caller that binds the keys may claim
+    // them, and it passes the glyph to Pager as decoration instead (#434). A
+    // shared string cannot carry a per-caller promise — on Peers, which binds
+    // nothing, `NEXT [.]` was simply false.
+    previousPage: 'PREV',
+    nextPage: 'NEXT',
     pageLabel: (page: number) => `Page ${page}`,
   },
   jobs: {
@@ -332,6 +348,10 @@ export const t = {
       failed: 'FAILED',
       parked: 'PARKED',
       done: 'DONE',
+      // Spelled out rather than reusing the row tag's 'NI' (Tag.tsx): the tag
+      // sits in a column the user has already learned, while a chip is the
+      // only place this status names itself.
+      notImported: 'NOT IMPORTED',
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
     // the mock, but source filtering is an approved Jobs control. The group's
@@ -546,12 +566,43 @@ export const t = {
     // counters sourced from the same JSON the rest of this page already reads
     // (useStatus/useUploads/useShares) — the real Prometheus surface is linked
     // via metricsMeta instead of being named row by row.
+    // Job-progress panel (#442). The module cards above report whether each
+    // module is *ticking*; these rows report whether the *work* is moving.
+    // Three downloads once sat untouched for four weeks while every card above
+    // them read OK, because doing nothing is a tick's normal outcome and so has
+    // no signature. The heading says "progress" rather than "staleness" for the
+    // same reason the rows carry no warning colour: how old is too old depends
+    // on the library and the peer, and slusk does not know the answer — it
+    // reports the age and lets the reader judge.
+    progressHeading: 'JOB PROGRESS',
+    progressMeta: 'oldest update per state',
+    progressEmpty: 'No jobs in progress.',
+    // Column headers for the per-state rows.
+    progressColumnState: 'state',
+    progressColumnCount: 'jobs',
+    progressColumnAge: 'oldest',
+    // The one row that *is* a defect rather than a reading: a job in
+    // DOWNLOADING or IMPORTING with no active candidate is skipped by its
+    // module on every pass while holding one of the concurrency slots, and
+    // nothing anywhere reports a failure. Non-zero always means stuck.
+    progressNoCandidate: 'stuck without a candidate',
+    progressNoCandidateTitle:
+      'Jobs downloading or importing with no active candidate. Their module skips them on every pass while they hold a slot, so they never fail and never finish. Retry or cancel them from the job list.',
     metricsHeading: 'METRICS',
     metricsMeta: 'full set at /metrics',
-    metricActive: 'active downloads',
-    metricQueued: 'queued',
-    metricStalled: 'stalled',
-    metricParked: 'parked transfers',
+    // The seven /status rows all count jobs, in the Jobs page's status
+    // vocabulary (issue #416), so each says so: 'active downloads' and
+    // 'parked transfers' both named the wrong unit, and the first was wrong
+    // by a factor of the album's file count once the value became a job
+    // count (issues #305 and #417). The uploads and shared rows below come
+    // from other endpoints and genuinely are not jobs.
+    metricWanted: 'wanted jobs',
+    metricSelecting: 'selecting jobs',
+    metricWaiting: 'waiting jobs',
+    metricQueued: 'queued jobs',
+    metricActive: 'active jobs',
+    metricStalled: 'stalled jobs',
+    metricParked: 'parked jobs',
     metricUploads: 'active uploads',
     metricShared: 'shared files',
   },

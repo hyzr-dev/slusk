@@ -9,7 +9,7 @@
 
 .body { display: flex; flex: 1; min-height: 0; }
 
-.main { flex: 1; min-width: 0; overflow-y: auto; }
+.main { flex: 1; min-width: 0; overflow-y: auto; overflow-x: auto; }
 
 /* Standard clip-rect pattern: present in the accessibility tree and to
    screen-reader navigation, but takes up no visual space. `display: none`

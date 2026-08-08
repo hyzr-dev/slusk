@@ -1246,7 +1246,7 @@ func TestDiscoverySkipsAndFailsManualJob(t *testing.T) {
 	p, st := newDiscoveryParams(t, music, searcher, map[int64]core.WantedRelease{})
 
 	job, err := st.CreateManualJob(ctx, "Album", "Artist", "alice", "",
-		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now)
+		[]store.ManualJobFile{{Filename: "a.flac", Size: 1}}, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("CreateManualJob: %v", err)
 	}
@@ -1325,7 +1325,7 @@ func TestDiscoverySkipsCandidateThatAlreadyFailed(t *testing.T) {
 	if cand.Username != "bad" {
 		t.Fatalf("expected the highest-scoring candidate to be %q, got %q", "bad", cand.Username)
 	}
-	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
 	}
@@ -1401,7 +1401,7 @@ func TestDiscoveryStillCachesCandidateFromSamePeerInAnotherDirectory(t *testing.
 	if err != nil || !ok {
 		t.Fatalf("NextNewCandidate: %v ok=%v", err, ok)
 	}
-	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
 	if err != nil || !activated {
 		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
 	}

@@ -71,6 +71,31 @@ func conversationPresenceForBackend(backend string, client conversationPresenceC
 	return client.ConversationPresence
 }
 
+// dashboardJobsQueryFromPaged maps an observ.PagedJobsQuery — the HTTP-layer
+// request shape — onto the store.DashboardJobsQuery the paged jobs endpoint
+// queries with. It is extracted from pagedJobsFn's closure (issue #293) so
+// the field-by-field mapping has a name and can be tested on its own, rather
+// than only ever being exercised indirectly through a mocked store call.
+//
+// Now is generated here, not threaded in from the caller, because the only
+// caller (pagedJobsFn) has no query-scoped timestamp of its own to thread —
+// each HTTP request must anchor filter=finished's window (see
+// store.DashboardFinishedWindow) to the moment it is actually served, not to
+// some earlier point in the request's life.
+func dashboardJobsQueryFromPaged(query observ.PagedJobsQuery) store.DashboardJobsQuery {
+	return store.DashboardJobsQuery{
+		Page:       query.Page,
+		Sort:       query.Sort,
+		Dir:        query.Dir,
+		Filter:     query.Filter,
+		Source:     query.Source,
+		Query:      query.Query,
+		PageSize:   query.PageSize,
+		SkipFacets: query.SkipFacets,
+		Now:        time.Now(),
+	}
+}
+
 // version is the build's identity, surfaced at GET /status and shown beside
 // the product name in the UI's top bar (issue #229).
 //
@@ -98,6 +123,12 @@ const (
 	// row cannot authenticate anything (see SessionUser), so this is cleanup,
 	// not a security control.
 	sessionPrunerInterval = time.Hour
+	// jobProgressInterval is how often runJobProgressPublisher republishes the
+	// job-staleness gauges (issue #442). The signal it carries is measured in
+	// hours and days — three jobs once sat untouched for four weeks — so a
+	// minute of scrape lag costs nothing, while a tighter loop would run two
+	// aggregate queries far more often than the reading can change.
+	jobProgressInterval = time.Minute
 )
 
 // ensureWritableDir verifies dir exists (creating it if needed) and is actually
@@ -278,30 +309,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Every count comes from the one query the Jobs page's facets come from,
+	// so /status and /api/jobs can never disagree about a status word
+	// (issue #417). Deriving any field here — from ActiveTransfers, from a
+	// state count — is what made /status report seventeen "active downloads"
+	// for a single active job, and queued/stalled as a hardcoded zero.
 	statusFn := func(ctx context.Context) (observ.StatusReport, error) {
-		active, err := st.ActiveTransfers(ctx)
+		counts, err := st.CountDashboardStatuses(ctx)
 		if err != nil {
 			return observ.StatusReport{}, err
 		}
-		parked, err := st.CountJobsInStates(ctx, core.StateParked, core.StateOrphaned)
+		return observ.StatusReport{
+			Wanted:    int(counts.Wanted),
+			Selecting: int(counts.Selecting),
+			Waiting:   int(counts.Waiting),
+			Queued:    int(counts.Queued),
+			Active:    int(counts.Active),
+			Stalled:   int(counts.Stalled),
+			Parked:    int(counts.Parked),
+		}, nil
+	}
+	// /status recomputes the progress snapshot per request rather than reading
+	// the publisher's last sample: two cheap aggregates beat a second cache
+	// with a staleness of its own, on a screen whose entire subject is
+	// staleness.
+	jobProgressFn := func(ctx context.Context) (observ.JobProgressReport, error) {
+		snapshot, err := st.JobProgress(ctx)
 		if err != nil {
-			return observ.StatusReport{}, err
+			return observ.JobProgressReport{}, err
 		}
-		return observ.StatusReport{Active: len(active), Parked: parked}, nil
+		return jobProgressReport(snapshot, time.Now()), nil
 	}
 	jobsFn := func(ctx context.Context) ([]core.JobView, error) {
 		return st.ListJobsWithTransfer(ctx)
 	}
 	pagedJobsFn := func(ctx context.Context, query observ.PagedJobsQuery) (observ.PagedJobsResult, error) {
-		page, err := st.ListDashboardJobs(ctx, store.DashboardJobsQuery{
-			Page: query.Page, Sort: query.Sort, Dir: query.Dir,
-			Filter: query.Filter, Source: query.Source, Query: query.Query,
-			PageSize: query.PageSize, SkipFacets: query.SkipFacets,
-			// filter=finished anchors its window here rather than in SQL, so
-			// the store never reads the database clock (see
-			// store.DashboardFinishedWindow). Every other filter ignores it.
-			Now: time.Now(),
-		})
+		page, err := st.ListDashboardJobs(ctx, dashboardJobsQueryFromPaged(query))
 		if err != nil {
 			return observ.PagedJobsResult{}, err
 		}
@@ -316,6 +359,7 @@ func main() {
 					Wanted: page.Facets.Status.Wanted, Stalled: page.Facets.Status.Stalled,
 					Failed: page.Facets.Status.Failed,
 					Parked: page.Facets.Status.Parked, Done: page.Facets.Status.Done,
+					NotImported: page.Facets.Status.NotImported,
 				},
 				Source: observ.JobSourceFacets{
 					All: page.Facets.Source.All, Manual: page.Facets.Source.Manual,
@@ -391,7 +435,12 @@ func main() {
 	peerHistoryFn := func(ctx context.Context, username string) (core.PeerHistory, bool, error) {
 		return st.PeerHistory(ctx, username)
 	}
-	jobs := &app.Jobs{Store: st, Peers: peers, Logger: logger.With("component", "app")}
+	jobs := &app.Jobs{
+		Store:            st,
+		Peers:            peers,
+		Logger:           logger.With("component", "app"),
+		TransferDeadline: cfg.Pipeline.TransferDeadline.Duration,
+	}
 	// authSvc backs form-based login (issue #279): account bootstrap,
 	// credential verification, and session lifecycle. See internal/app/auth.go.
 	authSvc := &app.Auth{Store: st}
@@ -697,6 +746,7 @@ func main() {
 		Registry:                  reg,
 		Version:                   version,
 		Status:                    statusFn,
+		JobProgress:               jobProgressFn,
 		Jobs:                      jobsFn,
 		PagedJobs:                 pagedJobsFn,
 		FailureDetails:            failureDetailsFn,
@@ -785,6 +835,8 @@ func main() {
 	// goroutine, rather than threaded through the soulDone/throughputDone
 	// join further down.
 	go runSessionPruner(restartCtx, authSvc, sessionPrunerInterval, logger)
+	// Same rationale: nothing to flush, so no join on shutdown.
+	go runJobProgressPublisher(restartCtx, st, metrics, jobProgressInterval, logger)
 
 	var soulDone chan error
 	var throughputDone chan struct{}

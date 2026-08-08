@@ -9,7 +9,7 @@
 //
 // A rejection is identified by (album_job_id, username, release_dir) - the same
 // key matcher.Rank groups search results on - and lives exactly as long as the
-// job (ON DELETE CASCADE; see migration 0015).
+// job (ON DELETE CASCADE; see migration 0016).
 package store
 
 import (

@@ -145,9 +145,27 @@ node scripts/triage/waves.mjs invalidate < /tmp/triage-invalidate-input.json
 where `/tmp/triage-invalidate-input.json` holds `{"state": <parsed state.json>, "openIssues":
 [{"number":.., "digest":..}, ...], "changedPaths": [...]}`.
 
-A cached judgement dies on either axis: the issue's content changed, or the code under it
-moved. `touches` is an asserted relation between the two, so one axis is not enough — an
-issue can sit untouched for months while the file it concerns is refactored away.
+A cached judgement dies on any of three axes: the issue's content changed, the code under it
+moved, or a judgement's evidence names an issue that has closed since the cache was written.
+`touches` is an asserted relation between an issue and the code, so the first two axes are
+not enough on their own — an issue can sit untouched for months while the file it concerns is
+refactored away.
+
+The third axis needs nothing from you and nothing extra in the payload. `invalidate` derives
+which issues have closed by subtracting `openIssues` from the cache's own keys: every issue
+in `state.json` was open when it was judged, so any of them missing from the open list has
+since closed. It then re-judges any cached judgement whose `impactEvidence` or `reproCheck`
+mentions one of those numbers as `#N`. This exists because a judgement's severity can hang on
+a *third* issue's status — "#287 (still open) is what turns this into an actual bug" — which
+neither of the other axes can see coming true (#298).
+
+It is a text heuristic on purpose, and it is a floor rather than a guarantee. It fires on a
+number mentioned in passing, misses a dependency the judge paraphrased instead of numbering,
+and cannot see an issue that closed without ever having a cache row of its own. Of the two
+judgements that motivated #298 it catches one: #294 wrote the number, #292 wrote "the rows
+are not clickable" and would still cache-hit. So the payoff for writing `#N` into
+`impactEvidence` when a finding depends on another issue is direct — that is what makes the
+dependency machine-visible.
 
 `invalidate` prints `{"fresh": [...], "stale": [...]}`. **Both arrays are bare issue
 numbers, not objects.** Keep both:
@@ -415,7 +433,10 @@ git rev-parse HEAD
 ```
 
 `issues` holds every judgement this run knows about — reused and newly judged — keyed by
-issue number as a string, so next run's `invalidate` step can find them. `waves` is what
+issue number as a string, so next run's `invalidate` step can find them. That is every
+*open* issue and nothing else: carrying a closed issue's entry forward would be read next
+run as "still open at cache time, closed since", and would permanently stale every judgement
+whose evidence names its number. `waves` is what
 makes the report checkable after the fact. `unassessable` and `unschedulable` (both from step
 3's result) and `unassessed` (from step 2's result) are kept apart deliberately: a judgement
 with a value the scheduler didn't recognise, a judgement whose `touches` named a directory,
@@ -499,6 +520,8 @@ and heredocs, which fish does not support at all.
 | Passed `fresh` issue numbers as `args.cached` | The workflow needs judgement *objects*; look each `fresh` number up in `state.json` first |
 | Went looking for `unassessed` in the log output | It's a field on the return value (`result.unassessed`), always an array; read it directly |
 | Skipped the code-change axis when `computedAt` didn't resolve | Treat everything as stale instead — an unresolvable diff is not evidence nothing changed |
+| Kept a closed issue's judgement in `state.json` | The closed-reference axis reads the cache's own keys as "was open then"; a stale entry stales every judgement citing that number, forever |
+| Forced a judgement stale by hand because it rested on an issue that had since closed | That axis is mechanical now (#298) — if it didn't fire, the evidence never wrote the number as `#N`; fix the judgement's evidence, not the cache |
 | Merged `unassessable`, `unschedulable` and `unassessed` into one bucket | Three different failure modes with three different repairs; keep them apart in the report and in `state.json` |
 | Assumed the prompt's "never a directory in `touches`" rule holds | `computeWaves` enforces it now, because the prompt didn't — such an issue lands in `unschedulable` and in no wave; report it and fix the judgement |
 | Committed the report or `state.json` | Leave both unstaged; this capability never commits anything, including its own output |

@@ -30,6 +30,11 @@ type Metrics struct {
 	DownloadsActive     prometheus.Gauge
 	AlbumReleasesErrors prometheus.Counter
 	AlbumTracksErrors   prometheus.Counter
+	// JobsInState and JobOldestUpdateAge are labelled by job state and are
+	// rebuilt wholesale on every publish - see SetJobProgress.
+	JobsInState                *prometheus.GaugeVec
+	JobOldestUpdateAge         *prometheus.GaugeVec
+	JobsWithoutActiveCandidate prometheus.Gauge
 }
 
 // NewMetrics constructs and registers the collectors on reg.
@@ -50,8 +55,20 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		AlbumTracksErrors: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "slusk_album_tracks_errors_total", Help: "Total failed Lidarr AlbumTracks calls during discovery.",
 		}),
+		JobsInState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "slusk_jobs_in_state", Help: "Jobs currently in each non-terminal state.",
+		}, []string{"state"}),
+		JobOldestUpdateAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "slusk_job_oldest_update_age_seconds",
+			Help: "Age of the least recently updated job in each non-terminal state.",
+		}, []string{"state"}),
+		JobsWithoutActiveCandidate: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "slusk_jobs_without_active_candidate",
+			Help: "Jobs in DOWNLOADING or IMPORTING with no ACTIVE candidate, which both modules skip indefinitely.",
+		}),
 	}
-	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors)
+	reg.MustRegister(m.ReconcileTotal, m.UnknownTransfers, m.DownloadsActive, m.AlbumReleasesErrors, m.AlbumTracksErrors,
+		m.JobsInState, m.JobOldestUpdateAge, m.JobsWithoutActiveCandidate)
 	return m
 }
 
@@ -71,11 +88,39 @@ func (m *Metrics) SetUnknownTransfers(n int) { m.UnknownTransfers.Set(float64(n)
 func (m *Metrics) SetDownloadsActive(n int) { m.DownloadsActive.Set(float64(n)) }
 
 // StatusReport is the read-only snapshot served at /status.
+//
+// Every field is a count of *jobs*, in the dashboard's status vocabulary
+// (issue #416) — never a count of transfers. Before issue #417 the report
+// mixed the two: Active was the length of the active-transfers query, so one
+// downloading job with seventeen files in flight reported as seventeen, while
+// Queued and Stalled were never assigned at all and served a hardcoded zero to
+// the Health page. Producers must derive all seven from
+// store.CountDashboardStatuses; deriving any of them another way reintroduces
+// exactly the disagreement this struct was fixed to remove.
+//
+// The seven are deliberately a subset of the dashboard's twelve facets: the
+// remaining five (importing, failed, done, notImported, all) come free from the
+// same query but exposing them is a separate API decision that was not taken.
+// notImported joined that remainder with issue #368 rather than this report —
+// the Jobs page needed a chip for it, /status was not asked to grow a field.
 type StatusReport struct {
-	Queued  int `json:"queued"`
-	Active  int `json:"active"`
+	// Wanted is jobs never searched, with no candidates yet.
+	Wanted int `json:"wanted"`
+	// Selecting is jobs whose candidates are cached, waiting for a
+	// max_active slot.
+	Selecting int `json:"selecting"`
+	// Waiting is downloading jobs between files of the same candidate — at
+	// least one file already delivered, none currently in progress.
+	Waiting int `json:"waiting"`
+	// Queued is jobs standing in a peer's queue with nothing delivered yet
+	// (issue #416's narrowed sense of the word).
+	Queued int `json:"queued"`
+	// Active is jobs with a transfer actually in progress.
+	Active int `json:"active"`
+	// Stalled is jobs whose transfers have stopped making progress.
 	Stalled int `json:"stalled"`
-	Parked  int `json:"parked"`
+	// Parked is jobs in PARKED or ORPHANED.
+	Parked int `json:"parked"`
 }
 
 // StatusFunc produces a current StatusReport (typically backed by the store).
@@ -277,6 +322,10 @@ type JobStatusFacets struct {
 	Failed    int64 `json:"failed"`
 	Parked    int64 `json:"parked"`
 	Done      int64 `json:"done"`
+	// NotImported is the terminal manual-job outcome from issue #59 (download
+	// finished, no Lidarr album to import into). Counted separately from Done
+	// and Failed (issue #368) so the client's chips sum to All.
+	NotImported int64 `json:"notImported"`
 }
 
 // JobSourceFacets contains counts for every persisted source. All ignores the
@@ -397,6 +446,10 @@ type ServerDeps struct {
 	Version string
 	// Status reports the pipeline snapshot served at /status.
 	Status StatusFunc
+	// JobProgress reports per-state job staleness for /status, so the Health
+	// view can show whether the work is moving next to whether the modules are
+	// ticking (issue #442).
+	JobProgress JobProgressFunc
 	// Jobs lists every job view, unpaged, for GET /api/stream's hub (issue
 	// #268 removed its other consumer, GET /api/jobs/all — every REST job
 	// list is paged now).
@@ -607,6 +660,11 @@ func NewServer(deps ServerDeps) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		progress, err := deps.JobProgress(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		type moduleStatusDTO struct {
 			LastAttempt         string `json:"lastAttempt"`
 			LastCompleted       string `json:"lastCompleted"`
@@ -654,12 +712,14 @@ func NewServer(deps ServerDeps) http.Handler {
 			Orphaned      int                        `json:"orphaned"`
 			Modules       map[string]string          `json:"modules"`
 			ModuleDetails map[string]moduleStatusDTO `json:"moduleDetails"`
+			JobProgress   jobProgressDTO             `json:"jobProgress"`
 			Version       string                     `json:"version"`
 		}{
 			StatusReport:  report,
 			Orphaned:      report.Parked,
 			Modules:       moduleTicks,
 			ModuleDetails: moduleDetails,
+			JobProgress:   newJobProgressDTO(progress),
 			Version:       deps.Version,
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -994,7 +1054,11 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	// (issue #310 shipped exactly that until a lab run caught it).
 	// "failures" and "failed" are deliberately both present and deliberately
 	// different — see the case comments in store.dashboardJobsWhere.
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "inflight", "finished") {
+	// Must stay identical to store.validateDashboardJobsQuery's own switch —
+	// two independent allowlists over the same value have already drifted once
+	// in this repo, and a value accepted here but refused there 500s instead of
+	// 400s.
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

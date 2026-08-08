@@ -39,6 +39,9 @@ function renderHealth(moduleDetails: StatusReport['moduleDetails']) {
   stubFetchIndefinitely();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(queryKeys.status, {
+    wanted: 0,
+    selecting: 0,
+    waiting: 0,
     queued: 0,
     active: 0,
     stalled: 0,
@@ -105,6 +108,9 @@ describe('Health loading vs empty', () => {
           return Promise.resolve(
             new Response(
               JSON.stringify({
+                wanted: 0,
+                selecting: 0,
+                waiting: 0,
                 queued: 2,
                 active: 1,
                 stalled: 0,
@@ -129,6 +135,160 @@ describe('Health loading vs empty', () => {
     );
     expect(await screen.findByText('1')).toBeInTheDocument(); // metricActive
     expect(screen.getAllByText('—').length).toBeGreaterThan(0); // uploads/shares rows
+  });
+
+  // Issue #417: queued and stalled were never assigned server-side and this
+  // page rendered their hardcoded zero as fact, on the surface people visit
+  // when something is wrong. Every one of the seven /status counts must reach
+  // its own row carrying its own value.
+  it('renders all seven status counts, each next to its own label', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/status') {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                wanted: 143,
+                selecting: 11,
+                waiting: 3,
+                queued: 2,
+                active: 1,
+                stalled: 7,
+                parked: 5,
+                modules: {},
+                moduleDetails: {},
+              } satisfies StatusReport),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <Health />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // The labels render before the query resolves (the value cell shows an
+    // em dash until then), so wait on a value, not on a label.
+    await screen.findByText('143');
+    const rows: [string, string][] = [
+      [t.health.metricWanted, '143'],
+      [t.health.metricSelecting, '11'],
+      [t.health.metricWaiting, '3'],
+      [t.health.metricQueued, '2'],
+      [t.health.metricActive, '1'],
+      [t.health.metricStalled, '7'],
+      [t.health.metricParked, '5'],
+    ];
+    for (const [label, value] of rows) {
+      const row = screen.getByText(label).parentElement;
+      expect(row?.textContent).toBe(`${label}${value}`);
+    }
+  });
+
+  // The labels are the second half of the same fix (#305, absorbed by #417):
+  // the value became a job count, so no label sourced from /status may still
+  // call it a download or a transfer.
+  it('names the status-sourced rows as job counts, not downloads or transfers', () => {
+    for (const label of [
+      t.health.metricWanted,
+      t.health.metricSelecting,
+      t.health.metricWaiting,
+      t.health.metricQueued,
+      t.health.metricActive,
+      t.health.metricStalled,
+      t.health.metricParked,
+    ]) {
+      expect(label).not.toMatch(/download|transfer/i);
+    }
+  });
+});
+
+function renderHealthWithProgress(jobProgress: StatusReport['jobProgress']) {
+  stubFetchIndefinitely();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(queryKeys.status, {
+    wanted: 0,
+    selecting: 0,
+    waiting: 0,
+    queued: 0,
+    active: 0,
+    stalled: 0,
+    parked: 0,
+    modules: {},
+    moduleDetails: { importer: makeModule() },
+    ...(jobProgress === undefined ? {} : { jobProgress }),
+  } satisfies StatusReport);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <Health />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe('Health job progress', () => {
+  it('renders one row per non-terminal state with its count and oldest-update age', () => {
+    renderHealthWithProgress({
+      states: [
+        { state: 'DOWNLOADING', count: 3, oldestUpdateAgeSeconds: 2_419_200 },
+        { state: 'IMPORTING', count: 1, oldestUpdateAgeSeconds: 45 },
+      ],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(screen.getByText(t.state.DOWNLOADING)).toBeInTheDocument();
+    expect(screen.getByText('28d')).toBeInTheDocument();
+    expect(screen.getByText(t.state.IMPORTING)).toBeInTheDocument();
+    expect(screen.getByText('45s')).toBeInTheDocument();
+  });
+
+  // A state slusk's own copy does not name must still be readable rather than
+  // silently dropped — the raw name is the honest fallback.
+  it('falls back to the raw state name for a state with no mapped label', () => {
+    renderHealthWithProgress({
+      states: [{ state: 'COOLDOWN', count: 2, oldestUpdateAgeSeconds: 60 }],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(screen.getByText('COOLDOWN')).toBeInTheDocument();
+  });
+
+  // The panel omits itself entirely on a server predating #442. Drawing zeroes
+  // would read as "nothing is stale" about a backend that said nothing at all.
+  it('omits the progress panel when the server sends no jobProgress', () => {
+    renderHealthWithProgress(undefined);
+    expect(screen.queryByText(t.health.progressHeading)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.health.progressNoCandidate)).not.toBeInTheDocument();
+  });
+
+  it('shows the empty message but keeps the wedge count when no state has jobs', () => {
+    renderHealthWithProgress({ states: [], jobsWithoutActiveCandidate: 0 });
+    expect(screen.getByText(t.health.progressEmpty, { exact: false })).toBeInTheDocument();
+    expect(screen.getByText(t.health.progressNoCandidate)).toBeInTheDocument();
+  });
+
+  it('marks a non-zero stuck-without-a-candidate count but leaves zero unmarked', () => {
+    const { unmount } = renderHealthWithProgress({
+      states: [],
+      jobsWithoutActiveCandidate: 0,
+    });
+    expect(
+      screen.getByTitle(t.health.progressNoCandidateTitle).querySelector('span:last-child')
+        ?.className,
+    ).not.toMatch(/wedgeValueBad/);
+    unmount();
+
+    renderHealthWithProgress({ states: [], jobsWithoutActiveCandidate: 2 });
+    const row = screen.getByTitle(t.health.progressNoCandidateTitle);
+    expect(row.querySelector('span:last-child')?.className).toMatch(/wedgeValueBad/);
+    expect(row.textContent).toContain('2');
   });
 });
 

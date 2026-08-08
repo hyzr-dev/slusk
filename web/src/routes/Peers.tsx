@@ -122,8 +122,12 @@ export default function Peers() {
         <div role="row" className={`${styles.grid} ${styles.head}`}>
           {sortHead('username', t.peers.gridHead.peer)}
           {sortHead('score', t.peers.gridHead.score)}
-          {sortHead('successCount', t.peers.gridHead.ok)}
-          {sortHead('failCount', t.peers.gridHead.fail)}
+          {/* narrowHide drops these two below 640px, where the five tracks leave
+              the username no width at all — see the media query in the
+              stylesheet. The header cell and its row cells must carry the class
+              together or the two stop lining up. */}
+          {sortHead('successCount', t.peers.gridHead.ok, styles.narrowHide)}
+          {sortHead('failCount', t.peers.gridHead.fail, styles.narrowHide)}
           {/* Not sortable, and deliberately so: LAST SEEN is derived here from
               whichever of two independent timestamps is newer, and the backend
               has no key that ranks by it. A header that sorted only the
@@ -164,8 +168,8 @@ export default function Peers() {
                   <span className={styles.username}>{p.username}</span>
                 </div>
                 <span role="cell" className={styles.mono}>{formatScore(p.score)}</span>
-                <span role="cell" className={styles.mono}>{p.successCount}</span>
-                <span role="cell" className={styles.mono}>{p.failCount}</span>
+                <span role="cell" className={`${styles.mono} ${styles.narrowHide}`}>{p.successCount}</span>
+                <span role="cell" className={`${styles.mono} ${styles.narrowHide}`}>{p.failCount}</span>
                 <span role="cell" className={`${styles.mono} ${styles.right}`}>
                   {formatShortTime(lastSeenAt(p))}
                 </span>

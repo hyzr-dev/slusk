@@ -1,0 +1,155 @@
+# docker-compose for slusk, WITH a Lidarr of its own.
+#
+#   cp docker-compose.with-lidarr.example.yml docker-compose.yml
+#   cp config.example.toml config/config.toml   # then fill it in
+#   echo "LIDARR_API_KEY=$(openssl rand -hex 16)" > .env
+#   docker compose up -d
+#
+# Copy this file only if you do NOT already run Lidarr. If you do, copy
+# docker-compose.example.yml instead — that is the main file, it carries every
+# deployment variant this project supports, and it assumes the Lidarr you
+# already have.
+#
+# This one is deliberately not the default. Nobody adopts slusk before Lidarr:
+# slusk does nothing until a Lidarr holds wanted albums, so almost everyone
+# arriving here already runs one. Making the bundled variant the default would
+# quietly start a SECOND, empty Lidarr on port 8686 — a port clash if you are
+# lucky, and slusk pointed at the wrong instance with no error to show for it if
+# you are not.
+#
+# Everything the main file explains applies here too and is not repeated: the
+# config directory mount, the observ token, the peer port, and the option blocks
+# for the slskd backend, external Postgres, gluetun and building from source.
+# Read that file alongside this one.
+#
+# BEFORE THE FIRST START, three things:
+#
+#   1. LIDARR_API_KEY in a .env file next to this one. There is no default and
+#      no fixed value shipped in the repo — a known key on an API that can add
+#      root folders and delete files is not something to hand out. The `:?` below
+#      fails the `up` with a clear message until you set it.
+#   2. THE SAME KEY in config/config.toml as lidarr.api_key. slusk reads no
+#      environment variables at all — its configuration is TOML only — so the key
+#      genuinely has to be written twice, and NOTHING CHECKS THAT THEY MATCH. Get
+#      it wrong and slusk gets 401 from a Lidarr that looks perfectly healthy.
+#   3. The two host paths below, /host/downloads and /host/music. Neither has a
+#      sensible default and both are left failing the `up` on purpose.
+#
+# After the stack is up, add /music/library as a root folder inside Lidarr. That
+# step has no environment variable; it has to be done in the UI.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: slusk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slusk
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: slusk
+    volumes:
+      - slusk-pgdata:/var/lib/postgresql/data
+    # slusk exits non-zero if it cannot reach the database at startup, so
+    # without this gate it crash-loops (harmlessly, but confusingly) until
+    # Postgres finishes initialising on a first run.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slusk -d slusk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    restart: unless-stopped
+
+    environment:
+      # The same PUID:PGID slusk runs as below — see the note on the downloads
+      # mount for why that is load-bearing rather than tidy.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      # Lidarr takes its API key from the environment and never writes it into
+      # its own config.xml, so this value stays authoritative across restarts
+      # and survives you deleting ./lidarr. Set it in .env; the same value has
+      # to go into config/config.toml as lidarr.api_key.
+      LIDARR__AUTH__APIKEY: ${LIDARR_API_KEY:?set LIDARR_API_KEY in a .env file next to this compose file, and the same value as lidarr.api_key in config/config.toml}
+
+    volumes:
+      # Lidarr's own state — its database, indexers, quality profiles. Not to be
+      # confused with ./config, which is slusk's.
+      - ./lidarr:/config
+      - type: bind
+        source: /host/downloads
+        target: /music/slskd-downloads
+        bind:
+          create_host_path: false
+      # Your actual music collection: Lidarr imports into it, and it is the path
+      # you add as a root folder in the UI after first start. CHANGE /host/music.
+      - type: bind
+        source: /host/music
+        target: /music/library
+        bind:
+          create_host_path: false
+
+    ports:
+      # Bound to loopback on purpose. Lidarr ships with no authentication — with
+      # no auth environment set it writes AuthenticationMethod=None itself and
+      # serves the UI to anyone who can reach the port. That is Lidarr's own
+      # default and not something this file introduces, but it does mean the
+      # loopback binding is the only thing protecting it. If you put a reverse
+      # proxy in front of this, set LIDARR__AUTH__METHOD first.
+      - "127.0.0.1:8686:8686"
+
+  slusk:
+    image: ghcr.io/hyzr-dev/slusk:${SLUSK_TAG:-latest}
+    container_name: slusk
+    restart: unless-stopped
+
+    # Must be the SAME uid:gid as Lidarr's PUID:PGID above. The native Soulseek
+    # backend creates each album directory itself with mode 0755, and Lidarr's
+    # import is copy-then-delete — deleting a file needs write permission on its
+    # directory, so a uid mismatch lets the copy succeed and then fails the
+    # delete with EACCES, halfway through an import that looks like it worked.
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lidarr:
+        condition: service_started
+
+    volumes:
+      # slusk's config directory. A writable DIRECTORY mount, not a single file,
+      # if you want to edit settings from the dashboard — see the main file for
+      # the full explanation.
+      - ./config:/config
+      # Shared with Lidarr above at the same container path, so the import is a
+      # local move rather than a copy across a boundary Lidarr cannot see. Must
+      # be WRITABLE by the PUID:PGID above and must match
+      # paths.slskd_complete_dir in config.toml, which already says
+      # /music/slskd-downloads. CHANGE /host/downloads to a real path.
+      - type: bind
+        source: /host/downloads
+        target: /music/slskd-downloads
+        bind:
+          create_host_path: false
+
+    ports:
+      # Dashboard and API. See the main file on the observ token before exposing
+      # this beyond loopback.
+      - "127.0.0.1:9090:9090"
+      # Soulseek peer listener. The published host port MUST equal the container
+      # port (soulseek.listen_addr's port) — there is no separate "advertised
+      # port" concept, so a mismatched mapping advertises a port nobody can reach.
+      - "2234:2234"
+
+volumes:
+  slusk-pgdata:
+
+# --- Everything else lives in the main file ---
+# Update channels and SLUSK_TAG, the slskd backend, external Postgres, running
+# inside an existing arr network, gluetun with VPN port forwarding, and building
+# from source are all documented as option blocks at the bottom of
+# docker-compose.example.yml. Each applies here unchanged — except the arr
+# network one, which is the case this file exists to replace.

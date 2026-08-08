@@ -47,6 +47,18 @@ func sharePostingPayloadBytes(index map[shareTrigram][]uint32) int64 {
 	return bytes
 }
 
+// benchmarkExcludedPhrases is the list the live server pushed on 2026-07-31 -
+// a handful of specific takedowns, not a broad filter (#324). Its length is
+// what the per-search cost scales with, so use the real one.
+var benchmarkExcludedPhrases = []string{
+	"bryan adams",
+	"from zero",
+	"housezzz",
+	"look outside your window",
+	"paper kingdom",
+	"village people",
+}
+
 func BenchmarkShareSnapshotMatch(b *testing.B) {
 	for _, size := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("files=%d", size), func(b *testing.B) {
@@ -70,7 +82,7 @@ func BenchmarkShareSnapshotMatch(b *testing.B) {
 				b.Run(query.name+"/indexed", func(b *testing.B) {
 					b.ReportAllocs()
 					for b.Loop() {
-						benchmarkShareSnapshotMatches = snapshot.match(query.query, maxSharedSearchResults)
+						benchmarkShareSnapshotMatches = snapshot.match(query.query, maxSharedSearchResults, nil)
 					}
 					b.ReportMetric(postingBytesPerFile, "posting-payload-bytes/file")
 				})
@@ -81,6 +93,15 @@ func BenchmarkShareSnapshotMatch(b *testing.B) {
 					}
 				})
 			}
+			// The exclusion filter runs per candidate file, so measure it on
+			// the query with the most candidates. Every case above passes nil,
+			// which is the one input shape that skips the filter entirely.
+			b.Run("common/indexed-excluded-phrases", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					benchmarkShareSnapshotMatches = snapshot.match("music artist", maxSharedSearchResults, &benchmarkExcludedPhrases)
+				}
+			})
 		})
 	}
 }
