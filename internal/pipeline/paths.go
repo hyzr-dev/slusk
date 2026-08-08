@@ -24,46 +24,97 @@ type FolderCleaner interface {
 	DeleteDownloadFolder(ctx context.Context, name string) error
 }
 
-// cleanupFolder best-effort deletes a failed candidate's leftover files from
-// slskd's downloads root, so they don't get mixed into the next candidate's
-// local folder (slskd names local subfolders after the remote peer's own leaf
+// DownloadFolderRegistry is the slice of the store the cleanup helpers need:
+// the record of which local folders a job actually downloaded into, written at
+// download time (see internal/store/download_folders.go, issue #314). Kept as
+// its own small interface, like FolderCleaner, so cleanupFolder and
+// cleanupCompletedFolder stay free functions that Downloading, Importing and
+// Selecting can each call with only the capability they use.
+type DownloadFolderRegistry interface {
+	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
+	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
+}
+
+// cleanupFolder best-effort deletes a job's leftover downloaded files from the
+// downloads root, so they don't get mixed into the next candidate's local
+// folder (both backends name local subfolders after the remote peer's own leaf
 // directory name, so two different peers sharing an identically-named folder
-// can otherwise collide, corrupting Lidarr's later import scan). It skips the
-// delete entirely when filenames don't share one common remote directory
-// (commonLeaf == ""): that's ambiguous, and slskd's API only accepts one
-// relative subdirectory name, so guessing wrong risks deleting more than this
-// candidate wrote. It also refuses to act on the quarantine directory itself
-// (see quarantineDirName), which a peer's remote folder can legitimately be
-// named: DeleteDownloadFolder is recursive on both backends, so one such peer
-// would otherwise wipe every album quarantined so far. A delete failure is
-// logged and otherwise ignored — it must not block the job from moving on to
-// its next candidate. A 404 means the candidate never wrote any bytes (e.g. it
-// failed before any transfer started), which is routine, so it's logged quietly
-// rather than as an ERROR.
+// can otherwise collide, corrupting Lidarr's later import scan).
+//
+// The folders come from the register rather than being re-derived from the
+// candidate's surviving transfer filenames (issue #314). The derivation was
+// silent wherever it failed — no filenames left to look at, or filenames not
+// sharing one directory — and silence is what let files accumulate on disk with
+// nothing left in the database able to name them. The register is also
+// per-job, not per-candidate, so a job whose earlier search cycles had their
+// transfers deleted by ResetJobToWanted still cleans those cycles up here.
+//
+// It refuses to act on the quarantine directory itself (see quarantineDirName),
+// which a peer's remote folder can legitimately be named: DeleteDownloadFolder
+// is recursive on both backends, so one such peer would otherwise wipe every
+// album quarantined so far. A delete failure is logged and otherwise ignored —
+// it must not block the job from moving on to its next candidate. A 404 means
+// the folder is already gone (e.g. the candidate failed before any transfer
+// wrote bytes), which is routine, so it's logged quietly rather than as an
+// ERROR.
+//
+// Only a genuine delete stamps cleaned_at — a 404 deliberately does not. The
+// slskd adapter maps *every* 404 to core.ErrRemoteNotFound, including one
+// caused by a wrong base URL or a moved endpoint, so a 404 is not evidence that
+// the folder is gone. Stamping on it would let a misconfigured backend mark
+// every job's folders cleaned while the files sit on disk, unreachable by any
+// later cleanup — issue #314's own defect, reintroduced by its fix. Leaving the
+// row is cheap: the next cleanup asks again, and DeleteJob drops it.
 //
 // Ported from the legacy engine's Discoverer.cleanupAttempt
 // (engine/discovery.go:812-825) as a shared free function so both Downloading
 // and Importing reuse it.
-func cleanupFolder(ctx context.Context, peers FolderCleaner, log *slog.Logger, jobID int64, filenames []string) {
-	leaf := commonLeaf(filenames)
-	if leaf == "" {
+func cleanupFolder(ctx context.Context, peers FolderCleaner, reg DownloadFolderRegistry, log *slog.Logger, jobID int64, now time.Time) {
+	leaves, err := registeredFolders(ctx, reg, log, jobID, "cleanup")
+	if err != nil {
 		return
 	}
-	// A peer's remote folder can legitimately be named ".failed"; deleting it
-	// would take every already-quarantined album with it, since both backends'
-	// DeleteDownloadFolder is recursive. Same guard, same reason, as
-	// quarantineFolder's.
-	if leaf == quarantineDirName {
-		log.Info("skipping cleanup of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
-		return
+	for _, leaf := range leaves {
+		// A peer's remote folder can legitimately be named ".failed"; deleting it
+		// would take every already-quarantined album with it, since both backends'
+		// DeleteDownloadFolder is recursive. Same guard, same reason, as
+		// quarantineFolder's.
+		if leaf == quarantineDirName {
+			log.Info("skipping cleanup of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
+			continue
+		}
+		switch err := peers.DeleteDownloadFolder(ctx, leaf); {
+		case err == nil:
+			markCleaned(ctx, reg, log, jobID, leaf, now)
+		case errors.Is(err, core.ErrRemoteNotFound):
+			log.Info("nothing to clean up for failed attempt", "album_job", jobID, "folder", leaf)
+		default:
+			log.Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
+		}
 	}
-	err := peers.DeleteDownloadFolder(ctx, leaf)
-	switch {
-	case err == nil:
-	case errors.Is(err, core.ErrRemoteNotFound):
-		log.Info("nothing to clean up for failed attempt", "album_job", jobID, "folder", leaf)
-	default:
-		log.Error("cleanup failed attempt's downloaded files failed", "album_job", jobID, "folder", leaf, "err", err)
+}
+
+// registeredFolders reads a job's uncleaned download folders and, crucially,
+// says so out loud when there are none. The defect this replaces was not that
+// the old derivation sometimes failed but that it failed *silently*: no log
+// line, no job_event, and a folder left on disk that nothing could name.
+func registeredFolders(ctx context.Context, reg DownloadFolderRegistry, log *slog.Logger, jobID int64, purpose string) ([]string, error) {
+	leaves, err := reg.DownloadFoldersForJob(ctx, jobID)
+	if err != nil {
+		log.Error("list registered download folders failed", "album_job", jobID, "purpose", purpose, "err", err)
+		return nil, err
+	}
+	if len(leaves) == 0 {
+		log.Info("no registered download folder", "album_job", jobID, "purpose", purpose)
+	}
+	return leaves, nil
+}
+
+// markCleaned records that a registered folder is gone, best-effort: failing to
+// stamp it only means a later cleanup asks about it again, which is harmless.
+func markCleaned(ctx context.Context, reg DownloadFolderRegistry, log *slog.Logger, jobID int64, leaf string, now time.Time) {
+	if err := reg.MarkDownloadFolderCleaned(ctx, jobID, leaf, now); err != nil {
+		log.Error("mark download folder cleaned failed", "album_job", jobID, "folder", leaf, "err", err)
 	}
 }
 
@@ -83,37 +134,59 @@ func AlbumFolder(completeDir string, filenames []string) string {
 	return path.Join(completeDir, leaf)
 }
 
-// cleanupCompletedFolder best-effort removes the per-album folder slskd
+// cleanupCompletedFolder best-effort removes the per-album folders the backend
 // created under completeDir once Lidarr has confirmed the import, so a
-// completed job doesn't leave an empty leftover directory behind forever.
-// Unlike cleanupFolder (used for a failed/rejected candidate via slskd's
+// completed job doesn't leave empty leftover directories behind forever. The
+// folders come from the register (issue #314) for the same reason cleanupFolder
+// takes them from there.
+//
+// Unlike cleanupFolder (used for a failed/rejected candidate via the backends'
 // recursive DeleteDownloadFolder API), this only ever removes an
 // already-verified-empty directory with os.Remove: if anything remains
 // (e.g. a partial import), os.Remove fails safely rather than deleting real
 // files, and that failure is only logged - it must never block the job's
 // own DONE transition, which has already committed by the time this runs.
-func cleanupCompletedFolder(log *slog.Logger, jobID int64, completeDir string, filenames []string) {
-	leaf := commonLeaf(filenames)
-	if leaf == "" {
+//
+// Every branch that reaches a verdict stamps cleaned_at, including the one that
+// deliberately leaves a non-empty folder alone. The import has succeeded, so
+// that decision is final: the unmatched extras Importing chose to keep are not
+// leftovers, and leaving the row uncleaned would hand them to cleanupFolder's
+// recursive delete if the same job were ever revived. Local os.ReadDir evidence
+// is trusted here in a way cleanupFolder cannot trust a remote 404.
+func cleanupCompletedFolder(ctx context.Context, reg DownloadFolderRegistry, log *slog.Logger, jobID int64, completeDir string, now time.Time) {
+	leaves, err := registeredFolders(ctx, reg, log, jobID, "completed")
+	if err != nil {
 		return
 	}
-	folder := filepath.Join(completeDir, leaf)
-	entries, err := os.ReadDir(folder)
-	switch {
-	case err == nil:
-		if len(entries) > 0 {
-			log.Info("completed album folder not empty, leaving in place", "album_job", jobID, "folder", folder, "entries", len(entries))
-			return
+	for _, leaf := range leaves {
+		// The same guard cleanupFolder and quarantineFolder carry: a peer's
+		// remote folder can legitimately be named ".failed", and the quarantine
+		// directory is not this job's to remove even when it happens to be empty.
+		if leaf == quarantineDirName {
+			log.Info("skipping completed-folder cleanup of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
+			continue
 		}
-		if err := os.Remove(folder); err != nil {
-			log.Error("remove completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
-			return
+		folder := filepath.Join(completeDir, leaf)
+		entries, err := os.ReadDir(folder)
+		switch {
+		case err == nil:
+			if len(entries) > 0 {
+				log.Info("completed album folder not empty, leaving in place", "album_job", jobID, "folder", folder, "entries", len(entries))
+				markCleaned(ctx, reg, log, jobID, leaf, now)
+				continue
+			}
+			if err := os.Remove(folder); err != nil {
+				log.Error("remove completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
+				continue
+			}
+			log.Info("removed empty completed album folder", "album_job", jobID, "folder", folder)
+		case os.IsNotExist(err):
+			log.Info("completed album folder already gone", "album_job", jobID, "folder", folder)
+		default:
+			log.Error("read completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
+			continue
 		}
-		log.Info("removed empty completed album folder", "album_job", jobID, "folder", folder)
-	case os.IsNotExist(err):
-		log.Info("completed album folder already gone", "album_job", jobID, "folder", folder)
-	default:
-		log.Error("read completed album folder failed", "album_job", jobID, "folder", folder, "err", err)
+		markCleaned(ctx, reg, log, jobID, leaf, now)
 	}
 }
 

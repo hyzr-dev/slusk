@@ -91,6 +91,7 @@ func seedImportingManualJob(t *testing.T, st *store.Store, username, albumMBID s
 			t.Fatalf("UpdateTransferProgress: %v", err)
 		}
 	}
+	registerSeedFolders(t, st, job.ID, files, now)
 	if err := st.AdvanceJobState(ctx, job.ID, core.StateImporting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
