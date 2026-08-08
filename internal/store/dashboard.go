@@ -816,11 +816,20 @@ func (s *Store) TransferBytesByCandidate(ctx context.Context, candidateIDs []int
 // Declared as []string directly (rather than []core.JobEventType converted on
 // every call) so LatestFailureDetails doesn't re-allocate a copy per call.
 //
-// EventJobFailed earns its place on intent rather than on current behaviour:
-// the only writer is recordBackoffEvent (internal/pipeline/backoff.go), which
-// hardcodes an empty detail, so the non-empty-detail test below can never
-// match it today. It stays listed so that giving it a real detail (issue #318)
-// needs no change here.
+// EventJobFailed now carries a real detail from all three of its writers -
+// the terminal branch of failOrBackoff (internal/pipeline/backoff.go),
+// Selecting's manual-job path and Discovery's manual-job guard - so it matches
+// the non-empty-detail test below instead of being unreachable in tier 1
+// (issue #318). The fallback tier stays regardless: it covers jobs whose
+// history predates that fix, and future event kinds not yet ranked here.
+//
+// One consequence is deliberate and worth stating: job_failed is by
+// construction the newest event a failed job has, so for a job that was also
+// import-rejected earlier, the terminal summary now outranks Lidarr's verbatim
+// rejection on created_at within this same tier. That is the newest-wins rule
+// working as written, not an oversight - but it is a judgement call about
+// which text a troubleshooter wants first, and giving job_failed its own tier
+// between these and the fallback is the alternative. See issue #318.
 var failureExplainingEvents = []string{
 	string(core.EventImportRejected),
 	string(core.EventAttemptFailed),

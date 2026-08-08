@@ -175,7 +175,7 @@ func (d *Discovery) failExcludedSearch(ctx context.Context, job core.AlbumJob, q
 	detail := fmt.Sprintf("search excluded by server phrase list: query=%q: %v", query, err)
 	d.log().Info(detail, "album_job", job.ID, "query", query)
 	d.recordEvent(ctx, job.ID, core.EventSearchExcluded, detail, now)
-	if _, ferr := failOrBackoff(ctx, d.p.Store, d.log(), job, 0, d.p.BackoffBase, d.p.BackoffCap, false, now); ferr != nil {
+	if _, ferr := failOrBackoff(ctx, d.p.Store, d.log(), job, 0, d.p.BackoffBase, d.p.BackoffCap, false, detail, now); ferr != nil {
 		return false, false, ferr
 	}
 	return true, false, nil
@@ -479,11 +479,15 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		}
 		// The EventSearch event recorded above already carries this cycle's
 		// empty outcome (results/candidates counts); nothing further to record.
-		d.log().Info("no viable candidates, backing off", "album_job", job.ID)
+		// The same counts go in as failOrBackoff's reason so a terminal
+		// job_failed explains itself without a reader walking back to the
+		// EventSearch row (issue #318).
+		reason := fmt.Sprintf("no viable candidates: all %d search results rejected by filtering", len(results))
+		d.log().Info(reason+", backing off", "album_job", job.ID)
 		// The terminal-failure signal is discarded on purpose: a Discovery-
 		// terminal job is in WANTED with its candidates and transfers already
 		// gone, so there is nothing to derive a leftover download folder from.
-		_, err := failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, now)
+		_, err := failOrBackoff(ctx, d.p.Store, d.log(), job, d.p.MaxRetries, d.p.BackoffBase, d.p.BackoffCap, false, reason, now)
 		return true, false, err
 	}
 

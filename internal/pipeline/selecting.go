@@ -224,13 +224,25 @@ func (s *Selecting) selectJob(ctx context.Context, job core.AlbumJob, now time.T
 		// ResetJobToWanted wipes the (now-useless) candidate cache and its
 		// transfers and sends the job back to WANTED for a fresh search, rather
 		// than leaving it stuck in SELECTING with nothing left to try.
-		detail := "candidates exhausted, re-searching"
-		s.log().Info(detail, "album_job", job.ID)
-		failed, err := failOrBackoff(ctx, s.p.Store, s.log(), job, s.p.MaxRetries, s.p.BackoffBase, s.p.BackoffCap, true, now)
+		detail := "candidates exhausted"
+		s.log().Info(detail+", re-searching unless the retry budget is spent", "album_job", job.ID)
+		// Recorded BEFORE failOrBackoff, and this ordering is load-bearing.
+		// candidate_rejected and job_failed are both in the store's
+		// failureExplainingEvents, and one pipeline pass shares a single now,
+		// so LatestFailureDetails separates them on `id DESC` alone. Written
+		// afterwards, this row would outrank the terminal job_failed and the
+		// FAILED JOBS panel would show "candidates exhausted" for a job that
+		// has actually given up - the exact substitution #318 exists to end.
+		s.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
+		// The reason handed to failOrBackoff is deliberately not the detail
+		// above: on the terminal branch - the only branch that reads it - the
+		// job is not re-searching, and it needs to explain itself to someone
+		// who has not read the rest of the trail.
+		failed, err := failOrBackoff(ctx, s.p.Store, s.log(), job, s.p.MaxRetries, s.p.BackoffBase, s.p.BackoffCap, true,
+			"every candidate found for this album was tried and failed to download", now)
 		if err != nil {
 			return false, err
 		}
-		s.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 		if failed {
 			s.quarantineLeftovers(ctx, job, now)
 		}
