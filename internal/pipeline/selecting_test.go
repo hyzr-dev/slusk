@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,6 +420,61 @@ func TestSelectingExhaustionAtMaxRetriesFails(t *testing.T) {
 	jobs, err := st.RunnableJobsInState(ctx, core.StateFailed, now, 10)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
 		t.Fatalf("expected job FAILED, got %+v (%v)", jobs, err)
+	}
+}
+
+// Writing a detail on job_failed (issue #318) is only half the fix: the
+// dashboard's FAILED JOBS panel reads whichever explanatory event
+// LatestFailureDetails ranks first, and one pipeline pass shares a single now,
+// so candidate_rejected and job_failed are separated by insertion order alone.
+// This asserts the whole path rather than the store call, because a unit test
+// over a fake store cannot see the ranking at all - the ordering bug it guards
+// against passed every such test.
+func TestSelectingTerminalFailureDetailWinsOverCandidateRejected(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+	p.MaxRetries = 1 // job.Retries(0)+1 >= 1 -> FAILED on first exhaustion
+
+	job, err := st.UpsertWantedJob(ctx, 31, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := st.InsertCandidates(ctx, job.ID, []store.NewCandidate{
+		{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	cand, found, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	if err := st.FailCandidate(ctx, cand.ID, "timeout", now); err != nil {
+		t.Fatalf("FailCandidate: %v", err)
+	}
+
+	if err := NewSelecting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	details, err := st.LatestFailureDetails(ctx, []int64{job.ID})
+	if err != nil {
+		t.Fatalf("LatestFailureDetails: %v", err)
+	}
+	got, ok := details[job.ID]
+	if !ok {
+		t.Fatal("no failure detail for the failed job, want the job_failed reason")
+	}
+	if !strings.Contains(got, "gave up") {
+		t.Errorf("detail = %q, want the terminal job_failed reason, not an earlier event", got)
+	}
+	if !strings.Contains(got, "tried and failed to download") {
+		t.Errorf("detail = %q, want it to say why the job gave up", got)
 	}
 }
 

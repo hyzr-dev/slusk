@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,8 +47,9 @@ type fakeBackoffStore struct {
 		notBefore *time.Time
 	}
 	events []struct {
-		jobID int64
-		event core.JobEventType
+		jobID  int64
+		event  core.JobEventType
+		detail string
 	}
 	failAddJobEvent bool
 }
@@ -75,14 +77,15 @@ func (f *fakeBackoffStore) ResetJobToWanted(_ context.Context, jobID int64, _ co
 	return nil
 }
 
-func (f *fakeBackoffStore) AddJobEvent(_ context.Context, jobID int64, event core.JobEventType, _ string, _ time.Time) error {
+func (f *fakeBackoffStore) AddJobEvent(_ context.Context, jobID int64, event core.JobEventType, detail string, _ time.Time) error {
 	if f.failAddJobEvent {
 		return errBoom
 	}
 	f.events = append(f.events, struct {
-		jobID int64
-		event core.JobEventType
-	}{jobID, event})
+		jobID  int64
+		event  core.JobEventType
+		detail string
+	}{jobID, event, detail})
 	return nil
 }
 
@@ -91,7 +94,7 @@ func TestFailOrBackoffMarksFailedAtMaxRetries(t *testing.T) {
 	job := core.AlbumJob{ID: 1, Retries: 2}
 	now := time.Now()
 
-	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, "test reason", now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
 	}
@@ -112,12 +115,95 @@ func TestFailOrBackoffMarksFailedAtMaxRetries(t *testing.T) {
 	}
 }
 
+// The terminal event must explain itself: issue #318 was that job_failed was
+// always written with an empty detail, so the one event that marks the
+// pipeline giving up said nothing about why, and the reason had to be derived
+// from earlier events several retry cycles back.
+func TestFailOrBackoffJobFailedEventCarriesRetriesAndReason(t *testing.T) {
+	st := &fakeBackoffStore{}
+	job := core.AlbumJob{ID: 1, Retries: 2}
+	now := time.Now()
+
+	if _, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, "candidate cache exhausted", now); err != nil {
+		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if len(st.events) != 1 {
+		t.Fatalf("events = %v, want one event", st.events)
+	}
+	got := st.events[0].detail
+	if got == "" {
+		t.Fatal("job_failed detail is empty, want an explanation")
+	}
+	if !strings.Contains(got, "3") {
+		t.Errorf("detail = %q, want it to mention the attempt count 3", got)
+	}
+	if !strings.Contains(got, "candidate cache exhausted") {
+		t.Errorf("detail = %q, want it to carry the caller's reason", got)
+	}
+}
+
+// A caller with nothing to add must still get a non-empty detail: the attempt
+// count alone is more than the empty string #318 shipped.
+func TestFailOrBackoffJobFailedEventWithoutReason(t *testing.T) {
+	st := &fakeBackoffStore{}
+	job := core.AlbumJob{ID: 1, Retries: 0}
+	now := time.Now()
+
+	if _, err := failOrBackoff(context.Background(), st, discardLogger(), job, 1, 15*time.Minute, 24*time.Hour, false, "", now); err != nil {
+		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if len(st.events) != 1 {
+		t.Fatalf("events = %v, want one event", st.events)
+	}
+	if got := st.events[0].detail; got != "gave up after 1 attempt" {
+		t.Errorf("detail = %q, want %q", got, "gave up after 1 attempt")
+	}
+}
+
+// maxRetries=0 is Discovery's excluded-phrase path: the job is failed on the
+// first hit by policy, so the attempts it happens to have accumulated for
+// unrelated reasons must not be reported as a retry budget that ran out.
+func TestFailOrBackoffJobFailedDropsAttemptCountWithoutRetryBudget(t *testing.T) {
+	st := &fakeBackoffStore{}
+	job := core.AlbumJob{ID: 1, Retries: 2}
+	now := time.Now()
+
+	if _, err := failOrBackoff(context.Background(), st, discardLogger(), job, 0, 15*time.Minute, 24*time.Hour, false, "search excluded by server phrase list", now); err != nil {
+		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if len(st.events) != 1 {
+		t.Fatalf("events = %v, want one event", st.events)
+	}
+	got := st.events[0].detail
+	if got != "search excluded by server phrase list" {
+		t.Errorf("detail = %q, want the bare reason with no attempt count", got)
+	}
+}
+
+// The count is only dropped when there is a reason to print instead - an
+// empty detail is exactly what #318 set out to remove.
+func TestFailOrBackoffJobFailedKeepsAttemptCountWhenReasonIsEmpty(t *testing.T) {
+	st := &fakeBackoffStore{}
+	job := core.AlbumJob{ID: 1, Retries: 2}
+	now := time.Now()
+
+	if _, err := failOrBackoff(context.Background(), st, discardLogger(), job, 0, 15*time.Minute, 24*time.Hour, false, "", now); err != nil {
+		t.Fatalf("failOrBackoff returned error: %v", err)
+	}
+	if len(st.events) != 1 {
+		t.Fatalf("events = %v, want one event", st.events)
+	}
+	if got := st.events[0].detail; got != "gave up after 3 attempts" {
+		t.Errorf("detail = %q, want %q", got, "gave up after 3 attempts")
+	}
+}
+
 func TestFailOrBackoffSetsBackoffWhenNotResettingToWanted(t *testing.T) {
 	st := &fakeBackoffStore{}
 	job := core.AlbumJob{ID: 5, Retries: 0}
 	now := time.Now()
 
-	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, false, "test reason", now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
 	}
@@ -145,7 +231,7 @@ func TestFailOrBackoffResetsToWantedWhenRequested(t *testing.T) {
 	job := core.AlbumJob{ID: 9, Retries: 1}
 	now := time.Now()
 
-	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, true, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 5, 15*time.Minute, 24*time.Hour, true, "test reason", now)
 	if err != nil {
 		t.Fatalf("failOrBackoff returned error: %v", err)
 	}
@@ -173,7 +259,7 @@ func TestFailOrBackoffAddJobEventIsBestEffort(t *testing.T) {
 	job := core.AlbumJob{ID: 1, Retries: 2}
 	now := time.Now()
 
-	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, now)
+	failed, err := failOrBackoff(context.Background(), st, discardLogger(), job, 3, 15*time.Minute, 24*time.Hour, false, "test reason", now)
 	if err != nil {
 		t.Fatalf("failOrBackoff should swallow AddJobEvent errors, got: %v", err)
 	}
