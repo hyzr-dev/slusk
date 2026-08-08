@@ -50,7 +50,7 @@ func TestRescanSharesPublishesVirtualIndexAndKeepsLastGood(t *testing.T) {
 		t.Fatalf("stats = %+v, want 2 files/2 directories", stats)
 	}
 	snapshot := c.shareSnapshot()
-	if len(snapshot.trigrams) == 0 || len(snapshot.match("album track", 10)) != 1 {
+	if len(snapshot.trigrams) == 0 || len(snapshot.match("album track", 10, nil)) != 1 {
 		t.Fatal("published snapshot is missing its share search index")
 	}
 	if snapshot.files[`Music\Album\track.flac`] == nil || snapshot.files[`Music\README`] == nil {
@@ -632,7 +632,7 @@ func TestShareSnapshotMatch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			matches := s.match(tt.query, tt.limit)
+			matches := s.match(tt.query, tt.limit, nil)
 			if len(matches) != len(tt.want) {
 				t.Fatalf("match count = %d, want %d: %#v", len(matches), len(tt.want), matches)
 			}
@@ -642,6 +642,103 @@ func TestShareSnapshotMatch(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestShareSnapshotMatchExcludedPhrases locks the protocol rule for the
+// server's excluded-search-phrase list (#324): a file whose *path* contains a
+// phrase as a case-insensitive substring must not appear in a search response,
+// while everything else is untouched - including when the list is absent, which
+// is the state of a client that has just connected.
+func TestShareSnapshotMatchExcludedPhrases(t *testing.T) {
+	s := newTestShareSnapshot(t,
+		`Music\A Bryan Adams\Summer.flac`,
+		`Music\B Keep\Track.flac`,
+	)
+	phrases := func(list ...string) *[]string { return &list }
+	tests := []struct {
+		name     string
+		query    string
+		limit    int
+		excluded *[]string
+		want     []string
+	}{
+		{
+			name: "no list yet", query: "music", limit: 10, excluded: nil,
+			want: []string{`Music\A Bryan Adams\Summer.flac`, `Music\B Keep\Track.flac`},
+		},
+		{
+			name: "empty list", query: "music", limit: 10, excluded: phrases(),
+			want: []string{`Music\A Bryan Adams\Summer.flac`, `Music\B Keep\Track.flac`},
+		},
+		{
+			name: "phrase in path is dropped", query: "music", limit: 10, excluded: phrases("bryan adams"),
+			want: []string{`Music\B Keep\Track.flac`},
+		},
+		{
+			name: "matching is case insensitive", query: "music", limit: 10, excluded: phrases("BRYAN Adams"),
+			want: []string{`Music\B Keep\Track.flac`},
+		},
+		{
+			name: "non-matching phrase changes nothing", query: "music", limit: 10, excluded: phrases("village people"),
+			want: []string{`Music\A Bryan Adams\Summer.flac`, `Music\B Keep\Track.flac`},
+		},
+		{
+			// The phrase covers the query but no path, so nothing is dropped:
+			// the rule is about paths, not about the incoming query (#319 is
+			// the query-side heuristic and has different semantics).
+			name: "phrase matched against path not query", query: "music", limit: 10, excluded: phrases("music"),
+			want: nil,
+		},
+		{
+			// An excluded file must not consume a result slot, or a full
+			// response would silently shrink.
+			name: "excluded file does not spend the limit", query: "music", limit: 1, excluded: phrases("bryan adams"),
+			want: []string{`Music\B Keep\Track.flac`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matches := s.match(tt.query, tt.limit, tt.excluded)
+			if len(matches) != len(tt.want) {
+				t.Fatalf("match count = %d, want %d: %#v", len(matches), len(tt.want), matches)
+			}
+			for i, want := range tt.want {
+				if matches[i].Name != want {
+					t.Fatalf("match %d = %q, want %q", i, matches[i].Name, want)
+				}
+			}
+		})
+	}
+}
+
+// TestRespondToSearchHonoursExcludedPhrases proves the filter is wired into the
+// live response path, not just available on the snapshot: with every match
+// excluded there is nothing left to send, so no response reaches the searcher.
+func TestRespondToSearchHonoursExcludedPhrases(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	c.shares.Store(newTestShareSnapshot(t, `Music\Bryan Adams\track.flac`))
+	startSessionLifecycle(t, c)
+
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = remote.Close() })
+	session := c.newSession(local, sessionKey{username: "requester", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	if _, inserted := c.sessions.Register(session); !inserted {
+		t.Fatal("register requester")
+	}
+
+	phrases := []string{"bryan adams"}
+	c.excludedPhrases.Store(&phrases)
+	c.respondToSearch("requester", 21, "track")
+
+	deadline := time.Now().Add(time.Second)
+	for len(c.shareWorkers) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-session.writes:
+		t.Fatal("responded with a file whose path contains an excluded phrase")
+	default:
 	}
 }
 
@@ -707,7 +804,7 @@ func TestShareSnapshotIndexedMatchEquivalentToLinear(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/limit=%d", tt.query, tt.limit), func(t *testing.T) {
-			got := s.match(tt.query, tt.limit)
+			got := s.match(tt.query, tt.limit, nil)
 			want := linearShareSnapshotMatch(s, tt.query, tt.limit)
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("indexed matches = %#v, linear matches = %#v", got, want)
@@ -718,7 +815,7 @@ func TestShareSnapshotIndexedMatchEquivalentToLinear(t *testing.T) {
 	// A two-byte UTF-8 term has no trigrams and must not depend on the index.
 	withoutIndex := *s
 	withoutIndex.trigrams = nil
-	if got, want := withoutIndex.match("é", 10), linearShareSnapshotMatch(s, "é", 10); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got, want := withoutIndex.match("é", 10, nil), linearShareSnapshotMatch(s, "é", 10); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("short-term fallback = %#v, want %#v", got, want)
 	}
 }
@@ -767,14 +864,14 @@ func TestShareSnapshotConcurrentIndexedMatch(t *testing.T) {
 		`Music\Artist\Demo.MP3`,
 		`Music\Other\Keep Demo.ogg`,
 	)
-	want := fmt.Sprint(s.match("music keep -other", 10))
+	want := fmt.Sprint(s.match("music keep -other", 10, nil))
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				if got := fmt.Sprint(s.match("music keep -other", 10)); got != want {
+				if got := fmt.Sprint(s.match("music keep -other", 10, nil)); got != want {
 					t.Errorf("concurrent match = %s, want %s", got, want)
 					return
 				}
@@ -787,7 +884,7 @@ func TestShareSnapshotConcurrentIndexedMatch(t *testing.T) {
 func TestShareSearchAndFolderLookup(t *testing.T) {
 	s := newTestShareSnapshot(t, `Music\Artist\keep.flac`, `Music\Artist\demo.mp3`)
 	s.directories = []peer.Directory{{Name: `Music\Artist`, Files: []peer.File{{Name: "keep.flac"}}}, {Name: `Music\Artist\Disc 2`}}
-	matches := s.match("ARTIST -demo", 10)
+	matches := s.match("ARTIST -demo", 10, nil)
 	if len(matches) != 1 || matches[0].Name != `Music\Artist\keep.flac` {
 		t.Fatalf("matches = %#v", matches)
 	}

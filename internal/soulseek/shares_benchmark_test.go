@@ -70,7 +70,7 @@ func BenchmarkShareSnapshotMatch(b *testing.B) {
 				b.Run(query.name+"/indexed", func(b *testing.B) {
 					b.ReportAllocs()
 					for b.Loop() {
-						benchmarkShareSnapshotMatches = snapshot.match(query.query, maxSharedSearchResults)
+						benchmarkShareSnapshotMatches = snapshot.match(query.query, maxSharedSearchResults, nil)
 					}
 					b.ReportMetric(postingBytesPerFile, "posting-payload-bytes/file")
 				})
