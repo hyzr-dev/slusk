@@ -110,6 +110,14 @@ func (c *Client) handleInboundFileConn(ctx context.Context, conn net.Conn, lease
 	}
 }
 
+// beforeOpenPartHook, when non-nil, runs between streamFile's resume-offset
+// write and the os.OpenFile that creates the ".part" file. Production never
+// sets it. It exists because that gap is the window issue #386 is about, and
+// it is a handful of instructions wide: a test that tried to land inside it by
+// timing would be a coin flip, and one that used a sleep would prove nothing
+// about the ordering it claims to check.
+var beforeOpenPartHook func()
+
 // streamFile copies size bytes of file data from conn to destPath, resuming
 // from a same-named ".part" file if one already exists, and renaming it into
 // place atomically once every byte has arrived. It owns the F connection
@@ -169,6 +177,10 @@ func streamFile(conn net.Conn, destPath string, size int64, idleTimeout time.Dur
 
 	if _, err := file.Write(conn, &file.Offset{Offset: uint64(resumeOffset)}); err != nil {
 		return 0, fmt.Errorf("write resume offset to peer: %w", err)
+	}
+
+	if hook := beforeOpenPartHook; hook != nil {
+		hook()
 	}
 
 	part, err := os.OpenFile(partPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)

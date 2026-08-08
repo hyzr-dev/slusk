@@ -275,8 +275,11 @@ log(`${judged.filter(Boolean).length} judged, ${cached.length} reused from cache
 // Browser reproduction is serial: the Playwright MCP server owns one browser for
 // the session, and two verifiers at once return verdicts about each other's tab.
 phase('Browser')
+// Mirrors isBrowserVerifiable() in scripts/triage/waves.mjs -- a Workflow
+// script cannot import that module, so this predicate is duplicated here and
+// must be kept in step with it by hand.
 const candidates = judgements
-  .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature')
+  .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature' && j?.kind !== 'test')
   .sort((a, b) => (IMPACT_RANK[b.prodImpact] - IMPACT_RANK[a.prodImpact])
     || (EFFORT_COST[a.effort] - EFFORT_COST[b.effort])
     || (a.number - b.number))

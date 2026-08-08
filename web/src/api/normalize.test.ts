@@ -67,7 +67,7 @@ describe('wire compatibility normalization', () => {
       jobs: [wireJob({ status: 'orphaned', state: 'ORPHANED' })],
       total: 25,
       facets: {
-        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4 },
+        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4, notImported: 0 },
         source: { all: 25, manual: 5, lidarr: 20 },
       },
     });
@@ -87,6 +87,25 @@ describe('wire compatibility normalization', () => {
       { status: 'parked', state: 'PARKED' },
       { status: 'parked', state: 'PARKED' },
     ]);
+  });
+
+  it('supplies zero for the status counts an older server omits', () => {
+    // wireStatus() carries no wanted/selecting/waiting, exactly like a binary
+    // predating issue #417. The Health page renders these straight into its
+    // metric rows, so undefined would reach the DOM as an empty cell.
+    const normalized = normalizeStatusReport(wireStatus());
+
+    expect(normalized.wanted).toBe(0);
+    expect(normalized.selecting).toBe(0);
+    expect(normalized.waiting).toBe(0);
+  });
+
+  it('keeps the new status counts a current server sends', () => {
+    const normalized = normalizeStatusReport(
+      wireStatus({ wanted: 143, selecting: 4, waiting: 3 }),
+    );
+
+    expect(normalized).toMatchObject({ wanted: 143, selecting: 4, waiting: 3 });
   });
 
   it('falls back to orphaned for an old status payload', () => {

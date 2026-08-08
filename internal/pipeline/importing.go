@@ -46,6 +46,11 @@ type ImportingStore interface {
 	RecordAttemptOutcome(ctx context.Context, artistID int64, username string, success bool, now time.Time) error
 	// AddJobEvent appends one row to a job's audit trail.
 	AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error
+	// DownloadFoldersForJob and MarkDownloadFolderCleaned are the register the
+	// two cleanup helpers read instead of re-deriving the folder from surviving
+	// transfer filenames (issue #314).
+	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
+	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
 
 // ImportingParams configures an Importing.
@@ -205,9 +210,9 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 // commonest way to get here is the coverage gate: someone picks six tracks
 // of a twelve-track album, so importable < MinTrackCount and the candidate
 // is rejected. The files stay; the job still reports why in its events.
-func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, now time.Time) error {
+func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, reason string, now time.Time) error {
 	if job.Source != core.SourceManual {
-		cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
+		cleanupFolder(ctx, m.p.Peers, m.p.Store, m.log(), job.ID, now)
 	}
 	m.recordOutcome(ctx, job, cand.Username, false, now)
 	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
@@ -260,7 +265,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	items, err := m.p.Music.ManualImportCandidates(ctx, folder)
 	if err != nil {
 		m.log().Error("manual import candidates failed", "album_job", job.ID, "folder", folder, "err", err)
-		return m.escalateIfStuck(ctx, job, cand, names, "import candidates failed", now)
+		return m.escalateIfStuck(ctx, job, cand, "import candidates failed", now)
 	}
 	if len(items) == 0 {
 		// An empty Lidarr preview only proves the import already happened when
@@ -271,12 +276,12 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		if readErr != nil && !os.IsNotExist(readErr) {
 			m.log().Error("inspect folder after empty import candidates failed",
 				"album_job", job.ID, "folder", folder, "err", readErr)
-			return m.escalateIfStuck(ctx, job, cand, names, "inspect folder after empty import candidates failed", now)
+			return m.escalateIfStuck(ctx, job, cand, "inspect folder after empty import candidates failed", now)
 		}
 		if readErr == nil && len(entries) > 0 {
 			m.log().Error("empty import candidates for non-empty folder",
 				"album_job", job.ID, "folder", folder, "entries", len(entries))
-			return m.escalateIfStuck(ctx, job, cand, names, "empty import candidates for non-empty folder", now)
+			return m.escalateIfStuck(ctx, job, cand, "empty import candidates for non-empty folder", now)
 		}
 
 		// The folder is absent or actually empty, consistent with a crash
@@ -289,7 +294,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 			return err
 		}
-		cleanupCompletedFolder(m.log(), job.ID, m.p.CompleteDir, names)
+		cleanupCompletedFolder(ctx, m.p.Store, m.log(), job.ID, m.p.CompleteDir, now)
 		return nil
 	}
 	// Classify by TrackIDs rather than Lidarr's per-file Importable flag:
@@ -326,7 +331,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 			if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 				return err
 			}
-			cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
+			cleanupFolder(ctx, m.p.Peers, m.p.Store, m.log(), job.ID, now)
 			return nil
 		}
 		// Other candidates usually remain, so the next SELECTING tick tries one
@@ -334,7 +339,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
-		return m.failCandidate(ctx, job, cand, names, "import rejected", now)
+		return m.failCandidate(ctx, job, cand, "import rejected", now)
 	}
 	if len(rejections) > 0 {
 		// Unmatched extras don't fail the candidate — the coverage gate below
@@ -364,7 +369,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		releases, err := m.p.Music.AlbumReleases(ctx, job.LidarrAlbumID)
 		if err != nil {
 			m.log().Error("album releases lookup failed", "album_job", job.ID, "err", err)
-			return m.escalateIfStuck(ctx, job, cand, names, "album releases lookup failed", now)
+			return m.escalateIfStuck(ctx, job, cand, "album releases lookup failed", now)
 		}
 		minRequired, _ = trackBand(releases)
 		if minRequired == 0 {
@@ -385,7 +390,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
 			"covered", coverage(importable), "required", minRequired)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
-		return m.failCandidate(ctx, job, cand, names, "incomplete download", now)
+		return m.failCandidate(ctx, job, cand, "incomplete download", now)
 	}
 	if err := m.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 		// Legacy propagated this error from the whole pass (advanceImporting
@@ -430,10 +435,9 @@ func (m *Importing) resolveAlbumID(ctx context.Context, job core.AlbumJob, cand 
 	album, found, err := m.p.Music.AlbumByForeignID(ctx, job.AlbumMBID)
 	if err != nil {
 		m.log().Error("resolve manual job album failed", "album_job", job.ID, "album_mbid", job.AlbumMBID, "err", err)
-		// nil filenames: only a manual job can reach here (a Lidarr job
-		// returned above), and failCandidate never cleans up a manual job's
-		// folder - see its comment. Nothing downstream reads them.
-		return 0, false, m.escalateIfStuck(ctx, job, cand, nil, "resolve album failed", now)
+		// Only a manual job can reach here (a Lidarr job returned above), and
+		// failCandidate never cleans up a manual job's folder - see its comment.
+		return 0, false, m.escalateIfStuck(ctx, job, cand, "resolve album failed", now)
 	}
 	if !found {
 		detail := fmt.Sprintf("identified release group %s is not in Lidarr's library", job.AlbumMBID)
@@ -474,7 +478,7 @@ func (m *Importing) routeNotImported(ctx context.Context, job core.AlbumJob, can
 // Ported from the legacy Discoverer.escalateIfStuck (engine/discovery.go:783-798).
 // Within the timeout it is a no-op (returns nil); past it, it propagates the
 // atomic fail path's error.
-func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand core.Candidate, filenames []string, reason string, now time.Time) error {
+func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand core.Candidate, reason string, now time.Time) error {
 	if now.Sub(job.UpdatedAt) <= m.p.StuckAfter {
 		// Not stuck yet: cool the job down instead of re-firing the same slow
 		// Lidarr call (typically a large-folder scan timing out) on the very
@@ -491,7 +495,7 @@ func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand
 	stuckDetail := fmt.Sprintf("importing stuck past timeout (%s)", reason)
 	m.log().Info(stuckDetail, "album_job", job.ID, "reason", reason)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, stuckDetail, now)
-	return m.failCandidate(ctx, job, cand, filenames, reason, now)
+	return m.failCandidate(ctx, job, cand, reason, now)
 }
 
 // albumAlreadyComplete reports whether Lidarr's library already holds every
@@ -562,15 +566,7 @@ func (m *Importing) confirm(ctx context.Context, job core.AlbumJob, cand core.Ca
 		if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 			return err
 		}
-		if transfers, err := m.p.Store.TransfersForCandidate(ctx, cand.ID); err != nil {
-			m.log().Error("list transfers for completed folder cleanup failed", "album_job", job.ID, "err", err)
-		} else {
-			names := make([]string, 0, len(transfers))
-			for _, t := range transfers {
-				names = append(names, t.Filename)
-			}
-			cleanupCompletedFolder(m.log(), job.ID, m.p.CompleteDir, names)
-		}
+		cleanupCompletedFolder(ctx, m.p.Store, m.log(), job.ID, m.p.CompleteDir, now)
 		return nil
 	}
 	if now.Sub(*cand.ImportSubmittedAt) > m.p.ImportConfirmTimeout {

@@ -166,6 +166,11 @@ func (s *Store) MarkJobFailed(ctx context.Context, jobID int64, now time.Time) e
 // caller resets a SELECTING job, so a job WantedSync cancelled underneath us
 // must NOT be resurrected to WANTED nor have its candidates/transfers deleted.
 // When the guard bounces (0 rows) the whole tx rolls back and nil is returned.
+//
+// job_download_folders is deliberately left alone (issue #314): this deletion
+// is precisely what used to orphan the folders earlier search cycles wrote to,
+// since afterwards nothing in the database could name them any more. The
+// register's lifetime is the job's, not the cycle's.
 func (s *Store) ResetJobToWanted(ctx context.Context, jobID int64, from core.AlbumJobState, retries int, notBefore *time.Time, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -757,8 +762,8 @@ func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) 
 
 // DeleteJob permanently removes one job and its children (issue #159): the
 // job row is locked with FOR UPDATE first so a concurrent transition cannot
-// race the IMPORTING check, then transfers/candidates/job_events/album_jobs
-// are deleted in FK-safe order. Returns (false, nil) if no such job exists,
+// race the IMPORTING check, then transfers/candidates/job_events/
+// job_download_folders/album_jobs are deleted in FK-safe order. Returns (false, nil) if no such job exists,
 // ErrJobImporting if it is currently IMPORTING (deleting mid-import risks
 // orphaned files or a half-applied Lidarr import), and (true, nil) on success.
 func (s *Store) DeleteJob(ctx context.Context, jobID int64) (bool, error) {
@@ -789,6 +794,9 @@ func (s *Store) DeleteJob(ctx context.Context, jobID int64) (bool, error) {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM job_events WHERE album_job_id = $1`, jobID); err != nil {
 		return false, fmt.Errorf("delete job: delete job events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM job_download_folders WHERE album_job_id = $1`, jobID); err != nil {
+		return false, fmt.Errorf("delete job: delete download folders: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM album_jobs WHERE id = $1`, jobID); err != nil {
 		return false, fmt.Errorf("delete job: delete job: %w", err)

@@ -412,6 +412,60 @@ func TestLoadSoulseekGluetunValid(t *testing.T) {
 	if cfg.Soulseek.Gluetun.APIKey != "gluetun-key" {
 		t.Errorf("Gluetun.APIKey = %q", cfg.Soulseek.Gluetun.APIKey)
 	}
+	// poll_interval is absent from this file: an existing gluetun config must
+	// keep working and get the default rather than a zero interval (#395).
+	if got := cfg.Soulseek.Gluetun.PollInterval.Duration; got != defaultGluetunPollInterval {
+		t.Errorf("Gluetun.PollInterval = %v, want the %v default when the key is absent", got, defaultGluetunPollInterval)
+	}
+}
+
+func TestLoadSoulseekGluetunPollIntervalOverride(t *testing.T) {
+	cfg, err := LoadBytes([]byte(gluetunConfigWith(t, `poll_interval = "90s"`)))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if got := cfg.Soulseek.Gluetun.PollInterval.Duration; got != 90*time.Second {
+		t.Errorf("Gluetun.PollInterval = %v, want 90s", got)
+	}
+}
+
+func TestLoadSoulseekGluetunPollIntervalMustBePositive(t *testing.T) {
+	_, err := LoadBytes([]byte(gluetunConfigWith(t, `poll_interval = "-1s"`)))
+	if err == nil {
+		t.Fatal("expected error for a negative soulseek.gluetun.poll_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.gluetun.poll_interval") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+func TestLoadSoulseekGluetunPollIntervalWithoutControlURL(t *testing.T) {
+	body := gluetunConfigWith(t, `poll_interval = "1m"`)
+	body = strings.Replace(body, "control_url = \"http://127.0.0.1:8000\"\n", "", 1)
+	body = strings.Replace(body, "api_key = \"gluetun-key\"\n", "", 1)
+	_, err := LoadBytes([]byte(body))
+	if err == nil {
+		t.Fatal("expected error for soulseek.gluetun.poll_interval without control_url, got nil")
+	}
+	if !strings.Contains(err.Error(), "soulseek.gluetun.poll_interval") {
+		t.Errorf("error should name the invalid field: %v", err)
+	}
+}
+
+// gluetunConfigWith returns the known-valid gluetun fixture with extra
+// appended to its [soulseek.gluetun] table, so these tests differ from the
+// passing baseline by exactly the key under test.
+func gluetunConfigWith(t *testing.T, extra string) string {
+	t.Helper()
+	data, err := os.ReadFile("testdata/soulseek_gluetun_valid.toml")
+	if err != nil {
+		t.Fatalf("read gluetun fixture: %v", err)
+	}
+	const anchor = "api_key = \"gluetun-key\"\n"
+	if !strings.Contains(string(data), anchor) {
+		t.Fatalf("gluetun fixture no longer contains %q", anchor)
+	}
+	return strings.Replace(string(data), anchor, anchor+extra+"\n", 1)
 }
 
 func TestLoadSoulseekGluetunInvalidURL(t *testing.T) {

@@ -83,6 +83,7 @@ func testServerDeps(reg *prometheus.Registry) ServerDeps {
 	return ServerDeps{
 		Registry:         reg,
 		Status:           func(ctx context.Context) (StatusReport, error) { return StatusReport{}, nil },
+		JobProgress:      func(ctx context.Context) (JobProgressReport, error) { return JobProgressReport{}, nil },
 		Jobs:             func(ctx context.Context) ([]core.JobView, error) { return nil, nil },
 		PagedJobs:        noopPagedJobs,
 		Cancel:           func(ctx context.Context, jobID int64) error { return nil },
@@ -162,6 +163,48 @@ func TestStatusEndpointReturnsParkedAndDeprecatedAlias(t *testing.T) {
 	}
 	if got.Queued != 3 || got.Parked != 2 {
 		t.Errorf("unexpected report: %+v", got)
+	}
+}
+
+// Issue #417: queued and stalled used to serialize as a hardcoded zero because
+// nothing assigned them, and a consumer could not tell "nothing is queued" from
+// "this field is not implemented". Every one of the seven counts must appear in
+// the JSON carrying the value its producer reported.
+func TestStatusEndpointReportsEverySevenCounts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	deps := testServerDeps(reg)
+	deps.Status = func(ctx context.Context) (StatusReport, error) {
+		return StatusReport{Wanted: 7, Selecting: 6, Waiting: 5, Queued: 4, Active: 3, Stalled: 2, Parked: 1}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d", rec.Code)
+	}
+	// Decoded key by key rather than into StatusReport, so a field that stops
+	// being serialized (or is renamed on the wire) fails here instead of
+	// silently decoding as its zero value.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw JSON: %v", err)
+	}
+	for key, want := range map[string]int{
+		"wanted": 7, "selecting": 6, "waiting": 5, "queued": 4,
+		"active": 3, "stalled": 2, "parked": 1,
+	} {
+		value, ok := raw[key]
+		if !ok {
+			t.Errorf("raw JSON missing %q: %s", key, rec.Body.String())
+			continue
+		}
+		var got int
+		if err := json.Unmarshal(value, &got); err != nil || got != want {
+			t.Errorf("%s = %s, want %d (decode error %v)", key, value, want, err)
+		}
 	}
 }
 
@@ -468,6 +511,14 @@ func TestPagedJobsEndpointParsesInflightFinishedAndFacets(t *testing.T) {
 			// catches that, so every filter Overview sends needs a case here.
 			suffix: "?filter=failures&sort=recent&dir=desc&pageSize=8&facets=0",
 			want:   PagedJobsQuery{Page: 0, Sort: "recent", Dir: "desc", Filter: "failures", Source: "all", PageSize: 8, SkipFacets: true},
+		},
+		{
+			// The Jobs page's NOT IMPORTED chip (issue #368) — a status
+			// filter, unlike the three above, so it is the same drift risk
+			// through a different door: the store learned "notImported" and
+			// this parser had to learn it in the same change.
+			suffix: "?filter=notImported&sort=st&dir=asc",
+			want:   PagedJobsQuery{Page: 0, Sort: "st", Dir: "asc", Filter: "notImported", Source: "all", PageSize: 12},
 		},
 	}
 	for _, tc := range cases {

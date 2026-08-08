@@ -90,6 +90,7 @@ function makeFacets(jobs: Job[]): JobFacets {
       failed: 0,
       parked: 0,
       done: jobs.filter((j) => j.status === 'done').length,
+      notImported: jobs.filter((j) => j.status === 'notImported').length,
     },
     source: { all: jobs.length, manual: 0, lidarr: jobs.length },
   };
@@ -111,6 +112,9 @@ const jobPage: JobPage = makeJobPage([
 ]);
 
 const status: StatusReport = {
+  wanted: 0,
+  selecting: 0,
+  waiting: 0,
   queued: 1,
   active: 1,
   stalled: 0,

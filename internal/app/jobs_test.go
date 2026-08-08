@@ -103,7 +103,7 @@ func (f *fakeJobStore) RetryManualJob(ctx context.Context, jobID int64, now time
 	return f.retryManualOK, nil
 }
 
-func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, now time.Time) (core.AlbumJob, error) {
+func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, deadline, now time.Time) (core.AlbumJob, error) {
 	f.createCalled.title, f.createCalled.artistName, f.createCalled.peer, f.createCalled.albumMBID, f.createCalled.files = title, artistName, peer, albumMBID, files
 	if f.createErr != nil {
 		return core.AlbumJob{}, f.createErr

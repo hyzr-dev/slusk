@@ -11,6 +11,40 @@ import styles from './TopBar.module.css';
 const STALE_AFTER_MS = STATUS_INTERVAL * 2;
 
 /**
+ * The public mirror slusk's source is published to. Hardcoded on purpose: an
+ * operator running a *modified* slusk should point at their own fork, but
+ * `internal/config` rejects unknown keys with no silent defaults, so a config
+ * key for this would have to reach every production `config.toml` before it
+ * could merge. That cost buys nothing until a fork exists — see issue #391's
+ * out-of-scope note, which names the trigger for revisiting it.
+ */
+export const SOURCE_REPO_URL = 'https://github.com/hyzr-dev/slusk';
+
+// What `.gitea/workflows/release.yml` can actually push, and therefore the only
+// version string that names a tree on the mirror. Deliberately an allowlist and
+// deliberately narrow: `version` comes off the wire from /status and is about to
+// be interpolated into a URL path, so anything unrecognised — a pre-release
+// suffix, a traversal attempt, an absolute URL — has to miss.
+const RELEASED_VERSION = /^v\d+\.\d+\.\d+$/;
+
+/**
+ * Where to send someone asking for the Corresponding Source of the build they
+ * are talking to (AGPL § 13).
+ *
+ * A released version resolves to that tag's tree, which is what the licence
+ * actually asks for — "the source of *your version*", not of whatever `main`
+ * happens to be. Everything else resolves to the repository root: `dev` (the
+ * ldflag default every locally built binary reports), a server too old to send
+ * the field at all, and any string that does not look like a release tag.
+ */
+export function sourceUrl(version: string | undefined): string {
+  if (version && RELEASED_VERSION.test(version)) {
+    return `${SOURCE_REPO_URL}/tree/${version}`;
+  }
+  return SOURCE_REPO_URL;
+}
+
+/**
  * The LIVE cell's label, or null while the poll is keeping up.
  *
  * Returns null rather than an age string in the healthy case on purpose: a
@@ -90,6 +124,26 @@ export default function TopBar() {
         {status.data?.version && (
           <span className={styles.brandVersion}>{status.data.version}</span>
         )}
+        {/* Unconditional, unlike the version slot above: § 13 obliges the
+            program to offer its source, and a server too old to report a
+            version is exactly a case where the offer still has to stand — it
+            just falls back to the repository root.
+
+            The app's first external link, so this sets the convention. New
+            tab, because someone reading this dashboard is usually mid-way
+            through diagnosing something and navigating away loses that. `rel`
+            carries `noreferrer` as well as `noopener`: a self-hosted instance's
+            address is not something to hand to a third party in a Referer
+            header. */}
+        <a
+          className={styles.sourceLink}
+          href={sourceUrl(status.data?.version)}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={t.chrome.sourceLabelAccessible}
+        >
+          {t.chrome.sourceLabel}
+        </a>
       </div>
 
       <div className={styles.cell}>

@@ -888,7 +888,7 @@ func (c *Client) respondToSearch(username string, token soul.Token, query string
 		// panic in match cannot leak the slot), before any network I/O.
 		results := func() []peer.File {
 			defer func() { <-c.shareWorkers }()
-			return c.shareSnapshot().match(query, maxSharedSearchResults)
+			return c.shareSnapshot().match(query, maxSharedSearchResults, c.excludedPhrases.Load())
 		}()
 		if len(results) == 0 || !c.reserveSearchDelivery(username, token) {
 			return
@@ -1068,7 +1068,47 @@ func matchesShareSearch(indexed *indexedFile, include, exclude []string) bool {
 	return true
 }
 
-func (s *shareSnapshot) match(query string, limit int) []peer.File {
+// loweredExcludedPhrases lowercases the server's excluded-search-phrase list
+// once per search so the per-file check is a plain substring test. phrases may
+// be nil (nothing pushed yet, or an empty list); empty entries are dropped
+// because they would match every path.
+func loweredExcludedPhrases(phrases *[]string) []string {
+	if phrases == nil || len(*phrases) == 0 {
+		return nil
+	}
+	lowered := make([]string, 0, len(*phrases))
+	for _, phrase := range *phrases {
+		if phrase != "" {
+			lowered = append(lowered, strings.ToLower(phrase))
+		}
+	}
+	return lowered
+}
+
+// pathExcluded reports whether virtualLower, a lowercased virtual file path,
+// contains any of the lowercased phrases as a substring. This is what
+// SLSKPROTOCOL prescribes for the server's excluded-search-phrase list (server
+// code 160): "File paths containing such phrases should be excluded when
+// responding to search requests."
+//
+// It is deliberately not matchExcludedPhrase's rule. That one answers a
+// different question - whether an outgoing query would be dropped by the
+// server (#319) - with token-set containment over the query. Same list, different
+// semantics; do not collapse the two.
+func pathExcluded(virtualLower string, phrases []string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(virtualLower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// match returns up to limit shared files matching query. excludedPhrases is the
+// server's most recently pushed exclusion list (nil when none has arrived);
+// files whose path contains one are skipped before the limit is counted, so an
+// excluded file never costs a result slot.
+func (s *shareSnapshot) match(query string, limit int, excludedPhrases *[]string) []peer.File {
 	if limit <= 0 {
 		return nil
 	}
@@ -1076,6 +1116,7 @@ func (s *shareSnapshot) match(query string, limit int) []peer.File {
 	if len(include) == 0 {
 		return nil
 	}
+	forbidden := loweredExcludedPhrases(excludedPhrases)
 
 	seen := make(map[shareTrigram]struct{})
 	var postings [][]uint32
@@ -1104,7 +1145,7 @@ func (s *shareSnapshot) match(query string, limit int) []peer.File {
 	results := make([]peer.File, 0, min(limit, len(s.search)))
 	if len(postings) == 0 {
 		for _, indexed := range s.search {
-			if matchesShareSearch(indexed, include, exclude) {
+			if matchesShareSearch(indexed, include, exclude) && !pathExcluded(indexed.virtualLower, forbidden) {
 				results = append(results, indexed.wire)
 				if len(results) == limit {
 					break
@@ -1131,7 +1172,7 @@ func (s *shareSnapshot) match(query string, limit int) []peer.File {
 		}
 		if candidate && int(id) < len(s.search) {
 			indexed := s.search[id]
-			if matchesShareSearch(indexed, include, exclude) {
+			if matchesShareSearch(indexed, include, exclude) && !pathExcluded(indexed.virtualLower, forbidden) {
 				results = append(results, indexed.wire)
 				if len(results) == limit {
 					break

@@ -283,6 +283,38 @@ func TestApplySettingsNilSecretsKeepAllSixValues(t *testing.T) {
 	}
 }
 
+// TestApplySettingsPreservesGluetunPollInterval locks that saving settings
+// from the UI does not drop soulseek.gluetun.poll_interval (#395). The key is
+// deliberately absent from GluetunSettings - it is not editable there - but it
+// sits inside a table ApplySettings does upsert into, so unlike a wholly
+// untouched section its survival depends on the writer editing in place rather
+// than re-rendering the table. Losing it would silently reset a shortened
+// interval back to the 5m default.
+func TestApplySettingsPreservesGluetunPollInterval(t *testing.T) {
+	path := writeFixtureFrom(t, "write_full.toml",
+		[2]string{"api_key = \"gluetun-key\"\n", "api_key = \"gluetun-key\"\npoll_interval = \"45s\"\n"},
+	)
+	cfg := mustLoad(t, path)
+	if cfg.Soulseek.Gluetun.PollInterval.Duration != 45*time.Second {
+		t.Fatalf("fixture PollInterval = %v, want 45s", cfg.Soulseek.Gluetun.PollInterval.Duration)
+	}
+
+	s := settingsFromConfig(cfg)
+	s.Soulseek.Gluetun.ControlURL = "http://127.0.0.1:9000" // force the table to be touched
+
+	if err := ApplySettings(path, s); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+
+	got := mustLoad(t, path)
+	if got.Soulseek.Gluetun.ControlURL != "http://127.0.0.1:9000" {
+		t.Errorf("Gluetun.ControlURL = %q, want the requested change applied", got.Soulseek.Gluetun.ControlURL)
+	}
+	if got.Soulseek.Gluetun.PollInterval.Duration != 45*time.Second {
+		t.Errorf("Gluetun.PollInterval = %v, want 45s preserved across a settings save", got.Soulseek.Gluetun.PollInterval.Duration)
+	}
+}
+
 // --- shared folders: unchanged list is byte-identical; changed list is rewritten ---
 
 func TestApplySettingsSharedFoldersUnchangedByteIdentical(t *testing.T) {

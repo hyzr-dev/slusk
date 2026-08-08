@@ -60,20 +60,32 @@ export function hasDirectoryTouch(issue) {
 }
 
 /**
- * Names of the shared contracts an issue touches. A side is a list of path
- * prefixes, so both a file and a directory can name a side.
+ * The (contract, side) pairs an issue touches. A side is a list of path
+ * prefixes, so both a file and a directory can name a side; its index within
+ * the contract's `sides` array is a sufficient identity for it.
+ *
+ * An issue can appear against more than one side of the same contract -- an
+ * issue that changes both the SSE producer and its consumer, say. That is
+ * exactly the case `conflicts` must still treat as a clash against anything
+ * else on that contract: touching every side is strictly more entangled with
+ * the protocol than touching one, never less, so it must not be read as
+ * cancelling out into "no side" or "safe".
  */
 export function contractsTouched(issue, contracts) {
   const touches = issue.touches ?? []
-  return contracts
-    .filter(c => c.sides.some(side =>
-      side.some(prefix => touches.some(path => {
+  const result = []
+  for (const c of contracts) {
+    c.sides.forEach((side, sideIndex) => {
+      const matches = side.some(prefix => {
         // Remove trailing slash from prefix for consistent matching
         const normalized = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix
         // Match exactly (file) or with slash following (directory)
-        return path === normalized || path.startsWith(normalized + '/')
-      }))))
-    .map(c => c.name)
+        return touches.some(path => path === normalized || path.startsWith(normalized + '/'))
+      })
+      if (matches) result.push({ name: c.name, side: sideIndex })
+    })
+  }
+  return result
 }
 
 /**
@@ -82,11 +94,18 @@ export function contractsTouched(issue, contracts) {
  * while touching entirely disjoint files -- #275 changes the SSE producer,
  * #267 the consumer -- and scheduling those together lets two agents skew a
  * contract silently, because each side is tested against its own mock.
+ *
+ * The comparison is by (contract, side), not by contract name alone: two
+ * issues that both only touch the producer side, say, are both working on the
+ * same end of the same protocol and are exactly the kind of change that
+ * benefits from being in the same wave, not split apart by a rule meant for
+ * the opposite case.
  */
 export function conflicts(a, b, contracts) {
   if (filesConflict(a, b)) return true
-  const mine = new Set(contractsTouched(a, contracts))
-  return contractsTouched(b, contracts).some(name => mine.has(name))
+  const mine = contractsTouched(a, contracts)
+  const theirs = contractsTouched(b, contracts)
+  return mine.some(x => theirs.some(y => x.name === y.name && x.side !== y.side))
 }
 
 const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 }
@@ -99,6 +118,22 @@ const EFFORT_COST = { S: 0, M: 1, L: 2 }
  */
 export function isAssessable(issue) {
   return issue.prodImpact in IMPACT_RANK && issue.effort in EFFORT_COST
+}
+
+/**
+ * True when an issue is a sound candidate for browser-based reproduction.
+ * Three conditions, each excluding a case a browser session cannot settle:
+ * `frontend` and `reproCheck` are the obvious prerequisites -- there must be
+ * something in `web/` to load and a concrete check to run against it -- and
+ * `kind` rules out two further cases. A `feature` has nothing shipped yet to
+ * reproduce against: there is no existing behaviour for a browser session to
+ * compare against a description. A `test` issue's defect lives in a test
+ * command's output, not in the running application, so no browser session can
+ * falsify or confirm it either way.
+ */
+export function isBrowserVerifiable(issue) {
+  return Boolean(issue.frontend) && Boolean(issue.reproCheck) &&
+    issue.kind !== 'feature' && issue.kind !== 'test'
 }
 
 /**
@@ -178,14 +213,83 @@ export function computeWaves(issues, contracts) {
   }
 }
 
+// Issue references in prose: `#294`, but not the leading digits of a CSS hex
+// colour (`#1d76db`) or a `#`-prefixed word. A six-digit all-numeric hex would
+// still match; that costs a re-judgement only if it collides with a real issue
+// number that closed since the cache was written, which the intersection in
+// invalidate() makes vanishingly unlikely.
+const ISSUE_REFERENCE = /#(\d+)(?!\w)/g
+
+/**
+ * Issue numbers a cached judgement names in its free-text evidence, ascending
+ * and deduplicated.
+ *
+ * Only the prose fields are scanned. `statedBlockers` is already structured and
+ * already drives the wave ordering; what this exists to find is the *unstated*
+ * dependency — "issue #287 (still open) is what turns this into an actual bug"
+ * — which lives in prose or nowhere.
+ */
+export function referencedIssues(judgement) {
+  const prose = [judgement?.impactEvidence, judgement?.reproCheck]
+    .filter(field => typeof field === 'string')
+    .join('\n')
+  const found = new Set()
+  for (const [, number] of prose.matchAll(ISSUE_REFERENCE)) found.add(Number(number))
+  return [...found].sort((a, b) => a - b)
+}
+
+/**
+ * The issue numbers that have closed since the cache was written, derived from
+ * the cache itself rather than fetched.
+ *
+ * Every issue in `state.issues` was open when it was judged — being open is
+ * what got it judged at all — so any of them missing from the current open list
+ * has since closed. No extra `tea` call, and nothing for the caller to pass.
+ *
+ * It also fires for an issue that was deleted or moved rather than closed. That
+ * is the same signal for this purpose: a judgement resting on it was written
+ * against a world that no longer holds.
+ *
+ * The blind spot is an issue that never had a cache row of its own -- opened and
+ * closed entirely between two triage runs, or never judged while it was open. It
+ * cannot appear here, so a judgement citing it stays fresh. Closing that gap
+ * needs closed-issue status fetched from the tracker; anchoring on the cache is
+ * what keeps the alternative -- "referenced and not currently open" -- from
+ * staling every judgement that cites a long-closed issue on every future run.
+ */
+export function closedSince(state, openIssues) {
+  const open = new Set((openIssues ?? []).map(i => i.number))
+  return new Set(
+    Object.values(state?.issues ?? {})
+      .map(cached => cached.number)
+      .filter(number => !open.has(number)))
+}
+
 /**
  * Split the open issues into those whose cached judgement still holds and
  * those that must be re-judged.
  *
- * Two independent axes, because `touches` is an asserted relation between an
- * issue and the code: the issue can move, and the code under it can move. An
- * issue may sit untouched for months while the file it concerns is refactored
- * away, so checking only the issue's content would miss the refactoring.
+ * Three independent axes. Two of them exist because `touches` is an asserted
+ * relation between an issue and the code: the issue can move, and the code
+ * under it can move. An issue may sit untouched for months while the file it
+ * concerns is refactored away, so checking only the issue's content would miss
+ * the refactoring.
+ *
+ * The third is that a judgement's severity can rest on a *third* issue's
+ * open/closed status — "#287 (still open) is what turns this into an actual
+ * bug" — and neither of the first two axes can see that condition come true.
+ * Two judgements fired on that in one run on 2026-07-30 when #287 merged, and
+ * both had to be forced stale by hand (#298). So a judgement also dies when its
+ * evidence names an issue that has closed since the cache was written.
+ *
+ * That last axis is a text heuristic and is meant to be one. It fires on a
+ * number that was mentioned without being load-bearing, and it misses a
+ * dependency the judge paraphrased instead of numbering — which is to say it
+ * would have caught only one of the two judgements that motivated it. #294
+ * wrote "#287" and is caught; #292 said the rows "are not clickable" without
+ * naming what would change that, and would cache-hit still. Both errors cost a
+ * re-judgement or leave the status quo, never a wrong answer presented as
+ * fresh, which is the trade the issue asked for.
  *
  * The digest is a content hash computed by the caller and is expected to cover
  * the issue's title, body, labels, and comments — enough to detect real content
@@ -195,6 +299,7 @@ export function invalidate({ state, openIssues, changedPaths }) {
   const fresh = []
   const stale = []
   const changed = new Set(changedPaths ?? [])
+  const closed = closedSince(state, openIssues)
 
   for (const open of openIssues) {
     const cached = state?.issues?.[String(open.number)]
@@ -203,8 +308,11 @@ export function invalidate({ state, openIssues, changedPaths }) {
       ? (cached.touches ?? []).some(path =>
           [...changed].some(c => c === path || c.startsWith(path) || path.startsWith(c)))
       : false
+    const movedReference = cached
+      ? referencedIssues(cached).some(number => closed.has(number))
+      : false
 
-    if (movedIssue || movedCode) stale.push(open.number)
+    if (movedIssue || movedCode || movedReference) stale.push(open.number)
     else fresh.push(open.number)
   }
 

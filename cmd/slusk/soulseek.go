@@ -23,6 +23,7 @@ func newSoulseekClient(cfg config.SoulseekConfig, downloadDir string, sink souls
 		DownloadDir:               downloadDir,
 		GluetunControlURL:         cfg.Gluetun.ControlURL,
 		GluetunAPIKey:             cfg.Gluetun.APIKey,
+		GluetunPollInterval:       cfg.Gluetun.PollInterval.Duration,
 		AllowPrivatePeerAddresses: cfg.AllowPrivatePeerAddresses,
 		MessageSink:               sink,
 		UploadSink:                uploads,

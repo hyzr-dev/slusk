@@ -40,7 +40,7 @@ func TestCandidateLifecycle(t *testing.T) {
 		t.Fatalf("expected carol (score 3.0) first, got %+v", top)
 	}
 
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, top.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, top.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("ActivateCandidate: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestActivateCandidateWithTransfersSetsCandidateMetadata(t *testing.T) {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
 
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
 	}
@@ -127,6 +127,64 @@ func TestActivateCandidateWithTransfersSetsCandidateMetadata(t *testing.T) {
 	}
 	if view.Job.Year == nil || *view.Job.Year != 2024 {
 		t.Errorf("Year = %v, want 2024", view.Job.Year)
+	}
+}
+
+// TestActivateCandidateWithTransfersStampsFutureDeadline verifies the PENDING
+// transfer set is created with the caller's deadline rather than the
+// activation timestamp (issue #441). Rows born already past their own deadline
+// would be swept as overdue by anything that widened TransfersPastDeadline to
+// cover PENDING, cancelling every deferred file of a multi-file candidate on
+// its first reconcile pass.
+func TestActivateCandidateWithTransfersStampsFutureDeadline(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(90 * time.Minute)
+
+	job, err := s.UpsertWantedJob(ctx, 441, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{
+		{Username: "erin", Score: 1.0, Files: []core.CandidateFile{
+			{Filename: "01 track.flac", Size: 111},
+			{Filename: "02 track.flac", Size: 222},
+		}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, deadline, now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: ok=%v err=%v", ok, err)
+	}
+
+	transfers, err := s.TransfersForCandidate(ctx, cand.ID)
+	if err != nil {
+		t.Fatalf("TransfersForCandidate: %v", err)
+	}
+	if len(transfers) != 2 {
+		t.Fatalf("got %d transfers, want 2", len(transfers))
+	}
+	for _, tr := range transfers {
+		if tr.State != core.TransferPending {
+			t.Fatalf("transfer %q state = %v, want PENDING", tr.Filename, tr.State)
+		}
+		if !tr.Deadline.Equal(deadline) {
+			t.Errorf("transfer %q deadline = %v, want %v", tr.Filename, tr.Deadline.UTC(), deadline)
+		}
+		if !tr.Deadline.After(now) {
+			t.Errorf("transfer %q was created already past its own deadline (%v <= %v)",
+				tr.Filename, tr.Deadline.UTC(), now)
+		}
 	}
 }
 
@@ -204,7 +262,7 @@ func TestActivateCandidateRespectsMaxActive(t *testing.T) {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
 
-	ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 2, now)
+	ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 2, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("ActivateCandidate: %v", err)
 	}
@@ -248,7 +306,7 @@ func TestActivateCandidateBouncesWhenJobLeftSelecting(t *testing.T) {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
 
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
 	}
@@ -286,7 +344,7 @@ func TestActivateCandidateWithTransfersRejectsWrongJobOwnership(t *testing.T) {
 		candidates = append(candidates, cand)
 	}
 
-	activated, _, err := s.ActivateCandidateWithTransfers(ctx, candidates[0].ID, jobs[1].ID, 5, now)
+	activated, _, err := s.ActivateCandidateWithTransfers(ctx, candidates[0].ID, jobs[1].ID, 5, now.Add(time.Hour), now)
 	if err != nil {
 		t.Fatalf("ActivateCandidateWithTransfers: %v", err)
 	}
@@ -337,7 +395,7 @@ func TestActivateCandidateWithTransfersRejectsInvalidFileSets(t *testing.T) {
 				t.Fatalf("seed invalid candidate files: %v", err)
 			}
 
-			activated, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+			activated, capFull, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 			if err == nil {
 				t.Fatal("expected invalid candidate file set to be rejected")
 			}
@@ -401,7 +459,7 @@ func TestActivateCandidateWithTransfersRollsBackOnEveryInsertPosition(t *testing
 				t.Fatalf("NextNewCandidate: found=%v (%v)", found, err)
 			}
 
-			activated, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now)
+			activated, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 5, now.Add(time.Hour), now)
 			if err == nil {
 				t.Fatal("expected injected transfer insertion error")
 			}
@@ -465,7 +523,7 @@ func TestActivateCandidateWithTransfersConcurrentLiveOwnerConflictRollsBack(t *t
 		go func() {
 			defer wg.Done()
 			<-start
-			ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, a.candID, a.jobID, 5, now)
+			ok, capFull, err := s.ActivateCandidateWithTransfers(ctx, a.candID, a.jobID, 5, now.Add(time.Hour), now)
 			results <- result{ok: ok, capFull: capFull, err: err}
 		}()
 	}
@@ -554,7 +612,7 @@ func TestActivateCandidateWithTransfersConcurrentCapKeepsJobsComplete(t *testing
 		go func() {
 			defer wg.Done()
 			<-start
-			ok, _, err := s.ActivateCandidateWithTransfers(ctx, attempt.candID, attempt.jobID, 1, now)
+			ok, _, err := s.ActivateCandidateWithTransfers(ctx, attempt.candID, attempt.jobID, 1, now.Add(time.Hour), now)
 			results <- ok
 			errs <- err
 		}()
@@ -624,7 +682,7 @@ func helperActivate(t *testing.T, s *Store, albumID int64, now time.Time) (jobID
 	if err != nil || !found {
 		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
 	}
-	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now)
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, job.ID, 100, now.Add(time.Hour), now)
 	if err != nil || !ok {
 		t.Fatalf("ActivateCandidate: %v ok=%v", err, ok)
 	}

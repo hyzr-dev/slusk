@@ -25,16 +25,24 @@ export interface PagerProps {
   page: number;
   totalPages: number;
   onChange: (page: number) => void;
+  // Keyboard hints for the prev/next buttons, e.g. '[,]' and '[.]'. Absent by
+  // default and supplied only by a caller that actually binds those keys —
+  // Jobs does, Peers does not (#434). Rendered aria-hidden, so the glyph is
+  // decoration and never reaches the button's accessible name, the same way
+  // the chat composer draws its '[⏎]' beside a plain SEND label.
+  previousHint?: string;
+  nextHint?: string;
 }
 
 // The prev/numbered/next control itself. No Jobs-specific props: a caller
 // that wants an accessible-name for the surrounding <nav>, or a result-count
 // summary beside it (Jobs does both — see .pagination/.resultRange in
 // Jobs.module.css), owns and renders those itself around this component.
-export default function Pager({ page, totalPages, onChange }: PagerProps) {
+export default function Pager({ page, totalPages, onChange, previousHint, nextHint }: PagerProps) {
   return (
     <div className={styles.pageButtons}>
       <button type="button" className={styles.pageButton} disabled={page === 0} onClick={() => onChange(page - 1)}>
+        {previousHint && <span aria-hidden="true">{previousHint} </span>}
         {t.pager.previousPage}
       </button>
       {paginationItems(page, totalPages).map((item, index) =>
@@ -55,6 +63,7 @@ export default function Pager({ page, totalPages, onChange }: PagerProps) {
       )}
       <button type="button" className={styles.pageButton} disabled={page + 1 >= totalPages} onClick={() => onChange(page + 1)}>
         {t.pager.nextPage}
+        {nextHint && <span aria-hidden="true"> {nextHint}</span>}
       </button>
     </div>
   );

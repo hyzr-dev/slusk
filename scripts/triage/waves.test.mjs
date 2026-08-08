@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { filesConflict, contractsTouched, conflicts, rank, isAssessable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
+import { filesConflict, contractsTouched, conflicts, rank, isAssessable, isBrowserVerifiable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
 
 test('issues touching the same file conflict', () => {
   const a = { number: 1, touches: ['internal/pipeline/importing.go'] }
@@ -84,12 +84,12 @@ const CONTRACTS = [
 
 test('an issue touching one side of a contract touches the contract', () => {
   const issue = { number: 275, touches: ['internal/observ/stream.go'] }
-  assert.deepEqual(contractsTouched(issue, CONTRACTS), ['sse-events'])
+  assert.deepEqual(contractsTouched(issue, CONTRACTS), [{ name: 'sse-events', side: 0 }])
 })
 
 test('a path prefix matches a directory side', () => {
   const issue = { number: 89, touches: ['internal/config/config.go'] }
-  assert.deepEqual(contractsTouched(issue, CONTRACTS), ['config'])
+  assert.deepEqual(contractsTouched(issue, CONTRACTS), [{ name: 'config', side: 0 }])
 })
 
 test('opposite sides of one contract conflict despite disjoint files', () => {
@@ -110,7 +110,21 @@ test('a directory side without a trailing slash does not match a longer sibling 
   const unrelated = { number: 1, touches: ['internal/configuration/x.go'] }
   const real = { number: 2, touches: ['internal/config/config.go'] }
   assert.deepEqual(contractsTouched(unrelated, contracts), [])
-  assert.deepEqual(contractsTouched(real, contracts), ['config'])
+  assert.deepEqual(contractsTouched(real, contracts), [{ name: 'config', side: 0 }])
+})
+
+test('two issues touching the same side of a shared contract do not conflict', () => {
+  const a = { number: 1, touches: ['internal/config/config.go'] }
+  const b = { number: 2, touches: ['internal/config/loader.go'] }
+  assert.equal(filesConflict(a, b), false)
+  assert.equal(conflicts(a, b, CONTRACTS), false)
+})
+
+test('an issue touching both sides of a contract still conflicts with an issue touching only one', () => {
+  const both = { number: 1, touches: ['internal/config/config.go', 'config.example.toml'] }
+  const oneSide = { number: 2, touches: ['internal/config/loader.go'] }
+  assert.equal(filesConflict(both, oneSide), false)
+  assert.equal(conflicts(both, oneSide, CONTRACTS), true)
 })
 
 test('rank orders by prod impact, then by ascending effort', () => {
@@ -121,6 +135,21 @@ test('rank orders by prod impact, then by ascending effort', () => {
   const cheap = { number: 3, prodImpact: 'degraded', effort: 'S', touches: ['c'] }
   const dear = { number: 4, prodImpact: 'degraded', effort: 'L', touches: ['d'] }
   assert.ok(rank(cheap) > rank(dear))
+})
+
+test('a test-classified issue is not browser-verifiable even with frontend and reproCheck', () => {
+  const issue = { number: 1, kind: 'test', frontend: true, reproCheck: 'open /jobs, check table renders' }
+  assert.equal(isBrowserVerifiable(issue), false)
+})
+
+test('a feature is not browser-verifiable: nothing shipped yet to reproduce against', () => {
+  const issue = { number: 2, kind: 'feature', frontend: true, reproCheck: 'open /jobs, check new column' }
+  assert.equal(isBrowserVerifiable(issue), false)
+})
+
+test('a bug with frontend and reproCheck is browser-verifiable', () => {
+  const issue = { number: 3, kind: 'bug', frontend: true, reproCheck: 'open /jobs, check table renders' }
+  assert.equal(isBrowserVerifiable(issue), true)
 })
 
 test('disjoint issues share wave one, ordered by rank', () => {
@@ -276,6 +305,125 @@ test('the two invalidation axes are independent: same digest, code changed', () 
     changedPaths: ['web/src/App.tsx'],
   })
   assert.deepEqual(out, { fresh: [], stale: [11] })
+})
+
+import { referencedIssues, closedSince } from './waves.mjs'
+
+test('referencedIssues finds every #N in the free-text evidence fields', () => {
+  const judgement = {
+    impactEvidence: 'Issue #287 (still open) is what turns this into a bug; see also #12.',
+    reproCheck: 'Could not reproduce while #300 is unmerged.',
+  }
+  assert.deepEqual(referencedIssues(judgement), [12, 287, 300])
+})
+
+test('referencedIssues ignores a hex colour and other #-prefixed non-numbers', () => {
+  const judgement = { impactEvidence: 'tokens.css sets --bad to #1d76db, not #fff.' }
+  assert.deepEqual(referencedIssues(judgement), [])
+})
+
+test('referencedIssues survives a judgement with no evidence text at all', () => {
+  assert.deepEqual(referencedIssues({ number: 1 }), [])
+  assert.deepEqual(referencedIssues({ impactEvidence: null, reproCheck: null }), [])
+})
+
+test('closedSince is the cached issues that are no longer open', () => {
+  const out = closedSince(state, [{ number: 10, digest: 'abc123def456' }])
+  assert.deepEqual([...out], [11])
+})
+
+test('closedSince is empty without a state file', () => {
+  assert.deepEqual([...closedSince(null, [{ number: 10, digest: 'x' }])], [])
+})
+
+test('a judgement resting on a now-closed issue is stale, digest and code unchanged', () => {
+  // The #294/#287 case from issue #298: the evidence named #287 as the
+  // condition that would turn the finding into a real bug, #287 then merged,
+  // and both existing axes reported the judgement as fresh.
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Issue #11 (still open) is what turns this into an actual bug.',
+      },
+      '11': { number: 11, digest: 'xyz789uvw012', touches: ['web/src/App.tsx'] },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [], stale: [10] })
+})
+
+test('a judgement referencing an issue that is still open stays fresh', () => {
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Blocked behind #11, which is still open.',
+      },
+      '11': { number: 11, digest: 'xyz789uvw012', touches: ['web/src/App.tsx'] },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [
+      { number: 10, digest: 'abc123def456' },
+      { number: 11, digest: 'xyz789uvw012' },
+    ],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10, 11], stale: [] })
+})
+
+test('a judgement referencing an issue that was already closed when it was made stays fresh', () => {
+  // #999 was never in the cache, so it cannot have closed since the cache was
+  // written -- the judge saw it closed and judged accordingly.
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Already fixed by #999, which shipped last month.',
+      },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10], stale: [] })
+})
+
+test('a judgement citing itself does not go stale on its own number', () => {
+  const referring = {
+    computedAt: 'f5e1f5b',
+    issues: {
+      '10': {
+        number: 10,
+        digest: 'abc123def456',
+        touches: ['internal/store/jobview.go'],
+        impactEvidence: 'Placeholder until issue #10 builds a search endpoint.',
+      },
+    },
+  }
+  const out = invalidate({
+    state: referring,
+    openIssues: [{ number: 10, digest: 'abc123def456' }],
+    changedPaths: [],
+  })
+  assert.deepEqual(out, { fresh: [10], stale: [] })
 })
 
 import { execFileSync } from 'node:child_process'
