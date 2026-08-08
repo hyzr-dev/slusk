@@ -34,6 +34,22 @@ type NewCandidate struct {
 // cycle, since retries/backoff track *search* failures (candidates exhausted
 // after filtering) rather than individual candidate failures, and
 // empty_searches tracks the separate no-raw-results streak.
+//
+// The reset is guarded on WANTED, the state Discovery reads the job in and
+// advances it out of on the very next call (see discovery.go's searchJob), per
+// the single-writer invariant that every UPDATE touching a job's cycle must be
+// conditional. Without the guard this can renew updated_at on a job sitting in
+// DONE or FAILED without moving it out - and the Overview panel reads that
+// stamp as a completion timestamp, so an old job would resurface under
+// "recently finished" (issue #294). The reset of retries is the sharper edge:
+// zeroing the retry budget of a job that already failed would make it
+// unfailable. Neither is reachable today - Discovery only ever gets here with a
+// job it read in WANTED - so this closes the hole by construction rather than
+// fixing an observed bug.
+//
+// A bounced guard is not an error: the candidate rows are still committed. A
+// job that left WANTED mid-search keeps them as inert rows nothing will read,
+// which is what Discovery already documents and accepts.
 func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCandidate, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -55,8 +71,8 @@ func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCa
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE album_jobs SET retries = 0, empty_searches = 0, not_before = NULL, updated_at = $1 WHERE id = $2`,
-		now, jobID); err != nil {
+		`UPDATE album_jobs SET retries = 0, empty_searches = 0, not_before = NULL, updated_at = $1 WHERE id = $2 AND state = $3`,
+		now, jobID, string(core.StateWanted)); err != nil {
 		return fmt.Errorf("reset job search cycle: %w", err)
 	}
 
