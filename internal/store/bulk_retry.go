@@ -115,6 +115,10 @@ func (s *Store) BulkRetryJobs(ctx context.Context, q DashboardJobsQuery, now tim
 			WHERE candidates.album_job_id = revived.id
 			  AND (SELECT count(*) FROM deleted_transfers) >= 0
 			RETURNING candidates.id
+		), deleted_rejections AS (
+			DELETE FROM candidate_rejections AS rejections USING revived
+			WHERE rejections.album_job_id = revived.id
+			RETURNING rejections.album_job_id
 		)
 		SELECT (SELECT count(*) FROM revived)`,
 		string(core.StateWanted), now, ids,

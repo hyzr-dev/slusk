@@ -141,11 +141,39 @@ func (s *Store) SucceedCandidate(ctx context.Context, candidateID int64, now tim
 // whether the job row transitioned; false (with the tx rolled back, candidate
 // left ACTIVE) when the job already left `from` or the candidate is no longer
 // ACTIVE.
+// It records no rejection history: use RejectCandidateAndAdvance when the
+// candidate's own content is what failed. See that function for the split.
 func (s *Store) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, false, now)
+}
+
+// RejectCandidateAndAdvance is FailCandidateAndAdvance plus a permanent record
+// of this candidate in the job's rejection history, written in the same
+// transaction (issue #317): ResetJobToWanted deletes the job's candidates on
+// every retry cycle, and Discovery's next - identical - search would otherwise
+// re-cache and re-download the peer that just failed.
+//
+// The split is about *whose fault* the failure was, because the record outlives
+// every automatic retry. Content faults belong here: Lidarr rejected the files,
+// or they cannot cover any known edition. Environmental ones do not - a peer
+// going offline mid-transfer, or Lidarr stalling on an import, says nothing
+// about the files, and blacklisting on it would let one timeout make an album
+// with a single seeder permanently unfetchable. Those keep
+// FailCandidateAndAdvance, whose soft counterpart is the peer-reliability
+// weighting recordOutcome already applies.
+//
+// Sharing the transaction is deliberate for the same reason: a rejection
+// recorded against a candidate whose failure write rolled back would blacklist
+// a peer that never actually failed.
+func (s *Store) RejectCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, true, now)
+}
+
+func (s *Store) failCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, reject bool, now time.Time) (bool, error) {
 	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
 		`UPDATE candidates SET state = $1, fail_reason = $2, updated_at = $3 WHERE id = $4 AND state = $5`,
 		[]any{string(core.CandidateFailed), reason, now, candidateID, string(core.CandidateActive)},
-		from, to, now)
+		from, to, reason, reject, now)
 }
 
 // SucceedCandidateAndAdvance is FailCandidateAndAdvance's success twin: it marks
@@ -155,13 +183,15 @@ func (s *Store) SucceedCandidateAndAdvance(ctx context.Context, candidateID, job
 	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
 		`UPDATE candidates SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
 		[]any{string(core.CandidateSucceeded), now, candidateID, string(core.CandidateActive)},
-		from, to, now)
+		from, to, "", false, now)
 }
 
 // terminalCandidateAndAdvance runs candSQL (the candidate terminal-state write,
 // guarded on state='ACTIVE') and the job's conditional from->to advance in one
-// transaction. Either write affecting zero rows rolls back both.
-func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, candSQL string, candArgs []any, from, to core.AlbumJobState, now time.Time) (bool, error) {
+// transaction. Either write affecting zero rows rolls back both. reject asks for
+// a candidate_rejections row (with reason) alongside them, in the same tx - only
+// the failure path wants one.
+func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, candSQL string, candArgs []any, from, to core.AlbumJobState, reason string, reject bool, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -195,6 +225,12 @@ func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jo
 		// Job left `from` underneath us (e.g. WantedSync cancel): roll back the
 		// candidate write too, so we never strand the job with no ACTIVE candidate.
 		return false, nil
+	}
+
+	if reject {
+		if err := recordRejectionTx(ctx, tx, candidateID, jobID, reason, now); err != nil {
+			return false, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

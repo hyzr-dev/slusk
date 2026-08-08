@@ -37,6 +37,14 @@ type ImportingStore interface {
 	// past ImportConfirmTimeout) in one tx, so a job is never left in IMPORTING
 	// with no ACTIVE candidate.
 	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// RejectCandidateAndAdvance is FailCandidateAndAdvance for a failure that
+	// is the candidate's own content's fault (Lidarr rejected the files, or
+	// they cover no known edition): it additionally records the candidate in
+	// the job's rejection history, so a later search cycle does not re-cache
+	// and re-download the same files (issue #317). A failure that says nothing
+	// about the content - a stuck import, a peer dropping mid-transfer - must
+	// use FailCandidateAndAdvance instead.
+	RejectCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// SetJobNotBefore hides the job from RunnableJobsInState until notBefore
 	// without touching retries or updated_at, so a verify-phase retry cooldown
 	// does not reset escalateIfStuck's StuckAfter clock (keyed on updated_at).
@@ -205,12 +213,22 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 // commonest way to get here is the coverage gate: someone picks six tracks
 // of a twelve-track album, so importable < MinTrackCount and the candidate
 // is rejected. The files stay; the job still reports why in its events.
-func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, now time.Time) error {
+//
+// contentFault says whether the failure was the candidate's own files' doing,
+// which is what earns it a permanent place in the job's rejection history
+// (issue #317). Lidarr refusing the files and a folder covering no known
+// edition qualify; an import stuck past its timeout does not - that is Lidarr's
+// state, not this peer's, and it would recur for every candidate in turn.
+func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, names []string, reason string, contentFault bool, now time.Time) error {
 	if job.Source != core.SourceManual {
 		cleanupFolder(ctx, m.p.Peers, m.log(), job.ID, names)
 	}
 	m.recordOutcome(ctx, job, cand.Username, false, now)
-	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
+	advance := m.p.Store.FailCandidateAndAdvance
+	if contentFault {
+		advance = m.p.Store.RejectCandidateAndAdvance
+	}
+	if _, err := advance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
 		return err
 	}
 	return nil
@@ -334,7 +352,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
-		return m.failCandidate(ctx, job, cand, names, "import rejected", now)
+		return m.failCandidate(ctx, job, cand, names, "import rejected", true, now)
 	}
 	if len(rejections) > 0 {
 		// Unmatched extras don't fail the candidate — the coverage gate below
@@ -385,7 +403,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
 			"covered", coverage(importable), "required", minRequired)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
-		return m.failCandidate(ctx, job, cand, names, "incomplete download", now)
+		return m.failCandidate(ctx, job, cand, names, "incomplete download", true, now)
 	}
 	if err := m.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 		// Legacy propagated this error from the whole pass (advanceImporting
@@ -491,7 +509,7 @@ func (m *Importing) escalateIfStuck(ctx context.Context, job core.AlbumJob, cand
 	stuckDetail := fmt.Sprintf("importing stuck past timeout (%s)", reason)
 	m.log().Info(stuckDetail, "album_job", job.ID, "reason", reason)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, stuckDetail, now)
-	return m.failCandidate(ctx, job, cand, filenames, reason, now)
+	return m.failCandidate(ctx, job, cand, filenames, reason, false, now)
 }
 
 // albumAlreadyComplete reports whether Lidarr's library already holds every
@@ -588,7 +606,7 @@ func (m *Importing) failUnconfirmed(ctx context.Context, job core.AlbumJob, cand
 	m.log().Info(detail, "album_job", job.ID)
 	m.recordEvent(ctx, job.ID, core.EventAttemptFailed, detail, now)
 	m.recordOutcome(ctx, job, cand.Username, false, now)
-	if _, err := m.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "import not confirmed", core.StateImporting, core.StateSelecting, now); err != nil {
+	if _, err := m.p.Store.RejectCandidateAndAdvance(ctx, cand.ID, job.ID, "import not confirmed", core.StateImporting, core.StateSelecting, now); err != nil {
 		return err
 	}
 	return nil

@@ -32,6 +32,11 @@ type DiscoveryStore interface {
 	// its search cycle (retries=0, empty_searches=0, not_before=NULL) in the
 	// same transaction.
 	InsertCandidates(ctx context.Context, jobID int64, cands []store.NewCandidate, now time.Time) error
+	// RejectedCandidates lists the (username, release directory) pairs this
+	// job has already tried and failed, across every earlier search cycle.
+	// Consulted before caching, since the search itself is deterministic
+	// enough to hand back the same failing peers every cycle (issue #317).
+	RejectedCandidates(ctx context.Context, jobID int64) ([]store.CandidateRejection, error)
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// ReliabilityFor batch-looks-up known peer reliability history for a set
 	// of usernames against one artist, for use in Ranker.Rank.
@@ -390,16 +395,38 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		}
 	}
 
-	// Candidates are cached per search cycle - the previously-tried-username
-	// filter the legacy engine applied at enqueue time is deliberately absent
-	// here: a fresh cache is wiped on every retry cycle (see InsertCandidates
-	// resetting retries, and ResetJobToWanted deleting prior candidates), so
-	// there is no cross-cycle "already tried" state left to consult.
+	// Candidates are cached per search cycle, and ResetJobToWanted wipes that
+	// cache on every retry - but the search producing them is deterministic
+	// enough that the next cycle hands back the same peers, including the ones
+	// that just failed. candidate_rejections is the cross-cycle memory that
+	// survives the wipe (issue #317); without consulting it here, a job whose
+	// search is consistently wrong pays MaxRetries × MaxCandidates full
+	// downloads of the same bad files before it finally fails.
+	rejections, err := d.p.Store.RejectedCandidates(ctx, job.ID)
+	if err != nil {
+		return false, false, err
+	}
+	rejected := make(map[candidateKey]struct{}, len(rejections))
+	for _, r := range rejections {
+		rejected[candidateKey{Username: r.Username, ReleaseDir: r.ReleaseDir}] = struct{}{}
+	}
+
 	var survivors []store.NewCandidate
-	var tooManyTracks, tooFewTracks, irrelevant int
+	var tooManyTracks, tooFewTracks, irrelevant, alreadyFailed int
 	for _, cand := range ranked {
 		if len(survivors) >= d.p.MaxCandidates {
 			break
+		}
+		// Checked first: this candidate has already been downloaded in full and
+		// failed for this job, so no amount of evidence from the cheaper filters
+		// below could make it worth trying again.
+		if key, ok := candidateKeyOf(cand); ok {
+			if _, seen := rejected[key]; seen {
+				detail := fmt.Sprintf("candidate %s already failed for this job (%s), skipping", cand.Username, key.ReleaseDir)
+				d.log().Debug(detail, "album_job", job.ID, "user", cand.Username, "release_dir", key.ReleaseDir)
+				alreadyFailed++
+				continue
+			}
 		}
 		if maxTracks > 0 && len(cand.Files) > maxTracks {
 			// More files than the largest known edition — almost certainly not
@@ -447,11 +474,12 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 		survivors = append(survivors, newCandidateFrom(cand))
 	}
 
-	if rejected := tooManyTracks + tooFewTracks + irrelevant; rejected > 0 {
-		detail := fmt.Sprintf("rejected %d candidates: %d above maximum track count, %d below minimum track count, %d not matching the requested album",
-			rejected, tooManyTracks, tooFewTracks, irrelevant)
-		d.log().Info(detail, "album_job", job.ID, "rejected", rejected,
-			"above_max_tracks", tooManyTracks, "below_min_tracks", tooFewTracks, "irrelevant", irrelevant)
+	if n := tooManyTracks + tooFewTracks + irrelevant + alreadyFailed; n > 0 {
+		detail := fmt.Sprintf("rejected %d candidates: %d above maximum track count, %d below minimum track count, %d not matching the requested album, %d already failed for this job",
+			n, tooManyTracks, tooFewTracks, irrelevant, alreadyFailed)
+		d.log().Info(detail, "album_job", job.ID, "rejected", n,
+			"above_max_tracks", tooManyTracks, "below_min_tracks", tooFewTracks,
+			"irrelevant", irrelevant, "already_failed", alreadyFailed)
 		d.recordEvent(ctx, job.ID, core.EventCandidateRejected, detail, now)
 	}
 
@@ -505,6 +533,27 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 			"album_job", job.ID)
 	}
 	return true, advanced, nil
+}
+
+// candidateKey identifies "the same candidate" across search cycles: one peer's
+// one release directory. Username alone is too blunt - the same peer may well
+// share the right album in another directory - and this pair is exactly what
+// matcher.Rank groups search results on, so one rejection matches one candidate.
+type candidateKey struct {
+	Username   string
+	ReleaseDir string
+}
+
+// candidateKeyOf derives a ranked candidate's key from its first file, matching
+// how the store derives it when recording a rejection. ok is false for a
+// candidate with no files, which has no directory to key on - such a candidate
+// is never filtered rather than being matched against an empty key, which would
+// collapse every unkeyable candidate onto one another.
+func candidateKeyOf(cand core.RankedCandidate) (candidateKey, bool) {
+	if len(cand.Files) == 0 {
+		return candidateKey{}, false
+	}
+	return candidateKey{Username: cand.Username, ReleaseDir: matcher.ReleaseDir(cand.Files[0].Filename)}, true
 }
 
 // filenamesOf extracts a candidate's filenames for matcher.CheckRelevance.
