@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { AppConfig, SoulseekConfigDTO } from '../api/types';
 import { t } from '../strings';
+import { restartPollInterval, restartTimeout } from './restartWatch';
 import Settings from './Settings';
 
 // jsdom has no layout engine and doesn't implement scrollIntoView at all.
@@ -100,6 +101,26 @@ function openSection(title: string) {
 
 function openAdvanced(sectionTitle: string) {
   fireEvent.click(within(cardFor(sectionTitle)).getByRole('button', { name: t.settings.advanced }));
+}
+
+// The instance ids of the process that serves a save and of the one that
+// replaces it (issue #154). A mock that answers /healthz with oldInstance is
+// modelling the dying server still on its feet; newInstance is the restart
+// having actually happened.
+const oldInstance = 'INSTANCE-BEFORE';
+const newInstance = 'INSTANCE-AFTER';
+
+function savedRestartingResponse(instance = oldInstance) {
+  return new Response(JSON.stringify({ ok: true, restarting: true, instance }), { status: 200 });
+}
+
+function healthzResponse(instance: string) {
+  return new Response(JSON.stringify({ instance }), { status: 200 });
+}
+
+// Drives the restart poll through one probe. Requires fake timers.
+function tickRestartPoll(times = 1) {
+  return act(() => vi.advanceTimersByTimeAsync(restartPollInterval * times));
 }
 
 describe('connection tests', () => {
@@ -289,18 +310,20 @@ describe('rendering', () => {
 
 describe('saving settings', () => {
   it('posts the full nested body, omitting secrets when untouched and including them when typed', async () => {
+    // Two saves, so the first restart has to be waited out: Save is disabled
+    // for the whole restart window (issue #154), exactly as it is in the app.
+    vi.useFakeTimers();
     let capturedBody: Record<string, unknown> | undefined;
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, init?: RequestInit) => {
         if (url === '/api/config' && init?.method === 'POST') {
           capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
-          return Promise.resolve(
-            new Response(JSON.stringify({ ok: true, restarting: true }), { status: 200 }),
-          );
+          return Promise.resolve(savedRestartingResponse());
         }
+        if (url === '/healthz') return Promise.resolve(healthzResponse(newInstance));
         if (url === '/api/config') {
-          return new Promise(() => {}); // the restart poll never resolves in this test
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
         }
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       }),
@@ -310,7 +333,7 @@ describe('saving settings', () => {
     renderSettings(client);
 
     fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
-    await waitFor(() => expect(capturedBody).toBeDefined());
+    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(capturedBody).toEqual({
       lidarr: { url: 'http://lidarr:8686' },
       slskd: { url: 'http://slskd:5030' },
@@ -355,6 +378,10 @@ describe('saving settings', () => {
       paths: { slskdCompleteDir: '/music/slskd-downloads' },
     });
 
+    // Let the restart finish so the form is editable again.
+    await tickRestartPoll();
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
     // Two of the six write-only secrets: lidarr.apiKey and soulseek.password.
     openSection(t.settings.lidarr);
     const lidarrApiKeyInput = within(cardFor(t.settings.lidarr)).getByPlaceholderText(
@@ -372,7 +399,8 @@ describe('saving settings', () => {
     fireEvent.change(soulseekPasswordInput, { target: { value: 'new-soulseek-password' } });
 
     fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
-    await waitFor(() => expect((capturedBody as { lidarr: { apiKey?: string } }).lidarr.apiKey).toBe('new-lidarr-key'));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect((capturedBody as { lidarr: { apiKey?: string } }).lidarr.apiKey).toBe('new-lidarr-key');
     expect((capturedBody as { soulseek: { password?: string } }).soulseek.password).toBe(
       'new-soulseek-password',
     );
@@ -418,17 +446,20 @@ describe('saving settings', () => {
   });
 
   it('requires two Save clicks only when a danger-zone field is touched', async () => {
+    // Also two saves, so the first restart is waited out — see above.
+    vi.useFakeTimers();
     let postCount = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, init?: RequestInit) => {
         if (url === '/api/config' && init?.method === 'POST') {
           postCount += 1;
-          return Promise.resolve(
-            new Response(JSON.stringify({ ok: true, restarting: true }), { status: 200 }),
-          );
+          return Promise.resolve(savedRestartingResponse());
         }
-        if (url === '/api/config') return new Promise(() => {});
+        if (url === '/healthz') return Promise.resolve(healthzResponse(newInstance));
+        if (url === '/api/config') {
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
+        }
         return Promise.reject(new Error(`unexpected fetch ${url}`));
       }),
     );
@@ -441,7 +472,10 @@ describe('saving settings', () => {
     const pipelineCard = cardFor(t.settings.pipeline);
     fireEvent.change(within(pipelineCard).getByDisplayValue('30'), { target: { value: '40' } });
     fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
-    await waitFor(() => expect(postCount).toBe(1));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(postCount).toBe(1);
+    await tickRestartPoll();
+    await act(() => vi.advanceTimersByTimeAsync(0));
 
     // Touching store.dsn arms the button; the first click after that must not submit.
     openSection(t.settings.dangerZone);
@@ -455,10 +489,12 @@ describe('saving settings', () => {
     // labeled Save at the moment of the click) — it must not submit yet.
     fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
     expect(postCount).toBe(1);
-    await screen.findByRole('button', { name: t.settings.saveConfirm });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    screen.getByRole('button', { name: t.settings.saveConfirm });
 
     fireEvent.click(screen.getByRole('button', { name: t.settings.saveConfirm }));
-    await waitFor(() => expect(postCount).toBe(2));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(postCount).toBe(2);
   });
 
   it('renders a nested 422 field error next to its field', async () => {
@@ -570,10 +606,9 @@ describe('saving settings', () => {
       'fetch',
       vi.fn((url: string, init?: RequestInit) => {
         if (url === '/api/config' && init?.method === 'POST') {
-          return Promise.resolve(
-            new Response(JSON.stringify({ ok: true, restarting: true }), { status: 200 }),
-          );
+          return Promise.resolve(savedRestartingResponse());
         }
+        if (url === '/healthz') return Promise.resolve(healthzResponse(newInstance));
         if (url === '/api/config') {
           // The restart poll: the process has come back up.
           return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
@@ -589,8 +624,307 @@ describe('saving settings', () => {
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.getByText(t.settings.savedRestarting)).toBeInTheDocument();
 
-    await act(() => vi.advanceTimersByTimeAsync(2000));
+    await tickRestartPoll();
+    await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.queryByText(t.settings.savedRestarting)).not.toBeInTheDocument();
+  });
+
+  it('announces the restart in a live region, with the spinner hidden from the accessibility tree', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        // Never comes back, so the notice stays up for the assertions.
+        if (url === '/healthz') return Promise.reject(new Error('connection refused'));
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    // QueryNotice above the connections section is a live region too, so scope
+    // to the one the restart headline actually sits in.
+    const status = screen.getByText(t.settings.savedRestarting).closest('[role="status"]') as HTMLElement;
+    expect(status).not.toBeNull();
+    expect(within(status).getByText(t.settings.restartWaiting)).toBeInTheDocument();
+    // The spinner carries no text of its own — it must not be the thing a
+    // screen reader is expected to interpret.
+    expect(status.querySelectorAll('[aria-hidden="true"]').length).toBe(1);
+  });
+
+  it('keeps the restart state up while probes fail, and does not overlap requests', async () => {
+    vi.useFakeTimers();
+    let healthzCalls = 0;
+    let inFlight = 0;
+    let overlapped = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') {
+          healthzCalls += 1;
+          inFlight += 1;
+          if (inFlight > 1) overlapped = true;
+          inFlight -= 1;
+          return Promise.reject(new Error('connection refused'));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    await tickRestartPoll(5);
+    expect(healthzCalls).toBe(5);
+    expect(overlapped).toBe(false);
+    // Failed probes are the expected middle of a restart, not a reason to
+    // declare it over.
+    expect(screen.getByText(t.settings.savedRestarting)).toBeInTheDocument();
+  });
+
+  it('does not treat the dying process still answering as a completed restart', async () => {
+    vi.useFakeTimers();
+    let instance = oldInstance;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse(oldInstance));
+        }
+        if (url === '/healthz') return Promise.resolve(healthzResponse(instance));
+        if (url === '/api/config') {
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    // The old server is up and healthy — it just hasn't exited yet. Answering
+    // 200 is not the same thing as having restarted.
+    await tickRestartPoll(3);
+    expect(screen.getByText(t.settings.savedRestarting)).toBeInTheDocument();
+
+    instance = newInstance;
+    await tickRestartPoll();
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.queryByText(t.settings.savedRestarting)).not.toBeInTheDocument();
+  });
+
+  it('disables Save and the connection tests for the whole restart window', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') return Promise.reject(new Error('connection refused'));
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    const testButtons = screen.getAllByRole('button', { name: t.settings.testConnection });
+    expect(testButtons.every((b) => (b as HTMLButtonElement).disabled)).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect((screen.getByRole('button', { name: t.settings.save }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      screen
+        .getAllByRole('button', { name: t.settings.testConnection })
+        .every((b) => (b as HTMLButtonElement).disabled),
+    ).toBe(true);
+  });
+
+  it('replaces the spinner with reload guidance once the restart times out', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') return Promise.reject(new Error('connection refused'));
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText(t.settings.savedRestarting)).toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(restartTimeout + restartPollInterval));
+    expect(screen.queryByText(t.settings.savedRestarting)).not.toBeInTheDocument();
+    expect(screen.getByText(t.settings.restartTimedOut)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.settings.restartReload })).toBeInTheDocument();
+  });
+
+  it('says the session is no longer authorised when the recovered process rejects it', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') return Promise.resolve(healthzResponse(newInstance));
+        // The restarted process is reachable but no longer accepts this
+        // session — the saved change rotated the auth token.
+        if (url === '/api/config') {
+          return Promise.resolve(new Response('unauthorized', { status: 401 }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    openSection(t.settings.dangerZone);
+    const dangerCard = cardFor(t.settings.dangerZone);
+    const tokenInput = within(dangerCard).getByLabelText(t.settings.authToken, {
+      exact: false,
+      selector: 'input',
+    });
+    fireEvent.change(tokenInput, { target: { value: 'a-new-token' } });
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save })); // arms
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    fireEvent.click(screen.getByRole('button', { name: t.settings.saveConfirm }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    // Warned about up front, since the recovery may not be observable at all.
+    expect(screen.getByText(t.settings.restartAuthWarning)).toBeInTheDocument();
+
+    await tickRestartPoll();
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText(t.settings.restartAuthChanged)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: t.settings.restartReload })).toBeInTheDocument();
+  });
+
+  it('warns that the page may never reconnect when the listen address changed', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') return Promise.reject(new Error('connection refused'));
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    openSection(t.settings.dangerZone);
+    const dangerCard = cardFor(t.settings.dangerZone);
+    const listenInput = within(dangerCard).getByLabelText(t.settings.listenAddr, {
+      exact: false,
+      selector: 'input',
+    });
+    fireEvent.change(listenInput, { target: { value: ':9999' } });
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save })); // arms
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    fireEvent.click(screen.getByRole('button', { name: t.settings.saveConfirm }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.getByText(t.settings.restartAddressWarning)).toBeInTheDocument();
+
+    // And it is repeated on the timeout, where it is the likeliest explanation.
+    await act(() => vi.advanceTimersByTimeAsync(restartTimeout + restartPollInterval));
+    expect(screen.getByText(t.settings.restartTimedOut)).toBeInTheDocument();
+    expect(screen.getByText(t.settings.restartAddressWarning)).toBeInTheDocument();
+  });
+
+  it('never enters the restart state when the save reports restarting: false', async () => {
+    vi.useFakeTimers();
+    const seen: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        seen.push(url);
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ ok: true, restarting: false, instance: oldInstance }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url === '/api/config') {
+          return Promise.resolve(new Response(JSON.stringify(makeConfig()), { status: 200 }));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.queryByText(t.settings.savedRestarting)).not.toBeInTheDocument();
+    expect((screen.getByRole('button', { name: t.settings.save }) as HTMLButtonElement).disabled).toBe(false);
+    // Nothing to wait for, so nothing probes /healthz.
+    await tickRestartPoll(3);
+    expect(seen).not.toContain('/healthz');
+  });
+
+  it('stops probing once the settings view unmounts mid-restart', async () => {
+    vi.useFakeTimers();
+    let healthzCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url === '/api/config' && init?.method === 'POST') {
+          return Promise.resolve(savedRestartingResponse());
+        }
+        if (url === '/healthz') {
+          healthzCalls += 1;
+          return Promise.reject(new Error('connection refused'));
+        }
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      }),
+    );
+    const client = newClient();
+    client.setQueryData(queryKeys.config, makeConfig({ writable: true }));
+    const view = renderSettings(client);
+
+    fireEvent.click(screen.getByRole('button', { name: t.settings.save }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    await tickRestartPoll();
+    expect(healthzCalls).toBe(1);
+
+    view.unmount();
+    await tickRestartPoll(3);
+    expect(healthzCalls).toBe(1);
   });
 
   it('re-seeds the form from the refetched config after a save, clearing the changed badge', async () => {
@@ -599,10 +933,9 @@ describe('saving settings', () => {
       'fetch',
       vi.fn((url: string, init?: RequestInit) => {
         if (url === '/api/config' && init?.method === 'POST') {
-          return Promise.resolve(
-            new Response(JSON.stringify({ ok: true, restarting: true }), { status: 200 }),
-          );
+          return Promise.resolve(savedRestartingResponse());
         }
+        if (url === '/healthz') return Promise.resolve(healthzResponse(newInstance));
         if (url === '/api/config') {
           // Both the restart poll and the post-invalidate refetch: the saved
           // config comes back with the backend's canonical duration forms.
@@ -627,7 +960,7 @@ describe('saving settings', () => {
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.getByText(t.settings.savedRestarting)).toBeInTheDocument();
 
-    await act(() => vi.advanceTimersByTimeAsync(2000)); // poll succeeds → invalidate → refetch
+    await tickRestartPoll(); // poll succeeds → invalidate → refetch
     await act(() => vi.advanceTimersByTimeAsync(0)); // flush the refetch round trip
     expect(within(pipelineCard).getByDisplayValue('5m0s')).toBeInTheDocument();
     expect(screen.queryByText(t.settings.changedBadge)).not.toBeInTheDocument();

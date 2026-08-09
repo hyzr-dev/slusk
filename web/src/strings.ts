@@ -1258,6 +1258,21 @@ export const t = {
     save: 'Save',
     saving: 'Saving…',
     savedRestarting: 'Saved — restarting…',
+    // The restart window (issue #154). savedRestarting is the headline beside
+    // the spinner; the rest explain what is happening and, in the two cases
+    // this page cannot recover from on its own, what to do instead.
+    restartWaiting: 'slusk is applying the new configuration. It is unreachable until the process comes back.',
+    // Shown while waiting, not after: the browser talks to the old address,
+    // so a listen-address change means recovery may never be observed here at
+    // all — there would be no later moment to say this.
+    restartAddressWarning:
+      'The listen address changed, so this page may never reconnect. Open slusk on its new address once the restart finishes.',
+    restartAuthWarning: 'The auth token changed. You will have to sign in again once slusk is back.',
+    restartAuthChanged:
+      'slusk is back, but this session is no longer authorised — the auth token changed. Reload and sign in with the new one.',
+    restartTimedOut:
+      'slusk has not answered for two minutes. It may have failed to start with the new configuration — check the container logs, then reload.',
+    restartReload: 'Reload',
     saveFailed: 'Could not save the configuration. Please try again.',
   },
   // The login/first-run card (issue #279) — see docs/design/slusk-login.dc.html

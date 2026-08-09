@@ -2,6 +2,7 @@ package observ
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -357,8 +358,19 @@ func TestHealthzRemainsPublicAndMinimal(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if body := rec.Body.String(); body != "" {
-		t.Fatalf("body = %q, want empty minimal response", body)
+	// The body carries the process instance id and nothing else (issue #154).
+	// It is public by design — it describes no configuration and no pipeline
+	// state — but any *other* field appearing here would be a leak, so assert
+	// on the whole key set rather than just on the one field we expect.
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("body = %v, want only an instance id", body)
+	}
+	if _, ok := body["instance"]; !ok {
+		t.Fatalf("body = %v, want an instance field", body)
 	}
 }
 

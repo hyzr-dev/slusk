@@ -55,6 +55,12 @@ export default defineConfig({
     proxy: {
       '/api': backendProxy,
       '/status': backendProxy,
+      // The settings view polls /healthz across a config-change restart
+      // (issue #154). In production the SPA is served from the same origin as
+      // the API, so this is only a dev-server concern — but without it the
+      // probe hits Vite, gets index.html back with a 200, and the restart
+      // window can never end while running `make dev`.
+      '/healthz': backendProxy,
     },
   },
   test: {

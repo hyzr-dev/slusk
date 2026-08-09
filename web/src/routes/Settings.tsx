@@ -9,12 +9,18 @@ import Panel from '../components/tui/Panel';
 import QueryNotice, { queryPhase } from '../components/tui/QueryNotice';
 import SectionHeader from '../components/tui/SectionHeader';
 import { t } from '../strings';
+import { watchRestart, type RestartPhase } from './restartWatch';
 import styles from './Settings.module.css';
 
 export default function Settings() {
   const configQuery = useConfig();
   const config = configQuery.data;
   const phase = queryPhase(configQuery);
+  // Owned here rather than in ConfigForm because the connection tests below
+  // are ConfigForm's sibling, not its children, and they must go dead for the
+  // same window (issue #154). Only the flag is lifted: the restart machine
+  // itself stays in ConfigForm, which is what has a form to re-seed.
+  const [restartBusy, setRestartBusy] = useState(false);
 
   return (
     <Page title={t.page.settings.title} subtitle={t.page.settings.subtitle} maxWidth={900}>
@@ -29,7 +35,7 @@ export default function Settings() {
           its own Panel now, so this stack's own gap replaces the border-top
           each card used to draw to separate itself from the one above. */}
       <div className={styles.stack}>
-        {config && <ConfigForm config={config} />}
+        {config && <ConfigForm config={config} onRestartChange={setRestartBusy} />}
 
         {/* Not collapsible (unlike the cards above), so this uses the plain
             SectionHeader primitive rather than CollapsibleSection's
@@ -38,11 +44,11 @@ export default function Settings() {
           <section>
             <SectionHeader label={t.settings.connections} />
             <div className={styles.sectionBody}>
-              <ConnectionTest label={t.settings.lidarr} dependency="lidarr" />
+              <ConnectionTest label={t.settings.lidarr} dependency="lidarr" disabled={restartBusy} />
               {/* Only offer the Soulseek test when the native client is
                   enabled — otherwise there is nothing to connect to. */}
               {config?.soulseek.enabled && (
-                <ConnectionTest label={t.settings.soulseek} dependency="soulseek" />
+                <ConnectionTest label={t.settings.soulseek} dependency="soulseek" disabled={restartBusy} />
               )}
             </div>
           </section>
@@ -551,7 +557,15 @@ function soulseekToForm(s: AppConfig['soulseek']): SoulseekFormState {
 // below). writable:false disables every input and hides the Save row, rather
 // than rendering a separate read-only tree, since duplicating ~40 fields
 // across two components isn't worth it for a disabled attribute.
-function ConfigForm({ config }: { config: AppConfig }) {
+function ConfigForm({
+  config,
+  onRestartChange,
+}: {
+  config: AppConfig;
+  // Reports whether a config-change restart is in progress, so Settings can
+  // disable the connection tests it renders as this form's sibling.
+  onRestartChange: (busy: boolean) => void;
+}) {
   const disabled = !config.writable;
 
   const [lidarrUrl, setLidarrUrl] = useState(config.lidarr.url);
@@ -592,7 +606,22 @@ function ConfigForm({ config }: { config: AppConfig }) {
 
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState('');
-  const [restarting, setRestarting] = useState(false);
+  const [restartPhase, setRestartPhase] = useState<RestartPhase>('idle');
+  // Captured at save time, because submit() clears the danger fields on
+  // success and both flags describe the save that is now restarting: a
+  // listen-address change may mean this page never sees the recovery at all,
+  // and an auth-token change means the recovered process will reject it.
+  const [restartRisk, setRestartRisk] = useState({ addressChanged: false, authChanged: false });
+  const restartAbort = useRef<AbortController | null>(null);
+
+  const restarting = restartPhase !== 'idle';
+  useEffect(() => {
+    onRestartChange(restarting);
+  }, [restarting, onRestartChange]);
+
+  // The poll runs outside React's render cycle, so unmounting mid-restart has
+  // to abort it explicitly or it keeps fetching against a dead component.
+  useEffect(() => () => restartAbort.current?.abort(), []);
 
   // Re-seed every form slice from a freshly fetched config. Called when the
   // restart poll confirms a save was applied: the saved config can differ
@@ -653,31 +682,35 @@ function ConfigForm({ config }: { config: AppConfig }) {
   const update = useUpdateConfig();
   const qc = useQueryClient();
 
-  // Once restarting, poll GET /api/config until the restarted process answers
-  // again, then invalidate the cached config (staleTime: Infinity means it
-  // otherwise never refetches on its own), clear the banner, and re-seed the
-  // form from the polled config. Re-seeding from the poll response rather
-  // than from the refetched query keeps it deterministic: structural sharing
-  // preserves the cached object's identity when the refetched config is
-  // deep-equal, so a prop-identity check would miss exactly the case where
-  // only the typed spelling differs from the saved canonical form.
-  useEffect(() => {
-    if (!restarting) return;
-    const id = setInterval(() => {
-      apiGet<AppConfig>('/api/config').then(
-        (fresh) => {
-          clearInterval(id);
-          setRestarting(false);
-          void qc.invalidateQueries({ queryKey: queryKeys.config });
-          reseedForm(fresh);
-        },
-        () => {
-          // Still restarting; keep polling.
-        },
-      );
-    }, 2000);
-    return () => clearInterval(id);
-  }, [restarting, qc]);
+  // Adopt a freshly fetched config: invalidate the cached query (staleTime:
+  // Infinity means it otherwise never refetches on its own) and re-seed the
+  // form. Re-seeding from the fetched object rather than from the refetched
+  // query keeps it deterministic: structural sharing preserves the cached
+  // object's identity when the refetched config is deep-equal, so a
+  // prop-identity check would miss exactly the case where only the typed
+  // spelling differs from the saved canonical form.
+  function adoptConfig(fresh: AppConfig) {
+    void qc.invalidateQueries({ queryKey: queryKeys.config });
+    reseedForm(fresh);
+  }
+
+  // Start watching for the replacement process. baseline is the instance id
+  // the save response reported for the process that is about to exit; see
+  // restartWatch.ts for why the poll needs it.
+  function beginRestart(baseline: string) {
+    restartAbort.current?.abort();
+    const controller = new AbortController();
+    restartAbort.current = controller;
+    setRestartPhase('waiting');
+    void watchRestart(baseline, controller.signal, {
+      onRecovered: (fresh) => {
+        setRestartPhase('idle');
+        adoptConfig(fresh);
+      },
+      onAuthChanged: () => setRestartPhase('authChanged'),
+      onTimeout: () => setRestartPhase('timedOut'),
+    });
+  }
 
   function handleLidarrChange(key: LidarrFieldKey, value: string) {
     if (key === 'url') setLidarrUrl(value);
@@ -805,14 +838,27 @@ function ConfigForm({ config }: { config: AppConfig }) {
     setFieldErrors({});
     setSaveError('');
 
+    const addressChanged = danger.listenAddr !== config.observ.listenAddr;
+    const authChanged = danger.authToken.trim() !== '';
+
     update.mutate(buildBody(), {
-      onSuccess: () => {
+      onSuccess: (result) => {
         setLidarrApiKey('');
         setSlskdApiKey('');
         setSoulseek((prev) => ({ ...prev, password: '', gluetunApiKey: '' }));
         setDanger((prev) => ({ ...prev, dsn: '', authToken: '' }));
         setDangerArmed(false);
-        setRestarting(true);
+        if (!result.restarting) {
+          // The backend applied the change in place. Nothing to wait for —
+          // but the form still has to pick up whatever it normalised, or the
+          // dirty badges stick (see reseedForm).
+          apiGet<AppConfig>('/api/config').then(adoptConfig, () => {
+            // Leave the form as typed; the save itself succeeded.
+          });
+          return;
+        }
+        setRestartRisk({ addressChanged, authChanged });
+        beginRestart(result.instance ?? '');
       },
       onError: (err) => {
         if (
@@ -1219,15 +1265,65 @@ function ConfigForm({ config }: { config: AppConfig }) {
 
       {!disabled && (
         <div className={styles.saveRow}>
-          <Button variant="primary" disabled={update.isPending} onClick={handleSaveClick}>
+          <Button variant="primary" disabled={update.isPending || restarting} onClick={handleSaveClick}>
             {saveLabel}
           </Button>
           {dangerArmed && <span className={styles.dangerWarning}>{t.settings.dangerConfirmWarning}</span>}
           {saveError && <span className={styles.saveError}>{saveError}</span>}
-          {restarting && <span className={styles.restartingBanner}>{t.settings.savedRestarting}</span>}
+          <RestartNotice phase={restartPhase} risk={restartRisk} />
         </div>
       )}
     </>
+  );
+}
+
+// RestartNotice is everything the user sees during the restart window: a
+// spinner and a plain account of what is happening while the poll runs, then
+// either nothing (recovered — the form re-seeds and the page is live again)
+// or guidance, for the two outcomes this page cannot recover from by waiting.
+//
+// The wrapper is always rendered so the live region exists before it has
+// anything to announce; .restartNotice:empty hides it when idle. The spinner
+// itself is aria-hidden decoration — the announcement is the text.
+function RestartNotice({
+  phase,
+  risk,
+}: {
+  phase: RestartPhase;
+  risk: { addressChanged: boolean; authChanged: boolean };
+}) {
+  return (
+    <div className={styles.restartNotice} role="status">
+      {phase === 'waiting' && (
+        <>
+          <span className={styles.restartingBanner}>
+            <span aria-hidden className={styles.spinner} />
+            {t.settings.savedRestarting}
+          </span>
+          <span className={styles.restartDetail}>{t.settings.restartWaiting}</span>
+          {risk.addressChanged && (
+            <span className={styles.restartDetail}>{t.settings.restartAddressWarning}</span>
+          )}
+          {risk.authChanged && (
+            <span className={styles.restartDetail}>{t.settings.restartAuthWarning}</span>
+          )}
+        </>
+      )}
+      {(phase === 'timedOut' || phase === 'authChanged') && (
+        <>
+          <span className={styles.restartFailed}>
+            {phase === 'authChanged' ? t.settings.restartAuthChanged : t.settings.restartTimedOut}
+          </span>
+          {/* Only worth repeating on a timeout: an auth-token change already
+              explains itself, but a listen-address change is the most likely
+              reason nothing ever answered. */}
+          {phase === 'timedOut' && risk.addressChanged && (
+            <span className={styles.restartDetail}>{t.settings.restartAddressWarning}</span>
+          )}
+          <Button onClick={() => window.location.reload()}>{t.settings.restartReload}</Button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1237,9 +1333,13 @@ function ConfigForm({ config }: { config: AppConfig }) {
 function ConnectionTest({
   label,
   dependency,
+  disabled,
 }: {
   label: string;
   dependency: 'lidarr' | 'soulseek';
+  // True during a config-change restart: the endpoint this button probes
+  // lives in the process that is going away (issue #154).
+  disabled: boolean;
 }) {
   const test = useTestConnection(dependency);
   const result = test.data;
@@ -1259,7 +1359,7 @@ function ConnectionTest({
   return (
     <div className={styles.testRow}>
       <label className={styles.testLabel}>{label}</label>
-      <Button disabled={test.isPending} onClick={() => test.mutate()}>
+      <Button disabled={test.isPending || disabled} onClick={() => test.mutate()}>
         {t.settings.testConnection}
       </Button>
       <span className={`${styles.status} ${styles[status]}`}>

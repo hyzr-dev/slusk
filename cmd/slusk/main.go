@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -743,27 +744,32 @@ func main() {
 	// the search session shapes (core.SearchSession/SearchDelta) already live
 	// in internal/core, so no wiring-boundary conversion is needed (issue #58).
 	handler := observ.NewServer(observ.ServerDeps{
-		Registry:                  reg,
-		Version:                   version,
-		Status:                    statusFn,
-		JobProgress:               jobProgressFn,
-		Jobs:                      jobsFn,
-		PagedJobs:                 pagedJobsFn,
-		FailureDetails:            failureDetailsFn,
-		Cancel:                    jobs.Cancel,
-		Retry:                     jobs.Retry,
-		BulkRetry:                 bulkRetryFn,
-		SearchJob:                 jobs.ForceSearch,
-		DeleteJob:                 jobs.Delete,
-		CreateJob:                 createJobFn,
-		JobDetail:                 jobDetailFn,
-		JobView:                   jobViewFn,
-		JobEvents:                 jobEventsFn,
-		RecentEvents:              recentEventsFn,
-		Peers:                     peersFn,
-		PeerHistory:               peerHistoryFn,
-		Live:                      liveFn,
-		Ready:                     readyFn,
+		Registry:       reg,
+		Version:        version,
+		Status:         statusFn,
+		JobProgress:    jobProgressFn,
+		Jobs:           jobsFn,
+		PagedJobs:      pagedJobsFn,
+		FailureDetails: failureDetailsFn,
+		Cancel:         jobs.Cancel,
+		Retry:          jobs.Retry,
+		BulkRetry:      bulkRetryFn,
+		SearchJob:      jobs.ForceSearch,
+		DeleteJob:      jobs.Delete,
+		CreateJob:      createJobFn,
+		JobDetail:      jobDetailFn,
+		JobView:        jobViewFn,
+		JobEvents:      jobEventsFn,
+		RecentEvents:   recentEventsFn,
+		Peers:          peersFn,
+		PeerHistory:    peerHistoryFn,
+		Live:           liveFn,
+		Ready:          readyFn,
+		// Fresh per process run, so a client polling /healthz across a
+		// config-change restart can tell the new process from the dying one
+		// (issue #154). Never persisted — being unrecognisable after a
+		// restart is the whole point.
+		InstanceID:                rand.Text(),
 		Modules:                   modulesFn,
 		FailedRetryAfter:          cfg.Pipeline.FailedReviveAfter.Duration,
 		MaxCandidates:             cfg.Pipeline.MaxCandidatesPerAlbum,
