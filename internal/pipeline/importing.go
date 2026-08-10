@@ -45,6 +45,12 @@ type ImportingStore interface {
 	// about the content - a stuck import, a peer dropping mid-transfer - must
 	// use FailCandidateAndAdvance instead.
 	RejectCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// CountRejectionsByReason reports how many distinct candidates this job has
+	// already had rejected under one core.RejectionReason. failCandidate reads
+	// it to decide whether the next content fault should park the job instead
+	// of returning it to SELECTING (issue #472). The count is of rows already
+	// committed, so the candidate being failed right now is not in it.
+	CountRejectionsByReason(ctx context.Context, jobID int64, reason string) (int, error)
 	// SetJobNotBefore hides the job from RunnableJobsInState until notBefore
 	// without touching retries or updated_at, so a verify-phase retry cooldown
 	// does not reset escalateIfStuck's StuckAfter clock (keyed on updated_at).
@@ -68,8 +74,19 @@ type ImportingParams struct {
 	Peers  FolderCleaner // DeleteDownloadFolder only, for cleanupFolder
 	Logger *slog.Logger
 
-	CompleteDir          string
-	MaxActive            int
+	CompleteDir string
+	MaxActive   int
+	// MaxCandidates is Discovery's per-album candidate cap, mirrored here
+	// because it is what the repeated-rejection cap is derived from: a job
+	// parks once MaxCandidates+1 candidates have been rejected for the same
+	// reason, i.e. once a full search cycle was exhausted and the next one
+	// said exactly the same thing (issue #472). Pipeline params are
+	// per-module, so Importing cannot read DiscoveryParams' copy.
+	//
+	// Zero or negative disables the cap entirely rather than parking on the
+	// first rejection, so a caller that forgets to wire it loses a safety net
+	// instead of marching the library into PARKED.
+	MaxCandidates        int
 	StuckAfter           time.Duration
 	ImportConfirmTimeout time.Duration
 	Interval             time.Duration
@@ -201,11 +218,14 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 
 // failCandidate is the shared "reject like a failed download" path used by
 // both the rejection and incomplete-coverage cases in verify: cleanup, record
-// outcome, then atomically fail the candidate and return the job to SELECTING.
+// outcome, then atomically fail the candidate and return the job to SELECTING -
+// or, on a content fault that reaches the repeated-rejection cap, to PARKED,
+// which is terminal until a person acts (see repeatedRejectionCap; this is not
+// a corner case, it is how a hopeless job now ends).
 // The candidate-fail + job-advance commit together or not at all, so the job is
-// never stranded in IMPORTING with no ACTIVE candidate. No cooldown is set -
-// other candidates usually remain cached, so the next SELECTING tick tries one
-// immediately. The best-effort cleanup/outcome errors are logged inside their
+// never stranded in IMPORTING with no ACTIVE candidate. No cooldown is set on
+// the SELECTING branch - other candidates usually remain cached, so the next
+// SELECTING tick tries one immediately. The best-effort cleanup/outcome errors are logged inside their
 // helpers; only the combined store call's error is propagated.
 //
 // A manual job's folder is never cleaned up (issue #59). cleanupFolder is a
@@ -224,19 +244,101 @@ func (m *Importing) Tick(ctx context.Context, now time.Time) error {
 // (issue #317). Lidarr refusing the files and a folder covering no known
 // edition qualify; an import stuck past its timeout does not - that is Lidarr's
 // state, not this peer's, and it would recur for every candidate in turn.
+//
+// A content fault also carries the repeated-rejection cap (see the summary
+// above and repeatedRejectionCap).
 func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand core.Candidate, reason string, contentFault bool, now time.Time) error {
 	if job.Source != core.SourceManual {
 		cleanupFolder(ctx, m.p.Peers, m.p.Store, m.log(), job.ID, now)
 	}
 	m.recordOutcome(ctx, job, cand.Username, false, now)
 	advance := m.p.Store.FailCandidateAndAdvance
+	to := core.StateSelecting
 	if contentFault {
 		advance = m.p.Store.RejectCandidateAndAdvance
+		if m.repeatedRejectionCap(ctx, job, reason) {
+			to = core.StateParked
+		}
 	}
-	if _, err := advance(ctx, cand.ID, job.ID, reason, core.StateImporting, core.StateSelecting, now); err != nil {
+	advanced, err := advance(ctx, cand.ID, job.ID, reason, core.StateImporting, to, now)
+	if err != nil {
 		return err
 	}
+	// Only claim a park the store actually performed: the transition is
+	// guarded on IMPORTING, and a job WantedSync cancelled underneath us
+	// bounces it. Writing the event regardless would put "automation stopped"
+	// in the trail of a job that went somewhere else entirely.
+	if advanced && to == core.StateParked {
+		m.recordPark(ctx, job, reason, now)
+	}
 	return nil
+}
+
+// recordPark writes the job_parked event for a job the cap just stopped.
+//
+// The count is re-read after the advance committed rather than reused from
+// repeatedRejectionCap's prior+1 estimate, because the two can differ: the
+// store records nothing for a candidate whose cached files carry no parseable
+// filename, and its upsert adds no row for a (peer, folder) pair already in
+// the history. The estimate is the right basis for the *decision* - it errs
+// toward parking a job that has been told the same thing enough times - but a
+// detail line saying "6 rejected" over a history holding 5 is a fabricated
+// number in a trail a troubleshooter reads as fact. If the re-read fails the
+// count is omitted rather than guessed.
+func (m *Importing) recordPark(ctx context.Context, job core.AlbumJob, reason string, now time.Time) {
+	detail := fmt.Sprintf("no candidate could satisfy this album: repeatedly rejected for %s", reason)
+	if n, err := m.p.Store.CountRejectionsByReason(ctx, job.ID, reason); err != nil {
+		m.log().Warn("count rejections by reason failed, parking without a count",
+			"album_job", job.ID, "reason", reason, "err", err)
+	} else {
+		detail = fmt.Sprintf("no candidate could satisfy this album: %d rejected for %s", n, reason)
+	}
+	m.log().Info(detail, "album_job", job.ID, "reason", reason)
+	m.recordEvent(ctx, job.ID, core.EventJobParked, detail, now)
+}
+
+// repeatedRejectionCap reports whether failing this candidate for reason makes
+// the job's count of same-reason rejections reach the cap. A capped job is
+// parked instead of returned to SELECTING: it has been
+// told the same thing often enough that another search cycle is not going to
+// change the answer, and only a person can (issue #472). The count it acts on
+// is an estimate, deliberately - see the paragraph on the read below, and
+// recordPark for why the event's own number is re-read instead.
+//
+// The cap is MaxCandidates+1, derived rather than configured, because that is
+// the number that encodes the intent - one full search cycle was exhausted and
+// the next one said the same thing. Three, the obvious constant, would park a
+// job partway through its *first* cycle: partial shares are ordinary on
+// Soulseek and the coverage gate rejects every one, so an album whose fourth
+// candidate is complete would never reach it.
+//
+// The read is outside RejectCandidateAndAdvance's transaction on purpose.
+// Importing is the single writer of a job in IMPORTING, so the read and the
+// write cannot interleave, and a stale count fails safe: the candidate about to
+// be recorded is counted as +1 here, which over-counts only in two cases the
+// ordinary path does not reach - this exact (peer, folder) pair already being
+// in the history, which Discovery filters out of the next cycle, and a
+// candidate whose cached files carry no parseable filename, which the store
+// declines to record at all.
+//
+// Restricted to content faults by its only caller. The environmental reasons -
+// a stuck import, a peer dropping mid-transfer - are correlated across every
+// job at once, so capping on them would march the whole library into a state
+// with no automatic revival the first time Lidarr is down.
+func (m *Importing) repeatedRejectionCap(ctx context.Context, job core.AlbumJob, reason string) bool {
+	if m.p.MaxCandidates <= 0 {
+		return false
+	}
+	prior, err := m.p.Store.CountRejectionsByReason(ctx, job.ID, reason)
+	if err != nil {
+		// Fail open: an unreadable count must not park a job, and must not
+		// abort a rejection that is otherwise fine. The job goes back to
+		// SELECTING exactly as it did before this cap existed.
+		m.log().Warn("count rejections by reason failed, not capping",
+			"album_job", job.ID, "reason", reason, "err", err)
+		return false
+	}
+	return prior+1 >= m.p.MaxCandidates+1
 }
 
 // verify is the verify-phase gate (ImportSubmittedAt is NULL): it asks Lidarr
@@ -357,7 +459,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
 		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
-		return m.failCandidate(ctx, job, cand, "import rejected", true, now)
+		return m.failCandidate(ctx, job, cand, string(core.ReasonImportRejected), true, now)
 	}
 	if len(rejections) > 0 {
 		// Unmatched extras don't fail the candidate — the coverage gate below
@@ -408,7 +510,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
 			"covered", coverage(importable), "required", minRequired)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
-		return m.failCandidate(ctx, job, cand, "incomplete download", true, now)
+		return m.failCandidate(ctx, job, cand, string(core.ReasonIncompleteDownload), true, now)
 	}
 	if err := m.p.Music.ExecuteManualImport(ctx, importable); err != nil {
 		// Legacy propagated this error from the whole pass (advanceImporting

@@ -214,6 +214,10 @@ export const t = {
     import_ok: 'Import completed',
     import_rejected: 'Import rejected',
     job_failed: 'Job failed',
+    // Issue #472. Written by every path that parks a job, so like
+    // not_imported it names only the outcome — which of the causes it was
+    // lives in the event's own detail text, rendered beside this label.
+    job_parked: 'Job parked',
     quarantined: 'Files quarantined',
     // Written from two different sites in the backend (issue #59) — the
     // download was never identified against a release group, or it was and
@@ -262,8 +266,31 @@ export const t = {
     back: '← Back',
     cancel: 'Cancel',
     retry: 'Retry',
+    // Deliberately cause-free, and it must stay that way. This used to assert
+    // one — 'repeated backend disappearance exhausted transfer retries' —
+    // true while the lost-transfer path was PARKED's only producer. Issue
+    // #472 added a third producer (N candidates rejected for the same content
+    // fault), so naming any one cause here invents a diagnosis for the other
+    // two. Note that 'no candidate could satisfy this album' is *also* a
+    // cause, and a wrong one for both transfer paths, which never looked at a
+    // candidate's content. Only the job's own events know which it was.
+    //
+    // The button sentence exists because the two carry different budgets and
+    // nothing else shows it: Retry clears the job's rejection history,
+    // Re-run pipeline deliberately keeps it (#317), so re-running the
+    // pipeline on an already-capped job re-parks on its first rejection.
+    // Name the button by its rendered label — #376 renamed this control from
+    // 'Force search', and copy pointing at a button that is not on screen is
+    // worse than copy that names none.
     parkedExplanation:
-      'Repeated backend disappearance exhausted transfer retries, so automation stopped. Retry discards prior candidates and transfers, then starts a fresh search and download cycle.',
+      'Automation stopped here and is waiting for you; the events below say what parked it. Retry starts over — it forgets which peers already failed, so it may try them again. Re-run pipeline keeps that record and searches only for peers it has not tried.',
+    // A manual job (issue #59) reaches PARKED only through the transfer path,
+    // and neither half of the Lidarr copy is true for it: JobActions does not
+    // offer it 'Re-run pipeline' at all, and its Retry is RetryManualJob,
+    // which keeps the one candidate and re-downloads from the same peer
+    // rather than starting a fresh search.
+    parkedExplanationManual:
+      'Automation stopped here and is waiting for you; the events below say what parked it. Retry downloads from the same peer again — a manual job has no other candidate to fall back on.',
     // 'Force search' used to double as both "re-run the automated pipeline"
     // and (implicitly) "search manually" — issue #376 split those into two
     // distinct actions, so this one is named for what it actually does:

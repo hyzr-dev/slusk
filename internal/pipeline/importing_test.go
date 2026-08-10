@@ -98,6 +98,48 @@ func seedImportingManualJob(t *testing.T, st *store.Store, username, albumMBID s
 	return job.ID, cand.ID
 }
 
+// seedNextImportingCandidate puts an existing job back into IMPORTING with a
+// fresh candidate, standing in for the Discovery→Selecting→Downloading round
+// trip a real job makes between two rejections. Repeated-rejection tests need
+// several rejections against the *same* job, which seedImportingJob cannot
+// give them: it starts from UpsertWantedJob.
+func seedNextImportingCandidate(t *testing.T, st *store.Store, jobID int64, username string, files []core.CandidateFile, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.InsertCandidates(ctx, jobID, []store.NewCandidate{
+		{Username: username, Score: 1.0, Files: files},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := st.NextNewCandidate(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	activated, _, err := st.ActivateCandidateWithTransfers(ctx, cand.ID, jobID, 100, now.Add(time.Hour), now)
+	if err != nil || !activated {
+		t.Fatalf("ActivateCandidateWithTransfers: %v activated=%v", err, activated)
+	}
+	registerSeedFolders(t, st, jobID, files, now)
+	for _, f := range files {
+		if _, _, err := st.RecordEnqueueIntent(ctx, cand.ID, username, f.Filename, now.Add(time.Hour), now); err != nil {
+			t.Fatalf("RecordEnqueueIntent: %v", err)
+		}
+	}
+	transfers, err := st.TransfersForCandidate(ctx, cand.ID)
+	if err != nil {
+		t.Fatalf("TransfersForCandidate: %v", err)
+	}
+	for _, tr := range transfers {
+		if err := st.UpdateTransferProgress(ctx, tr.ID, core.TransferCompleted, tr.BytesTotal, tr.BytesTotal, now); err != nil {
+			t.Fatalf("UpdateTransferProgress: %v", err)
+		}
+	}
+	if err := st.AdvanceJobState(ctx, jobID, core.StateImporting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	return cand.ID
+}
+
 // assertCandidateNoLongerActive asserts the candidate has left the ACTIVE
 // state (store exposes no by-id lookup across every candidate state, so a
 // terminal candidate is verified by absence from ActiveCandidate combined with
@@ -1274,4 +1316,165 @@ func TestImportingResolveErrorEscalatesLikeAnyOtherVerifyError(t *testing.T) {
 		t.Errorf("job state = %v, want SELECTING once stuck past StuckAfter", got)
 	}
 	assertCandidateNoLongerActive(t, st, jobID)
+}
+
+// TestImportingParksAfterRepeatedIdenticalRejections is issue #472's core case:
+// job 44906 ran 59 identical download→reject→re-search cycles over four weeks,
+// because retries counts *search* failures and InsertCandidates resets it on
+// every successful search, so max_retries could never be spent on this loop
+// shape. MaxCandidates is set to 1 here, making the cap N = 2 - the second
+// rejection carrying the same reason parks the job instead of re-searching.
+func TestImportingParksAfterRepeatedIdenticalRejections(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
+		},
+		albumReleases: []core.AlbumRelease{{TrackCount: 2}},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.MaxCandidates = 1
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick (first rejection): %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Fatalf("one rejection under the cap should return job to SELECTING, got %v", got)
+	}
+
+	seedNextImportingCandidate(t, st, jobID, "carol",
+		[]core.CandidateFile{{Filename: `B\01.mp3`, Size: 10}}, now.Add(time.Hour))
+	if err := m.Tick(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatalf("Tick (second rejection): %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateParked {
+		t.Fatalf("reaching the cap should park the job, got %v", got)
+	}
+	assertCandidateNoLongerActive(t, st, jobID)
+
+	ev := lastJobEvent(t, st, jobID)
+	if ev.Event != core.EventJobParked {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventJobParked)
+	}
+	if !strings.Contains(ev.Detail, string(core.ReasonIncompleteDownload)) {
+		t.Errorf("park detail = %q, want it to name the reason", ev.Detail)
+	}
+	if !strings.Contains(ev.Detail, "2 rejected") {
+		t.Errorf("park detail = %q, want it to carry the count", ev.Detail)
+	}
+}
+
+// TestImportingCapCountsEachReasonSeparately: the cap is per reason, not per
+// job. A job told two different things has not been told the same thing twice,
+// and re-searching may still find a candidate that answers either one.
+func TestImportingCapCountsEachReasonSeparately(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	// Lidarr refuses every file: the "import rejected" path.
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.MaxCandidates = 1
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	if err := m.Tick(ctx, now); err != nil {
+		t.Fatalf("Tick (import rejected): %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Fatalf("first rejection should return job to SELECTING, got %v", got)
+	}
+
+	// Second cycle fails the coverage gate instead: a different reason, so
+	// neither count reaches 2.
+	music.manualImportItems = []core.ImportItem{
+		{ID: 2, Path: "/music/complete/B/01.mp3", Importable: true, TrackIDs: []int64{101}},
+	}
+	music.albumReleases = []core.AlbumRelease{{TrackCount: 2}}
+	seedNextImportingCandidate(t, st, jobID, "carol",
+		[]core.CandidateFile{{Filename: `B\01.mp3`, Size: 10}}, now.Add(time.Hour))
+	if err := m.Tick(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatalf("Tick (incomplete download): %v", err)
+	}
+	if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+		t.Errorf("two rejections carrying different reasons must not park the job, got %v", got)
+	}
+}
+
+// TestImportingCapIgnoresEnvironmentalFailures: a stuck import is Lidarr's
+// state, not this peer's, and it fires for every job at once. Capping on it
+// would march the whole library into PARKED - a state with no automatic
+// revival - the first time Lidarr is down. Only content faults are counted,
+// and they are exactly the failures RejectCandidateAndAdvance records.
+func TestImportingCapIgnoresEnvironmentalFailures(t *testing.T) {
+	ctx := context.Background()
+	stuckSince := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{manualImportErr: context.DeadlineExceeded}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	p.MaxCandidates = 1
+	p.StuckAfter = time.Minute
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, stuckSince)
+
+	m := NewImporting(p)
+	for i, files := range [][]core.CandidateFile{
+		{{Filename: `A\01.mp3`, Size: 10}},
+		{{Filename: `B\01.mp3`, Size: 10}},
+		{{Filename: `C\01.mp3`, Size: 10}},
+	} {
+		at := stuckSince.Add(time.Duration(i) * time.Hour)
+		if i > 0 {
+			seedNextImportingCandidate(t, st, jobID, fmt.Sprintf("peer%d", i), files, at)
+		}
+		if err := m.Tick(ctx, at.Add(p.StuckAfter+time.Second)); err != nil {
+			t.Fatalf("Tick %d: %v", i, err)
+		}
+		if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+			t.Fatalf("stuck escalation %d should return job to SELECTING, got %v", i, got)
+		}
+	}
+}
+
+// TestImportingCapDisabledWithoutMaxCandidates: MaxCandidates unset means no
+// cap at all, deliberately. A caller that forgets to wire it loses a safety
+// net; the alternative reading of zero - park after one rejection - would
+// silently drive every job into PARKED.
+func TestImportingCapDisabledWithoutMaxCandidates(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: true, TrackIDs: []int64{101}},
+		},
+		albumReleases: []core.AlbumRelease{{TrackCount: 2}},
+	}
+	peers := &fakeSearcher{}
+	p, st := newImportingParams(t, music, peers)
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	m := NewImporting(p)
+	for i, files := range [][]core.CandidateFile{
+		{{Filename: `A\01.mp3`, Size: 10}},
+		{{Filename: `B\01.mp3`, Size: 10}},
+		{{Filename: `C\01.mp3`, Size: 10}},
+	} {
+		at := now.Add(time.Duration(i) * time.Hour)
+		if i > 0 {
+			seedNextImportingCandidate(t, st, jobID, fmt.Sprintf("peer%d", i), files, at)
+		}
+		if err := m.Tick(ctx, at); err != nil {
+			t.Fatalf("Tick %d: %v", i, err)
+		}
+		if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
+			t.Fatalf("cap must be off with MaxCandidates unset, tick %d got %v", i, got)
+		}
+	}
 }

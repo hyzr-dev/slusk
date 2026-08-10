@@ -380,3 +380,59 @@ func TestBulkRetryJobsClearsRejections(t *testing.T) {
 		t.Fatalf("bulk retry must clear the history, got %+v", got)
 	}
 }
+
+// TestCountRejectionsByReason: the cap Importing applies (issue #472) is only
+// as good as this count, so it is asserted directly - per reason, distinct in
+// the (username, release directory) key, and zero for a job that has none.
+func TestCountRejectionsByReason(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+
+	jobID, candID := helperActivateFiles(t, s, 940, "alice",
+		[]core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}, now)
+	if n, err := s.CountRejectionsByReason(ctx, jobID, string(core.ReasonIncompleteDownload)); err != nil || n != 0 {
+		t.Fatalf("count before any rejection = %d (%v), want 0", n, err)
+	}
+	if _, err := s.RejectCandidateAndAdvance(ctx, candID, jobID,
+		string(core.ReasonIncompleteDownload), core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	// A second peer, same reason: counted.
+	if err := s.InsertCandidates(ctx, jobID, []NewCandidate{
+		{Username: "bob", Score: 1.0, Files: []core.CandidateFile{{Filename: `music\Other Dir\01.flac`, Size: 1}}},
+	}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	bob, found, err := s.NextNewCandidate(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	if ok, _, err := s.ActivateCandidateWithTransfers(ctx, bob.ID, jobID, 100, now.Add(time.Hour), now); err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: %v ok=%v", err, ok)
+	}
+	// ActivateCandidateWithTransfers leaves the job DOWNLOADING, which is the
+	// state the rejection must advance out of - a bounced job guard rolls the
+	// rejection back with it.
+	if ok, err := s.RejectCandidateAndAdvance(ctx, bob.ID, jobID,
+		string(core.ReasonIncompleteDownload), core.StateDownloading, core.StateSelecting, now); err != nil || !ok {
+		t.Fatalf("RejectCandidateAndAdvance (bob): %v ok=%v", err, ok)
+	}
+
+	if n, err := s.CountRejectionsByReason(ctx, jobID, string(core.ReasonIncompleteDownload)); err != nil || n != 2 {
+		t.Errorf("count = %d (%v), want 2", n, err)
+	}
+	// A different reason shares neither count.
+	if n, err := s.CountRejectionsByReason(ctx, jobID, string(core.ReasonImportRejected)); err != nil || n != 0 {
+		t.Errorf("count for the other reason = %d (%v), want 0", n, err)
+	}
+	// Another job's history is its own.
+	// A different peer and filename: one live transfer per (peer, file) is a
+	// unique index, so reusing alice's would silently fail to activate.
+	otherJob, _ := helperActivateFiles(t, s, 941, "dave",
+		[]core.CandidateFile{{Filename: `music\Another Album\01.flac`, Size: 1}}, now)
+	if n, err := s.CountRejectionsByReason(ctx, otherJob, string(core.ReasonIncompleteDownload)); err != nil || n != 0 {
+		t.Errorf("other job's count = %d (%v), want 0", n, err)
+	}
+}

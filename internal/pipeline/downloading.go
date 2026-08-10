@@ -54,8 +54,10 @@ type DownloadingStore interface {
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
 	// ParkJobForCandidate atomically terminalizes an exhausted transfer and parks
 	// its DOWNLOADING job, so an operator can manually retry or delete it
-	// (issue #158). false means the job already left DOWNLOADING.
-	ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error)
+	// (issue #158). false means the job already left DOWNLOADING. The job id is
+	// returned because the caller has only a transfer to hand and needs it to
+	// record the job_parked event; it is 0 when no job owns the pair.
+	ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (int64, bool, error)
 
 	// --- Resolve phase (port of resolveDownloadingJob) ---
 	// RunnableJobsInState is used with StateDownloading to pick this tick's
@@ -390,7 +392,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				d.log().Warn("remote cancel still failing past grace, parking job",
 					"transfer", tr.ID, "candidate", tr.CandidateID, "user", tr.Username,
 					"remote_id", effectiveID, "overdue_by", now.Sub(tr.Deadline), "err", err)
-				parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
+				jobID, parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
 					core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 				if perr != nil {
 					return stats, fmt.Errorf("park job for uncancellable transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, effectiveID, perr)
@@ -399,6 +401,8 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				// transfer path: on a race the transfer write still commits.
 				if parked {
 					stats.Parked++
+					d.recordEvent(ctx, jobID, core.EventJobParked,
+						"the backend would not confirm cancelling this transfer, so automation stopped", now)
 				}
 				handled[tr.ID] = true
 				continue
@@ -446,7 +450,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// and park the owning job for manual action. The guarded job transition
 			// may bounce if another module already moved it, but the ERRORED transfer
 			// still commits; any database failure rolls both writes back.
-			ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+			jobID, ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 			if err != nil {
 				return stats, fmt.Errorf("park job for lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
 			}
@@ -456,6 +460,8 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// ERRORED above, but there is no newly parked job to report.
 			if ok {
 				stats.Parked++
+				d.recordEvent(ctx, jobID, core.EventJobParked,
+					"the download kept vanishing from the backend and ran out of retries, so automation stopped", now)
 			}
 			continue
 		}
