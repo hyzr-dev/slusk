@@ -181,11 +181,69 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 	if !strings.Contains(ev.Detail, "incomplete download") {
 		t.Errorf("event detail = %q, want it to mention 'incomplete download'", ev.Detail)
 	}
+	// The counts behind the verdict (issue #476). CompleteDir does not exist
+	// here, so dedup could not run and its count must be omitted rather than
+	// printed as a plausible zero.
+	for _, want := range []string{"1 downloaded", "1 offered by Lidarr", "0 unmatched by Lidarr"} {
+		if !strings.Contains(ev.Detail, want) {
+			t.Errorf("event detail = %q, want it to contain %q", ev.Detail, want)
+		}
+	}
+	if strings.Contains(ev.Detail, "duplicates") {
+		t.Errorf("event detail = %q, want no duplicate count when dedup never ran", ev.Detail)
+	}
 	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
 		t.Errorf("expected incomplete candidate's folder cleaned up, got %+v", peers.deletedFolders)
 	}
 	if len(music.executedItems) != 0 {
 		t.Errorf("ExecuteManualImport must not run on an incomplete candidate, got %+v", music.executedItems)
+	}
+}
+
+// TestImportingIncompleteCoverageReportsDedupCount covers the other half of
+// issue #476: when dedup did run, its count is part of the derivation, because
+// "slusk deleted the missing files itself" (issue #280) and "the peer never
+// sent them" produce the same coverage verdict and need opposite fixes.
+func TestImportingIncompleteCoverageReportsDedupCount(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	completeDir := t.TempDir()
+	folder := filepath.Join(completeDir, "A")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"01.mp3", "02.mp3"} {
+		if err := os.WriteFile(filepath.Join(folder, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: filepath.Join(folder, "01.mp3"), Importable: true, TrackIDs: []int64{101}},
+			{ID: 2, Path: filepath.Join(folder, "02.mp3")},
+		},
+		albumReleases: []core.AlbumRelease{{TrackCount: 2}},
+	}
+	p, st := newImportingParams(t, music, &fakeSearcher{})
+	p.CompleteDir = completeDir
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{
+		{Filename: `A\01.mp3`, Size: 10},
+		{Filename: `A\02.mp3`, Size: 10},
+	}, now)
+
+	if err := NewImporting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	ev := lastJobEvent(t, st, jobID)
+	if ev.Event != core.EventImportRejected {
+		t.Fatalf("last event = %v, want %v", ev.Event, core.EventImportRejected)
+	}
+	// Untagged files can't be identified as duplicates of anything, so dedup
+	// ran and removed nothing - a real zero, not an invented one.
+	for _, want := range []string{"2 downloaded", "0 removed as duplicates", "2 offered by Lidarr", "1 unmatched by Lidarr"} {
+		if !strings.Contains(ev.Detail, want) {
+			t.Errorf("event detail = %q, want it to contain %q", ev.Detail, want)
+		}
 	}
 }
 

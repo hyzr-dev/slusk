@@ -261,6 +261,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	for _, t := range transfers {
 		names = append(names, t.Filename)
 	}
+	deriv := importDerivation{downloaded: len(transfers)}
 
 	// job.LidarrAlbumID is already resolved by Tick (see resolveAlbumID), so
 	// it is non-zero here for every job, manual or not.
@@ -274,10 +275,13 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		// and gone) must not block verify; the scan below copes either way.
 		if removed, err := dedupAlbumFolder(m.log(), folder); err != nil {
 			m.log().Warn("dedup album folder failed", "album_job", job.ID, "folder", folder, "err", err)
-		} else if len(removed) > 0 {
-			detail := fmt.Sprintf("removed %d duplicate track file(s) before import", len(removed))
-			m.log().Info(detail, "album_job", job.ID, "folder", folder, "removed", removed)
-			m.recordEvent(ctx, job.ID, core.EventDedup, detail, now)
+		} else {
+			deriv.dedupRemoved, deriv.dedupRan = len(removed), true
+			if len(removed) > 0 {
+				detail := fmt.Sprintf("removed %d duplicate track file(s) before import", len(removed))
+				m.log().Info(detail, "album_job", job.ID, "folder", folder, "removed", removed)
+				m.recordEvent(ctx, job.ID, core.EventDedup, detail, now)
+			}
 		}
 	}
 	items, err := m.p.Music.ManualImportCandidates(ctx, folder)
@@ -323,6 +327,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// track ID at all are genuinely unmatched.
 	var importable []core.ImportItem
 	var rejections []string
+	deriv.offered = len(items)
 	for _, it := range items {
 		if len(it.TrackIDs) > 0 {
 			importable = append(importable, it)
@@ -330,6 +335,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 			rejections = append(rejections, it.Rejections...)
 		}
 	}
+	deriv.unmatched = len(items) - len(importable)
 	if len(importable) == 0 {
 		// Nothing matched at all. This usually means the candidate's files are
 		// bad, but Lidarr also rejects every file with no TrackIDs when the
@@ -404,9 +410,10 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		// rather than partially imported, to keep the library free of half
 		// albums. Other candidates usually remain, so use the no-cooldown
 		// fail path.
-		incompleteDetail := fmt.Sprintf("incomplete download, rejecting (folder %s, covered %d/%d)", folder, coverage(importable), minRequired)
-		m.log().Info(incompleteDetail, "album_job", job.ID, "folder", folder,
-			"covered", coverage(importable), "required", minRequired)
+		incompleteDetail := fmt.Sprintf("incomplete download, rejecting (folder %s, covered %d/%d; %s)",
+			folder, coverage(importable), minRequired, deriv)
+		m.log().Info(incompleteDetail, append([]any{"album_job", job.ID, "folder", folder,
+			"covered", coverage(importable), "required", minRequired}, deriv.logAttrs()...)...)
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, incompleteDetail, now)
 		return m.failCandidate(ctx, job, cand, "incomplete download", true, now)
 	}
@@ -527,6 +534,47 @@ func (m *Importing) albumAlreadyComplete(ctx context.Context, job core.AlbumJob)
 		return false, err
 	}
 	return total > 0 && present >= total, nil
+}
+
+// importDerivation carries the counts a coverage-gate rejection was derived
+// from. The verdict alone ("covered 7/18") is produced by causes that need
+// opposite fixes - the peer sent fewer files than the release needs, Lidarr
+// filtered some out, Lidarr matched none of them to a track, or slusk's own
+// dedup deleted them before the scan (issue #280) - and diagnosing that took
+// several rounds precisely because the line could not tell them apart (#476).
+//
+// dedupRan is what keeps this honest: dedup is skipped for a download that
+// landed in the root folder and errors on a folder that is already gone, and
+// an unknown count must be omitted rather than printed as a plausible zero.
+type importDerivation struct {
+	downloaded   int  // transfers recorded for the candidate
+	dedupRemoved int  // duplicate files slusk deleted before Lidarr scanned
+	dedupRan     bool // false when dedup was skipped or failed
+	offered      int  // files Lidarr returned from its scan of the folder
+	unmatched    int  // of those, files Lidarr matched to no track at all
+}
+
+// String renders the counts as one human-readable clause, omitting the dedup
+// count when it is unknown.
+func (d importDerivation) String() string {
+	parts := []string{fmt.Sprintf("%d downloaded", d.downloaded)}
+	if d.dedupRan {
+		parts = append(parts, fmt.Sprintf("%d removed as duplicates", d.dedupRemoved))
+	}
+	return strings.Join(append(parts,
+		fmt.Sprintf("%d offered by Lidarr", d.offered),
+		fmt.Sprintf("%d unmatched by Lidarr", d.unmatched),
+	), ", ")
+}
+
+// logAttrs returns the same counts as slog key/value pairs, dropping the dedup
+// count when it is unknown for the same reason String does.
+func (d importDerivation) logAttrs() []any {
+	attrs := []any{"downloaded", d.downloaded}
+	if d.dedupRan {
+		attrs = append(attrs, "deduped", d.dedupRemoved)
+	}
+	return append(attrs, "offered", d.offered, "unmatched", d.unmatched)
 }
 
 // coverage counts the distinct Lidarr track IDs covered by importable, used to
