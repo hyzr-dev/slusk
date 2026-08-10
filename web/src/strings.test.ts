@@ -83,20 +83,26 @@ describe('parkedExplanation', () => {
   // another ('no candidate could satisfy this album'), and a blocklist of the
   // first reports success on the second. Causal verbs are the thing being
   // banned, so ban the grammar.
+  //
+  // This ban applies only to parkedLead, the static fallback shown when the
+  // job carries no parkDetail (issue #484). parkedReason interpolates the
+  // backend's own job_parked event text — which is free to name any of the
+  // three causes, because it is reporting the one that actually happened for
+  // *this* job, not guessing at one of three — so it is deliberately exempt.
   const causalClaim = /because|repeated|exhaust|disappear|no candidate|offline|unavailable|could not (be )?(find|found)/i;
 
-  it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('states no cause for a %s job, because the backend has three', (_source, copy) => {
-    expect(copy).not.toMatch(causalClaim);
+  it('states no cause in the static fallback lead, because the backend has three', () => {
+    expect(t.jobs.parkedLead).not.toMatch(causalClaim);
   });
 
-  it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('points a %s job at the events, which do know the cause', (_source, copy) => {
-    expect(copy).toMatch(/events/i);
+  it('points at the job\'s own events, which do know the cause', () => {
+    expect(t.jobs.parkedLead).toMatch(/events/i);
+  });
+
+  it('renders a backend-supplied reason as a labelled, punctuated sentence', () => {
+    expect(t.jobs.parkedReason('no candidate could satisfy this album: 5 rejected')).toBe(
+      'Parked — no candidate could satisfy this album: 5 rejected.',
+    );
   });
 
   // Issue #487. The pointer above is right; naming *where* it points was not.
@@ -115,11 +121,11 @@ describe('parkedExplanation', () => {
   // guard has to live on the string.
   const positionalLocator = /\b(below|above|beneath|underneath|further down|down the page)\b/i;
 
-  it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('does not tell a %s job where the events are, having two hosts', (_source, copy) => {
-    expect(copy).not.toMatch(positionalLocator);
+  // #484 split the two blobs into lead + actions, so the pointer this guards
+  // now lives in exactly one string. Asserted on the lead alone rather than
+  // dropped: it is the only string that still names the events.
+  it('does not tell the reader where the events are, having two hosts', () => {
+    expect(t.jobs.parkedLead).not.toMatch(positionalLocator);
   });
 
   // The two buttons carry different budgets and nothing else on screen shows
@@ -127,14 +133,14 @@ describe('parkedExplanation', () => {
   // renamed 'Force search' to 'Re-run pipeline', and copy naming a button
   // that is not on screen misdirects rather than helps.
   it('names the Lidarr buttons exactly as they are rendered', () => {
-    expect(t.jobs.parkedExplanation).toContain(t.jobs.retry);
-    expect(t.jobs.parkedExplanation).toContain(t.jobs.forceSearch);
+    expect(t.jobs.parkedActions).toContain(t.jobs.retry);
+    expect(t.jobs.parkedActions).toContain(t.jobs.forceSearch);
   });
 
   // JobActions gates 'Re-run pipeline' on source !== 'manual', so naming it
   // in the manual copy sends the user hunting for a button that is not there.
   it('does not offer a manual job the button it cannot have', () => {
-    expect(t.jobs.parkedExplanationManual).not.toContain(t.jobs.forceSearch);
-    expect(t.jobs.parkedExplanationManual).toContain(t.jobs.retry);
+    expect(t.jobs.parkedActionsManual).not.toContain(t.jobs.forceSearch);
+    expect(t.jobs.parkedActionsManual).toContain(t.jobs.retry);
   });
 });

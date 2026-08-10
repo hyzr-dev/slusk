@@ -170,6 +170,11 @@ export interface Job {
   // is populated only by GET /api/jobs, never by the live stream — so it's
   // optional and absent on stream-sourced jobs.
   failDetail?: string;
+  // The job's own job_parked event detail (issue #484) — a single
+  // human-readable sentence naming why *this* job parked, distinct from
+  // failDetail above. Absent for every job parked before this event existed,
+  // which is normal, not an error.
+  parkDetail?: string;
   nextAttemptAt: string;
   retries: number;
   notBefore: string;

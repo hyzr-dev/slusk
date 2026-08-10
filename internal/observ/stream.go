@@ -62,6 +62,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"maps"
@@ -76,6 +77,11 @@ import (
 
 	"github.com/hyzr-dev/slusk/internal/core"
 )
+
+// errNoFunc is callFailureDetails/callParkReasons' internal sentinel for "no
+// func wired" — see their doc comments for why that must degrade exactly
+// like a failed call rather than like a successful-but-empty lookup.
+var errNoFunc = errors.New("observ: no lookup func configured")
 
 // streamInterval is how often the shared broadcaster ticks and considers
 // pushing a fresh live snapshot. It deliberately mirrors
@@ -271,6 +277,18 @@ func toSearchPayload(delta core.SearchDelta) searchPayload {
 		Truncated: delta.Truncated,
 		Error:     delta.Err,
 	}
+}
+
+// jobReasons is the pair of human-readable explanation strings a scoped
+// job-detail frame overlays onto its embedded jobDTO (issue #484): fail is
+// jobDTO.FailDetail's stream counterpart (store.LatestFailureDetails), park
+// is jobDTO.ParkDetail's (store.LatestParkReasons). Either field is "" when
+// its lookup found no matching job_events row — absent, not fabricated, same
+// as the REST side (see enrichFailAndParkDetails and
+// interface-must-not-invent-data).
+type jobReasons struct {
+	fail string
+	park string
 }
 
 // jobCorrelation is the minimal per-job data the stream hub needs to notice
@@ -531,11 +549,24 @@ func buildJobsDelta(sub *streamSubscriber, viewByJob map[int64]core.JobView, idx
 // jobDTO header needs both) hasn't been cached for it yet, which omits the
 // field rather than sending an incomplete object the frontend would mistake
 // for "this job has no attempts".
-func buildStreamDetail(view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) *jobDetailDTO {
+//
+// reasons overlays FailDetail/ParkDetail onto the returned DTO's embedded
+// Job AFTER toJobDetailDTO builds it (issue #484): the frontend's
+// pickJobDetail (web/src/api/queries.ts) REPLACES REST's jobDetailDTO with
+// this frame outright rather than merging the two field by field (issue
+// #258), so this frame must describe the job identically to GET
+// /api/jobs/{id}/detail, including the reason fields, or a subscriber that
+// already saw the richer REST body would see it regress the moment a stream
+// frame lands. reasons' zero value (both fields "") is indistinguishable
+// from "no reason cached yet" and from "genuinely no matching event" —
+// exactly the same absent-not-fabricated contract jobReasons documents.
+func buildStreamDetail(view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, reasons jobReasons, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) *jobDetailDTO {
 	if !hasDetail || !hasView {
 		return nil
 	}
 	dto := toJobDetailDTO(view, detail, idx, persisted, failedRetryAfter, maxCandidates, now)
+	dto.Job.FailDetail = reasons.fail
+	dto.Job.ParkDetail = reasons.park
 	return &dto
 }
 
@@ -595,13 +626,13 @@ func sumDownSpeed(live []core.RemoteTransfer) int64 {
 // down/up/detail it is delta-encoded per subscriber rather than a shared
 // snapshot (see buildJobsDelta). Pure and I/O-free by construction, so it is
 // table-testable without a server.
-func buildLiveSnapshot(live []core.RemoteTransfer, jobID int64, throughput core.ThroughputSeries, view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) livePayload {
+func buildLiveSnapshot(live []core.RemoteTransfer, jobID int64, throughput core.ThroughputSeries, view core.JobView, hasView bool, detail core.JobDetail, hasDetail bool, reasons jobReasons, idx liveTransferIndex, persisted map[int64]map[string]int64, failedRetryAfter time.Duration, maxCandidates int, now time.Time) livePayload {
 	payload := livePayload{
 		Down: downSpeed(throughput.Download, live),
 		Up:   upSpeed(throughput.Upload),
 	}
 	if jobID > 0 {
-		payload.Detail = buildStreamDetail(view, hasView, detail, hasDetail, idx, persisted, failedRetryAfter, maxCandidates, now)
+		payload.Detail = buildStreamDetail(view, hasView, detail, hasDetail, reasons, idx, persisted, failedRetryAfter, maxCandidates, now)
 	}
 	return payload
 }
@@ -771,11 +802,19 @@ type streamSubscriber struct {
 // goroutine also owns the job<->candidate correlation cache (see
 // refreshCorrelation), refreshed on its own slower timer.
 type streamHub struct {
-	jobs                JobsFunc
-	liveTransfers       LiveTransfersFunc
-	throughput          ThroughputFunc
-	transferBytes       TransferBytesFunc
-	jobDetail           JobDetailFunc
+	jobs          JobsFunc
+	liveTransfers LiveTransfersFunc
+	throughput    ThroughputFunc
+	transferBytes TransferBytesFunc
+	jobDetail     JobDetailFunc
+	// failureDetails/parkReasons back the scoped detail frame's FailDetail/
+	// ParkDetail overlay (issue #484) — the stream's counterpart to
+	// ServerDeps.FailureDetails/ParkReasons on the REST paths. Either may be
+	// nil (every ServerDeps that predates #484 leaves them so), in which case
+	// reasonByJob simply never gains entries and buildStreamDetail's overlay
+	// is a no-op — see fetchReasons.
+	failureDetails      FailureDetailsFunc
+	parkReasons         ParkReasonsFunc
 	searchDelta         SearchDeltaFunc
 	failedRetryAfter    time.Duration
 	maxCandidates       int
@@ -793,6 +832,17 @@ type streamHub struct {
 	// Treat the stored value as read-only; tick merges live data into a
 	// freshly built DTO rather than mutating it.
 	detailByJob map[int64]core.JobDetail
+	// reasonByJob caches the FailDetail/ParkDetail overlay (issue #484) for
+	// each currently-scoped ?job=<id> subscriber, refreshed on
+	// correlationInterval in the same corrMu.Lock() block as detailByJob and
+	// the other caches above — NOT on the 1Hz tick, so a subscriber's
+	// FailDetail/ParkDetail is only as fresh as the last correlation refresh,
+	// same staleness bound as detailByJob itself. Keyed by job id and holding
+	// only ids someone's ?job= scope is watching right now (the scoped-detail
+	// id set is tiny — one per open job-detail view — so this is nowhere near
+	// the query-per-tick cost a per-job lookup on every tick would be). Treat
+	// the stored value as read-only, like its neighbors.
+	reasonByJob map[int64]jobReasons
 	// viewByJob caches each job's full core.JobView — unlike jobCorrelation's
 	// deliberately minimal projection, this holds everything toJobDTO/
 	// toJobDetailDTO's embedded header need (issue #258): title, artist,
@@ -866,13 +916,15 @@ type streamHub struct {
 	cancel context.CancelFunc
 }
 
-func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, searchDelta SearchDeltaFunc, uploadHistoryMark UploadHistoryMarkFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
+func newStreamHub(jobs JobsFunc, liveTransfers LiveTransfersFunc, throughput ThroughputFunc, transferBytes TransferBytesFunc, jobDetail JobDetailFunc, failureDetails FailureDetailsFunc, parkReasons ParkReasonsFunc, searchDelta SearchDeltaFunc, uploadHistoryMark UploadHistoryMarkFunc, failedRetryAfter time.Duration, maxCandidates int, tickInterval, correlationInterval, invalidateInterval time.Duration) *streamHub {
 	return &streamHub{
 		jobs:                jobs,
 		liveTransfers:       liveTransfers,
 		throughput:          throughput,
 		transferBytes:       transferBytes,
 		jobDetail:           jobDetail,
+		failureDetails:      failureDetails,
+		parkReasons:         parkReasons,
 		searchDelta:         searchDelta,
 		uploadHistoryMark:   uploadHistoryMark,
 		failedRetryAfter:    failedRetryAfter,
@@ -998,6 +1050,90 @@ func (h *streamHub) fetchDetails(ctx context.Context, ids []int64, previous map[
 	return out
 }
 
+// fetchReasons loads the FailDetail/ParkDetail overlay (issue #484) for each
+// scoped ?job=<id> id, partitioned by that job's current Status the same way
+// enrichFailAndParkDetails does on the REST paths: a "failed" id's reason
+// comes from failureDetails, a "parked" id's from parkReasons, and any other
+// status gets neither — a job that is not currently failed or parked has no
+// explanatory event of either kind to show, exactly as a fresh REST response
+// for it would carry both fields at their zero value. views is this
+// refresh's own already-fetched viewByJob-shaped map, keyed the same way, so
+// no extra query is needed to learn each id's status.
+//
+// Same degrade-per-id contract as fetchDetails (issue #258 review finding
+// C1), scoped to the ids actually eligible for each lookup: a nil func, or a
+// call that errors, RETAINS previous's entry for the ids that lookup would
+// have covered rather than dropping them — a transient failure must not make
+// a FailDetail/ParkDetail that was fine a moment ago vanish from a
+// subscriber's next frame. Every other id (not failed/parked, or failed/
+// parked but with a successful lookup that found no row) gets its zero
+// value, which is what keeps this in parity with REST: a job that moved out
+// of "failed"/"parked" between two refreshes must stop reporting its old
+// reason, the same way a fresh call to enrichFailAndParkDetails for it would.
+func (h *streamHub) fetchReasons(ctx context.Context, ids []int64, views map[int64]core.JobView, previous map[int64]jobReasons) map[int64]jobReasons {
+	if len(ids) == 0 {
+		return nil
+	}
+	var failedIDs, parkedIDs []int64
+	for _, id := range ids {
+		view, ok := views[id]
+		if !ok {
+			continue
+		}
+		switch view.Status {
+		case "failed":
+			failedIDs = append(failedIDs, id)
+		case "parked":
+			parkedIDs = append(parkedIDs, id)
+		}
+	}
+
+	out := make(map[int64]jobReasons, len(ids))
+
+	if len(failedIDs) > 0 {
+		details, err := h.callFailureDetails(ctx, failedIDs)
+		for _, id := range failedIDs {
+			if err != nil {
+				out[id] = jobReasons{fail: previous[id].fail}
+				continue
+			}
+			out[id] = jobReasons{fail: details[id]}
+		}
+	}
+	if len(parkedIDs) > 0 {
+		reasons, err := h.callParkReasons(ctx, parkedIDs)
+		for _, id := range parkedIDs {
+			if err != nil {
+				out[id] = jobReasons{park: previous[id].park}
+				continue
+			}
+			out[id] = jobReasons{park: reasons[id]}
+		}
+	}
+	return out
+}
+
+// callFailureDetails calls failureDetails best-effort: a nil func is treated
+// as a failed call (err != nil) so fetchReasons' single retain-previous
+// branch covers both "no func wired" and "func wired but erroring" — every
+// ServerDeps that predates #484 leaves FailureDetails nil, and that must
+// degrade exactly like a transient lookup failure, not like a lookup that
+// definitively found nothing.
+func (h *streamHub) callFailureDetails(ctx context.Context, ids []int64) (map[int64]string, error) {
+	if h.failureDetails == nil {
+		return nil, errNoFunc
+	}
+	return h.failureDetails(ctx, ids)
+}
+
+// callParkReasons is callFailureDetails' sibling for parkReasons.
+func (h *streamHub) callParkReasons(ctx context.Context, ids []int64) (map[int64]string, error) {
+	if h.parkReasons == nil {
+		return nil, errNoFunc
+	}
+	return h.parkReasons(ctx, ids)
+}
+
 // refreshCorrelation re-derives the hub's persisted-data caches from h.jobs
 // (deps.Jobs) — the only place GET /api/stream ever queries Postgres, and
 // only on correlationInterval (or the event-driven trigger in tick), never on
@@ -1061,6 +1197,7 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	// silently losing it (finding C1).
 	previousBytes := h.bytesSnapshot()
 	previousDetails := h.detailsSnapshot()
+	previousReasons := h.reasonsSnapshot()
 	previousMark := h.markSnapshot()
 	details := h.fetchDetails(ctx, detailIDs, previousDetails)
 	idx := newLiveTransferIndex(live)
@@ -1103,6 +1240,15 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 		}
 	}
 
+	// Only detailIDs, never jobArrayIDs (issue #484): a scoped ?job=<id>
+	// detail view is the only frame this overlay applies to — job-list
+	// frames stay excluded from FailDetail/ParkDetail on purpose (see this
+	// file's package comment) — so fetching reasons for the whole ?jobs=
+	// scope too would be pure waste. viewByJob, not the raw views slice, so
+	// each id's Status comes from exactly the same row buildStreamDetail's
+	// jobDTO header will be built from.
+	reasons := h.fetchReasons(ctx, detailIDs, viewByJob, previousReasons)
+
 	// Computed here, AFTER the h.jobs error early return above, and applied
 	// inside the same corrMu.Lock() block as every other cache below (issue
 	// #275): a failed h.jobs call already leaves this function's other
@@ -1119,6 +1265,7 @@ func (h *streamHub) refreshCorrelation(ctx context.Context, live []core.RemoteTr
 	h.correlation = corr
 	h.bytesByCandidate = bytesByCandidate
 	h.detailByJob = details
+	h.reasonByJob = reasons
 	h.viewByJob = viewByJob
 	h.matchedFiles = liveMatchedFileSet(corr, idx)
 	// Each half is compared, and bumped, INDEPENDENTLY of the other (issue
@@ -1180,6 +1327,30 @@ func (h *streamHub) detailSnapshot(jobID int64) (core.JobDetail, bool) {
 	defer h.corrMu.RUnlock()
 	d, ok := h.detailByJob[jobID]
 	return d, ok
+}
+
+// reasonsSnapshot returns the whole cached reasonByJob map, mirroring
+// detailsSnapshot: taken once per tick under corrMu so tick's per-subscriber
+// loop below reads a consistent snapshot rather than re-locking per
+// subscriber, and safe to return without copying since refreshCorrelation
+// replaces the map wholesale rather than mutating it in place.
+func (h *streamHub) reasonsSnapshot() map[int64]jobReasons {
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.reasonByJob
+}
+
+// reasonSnapshot is detailSnapshot's sibling for one scoped subscriber's
+// cached jobReasons. The zero value (both fields "") is returned for an
+// unscoped subscriber or one whose reasons haven't been fetched yet — same
+// "absent, not fabricated" contract as everywhere else jobReasons appears.
+func (h *streamHub) reasonSnapshot(jobID int64) jobReasons {
+	if jobID <= 0 {
+		return jobReasons{}
+	}
+	h.corrMu.RLock()
+	defer h.corrMu.RUnlock()
+	return h.reasonByJob[jobID]
 }
 
 func (h *streamHub) correlationSnapshot() []jobCorrelation {
@@ -1287,6 +1458,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 	views := h.viewsSnapshot()
 	persisted := h.bytesSnapshot()
 	detail, hasDetail := h.detailSnapshot(jobID)
+	reasons := h.reasonSnapshot(jobID)
 	view, hasView := views[jobID]
 
 	// This runs outside tick() (a subscriber's first frame, on connect), so
@@ -1331,7 +1503,7 @@ func (h *streamHub) subscribe(ctx context.Context, jobID int64, jobIDs map[int64
 	}
 	jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 
-	initial = buildLiveSnapshot(live, jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
+	initial = buildLiveSnapshot(live, jobID, throughput, view, hasView, detail, hasDetail, reasons, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 	initial.Jobs = jobsDelta
 
 	if wantThroughput {
@@ -1465,6 +1637,7 @@ func (h *streamHub) tick(ctx context.Context) {
 	// Snapshotted before h.mu is taken: detailsSnapshot needs corrMu, and
 	// tick must never acquire corrMu while holding h.mu (see scopedJobIDs).
 	details := h.detailsSnapshot()
+	reasons := h.reasonsSnapshot()
 	// Snapshotted alongside the others, under the same corrMu-before-h.mu
 	// ordering (issue #275), as two independent values (issue #371 — see
 	// jobsGeneration/uploadsGeneration's doc comment on streamHub).
@@ -1488,7 +1661,7 @@ func (h *streamHub) tick(ctx context.Context) {
 	for _, sub := range h.subs {
 		detail, hasDetail := details[sub.jobID]
 		view, hasView := views[sub.jobID]
-		next := buildLiveSnapshot(live, sub.jobID, throughput, view, hasView, detail, hasDetail, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
+		next := buildLiveSnapshot(live, sub.jobID, throughput, view, hasView, detail, hasDetail, reasons[sub.jobID], liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 		jobsDelta := buildJobsDelta(sub, views, liveIdx, persisted, h.failedRetryAfter, h.maxCandidates, now)
 		if changedSinceLast(sub.last, next, len(jobsDelta)) {
 			payload := next
@@ -1899,7 +2072,7 @@ func parseStreamJobIDs(raw string) (map[int64]struct{}, error) {
 // tests can use short durations instead of the real cadences; NewServer's
 // call site passes the real constants.
 func registerStream(mux *http.ServeMux, deps ServerDeps, tickInterval, correlationInterval, heartbeatInterval, invalidateInterval time.Duration) {
-	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.SearchDelta, deps.UploadHistoryMark, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
+	hub := newStreamHub(deps.Jobs, deps.LiveTransfers, deps.Throughput, deps.TransferBytes, deps.JobDetail, deps.FailureDetails, deps.ParkReasons, deps.SearchDelta, deps.UploadHistoryMark, deps.FailedRetryAfter, deps.MaxCandidates, tickInterval, correlationInterval, invalidateInterval)
 	mux.HandleFunc("GET /api/stream", func(w http.ResponseWriter, r *http.Request) {
 		var jobID int64
 		if raw := r.URL.Query().Get("job"); raw != "" {

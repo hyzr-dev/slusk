@@ -294,6 +294,29 @@ export const t = {
     // cause, and a wrong one for both transfer paths, which never looked at a
     // candidate's content. Only the job's own events know which it was.
     //
+    // Static fallback lead sentence, used only when the job carries no
+    // parkDetail (issue #484) — i.e. it parked before the job_parked event
+    // existed. Points at the job's own events rather than naming a cause,
+    // for the same reason as before: three backend paths lead to PARKED and
+    // naming any one of them here would be a fabricated diagnosis for the
+    // other two.
+    //
+    // The pointer names no location, and must not (issue #487, inherited here
+    // when #484 split the copy). ParkedExplanation renders on two surfaces and
+    // only JobDetail has an EVENTS section under it; JobExpansion renders a
+    // meta tree and a file list, so 'the events below' sent a jobs-list reader
+    // looking at filenames for a reason that was never going to be there. The
+    // events are still where the cause lives on both surfaces — one below, one
+    // a navigation away — so the pointer stays and only the locator goes.
+    parkedLead:
+      'Automation stopped here and is waiting for you; the events on this job say what parked it.',
+    // Replaces parkedLead when the job carries a parkDetail (issue #484):
+    // the backend's own job_parked event text, a lowercase mid-sentence
+    // fragment (e.g. 'no candidate could satisfy this album: ...'). The
+    // 'Parked — ' label exists because that fragment read bare would look
+    // like a rendering bug, not a sentence; the trailing period closes the
+    // backend's unpunctuated text.
+    parkedReason: (detail: string) => `Parked — ${detail}.`,
     // The button sentence exists because the two carry different budgets and
     // nothing else shows it: Retry clears the job's rejection history,
     // Re-run pipeline deliberately keeps it (#317), so re-running the
@@ -301,23 +324,15 @@ export const t = {
     // Name the button by its rendered label — #376 renamed this control from
     // 'Force search', and copy pointing at a button that is not on screen is
     // worse than copy that names none.
-    //
-    // The pointer to the events names no location, and must not (issue #487).
-    // ParkedExplanation renders on two surfaces and only JobDetail has an
-    // EVENTS section under it; JobExpansion renders a meta tree and a file
-    // list, so 'the events below' sent a jobs-list reader looking at filenames
-    // for a reason that was never going to be there. The events are still
-    // where the cause lives on both surfaces - one below, one a navigation
-    // away - so the pointer stays and only the locator goes.
-    parkedExplanation:
-      'Automation stopped here and is waiting for you; the events on this job say what parked it. Retry starts over — it forgets which peers already failed, so it may try them again. Re-run pipeline keeps that record and searches only for peers it has not tried.',
+    parkedActions:
+      'Retry starts over — it forgets which peers already failed, so it may try them again. Re-run pipeline keeps that record and searches only for peers it has not tried.',
     // A manual job (issue #59) reaches PARKED only through the transfer path,
     // and neither half of the Lidarr copy is true for it: JobActions does not
     // offer it 'Re-run pipeline' at all, and its Retry is RetryManualJob,
     // which keeps the one candidate and re-downloads from the same peer
     // rather than starting a fresh search.
-    parkedExplanationManual:
-      'Automation stopped here and is waiting for you; the events on this job say what parked it. Retry downloads from the same peer again — a manual job has no other candidate to fall back on.',
+    parkedActionsManual:
+      'Retry downloads from the same peer again — a manual job has no other candidate to fall back on.',
     // 'Force search' used to double as both "re-run the automated pipeline"
     // and (implicitly) "search manually" — issue #376 split those into two
     // distinct actions, so this one is named for what it actually does:
