@@ -264,6 +264,13 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]c
 			// An absent or unrecognised type reads as permanent, matching
 			// Lidarr's own constructor default. Only the explicit "Temporary"
 			// buys a retry.
+			//
+			// EqualFold, not ==, and that is load-bearing: Lidarr serialises
+			// the enum in lower case. A lab probe against
+			// /api/v1/manualimport returned {"reason": "Couldn't find similar
+			// album for [...]", "type": "permanent"}, so a case-sensitive
+			// comparison against "Temporary" would read every genuinely
+			// temporary rejection as permanent and end the job for good.
 			reasons = append(reasons, core.ImportRejection{
 				Reason:    r.Reason,
 				Permanent: !strings.EqualFold(r.Type, "Temporary"),
