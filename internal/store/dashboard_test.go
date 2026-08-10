@@ -1104,7 +1104,7 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 		t.Fatalf("TransfersForCandidate = %d (%v)", len(transfers), err)
 	}
 
-	parked, err := s.ParkJobForCandidate(ctx, transfers[0].ID, cand.ID, core.TransferErrored, 5, 10, now.Add(time.Minute))
+	_, parked, err := s.ParkJobForCandidate(ctx, transfers[0].ID, cand.ID, core.TransferErrored, 5, 10, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ParkJobForCandidate: %v", err)
 	}

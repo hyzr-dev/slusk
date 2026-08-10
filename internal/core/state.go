@@ -21,11 +21,15 @@ const (
 	StateWanted AlbumJobState = "WANTED"
 	// StateDone replaces COMPLETED in the pipeline rewrite.
 	StateDone AlbumJobState = "DONE"
-	// StateParked is an operator-visible holding state for a DOWNLOADING job
-	// whose active transfer exhausted its retry budget after repeatedly
-	// vanishing from the backend. PARKED is neither runnable nor terminal; a
-	// manual retry or force-search returns it to WANTED, deletion removes it,
-	// and WantedSync cancels it when the album stops being wanted.
+	// StateParked is an operator-visible holding state for a job set aside
+	// because no candidate could satisfy it - distinct from failed: parked
+	// jobs await a person's decision, failed jobs await a retry. Two paths
+	// reach it today: a DOWNLOADING job whose active transfer exhausted its
+	// retry budget after repeatedly vanishing from the backend, and an
+	// IMPORTING job that has had N candidates rejected for the same content
+	// fault (issue #472). PARKED is neither runnable nor terminal; a manual
+	// retry or force-search returns it to WANTED, deletion removes it, and
+	// WantedSync cancels it when the album stops being wanted.
 	StateParked AlbumJobState = "PARKED"
 	// StateOrphaned is the deprecated spelling of StateParked retained for
 	// reading databases and accepting operations from before migration 0008.
@@ -134,6 +138,11 @@ const (
 	// is not in Lidarr's library. Deliberately distinct from
 	// EventAttemptFailed/EventJobFailed: this is not a failure.
 	EventNotImported JobEventType = "not_imported"
+	// EventJobParked records a job entering StateParked, whichever path took
+	// it there (issue #472). Parking is the most operator-relevant transition
+	// in the system - it is where automation stops and waits for a person -
+	// and until this event existed the timeline was silent about it.
+	EventJobParked JobEventType = "job_parked"
 	// EventImportRefused records a job reaching StateImportRefused: Lidarr
 	// permanently refused the files and they were moved to the
 	// _import_rejected quarantine (issue #470). Distinct from
@@ -142,6 +151,33 @@ const (
 	// read alike and mean opposite things, which is why the state is spelled
 	// REFUSED. The detail carries Lidarr's reason and where the files went.
 	EventImportRefused JobEventType = "import_refused"
+)
+
+// RejectionReason is the machine-readable key a candidate rejection is counted
+// under in candidate_rejections.reason. Its values are the exact strings the
+// pipeline has always written there, so the counts already in the database
+// keep their meaning and no migration is needed.
+//
+// Not an exhaustive enumeration of that column. It names only the reasons
+// something counts, which today is the two content faults the repeated-
+// rejection cap acts on (issue #472). Importing's confirm-timeout path writes
+// "import not confirmed" to the same column as a bare literal and deliberately
+// has no constant here - it was held back from the cap's scope, and giving it
+// one would imply it is in. Anything that treats this type as the full set of
+// recorded reasons is wrong about the data.
+//
+// This is deliberately not job_events.detail: that string is written for
+// humans and embeds a folder path and per-candidate numbers, so re-wording it
+// would silently disable anything keyed on it.
+type RejectionReason string
+
+const (
+	// ReasonImportRejected is Lidarr refusing every file in the candidate's
+	// folder.
+	ReasonImportRejected RejectionReason = "import rejected"
+	// ReasonIncompleteDownload is the coverage gate: the candidate's files
+	// cannot complete even the smallest valid edition of the album.
+	ReasonIncompleteDownload RejectionReason = "incomplete download"
 )
 
 // CandidateState is the lifecycle of one cached candidate (see core.Candidate).

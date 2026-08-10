@@ -199,9 +199,9 @@ func (s *failOnceDownloadingStore) UpdateTransferProgress(ctx context.Context, t
 	return s.DownloadingStore.UpdateTransferProgress(ctx, transferID, state, bytesDone, bytesTotal, now)
 }
 
-func (s *failOnceDownloadingStore) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+func (s *failOnceDownloadingStore) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) (int64, bool, error) {
 	if err := s.fail("park"); err != nil {
-		return false, err
+		return 0, false, err
 	}
 	return s.DownloadingStore.ParkJobForCandidate(ctx, transferID, candidateID, state, bytesDone, bytesTotal, now)
 }

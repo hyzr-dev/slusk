@@ -298,6 +298,7 @@ func main() {
 		Logger:               logger,
 		CompleteDir:          cfg.Paths.SlskdCompleteDir,
 		MaxActive:            cfg.Pipeline.MaxActive,
+		MaxCandidates:        cfg.Pipeline.MaxCandidatesPerAlbum,
 		StuckAfter:           cfg.Pipeline.StuckAfter.Duration,
 		ImportConfirmTimeout: cfg.Pipeline.ImportConfirmTimeout.Duration,
 		Interval:             cfg.Pipeline.ImportingInterval.Duration,

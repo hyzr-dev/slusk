@@ -450,10 +450,15 @@ func (s *Store) RetryRefusedJob(ctx context.Context, jobID int64, now time.Time)
 // is still DOWNLOADING. If another transition (for example WantedSync
 // cancellation) already moved the job, the transfer write still commits and
 // false is returned. A stale transfer that already became terminal is a no-op.
-func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+//
+// The owning job's id is returned alongside, because the caller reaches this
+// with a transfer in hand and no other way to name the job it just parked in
+// the audit trail (issue #472). It is 0 when no job owns the (candidate,
+// transfer) pair.
+func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (int64, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: begin: %w", err)
+		return 0, false, fmt.Errorf("park job for candidate: begin: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -469,10 +474,10 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 		 WHERE c.id = $1 AND t.id = $2
 		 FOR UPDATE OF j`, candidateID, transferID).Scan(&jobID, &jobState)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: lock job: %w", err)
+		return 0, false, fmt.Errorf("park job for candidate: lock job: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,
@@ -485,14 +490,14 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 		string(core.TransferPending), string(core.TransferQueued),
 		string(core.TransferInProgress), string(core.TransferStalled))
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: update transfer: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: update transfer: %w", err)
 	}
 	transferRows, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
 	}
 	if transferRows == 0 {
-		return false, nil
+		return jobID, false, nil
 	}
 
 	var jobRows int64
@@ -502,17 +507,17 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 			 WHERE id = $3 AND state = $4`,
 			string(core.StateParked), now, jobID, string(core.StateDownloading))
 		if err != nil {
-			return false, fmt.Errorf("park job for candidate: update job: %w", err)
+			return jobID, false, fmt.Errorf("park job for candidate: update job: %w", err)
 		}
 		jobRows, err = res.RowsAffected()
 		if err != nil {
-			return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
+			return jobID, false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("park job for candidate: commit: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: commit: %w", err)
 	}
-	return jobRows > 0, nil
+	return jobID, jobRows > 0, nil
 }
 
 // AdvanceJobStateFrom is the conditional transition every module uses:

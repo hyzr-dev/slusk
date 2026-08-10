@@ -850,6 +850,7 @@ var failureExplainingEvents = []string{
 	string(core.EventAttemptFailed),
 	string(core.EventCandidateRejected),
 	string(core.EventJobFailed),
+	string(core.EventJobParked),
 }
 
 // LatestFailureDetails returns one explanatory job_events detail per given job
