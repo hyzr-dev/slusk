@@ -2,13 +2,28 @@
 .right { text-align: right; white-space: nowrap; }
 
 /* The filter row's width budget is fixed, not responsive: .page caps every
-   page at max-width 1320px, so this row never gets more than ~1240px however
-   wide the display is. Issue #416 took the status axis from seven chips to ten
-   and blew that budget by 137px, wrapping the source axis onto its own line at
-   every width. It is bought back by dropping the source axis's ALL chip and
-   its counts, and by the narrower .filterBox below. Anything added here has to
-   pay for itself out of the same 1240px — check in a browser, since jsdom
-   computes no layout and the wrap cannot fail a test. */
+   page at max-width 1320px, so this row gets 1238px of content however wide
+   the display is. Issue #416 took the status axis from seven chips to ten and
+   blew that budget by 137px; it was bought back by dropping the source axis's
+   ALL chip and its counts, and by the narrower .filterBox below.
+
+   Measured again in a browser when #470 added a twelfth chip, because the
+   paragraph above was by then describing an invariant the layout no longer
+   held. At 1238px the source axis (MANUAL/LIDARR) already sits on its own
+   line, with eleven chips as well as twelve — so a new chip is not what puts
+   it there, and moving it back is a layout question this row cannot answer by
+   shaving padding.
+
+   What a new chip does spend is .filterBox's slack. It is `flex: 1 1 120px`,
+   so it absorbs whatever the chips leave: 220px wide at eleven chips, 128px at
+   twelve. That slack is the actual budget, and it is nearly gone. The next
+   status added has nothing left to take from and will wrap the chips
+   themselves.
+
+   Check in a browser, and hold the counts still while you do — chip widths
+   move with the number of digits in them, so an A/B taken minutes apart on a
+   live instance measures the digits, not the change. jsdom computes no layout,
+   so none of this can fail a test. */
 .controlsRow {
   display: flex;
   align-items: center;
