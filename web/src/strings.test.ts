@@ -99,6 +99,29 @@ describe('parkedExplanation', () => {
     expect(copy).toMatch(/events/i);
   });
 
+  // Issue #487. The pointer above is right; naming *where* it points was not.
+  // ParkedExplanation has two hosts and only JobDetail puts an EVENTS section
+  // under it - JobExpansion renders a meta tree and a file list - so 'the
+  // events below' was false for every parked job read from the jobs list, and
+  // sent that reader hunting through filenames.
+  //
+  // Banned as grammar rather than as the one phrase that shipped, for the
+  // reason causalClaim gives: 'the timeline underneath' would pass a blocklist
+  // of 'below' while being just as false. A locator is only ever correct on
+  // one of the two surfaces, so no locator can be correct here.
+  //
+  // jsdom cannot catch this class of defect - it renders both hosts happily
+  // without ever relating a sentence's promise to another file's JSX - so the
+  // guard has to live on the string.
+  const positionalLocator = /\b(below|above|beneath|underneath|further down|down the page)\b/i;
+
+  it.each([
+    ['lidarr', t.jobs.parkedExplanation],
+    ['manual', t.jobs.parkedExplanationManual],
+  ])('does not tell a %s job where the events are, having two hosts', (_source, copy) => {
+    expect(copy).not.toMatch(positionalLocator);
+  });
+
   // The two buttons carry different budgets and nothing else on screen shows
   // it, so the Lidarr copy names them - by their rendered labels. #376
   // renamed 'Force search' to 'Re-run pipeline', and copy naming a button
