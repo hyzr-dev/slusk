@@ -1,0 +1,17 @@
+-- A candidate whose download folder is owned by another job waits rather than
+-- failing (issue #471). That wait needs a ceiling, or a job whose owner never
+-- finishes waits forever: TransfersPastDeadline and StallTimeout only look at
+-- transfers already QUEUED/IN_PROGRESS/STALLED, and a deferred candidate's
+-- transfers are all PENDING with no deadline set, so nothing existing can
+-- break it.
+--
+-- The ceiling needs a "waiting since" timestamp and candidates has nothing
+-- usable: created_at predates the wait, and updated_at moves for unrelated
+-- reasons, so hanging a deadline on it would fire the ceiling when something
+-- else happened to touch the row.
+--
+-- NULL means "not waiting". The column going NULL -> set is by construction
+-- exactly once per wait, which is also what de-duplicates the
+-- candidate_deferred event: no tick counter, no "have I logged this already"
+-- bookkeeping.
+ALTER TABLE candidates ADD COLUMN IF NOT EXISTS deferred_since TIMESTAMPTZ;

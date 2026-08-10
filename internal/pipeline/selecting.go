@@ -46,7 +46,12 @@ type SelectingStore interface {
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
-	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error)
+	DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error)
+	ClearCandidateDeferral(ctx context.Context, candidateID int64) error
+	// FailCandidateAndAdvance is the ceiling on a deferred candidate's wait
+	// (issue #471); Downloading uses the same method for transfer failures.
+	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
 }
 
 // SelectingParams configures a Selecting.
@@ -107,8 +112,24 @@ func (p SelectingParams) AttachTransferID(ctx context.Context, transferID int64,
 	return p.Store.AttachTransferID(ctx, transferID, remoteID, now)
 }
 
-func (p SelectingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+func (p SelectingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error) {
 	return p.Store.RegisterDownloadFolder(ctx, jobID, leaf, now)
+}
+
+func (p SelectingParams) DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error) {
+	return p.Store.DeferCandidate(ctx, candidateID, now)
+}
+
+func (p SelectingParams) ClearCandidateDeferral(ctx context.Context, candidateID int64) error {
+	return p.Store.ClearCandidateDeferral(ctx, candidateID)
+}
+
+func (p SelectingParams) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return p.Store.FailCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, now)
+}
+
+func (p SelectingParams) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
+	return p.Store.AddJobEvent(ctx, jobID, event, detail, now)
 }
 
 func (p SelectingParams) Enqueue(ctx context.Context, username, filename string, size int64) (string, error) {
@@ -361,7 +382,11 @@ func (s *Selecting) quarantineLeftovers(ctx context.Context, job core.AlbumJob, 
 type topUpDeps interface {
 	TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error)
 	RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error)
-	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error)
+	DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error)
+	ClearCandidateDeferral(ctx context.Context, candidateID int64) error
+	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
+	AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error
 	RetryTransfer(ctx context.Context, transferID int64, now time.Time) error
 	UpdateTransferProgress(ctx context.Context, transferID int64, state core.TransferState, bytesDone, bytesTotal int64, now time.Time) error
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
@@ -411,6 +436,22 @@ func topUpCandidate(ctx context.Context, d topUpDeps, jobID, candidateID int64, 
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].Filename < pending[j].Filename })
 
+	// Claim the folders this tick's files would land in before promoting any
+	// transfer out of PENDING. Doing it inside the loop below would leave a
+	// transfer QUEUED with a deadline running against a file that was never
+	// handed to a peer, and — worse — the first file would already be
+	// downloading into a directory another job owns by the time the second one
+	// discovered the collision.
+	if room := maxInflightPerPeer - inflight; room > 0 && len(pending) > 0 {
+		if room > len(pending) {
+			room = len(pending)
+		}
+		ok, err := reserveDownloadFolders(ctx, d, jobID, candidateID, pending[:room], now, transferDeadline, log)
+		if err != nil || !ok {
+			return 0, err
+		}
+	}
+
 	deadline := now.Add(transferDeadline)
 	sent := 0
 	for _, p := range pending {
@@ -426,17 +467,6 @@ func topUpCandidate(ctx context.Context, d topUpDeps, jobID, candidateID int64, 
 		}
 		if !ok {
 			return sent, nil
-		}
-		// Register before the enqueue, not after: the register's job is to name
-		// every folder bytes could have landed in, and a registration that turns
-		// out to be premature is inert (the folder simply isn't there, so cleanup
-		// no-ops). A failure here must never block the download — same contract as
-		// cleanupFolder's — and an unregisterable leaf is one this file was never
-		// going to be written into anyway (the backends fall back to the root).
-		if leaf := commonLeaf([]string{p.Filename}); leaf != "" {
-			if err := d.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
-				log.Error("register download folder failed", "album_job", jobID, "folder", leaf, "err", err)
-			}
 		}
 		remoteID, err := d.Enqueue(ctx, p.Username, p.Filename, p.BytesTotal)
 		if err != nil {
@@ -470,4 +500,103 @@ func topUpCandidate(ctx context.Context, d topUpDeps, jobID, candidateID int64, 
 		sent++
 	}
 	return sent, nil
+}
+
+// reserveDownloadFolders claims every local folder files would be written into
+// for jobID, and reports whether the caller may go on to enqueue them. false
+// means another job owns one of those folders right now and this candidate has
+// been deferred (or, at the ceiling, failed); the error is reserved for
+// problems that should abort the tick.
+//
+// This is the register (issue #314) doing a second job. Registering has always
+// been how a folder gets named for later cleanup; since #471 it is also how a
+// job acquires the right to write there at all, because neither backend lets
+// slusk pick the local directory — both derive it from the peer's share path,
+// so two peers sharing a directory name is enough for two jobs to collide.
+//
+// A register *error* still never blocks a download, the same contract
+// cleanupFolder holds: an unregisterable leaf is one this file was never going
+// to be written into anyway, since the backends fall back to the download root.
+// Only a live owner blocks.
+//
+// The leaf is derived per file rather than once over the whole set, which keeps
+// the registered names byte-for-byte what they were before this guard existed —
+// including the defensive case of a candidate whose files span two directories,
+// where a set-wide commonLeaf would collapse to "" and register nothing,
+// stranding those folders. matcher.Rank groups on (username, ReleaseDir) so a
+// real candidate is always exactly one directory and the loop runs once; the
+// wording of the all-or-nothing rule survives as intent, not as machinery.
+func reserveDownloadFolders(ctx context.Context, d topUpDeps, jobID, candidateID int64, files []core.Transfer, now time.Time, transferDeadline time.Duration, log *slog.Logger) (bool, error) {
+	seen := make(map[string]struct{}, 1)
+	for _, f := range files {
+		leaf := commonLeaf([]string{f.Filename})
+		if leaf == "" {
+			continue
+		}
+		if _, dup := seen[leaf]; dup {
+			continue
+		}
+		seen[leaf] = struct{}{}
+
+		owner, ok, err := d.RegisterDownloadFolder(ctx, jobID, leaf, now)
+		if err != nil {
+			log.Error("register download folder failed", "album_job", jobID, "folder", leaf, "err", err)
+			continue
+		}
+		if ok {
+			continue
+		}
+		return false, deferForFolder(ctx, d, jobID, candidateID, leaf, owner, now, transferDeadline, log)
+	}
+	// Nothing is in the way, so any earlier wait is over. Clearing it here
+	// rather than on the first successful enqueue keeps the clock tied to the
+	// obstruction and not to how the tick happened to end.
+	if err := d.ClearCandidateDeferral(ctx, candidateID); err != nil {
+		log.Error("clear candidate deferral failed", "album_job", jobID, "candidate", candidateID, "err", err)
+	}
+	return true, nil
+}
+
+// deferForFolder records that candidateID is waiting for owner to release leaf,
+// and fails the candidate once the wait outlives transferDeadline.
+//
+// Waiting, not failing, is the point: a collision says "not right now", never
+// "bad candidate". Routing it through FailCandidateAndAdvance immediately would
+// burn a retry, and RejectCandidateAndAdvance would blacklist the peer
+// permanently (#317) because a neighbour happened to download at the same time.
+//
+// The ceiling exists because nothing else can break this wait. TransfersPastDeadline
+// and StallTimeout only look at transfers already QUEUED/IN_PROGRESS/STALLED,
+// and a deferred candidate's transfers are all still PENDING with no deadline
+// set. transferDeadline is reused rather than adding a config key: a required
+// key must exist in production's config.toml before the merge deploys, and this
+// is the same question — how long may one candidate hold a job up.
+func deferForFolder(ctx context.Context, d topUpDeps, jobID, candidateID int64, leaf string, owner int64, now time.Time, transferDeadline time.Duration, log *slog.Logger) error {
+	since, first, err := d.DeferCandidate(ctx, candidateID, now)
+	if err != nil {
+		return err
+	}
+	if first {
+		// Written once per wait, not once per tick: `first` is true exactly when
+		// deferred_since went NULL -> set. Silence here would leave the job
+		// looking stuck on the one screen whose whole job is explaining stuck
+		// jobs, and the owning job id is what makes the wait chaseable.
+		detail := fmt.Sprintf("download folder %q is in use by job %d, waiting", leaf, owner)
+		log.Info("candidate deferred", "album_job", jobID, "candidate", candidateID, "folder", leaf, "owner", owner)
+		if err := d.AddJobEvent(ctx, jobID, core.EventCandidateDeferred, detail, now); err != nil {
+			log.Warn("record candidate_deferred event failed", "album_job", jobID, "err", err)
+		}
+		return nil
+	}
+	if since.IsZero() || now.Sub(since) <= transferDeadline {
+		return nil
+	}
+	reason := fmt.Sprintf("download folder %q still held by job %d after %s", leaf, owner, transferDeadline)
+	log.Info("deferred candidate hit the ceiling", "album_job", jobID, "candidate", candidateID, "folder", leaf, "owner", owner)
+	// from is DOWNLOADING for both callers: Selecting only reaches topUpCandidate
+	// after ActivateCandidateWithTransfers has already advanced the job.
+	if _, err := d.FailCandidateAndAdvance(ctx, candidateID, jobID, reason, core.StateDownloading, core.StateSelecting, now); err != nil {
+		return err
+	}
+	return nil
 }

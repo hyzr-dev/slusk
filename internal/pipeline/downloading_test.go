@@ -80,7 +80,7 @@ func registerSeedFolders(t *testing.T, st *store.Store, jobID int64, files []cor
 		if leaf == "" {
 			continue
 		}
-		if err := st.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
+		if _, _, err := st.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
 			t.Fatalf("RegisterDownloadFolder: %v", err)
 		}
 	}

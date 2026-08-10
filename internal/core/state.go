@@ -90,6 +90,13 @@ const (
 	EventSearchExcluded    JobEventType = "search_excluded"
 	EventCandidateSelected JobEventType = "candidate_selected"
 	EventCandidateRejected JobEventType = "candidate_rejected"
+	// EventCandidateDeferred records a candidate waiting because another job
+	// owns the download folder its peer's files would land in (issue #471).
+	// Deliberately not EventCandidateRejected: nothing is wrong with the
+	// candidate, and the two must stay distinguishable because a rejection is
+	// permanent (#317) while this clears as soon as the owner is done. The
+	// detail names the owning job.
+	EventCandidateDeferred JobEventType = "candidate_deferred"
 	EventAttemptFailed     JobEventType = "attempt_failed"
 	EventAttemptSucceeded  JobEventType = "attempt_succeeded"
 	EventTransferStalled   JobEventType = "transfer_stalled"

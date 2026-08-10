@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,7 +61,7 @@ func TestRegisterDownloadFolderIsIdempotent(t *testing.T) {
 	jobID, _ := seedJobWithCandidate(t, s, 1000, []string{`music\Artist\Album\01.flac`}, now)
 
 	for i := 0; i < 3; i++ {
-		if err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
+		if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
 			t.Fatalf("RegisterDownloadFolder: %v", err)
 		}
 	}
@@ -86,7 +88,7 @@ func TestRegisterDownloadFolderResurrectsCleanedRow(t *testing.T) {
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	jobID, _ := seedJobWithCandidate(t, s, 1001, []string{`music\Artist\Album\01.flac`}, now)
 
-	if err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
+	if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
 		t.Fatalf("RegisterDownloadFolder: %v", err)
 	}
 	if err := s.MarkDownloadFolderCleaned(ctx, jobID, "Album", now); err != nil {
@@ -96,7 +98,7 @@ func TestRegisterDownloadFolderResurrectsCleanedRow(t *testing.T) {
 		t.Fatalf("after cleaning, leaves = %v (%v), want none", leaves, err)
 	}
 
-	if err := s.RegisterDownloadFolder(ctx, jobID, "Album", now.Add(time.Hour)); err != nil {
+	if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "Album", now.Add(time.Hour)); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 	leaves, err := s.DownloadFoldersForJob(ctx, jobID)
@@ -119,7 +121,7 @@ func TestRegisterDownloadFolderRejectsNonLeaf(t *testing.T) {
 	jobID, _ := seedJobWithCandidate(t, s, 1002, []string{`music\Artist\Album\01.flac`}, now)
 
 	for _, leaf := range []string{"", ".", "..", "../x", "a/b", `a\b`, "/abs"} {
-		err := s.RegisterDownloadFolder(ctx, jobID, leaf, now)
+		_, _, err := s.RegisterDownloadFolder(ctx, jobID, leaf, now)
 		if !errors.Is(err, ErrInvalidDownloadLeaf) {
 			t.Errorf("RegisterDownloadFolder(%q) err = %v, want ErrInvalidDownloadLeaf", leaf, err)
 		}
@@ -161,7 +163,7 @@ func TestResetJobToWantedKeepsDownloadFolders(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	jobID, candID := seedJobWithCandidate(t, s, 1004, []string{`music\Artist\First Album\01.flac`}, now)
-	if err := s.RegisterDownloadFolder(ctx, jobID, "First Album", now); err != nil {
+	if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "First Album", now); err != nil {
 		t.Fatalf("RegisterDownloadFolder: %v", err)
 	}
 	if err := s.AdvanceJobState(ctx, jobID, core.StateSelecting, now); err != nil {
@@ -189,7 +191,7 @@ func TestDeleteJobRemovesDownloadFolders(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	jobID, _ := seedJobWithCandidate(t, s, 1005, []string{`music\Artist\Album\01.flac`}, now)
-	if err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
+	if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "Album", now); err != nil {
 		t.Fatalf("RegisterDownloadFolder: %v", err)
 	}
 
@@ -288,7 +290,7 @@ func TestRegisterDownloadFolderTreatsCaseVariantsAsOneFolder(t *testing.T) {
 	jobID, _ := seedJobWithCandidate(t, s, 1100, []string{`music\Artist\Cd1\01.flac`}, now)
 
 	for _, leaf := range []string{"Cd1", "cd1", "CD1"} {
-		if err := s.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
+		if _, _, err := s.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
 			t.Fatalf("RegisterDownloadFolder(%q): %v", leaf, err)
 		}
 	}
@@ -312,7 +314,7 @@ func TestMarkDownloadFolderCleanedMatchesCaseInsensitively(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	jobID, _ := seedJobWithCandidate(t, s, 1101, []string{`music\Artist\Cd1\01.flac`}, now)
-	if err := s.RegisterDownloadFolder(ctx, jobID, "Cd1", now); err != nil {
+	if _, _, err := s.RegisterDownloadFolder(ctx, jobID, "Cd1", now); err != nil {
 		t.Fatalf("RegisterDownloadFolder: %v", err)
 	}
 
@@ -423,4 +425,235 @@ func dedupeStatements(t *testing.T) string {
 		t.Fatalf("migration 0017 no longer contains %q .. %q; update this test", start, end)
 	}
 	return string(raw)[i:j]
+}
+
+// mustOwnFolder registers leaf for jobID and fails the test unless the job got
+// it, so the ownership tests below read as a sequence of claims rather than a
+// sequence of three-value assignments.
+func mustOwnFolder(t *testing.T, s *Store, jobID int64, leaf string, now time.Time) {
+	t.Helper()
+	owner, ok, err := s.RegisterDownloadFolder(context.Background(), jobID, leaf, now)
+	if err != nil {
+		t.Fatalf("RegisterDownloadFolder(%d, %q): %v", jobID, leaf, err)
+	}
+	if !ok {
+		t.Fatalf("job %d was refused folder %q, owner = %d", jobID, leaf, owner)
+	}
+}
+
+// TestRegisterDownloadFolderBlocksASecondLiveJob is issue #471's core claim.
+// Neither backend lets slusk choose the local directory - both derive it from
+// the peer's share path - so two peers who happen to share a directory name are
+// enough for two jobs to write into one directory at the same time. The second
+// job must be told no, and must not leave a row behind: a row is what later
+// entitles it to run a recursive delete over the first job's files.
+func TestRegisterDownloadFolderBlocksASecondLiveJob(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	first, _ := seedJobWithCandidate(t, s, 1, []string{`music\A\cd1\01.flac`}, now)
+	second, _ := seedJobWithCandidate(t, s, 2, []string{`music\B\cd1\01.flac`}, now)
+
+	mustOwnFolder(t, s, first, "cd1", now)
+
+	owner, ok, err := s.RegisterDownloadFolder(ctx, second, "cd1", now)
+	if err != nil {
+		t.Fatalf("RegisterDownloadFolder: %v", err)
+	}
+	if ok || owner != first {
+		t.Fatalf("second job got (owner=%d, ok=%v), want (owner=%d, ok=false)", owner, ok, first)
+	}
+	if n := countDownloadFolders(t, s, second); n != 0 {
+		t.Errorf("refused job left %d rows behind, want 0 - a row is a licence to delete", n)
+	}
+}
+
+// TestRegisterDownloadFolderOwnershipIsCaseInsensitive: the same comparison
+// that makes two casings one row (#479) has to decide ownership, or a peer
+// sharing `CD1` walks straight into the folder a peer sharing `cd1` is using on
+// a case-insensitive filesystem.
+func TestRegisterDownloadFolderOwnershipIsCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	first, _ := seedJobWithCandidate(t, s, 1, []string{`music\A\Cd1\01.flac`}, now)
+	second, _ := seedJobWithCandidate(t, s, 2, []string{`music\B\CD1\01.flac`}, now)
+
+	mustOwnFolder(t, s, first, "Cd1", now)
+
+	owner, ok, err := s.RegisterDownloadFolder(ctx, second, "CD1", now)
+	if err != nil {
+		t.Fatalf("RegisterDownloadFolder: %v", err)
+	}
+	if ok || owner != first {
+		t.Fatalf("second job got (owner=%d, ok=%v), want (owner=%d, ok=false)", owner, ok, first)
+	}
+}
+
+// TestRegisterDownloadFolderIgnoresIdleOwners is the correction that a canary
+// measurement forced. Three live jobs held `cd1` there and only one was
+// downloading: the other two carried rows left over from earlier search cycles,
+// which ResetJobToWanted deliberately keeps (#314) because deleting them is
+// what stranded folders on disk in the first place.
+//
+// So the row answers two questions and only one of them is state-dependent.
+// Cleanup asks "may this hold my bytes" of every uncleaned row; ownership asks
+// "is someone writing there now", which only DOWNLOADING and IMPORTING can be
+// true of. The idle job's row must survive being ignored - losing it would
+// trade this bug for the leak #314 closed.
+func TestRegisterDownloadFolderIgnoresIdleOwners(t *testing.T) {
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	idle, _ := seedJobWithCandidate(t, s, 1, []string{`music\A\cd1\01.flac`}, now)
+	mustOwnFolder(t, s, idle, "cd1", now)
+	if err := s.ResetJobToWanted(ctx, idle, core.StateDownloading, 0, nil, now); err != nil {
+		t.Fatalf("ResetJobToWanted: %v", err)
+	}
+
+	live, _ := seedJobWithCandidate(t, s, 2, []string{`music\B\cd1\01.flac`}, now)
+	mustOwnFolder(t, s, live, "cd1", now)
+
+	leaves, err := s.DownloadFoldersForJob(ctx, idle)
+	if err != nil {
+		t.Fatalf("DownloadFoldersForJob: %v", err)
+	}
+	if len(leaves) != 1 || leaves[0] != "cd1" {
+		t.Errorf("idle job's uncleaned leaves = %v, want [cd1] - cleanup still has to find it", leaves)
+	}
+}
+
+// TestRegisterDownloadFolderReleasesOnCleanup: cleanup stamping cleaned_at is
+// what hands the folder on. Without this the first collision on a name like
+// `Digital Media 02` would block it for the lifetime of the deployment.
+func TestRegisterDownloadFolderReleasesOnCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	first, _ := seedJobWithCandidate(t, s, 1, []string{`music\A\cd1\01.flac`}, now)
+	second, _ := seedJobWithCandidate(t, s, 2, []string{`music\B\cd1\01.flac`}, now)
+
+	mustOwnFolder(t, s, first, "cd1", now)
+	if _, ok, err := s.RegisterDownloadFolder(ctx, second, "cd1", now); err != nil || ok {
+		t.Fatalf("second job should be blocked before cleanup, got ok=%v err=%v", ok, err)
+	}
+	if err := s.MarkDownloadFolderCleaned(ctx, first, "cd1", now); err != nil {
+		t.Fatalf("MarkDownloadFolderCleaned: %v", err)
+	}
+	mustOwnFolder(t, s, second, "cd1", now.Add(time.Minute))
+}
+
+// TestRegisterDownloadFolderReclaimIsNotAConflict: a job re-registering a
+// folder it already holds must stay a success. Every file of a candidate
+// registers, and Downloading re-registers on every tick, so treating the job's
+// own row as a live owner would deadlock it against itself on file two.
+func TestRegisterDownloadFolderReclaimIsNotAConflict(t *testing.T) {
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	jobID, _ := seedJobWithCandidate(t, s, 1, []string{`music\A\cd1\01.flac`}, now)
+	mustOwnFolder(t, s, jobID, "cd1", now)
+	mustOwnFolder(t, s, jobID, "cd1", now.Add(time.Minute))
+	mustOwnFolder(t, s, jobID, "CD1", now.Add(2*time.Minute))
+
+	if n := countDownloadFolders(t, s, jobID); n != 1 {
+		t.Errorf("reclaims left %d rows, want 1", n)
+	}
+}
+
+// TestRegisterDownloadFolderConcurrent is the reason the claim runs inside a
+// transaction holding an advisory lock. Every store transaction here is READ
+// COMMITTED, so a lookup followed by an INSERT does not serialize: both jobs
+// see the folder free and both claim it, and the test that would have caught
+// it passes because it never ran the two at once.
+//
+// Follows ActivateCandidateWithTransfers' concurrency test - all goroutines
+// released from one channel, exactly one winner.
+func TestRegisterDownloadFolderConcurrent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	const racers = 5
+	jobs := make([]int64, racers)
+	for i := range jobs {
+		jobs[i], _ = seedJobWithCandidate(t, s,
+			int64(i+1), []string{fmt.Sprintf(`music\Artist %d\cd1\01.flac`, i)}, now)
+	}
+
+	type result struct {
+		owner int64
+		ok    bool
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, racers)
+	var wg sync.WaitGroup
+	for _, jobID := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			owner, ok, err := s.RegisterDownloadFolder(ctx, jobID, "cd1", now)
+			results <- result{owner: owner, ok: ok, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winners, losers := 0, 0
+	for r := range results {
+		switch {
+		case r.err != nil:
+			t.Fatalf("concurrent registration: %v", r.err)
+		case r.ok:
+			winners++
+		default:
+			losers++
+			if r.owner == 0 {
+				t.Error("a refused job was told ok=false with no owner to wait for")
+			}
+		}
+	}
+	if winners != 1 || losers != racers-1 {
+		t.Fatalf("registration results: winners=%d losers=%d, want 1/%d", winners, losers, racers-1)
+	}
+}
+
+// TestDeferCandidateKeepsTheFirstTimestamp pins the two properties the ceiling
+// and the event both hang off: the clock starts once, and `first` is true
+// exactly once. A candidate re-deferred every tick that refreshed its own
+// timestamp would push its deadline forward forever, and the wait would never
+// be broken.
+func TestDeferCandidateKeepsTheFirstTimestamp(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	s := newTestStore(t)
+
+	_, candID := seedJobWithCandidate(t, s, 1, []string{`music\A\cd1\01.flac`}, now)
+
+	since, first, err := s.DeferCandidate(ctx, candID, now)
+	if err != nil || !first || !since.Equal(now) {
+		t.Fatalf("first deferral = (%v, %v, %v), want (%v, true, nil)", since, first, err, now)
+	}
+	later := now.Add(30 * time.Minute)
+	since, first, err = s.DeferCandidate(ctx, candID, later)
+	if err != nil || first || !since.Equal(now) {
+		t.Fatalf("second deferral = (%v, %v, %v), want (%v, false, nil)", since, first, err, now)
+	}
+
+	if err := s.ClearCandidateDeferral(ctx, candID); err != nil {
+		t.Fatalf("ClearCandidateDeferral: %v", err)
+	}
+	// A later wait starts a fresh clock, and reports itself as fresh: inheriting
+	// the old timestamp would fail the candidate on its first deferred tick.
+	since, first, err = s.DeferCandidate(ctx, candID, later)
+	if err != nil || !first || !since.Equal(later) {
+		t.Fatalf("deferral after clear = (%v, %v, %v), want (%v, true, nil)", since, first, err, later)
+	}
 }
