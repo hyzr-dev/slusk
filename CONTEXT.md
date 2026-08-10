@@ -44,8 +44,12 @@ _Avoid_: album folder, source folder
 **Download folder**:
 The directory a job owns beneath the local download root, named after the remote folder
 it copies. Only one live job may own one at a time: owning it is what confers the right
-to write into it and, later, to delete it.
-_Avoid_: leaf, target folder, complete dir
+to write into it and, later, to delete it. It is what Lidarr is pointed at to scan, and
+it carries whatever name the peer chose — so it is not a promise that one album, or only
+one album, is inside it.
+_Avoid_: album folder (it holds what a peer put in one directory, which is not the same
+as one album — reading it the other way is what #280 lived in), leaf, target folder,
+complete dir
 
 **Backend**:
 The Soulseek implementation in use — the native protocol client, or slskd over HTTP.
