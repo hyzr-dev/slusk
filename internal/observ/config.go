@@ -297,21 +297,22 @@ type connectionTestResult struct {
 
 // registerConfig wires the read/write config endpoint and the per-dependency
 // connection tests onto mux.
-func registerConfig(mux *http.ServeMux, config ConfigFunc, tester ConnectionTester, writer ConfigWriter, restart func()) {
-	mux.Handle("/api/config", newConfigHandler(config, writer, restart))
+func registerConfig(mux *http.ServeMux, config ConfigFunc, tester ConnectionTester, writer ConfigWriter, restart func(), instanceID string) {
+	mux.Handle("/api/config", newConfigHandler(config, writer, restart, instanceID))
 	mux.Handle("/api/config/test/lidarr", newConnectionTestHandler("lidarr", tester.Lidarr))
 	mux.Handle("/api/config/test/soulseek", newConnectionTestHandler("soulseek", tester.Soulseek))
 }
 
 // newConfigHandler serves the current config on GET and, on POST, validates
 // and applies a ConfigUpdate before scheduling a restart to pick it up.
-func newConfigHandler(config ConfigFunc, writer ConfigWriter, restart func()) http.Handler {
+// instanceID identifies the process serving the request; see serveConfigPost.
+func newConfigHandler(config ConfigFunc, writer ConfigWriter, restart func(), instanceID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			serveConfigGet(w, config)
 		case http.MethodPost:
-			serveConfigPost(w, r, writer, restart)
+			serveConfigPost(w, r, writer, restart, instanceID)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -450,7 +451,7 @@ func writeConfigErrorWithCode(w http.ResponseWriter, status int, message, code s
 	_ = json.NewEncoder(w).Encode(errorResponse{Error: message, Code: code})
 }
 
-func serveConfigPost(w http.ResponseWriter, r *http.Request, writer ConfigWriter, restart func()) {
+func serveConfigPost(w http.ResponseWriter, r *http.Request, writer ConfigWriter, restart func(), instanceID string) {
 	var req configUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeConfigError(w, http.StatusBadRequest, "invalid request body", nil)
@@ -480,10 +481,14 @@ func serveConfigPost(w http.ResponseWriter, r *http.Request, writer ConfigWriter
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// instance names the process that is about to die, so the settings view
+	// can poll /healthz and reject that same id as "not restarted yet"
+	// instead of reading the dying server as the new one (issue #154).
 	_ = json.NewEncoder(w).Encode(struct {
-		OK         bool `json:"ok"`
-		Restarting bool `json:"restarting"`
-	}{OK: true, Restarting: true})
+		OK         bool   `json:"ok"`
+		Restarting bool   `json:"restarting"`
+		Instance   string `json:"instance"`
+	}{OK: true, Restarting: true, Instance: instanceID})
 
 	// Give the response time to flush to the client before the process exits.
 	go func() {

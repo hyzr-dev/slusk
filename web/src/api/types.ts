@@ -610,6 +610,18 @@ export interface ConfigUpdateRequest {
 export interface ConfigUpdateResult {
   ok: boolean;
   restarting: boolean;
+  /**
+   * Identifies the process that served this save and is about to exit. The
+   * settings view holds it as the baseline for its /healthz poll: the dying
+   * server keeps answering for a moment after this response is flushed, and
+   * the same id coming back means the restart has not happened yet (#154).
+   */
+  instance: string;
+}
+
+/** GET /healthz 200 response body — see ServerDeps.InstanceID. */
+export interface HealthResult {
+  instance: string;
 }
 
 /**

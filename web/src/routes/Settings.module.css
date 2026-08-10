@@ -324,10 +324,54 @@
 .saveError { font-size: 11px; color: var(--bad); }
 .dangerWarning { font-size: 11px; letter-spacing: 0.3px; color: var(--bad); }
 
+/* The restart window (issue #154). :empty is what keeps the live region in
+   the DOM while idle without it costing a row of the save row's gap — a
+   region added at the same moment as its content is not reliably announced. */
+.restartNotice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+.restartNotice:empty {
+  display: none;
+}
+
 .restartingBanner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 11.5px;
   letter-spacing: 0.3px;
   color: var(--ok);
+}
+
+/* Covered by global.css's blanket prefers-reduced-motion rule, which freezes
+   it in place; the wait is still stated in words beside it. */
+.spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--line2);
+  border-top-color: var(--ok);
+  border-radius: 50%;
+  animation: settings-restart-spin 0.7s linear infinite;
+}
+
+@keyframes settings-restart-spin {
+  to { transform: rotate(360deg); }
+}
+
+.restartDetail {
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+}
+
+.restartFailed {
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  color: var(--bad);
 }
 
 .testRow { display: flex; align-items: center; gap: 12px; padding: 6.5px 0; border-bottom: 1px solid var(--line); }
