@@ -1,11 +1,15 @@
 {
-  "computedAt": "36c3696633b4d2d4078df42175199e648d92fb89",
+  "computedAt": "e0a7f89241557a087cc5bf303e2ca65021a43642",
   "issues": {
     "69": {
       "number": 69,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "needs-triage",
+      "labelReason": "Confirmed no sdk/ package and zero 'plugin' hits in internal/ or cmd/; pipeline.Module (internal/pipeline/runner.go:30) is exactly the thin name/interval/tick contract the issue describes as insufficient. The design references 'the protocol-neutral application ports issue' as a prerequisite that does not exist under any searchable title in the tracker, and the issue itself does not pick a first-party capability, an RPC protocol, or a scope for the minimal out-of-process example. Nothing here is implementable without a human resolving that dangling reference and narrowing scope first, so needs-triage stands.",
       "prodImpact": "none",
-      "impactEvidence": "Pure design proposal with zero runtime effect: `sdk/` does not exist in the repo (verified via find) and grep for \"plugin\" across internal/ and cmd/ returns no matches. Nothing in production is affected because nothing has been built — this is not code yet, just an architecture sketch.",
+      "impactEvidence": "Pure architectural proposal for a plugin SDK that does not exist yet (sdk/ absent, no 'plugin' references in internal/ or cmd/); nothing in production behavior is touched by this issue as written.",
       "touches": [],
       "frontend": false,
       "effort": "L",
@@ -16,11 +20,14 @@
     "86": {
       "number": 86,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The issue itself says scope is undecided (library choice, first slice) — a genuine architecture/product call, not something an agent can pick up. web/src/strings.ts already centralizes all UI copy in one catalog module (confirmed at web/src/strings.ts:1-2, which explicitly notes 'This is i18n preparation, not i18n — see #86'), so the groundwork is real but wiring an i18n library, doing a full Swedish translation, and building a language switcher is a multi-decision feature, not a bounded fix.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request — no defect in the running instance. web/src/strings.ts (1275 lines) already centralizes all UI strings but is not wired to any i18n library; this is a documentation/architecture proposal (phase-1 prep noted in the file's own header comment at web/src/strings.ts:1-2) with no behavioral change to production.",
+      "impactEvidence": "Feature request for functionality that does not exist yet (no i18n library wired, UI is English-only); nothing currently running in production is affected either way.",
       "touches": [
-        "web/src/strings.ts",
-        "web/src/components/tui/SectionHeader.tsx"
+        "web/src/strings.ts"
       ],
       "frontend": true,
       "effort": "L",
@@ -31,25 +38,33 @@
     "106": {
       "number": 106,
       "kind": "techdebt",
+      "category": "tech-debt",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Issue carries both 'enhancement' and 'tech-debt' category labels plus 'ready-for-agent'; I read it as tech-debt (defense-in-depth hardening, no user-facing behavior) since that's the more specific fit, driving kind='techdebt'. Verified all three claims in code: no TTL/eviction on the download registry (internal/soulseek/downloads.go, Remove() is caller-driven, runDownload never self-removes on terminal state), Enqueue has no internal concurrency cap (relies entirely on pipeline's MaxActive/MaxInflightPerPeer, internal/pipeline/downloading.go:117-120), and peerConns (internal/soulseek/client.go:323, incremented sessions.go:306/peers.go:51) is tracked but never compared against any budget — only inboundPeerLimit/inboundSlots (client.go:216-218,517) bounds inbound connections. Despite the ready-for-agent label, this is three separate concurrency-sensitive subsystems (registry sweep, download semaphore, outbound connection budget), each needing its own config knob, default value and race-safe implementation plus tests — real design judgement (TTL value, default budget, block-vs-reject semantics) that warrants a human call before an agent burns a wave on it, especially since the issue itself frames it as low priority while pipeline is the sole caller.",
       "prodImpact": "none",
-      "impactEvidence": "internal/pipeline/downloading.go:266 (removeFromSlskd, invoked from resolve()) purges every settled transfer, and internal/pipeline/downloading.go:101 / internal/pipeline/downloading.go:104 (MaxActive/MaxInflightPerPeer) bound concurrent enqueues — the only caller today already provides the discipline internal/soulseek lacks internally. downloadRegistry never evicts on its own (no Remove() call in runDownload, internal/soulseek/downloads.go:841-900; Enqueue at internal/soulseek/downloads.go:582-609 relies entirely on the caller), and outgoing peerConns is incremented with no budget check before dialing (internal/soulseek/sessions.go:306), unlike the enforced inboundPeerLimit at internal/soulseek/client.go:198-200/421-422/480. None of this currently leaks or exhausts resources in production because pipeline is the sole caller and already disciplined.",
+      "impactEvidence": "Issue and code agree this is not an active production problem: the current and only caller (internal/pipeline/downloading.go, MaxActive/MaxInflightPerPeer at lines 117-120) already enforces the limits that would otherwise be missing, and the issue text itself states this (\"Idag städar pipeline/downloading.go... så det läcker inte i praktiken\"). The gap is real but latent, triggered only by a hypothetical future/buggy caller that stops reconciling — nothing running today exercises it.",
       "touches": [
         "internal/soulseek/downloads.go",
         "internal/soulseek/peers.go",
-        "internal/soulseek/sessions.go"
+        "internal/soulseek/sessions.go",
+        "internal/soulseek/client.go"
       ],
       "frontend": false,
-      "effort": "M",
+      "effort": "L",
       "reproCheck": null,
       "statedBlockers": [],
-      "concurrency": true,
       "digest": "cc49191920dbfaa33d5e5c560916f36d9884720cb6ce98ac7e906b65143c96e8"
     },
     "120": {
       "number": 120,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Issue carries 'enhancement' and 'ready-for-human' labels today, correctly. Verified in code (internal/pipeline/discovery.go, internal/store/reliability.go, internal/soulseek/shares.go) that no cache layer, no new tables, and no cache-first path exist -- shares.go's shareSnapshot() is our own outbound share, not a peer-share cache. This is a multi-week feature needing new schema, a new background module competing for network/connection resources with existing search and download, and open product calls (eviction thresholds, default limits, background auto-connect risk vs load) that need human judgement, not just spec-following.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature proposal with no code in the repo today: internal/soulseek/shares.go only builds and serves this instance's own outbound share index (scanShares at internal/soulseek/shares.go:452, respondToSearch at :870); there is no code path that browses a remote peer's shares or caches them, so nothing in production behaves differently until this is built. Two of the issue's own paths do not exist as named (cmd/sluskdarr/main.go — actual is cmd/slusk/main.go; internal/soulseek/soul/peer/sharedfilelistresponse.go — actual filename is sharedfileistresponse.go, missing an 'l'), reinforcing that this is greenfield work, not a fix to something already running.",
+      "impactEvidence": "Feature request with zero implementation present; nothing in production behavior is affected either way.",
       "touches": [
         "internal/pipeline/discovery.go",
         "internal/pipeline/ports.go",
@@ -57,11 +72,10 @@
         "internal/soulseek/peers.go",
         "internal/soulseek/search.go",
         "internal/soulseek/shares.go",
-        "internal/soulseek/downloads.go",
         "internal/soulseek/soul/peer/sharedfilelistrequest.go",
         "internal/soulseek/soul/peer/sharedfileistresponse.go",
-        "internal/store/migrations/0015_peer_share_cache.sql",
         "cmd/slusk/main.go",
+        "internal/config/config.go",
         "config.example.toml"
       ],
       "frontend": false,
@@ -73,18 +87,20 @@
     "128": {
       "number": 128,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "The maintainer's 2026-08-02 comment already corrected the scope drift and pinpointed exactly what remains, verified in code: core.SearchResult (internal/core/search.go:22-34) already has Duration/SampleRate/BitDepth/VariableBitRate, mapSearchResult (internal/soulseek/search.go:430+) already extracts them, but no internal/filter package exists, no result_filter config key exists (grep for ResultFilter/result_filter in internal/config returns nothing), and passesFloor() in internal/matcher/matcher.go:66-71 still only checks BitRate>=minBitrate with no filter hook. The design gives a concrete filter syntax table, a clear package boundary (internal/filter with parser + Match(core.SearchResult) bool), and explicit fallback semantics for missing peer attributes, so an agent has enough to implement without a human architecture call.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request; no filter parser, result_filter config key, or filter-application code exists anywhere in the repo. internal/pipeline/discovery.go:449-455 shows the existing EventCandidateRejected pattern this would extend; internal/core/search.go:24-34 confirms attribute extraction (#58) is already complete.",
+      "impactEvidence": "Pure feature addition -- nothing in production today depends on a result filter existing; passesFloor() in internal/matcher/matcher.go:66-71 continues to work as-is until this lands.",
       "touches": [
+        "internal/filter/filter.go",
         "internal/config/config.go",
-        "internal/config/validate.go",
-        "internal/pipeline/discovery.go",
-        "internal/pipeline/selecting.go",
         "internal/matcher/matcher.go",
         "config.example.toml"
       ],
       "frontend": false,
-      "effort": "M",
+      "effort": "L",
       "reproCheck": null,
       "statedBlockers": [],
       "digest": "cc9b1aeeb470d6152c2efd77440aee44bc9eb3ecc434897142262f18c30c0199"
@@ -92,44 +108,40 @@
     "129": {
       "number": 129,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "needs-info",
+      "suggestedLabel": "needs-info",
+      "labelReason": "Verified in code: internal/soulseek/search.go's mapSearchResult and core.SearchResult carry the raw attributes (bitrate today; #58 already plumbs the rest per the thread), web/src/routes/Search.tsx has the full search page with sortGroups/deriveFormats exported for reuse, but no filter-syntax engine (minbr:, islossless, !term) exists anywhere in internal/ or web/src/ - grep for those tokens returns nothing. #128, which is supposed to own that engine, is confirmed still needs-triage with zero comments. So #129 cannot start: nothing to build the filter box against, and the server-vs-client filtering call can't be made until #128 exists. needs-info is a semantic mismatch (nobody is waiting on the reporter - the issue's own Aug 5 comment says so) but it's the only one of the five roles that correctly removes this from the ready waves; needs-triage would misstate that it hasn't been evaluated, ready-for-human/ready-for-agent are both wrong since there is no work to start yet.",
       "prodImpact": "none",
-      "impactEvidence": "Feature request for a missing UI capability (filter syntax box), not a defect. Verified web/src/routes/Search.tsx exists with search field, result cards, sort and format chips (from #58) but no filter-expression input, and internal/observ/observ.go:499-507 shows StartSearch/SearchSnapshot/SearchDelta/StopSearch already wired for /api/search — nothing in the running instance behaves incorrectly, there is simply no filter box yet.",
+      "impactEvidence": "Pure unbuilt feature request with no code touching the running pipeline or existing UI; nothing to regress.",
       "touches": [
-        "web/src/routes/Search.tsx",
-        "web/src/routes/SearchResultCard.tsx",
-        "internal/observ/observ.go"
+        "internal/observ/observ.go",
+        "web/src/App.tsx",
+        "web/src/routes/Search.tsx"
       ],
       "frontend": true,
-      "effort": "S",
+      "effort": "M",
       "reproCheck": null,
       "statedBlockers": [
         128
       ],
       "digest": "afa0d3f1e34443adb782990b07b9644a7dc44bf618d7b5e18d0af1f1d19c681b"
     },
-    "154": {
-      "number": 154,
-      "kind": "feature",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "No system-level misbehavior: web/src/routes/Settings.tsx:1222 gates the Save button only on `update.isPending` (the initial mutation), not on `restarting`, and the connection-test button at line 1262 isn't gated on `restarting` at all, so a user can click Save or Test Connection while the backend is mid-restart and get a failed request/'unreachable' status. The restart-recovery poll (lines 664-680) also has no timeout and treats any successful GET /api/config as recovery without distinguishing an old vs. new process. All of this is client-side UX (spinner/disabled-state/timeout/refetch feedback) — it doesn't corrupt config, lose data, or wedge the pipeline; worst case is a confusing failed click or an indefinite 'restarting…' banner if the process never comes back, which is a UI-says-something-misleading defect, not the system behaving worse.",
-      "touches": [
-        "web/src/routes/Settings.tsx"
-      ],
-      "frontend": true,
-      "effort": "M",
-      "reproCheck": "Open Settings, change a field and Save; while the 'Saved — restarting…' banner is visible (restarting poll running, lines 664-680), click Save again or click a connection-test button — both remain enabled and clickable instead of being disabled during the restart window.",
-      "statedBlockers": [],
-      "digest": "1e0eafe84ed3c97429f4d789366e5e5a52baad250578370e905661e65666ff83"
-    },
     "180": {
       "number": 180,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Fully specified feature (route, verb, 202/409 semantics, buffered kick-channel-of-1 design, CSRF reuse) with a clear implementation seam in WantedSync/Runner; no product ambiguity requiring a human call.",
       "prodImpact": "none",
-      "impactEvidence": "No such endpoint or kick mechanism exists anywhere in the tree today (grep for reconcile/kick in internal/pipeline and internal/observ turns up only unrelated reconcile() methods in internal/pipeline/downloading_test.go). WantedSync.Tick (internal/pipeline/wanted.go:104) only runs on Runner's fixed ticker (internal/pipeline/runner.go:130-137); there is no way to trigger it early and no code path this issue would change is live in production, so there is nothing running today for it to degrade.",
+      "impactEvidence": "Pure addition — no manual-trigger mechanism, kick channel, or /api/reconcile route exists anywhere today (grepped internal/pipeline, internal/app, internal/observ for kick/Trigger patterns, all empty); nothing in the running instance is touched until this ships.",
       "touches": [
         "internal/pipeline/wanted.go",
+        "internal/pipeline/runner.go",
         "internal/observ/observ.go",
-        "internal/observ/auth_test.go"
+        "internal/observ/reconcile.go",
+        "cmd/slusk/main.go"
       ],
       "frontend": false,
       "effort": "M",
@@ -140,36 +152,38 @@
     "184": {
       "number": 184,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The issue itself poses two unresolved scope questions (PM-only ignore vs. full nicotine+-style ignore-list touching search/upload/peer-connect surfaces, and username-only vs. IP-based blocking) that require a product/architecture call before an implementation plan can be written; that is exactly what ready-for-human is for. Verified against current code: internal/core has no blocklist type, internal/store/migrations has no blocklist table, and internal/soulseek/client.go's handleMessage (case server.CodeMessageUser at line 1139) has no filtering hook -- nothing exists yet, consistent with the issue's premise. Its stated blocker #183 is now closed and fully shipped (migration 0006_private_messages.sql, internal/core/messages.go port, web/src/routes/Chat.tsx UI), so the dependency is satisfied but the scope questions remain open.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request with zero code impact on the running production instance — no blocking or ignore-list code exists anywhere in internal/soulseek, internal/store, or internal/config today, so there is nothing to regress. Verified the incoming-message dispatch at internal/soulseek/client.go:1083 (case server.CodeMessageUser) has no filtering hook, and internal/store/migrations/ has no block/ignore table (highest migration is 0013_add_album_mbid.sql).",
+      "impactEvidence": "Pure feature request; no running-instance behavior is affected by its absence. Grep for block/ignore across internal/core, internal/config and internal/store found nothing related to user blocking (only unrelated matches like a write-lock 'Block' comment marker), confirming there is no partial or broken implementation silently degrading anything today.",
       "touches": [
         "internal/soulseek/client.go",
-        "internal/soulseek/messages.go",
-        "internal/store/migrations/0014_block_list.sql",
-        "internal/store/messages.go",
-        "internal/observ/messages.go",
+        "internal/core/messages.go",
         "internal/config/config.go",
-        "config.example.toml"
+        "config.example.toml",
+        "web/src/routes/Chat.tsx",
+        "web/src/api/types.ts",
+        "web/src/api/queries.ts"
       ],
       "frontend": true,
-      "effort": "M",
+      "effort": "L",
       "reproCheck": null,
       "statedBlockers": [
         183
       ],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": true,
-        "configKey": false,
-        "migration": true
-      },
       "digest": "0431d9d8a0527b783ffe10b483f2016f4e1fd97c6ae7d312c85d28063ad22be5"
     },
     "186": {
       "number": 186,
-      "kind": "techdebt",
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The issue itself lays out four viable remediation approaches (per-peer caps, rate limiting with ack-only, user blocking, operator-triggered pruning) with different UX and data-retention tradeoffs, and explicitly says a human decision is needed before implementation -- this is a product/architecture call, not a spec an agent can pick a fix from.",
       "prodImpact": "dataloss",
-      "impactEvidence": "internal/store/messages.go:68-83 (RecordIncomingMessage) persists every accepted incoming message with no per-peer or total-row cap; internal/store/migrations/0006_private_messages.sql:7-11 explicitly documents that pruning is intentionally absent. internal/soulseek/messages.go:34 and :55 only bound single-message size (64 KiB) and in-flight queue depth (256), not total stored volume — any Soulseek peer can drive unbounded row growth in private_messages, and nothing in the code today stops or later cleans that up.",
+      "impactEvidence": "internal/store/messages.go:68-84 (RecordIncomingMessage) inserts every incoming message unconditionally -- no per-peer count check, no rate limit -- guarded only by internal/soulseek/messages.go:44 (256-byte username cap) and :104 (maxPrivateMessageBytes per-message body cap); internal/store/migrations/0006_private_messages.sql:1-11 documents deliberately no retention/pruning. Any peer can send unlimited messages forever, growing private_messages without bound -- the rubric's own worked example for dataloss.",
       "touches": [
         "internal/store/messages.go",
         "internal/store/migrations/0006_private_messages.sql",
@@ -177,804 +191,633 @@
       ],
       "frontend": false,
       "effort": "M",
-      "reproCheck": "Have a Soulseek peer send many private messages to the running instance in a loop and confirm SELECT count(*) FROM private_messages climbs without bound while no code path deletes or caps rows.",
+      "reproCheck": null,
       "statedBlockers": [],
-      "concurrency": false,
       "digest": "a7e719e753f2aff2316a57aa695996262885f7e9e61c18d1a88db6805cb5ae5b"
     },
     "192": {
       "number": 192,
       "kind": "bug",
+      "category": "bug",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Confirmed in testenv/compose.yml: lidarr (lines 31-46) has no healthcheck and slusk's depends_on uses condition: service_started (lines 105-106), while postgres already demonstrates the fix pattern (healthcheck at 25-29, service_healthy condition at 101-102). The fix is a small, self-contained compose change with a proven pattern to copy.",
       "prodImpact": "none",
-      "impactEvidence": "testenv/compose.yml only (local PR lab, not production); the affected dependency is testenv/compose.yml:105-106 (slusk depends on lidarr with condition: service_started, no healthcheck defined for lidarr) versus the working pattern at testenv/compose.yml:101-102 (postgres uses service_healthy). Nothing here runs against the production canary.",
+      "impactEvidence": "testenv/ is the local PR lab, not production; the race and misleading log only occur on `lab.sh up`/`reset` startup, never in the deployed canary or promoted images.",
       "touches": [
         "testenv/compose.yml"
       ],
       "frontend": false,
       "effort": "S",
-      "reproCheck": "./testenv/lab.sh reset then ./testenv/lab.sh logs slusk — expect a connection refused ERROR from the first wanted_sync tick against Lidarr before it recovers on the next 15s tick",
+      "reproCheck": "Run ./testenv/lab.sh reset and check the slusk container's startup logs for a connection-refused ERROR from wanted_sync before Lidarr's port 8686 is up.",
       "statedBlockers": [],
       "digest": "31a18917973f4987b455bba5ecad1306446a7df573214bdd904347a9c346ab88"
     },
     "199": {
       "number": 199,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Confirmed against code: no global keydown listener, KeyActionsContext, or HelpOverlay exist anywhere in web/src today (chrome/ has only SideNav/StatusBar/TopBar/FlashContext, no keyboard concern). Keyboard handling that does exist is three-plus ad-hoc per-component listeners (web/src/routes/Jobs.tsx:320-332, Settings.tsx:169, BulkRetryDialog.tsx:68, IdentifyModal.tsx:308), none resembling the proposed chrome-layer architecture. The issue's own second comment (2026-08-05) correctly identifies two unresolved product/architecture calls gating implementation: whether the app commits to full keyboard-drivenness (CLAUDE.md calls keyboard operability \"nice-to-have, not a gate\", below the mock's full binding table + help overlay), and whether a single global listener + KeyActionsContext still fits the post-reskin chrome component structure. Both need a maintainer decision, not code archaeology, so ready-for-human is correct and I would not move it.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request with no current defect: no keyboard infrastructure exists today (web/src/hooks/useKeyboard.ts and a HelpOverlay component do not exist in the tree), the only keyboard handling anywhere is the ad-hoc `,`/`.` pagination in web/src/routes/Jobs.tsx:315-326, and CLAUDE.md:338 explicitly classifies keyboard operability as \"nice-to-have... not a gate.\" Nothing in production behaves incorrectly as a result of this gap.",
+      "impactEvidence": "Pure feature addition with no shipped behavior yet — no runtime effect on the running instance either way; the gap is between the design mock's spec and the UI's current keyboard support, not a defect in shipped code.",
       "touches": [
         "web/src/hooks/useKeyboard.ts",
-        "web/src/chrome/HelpOverlay.tsx",
-        "web/src/chrome/Layout.tsx",
+        "web/src/components/chrome/HelpOverlay.tsx",
+        "web/src/components/chrome/SideNav.tsx",
+        "web/src/components/chrome/StatusBar.tsx",
         "web/src/routes/Jobs.tsx"
       ],
       "frontend": true,
       "effort": "L",
       "reproCheck": null,
       "statedBlockers": [],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": true
-      },
       "digest": "bb722e170112d1142c754ffdcebcaa4d190656427cc41c157061374e7dd93701"
     },
     "200": {
       "number": 200,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Verified in code: internal/observ/observ.go's /status only exposes moduleDetails keyed by pipeline module names (wanted_sync, discovery, selecting, downloading, importing) with no lidarr/soulseek/shares keys, and web/src/routes/Health.tsx already carries a comment at the modules block explicitly citing issue #200 as the reason it derives generically instead of a hardcoded dependency map. The issue specifies the exact endpoint shape, passive-reading sources (Lidarr's last successful HTTP call, native Soulseek client Status(), share indexer state), explicit non-goals (no active probes, no alerting), and acceptance criteria including browser verification — fully actionable without further product input.",
       "prodImpact": "none",
-      "impactEvidence": "No production impact: this is a pure UX/observability gap, not a defect in running behavior. internal/observ/observ.go's GET /status handler (built starting line 604) only ever emits moduleDetails keyed by pipeline module name; web/src/routes/Health.tsx lines 24-27 explicitly document there is no dependency-health data source yet. Nothing crashes, no data is lost, no request degrades — the dashboard just shows an inferred (and admittedly misleading) proxy for dependency health instead of the real thing.",
+      "impactEvidence": "Pure feature addition; nothing in production is broken by its absence. The existing derivation Health.tsx uses (moduleDetails per pipeline module) is misleading but is a UX/design concern the issue itself proposes to fix, not an active incident — no crash, no dataloss, no outage path exists here.",
       "touches": [
         "internal/observ/observ.go",
         "internal/observ/observ_test.go",
-        "web/src/routes/Health.tsx",
-        "web/src/routes/Health.module.css",
-        "web/src/api/queries.ts",
-        "web/src/strings.ts"
+        "web/src/routes/Health.tsx"
       ],
       "frontend": true,
       "effort": "M",
       "reproCheck": null,
       "statedBlockers": [],
-      "concurrency": false,
       "digest": "79946a2f93974147a04dc3f812c1c4377a6787c5398f8912e4179dbb44e00df2"
-    },
-    "215": {
-      "number": 215,
-      "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "web/src/styles/global.css:8 locks both scroll axes (`html, body { overflow: hidden }`); web/src/components/Layout.module.css:12 gives `.main` only `overflow-y: auto`, no horizontal counterpart. Any view whose fixed-width columns exceed the viewport (issue's own measurements, e.g. routes/Jobs.module.css:35's fixed column widths totalling ~494px) renders content that cannot be reached by any scroll gesture -- not merely clipped, genuinely unreachable. routes/Overview.module.css:236-249 already documents dropping a data column (PEER) at 375px specifically because of this bug, citing issue #215 by number in the comment.",
-      "touches": [
-        "web/src/components/Layout.module.css",
-        "web/src/styles/global.css"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open the dashboard, narrow the window to ~375-600px, go to Jobs, and try to horizontally scroll to reach the clipped right-hand columns — currently impossible because html/body overflow hidden blocks the axis.",
-      "statedBlockers": [],
-      "needsDecision": {
-        "architecture": false,
-        "configKey": false,
-        "migration": false
-      },
-      "digest": "7acbd236e7db3e2c0ba411d372b6e44bd3d9934e3cd30174e2a3ea9096502899"
     },
     "238": {
       "number": 238,
-      "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "cmd/slusk/main.go:666-680 — sendMessageFn is only assigned inside `if soulClient != nil`; when pipeline.backend=slskd, soulClient is nil so sendMessageFn stays nil, and observ.go:525-527's own doc comment confirms Send==nil makes POST /api/messages/{username} answer 503. There is no slskd-side compensating path: internal/slskd/client.go has no messaging method at all (only Enqueue/ListDownloads/Cancel/Remove/DeleteDownloadFolder/Search*), and the only code that calls store.RecordIncomingMessage is internal/soulseek/messages.go:208 via the native client's MessageSink — nothing in internal/slskd or cmd/slusk/main.go feeds incoming messages into the store for the slskd backend. So on a slskd-backend instance the whole messaging feature is silently non-functional (clean 503 on send, incoming messages never recorded) while the rest of the pipeline runs unaffected — degraded, not outage/dataloss, since the 503 path is deliberate/handled and nothing crashes or corrupts data.",
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Verified against cmd/slusk/main.go:709-718: sendMessageFn is only wired when soulClient != nil, so slskd sends 503, and incoming PMs never reach private_messages since messageSink only exists in the native client's read loop. The issue itself flags an unresolved architectural fork (mirror slskd conversations into private_messages with a dedup-key problem, vs. read-through with no persistent history) that a maintainer needs to decide before an agent can implement this — exactly the ready-for-human bar.",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "No production breakage: the UI already degrades correctly, distinguishing 503 (can't send from here) from 502 (send failed), per cmd/slusk/main.go:709-718 and internal/observ/messages.go:268 (serveSendMessage). This is a missing feature for slskd-backend users, not a defect in shipped behavior.",
       "touches": [
-        "cmd/slusk/main.go",
         "internal/slskd/client.go",
         "internal/pipeline/ports.go",
-        "internal/store/messages.go"
+        "cmd/slusk/main.go",
+        "internal/store/store.go"
       ],
       "frontend": false,
-      "effort": "M",
-      "reproCheck": "Run with pipeline.backend=slskd; POST /api/messages/{username} returns 503 (cmd/slusk/main.go:666-680 leaves Send nil). Have another Soulseek client message the slskd account and confirm no row appears via GET /api/messages (internal/slskd/client.go has no message-receiving code path).",
-      "statedBlockers": [],
+      "effort": "L",
+      "reproCheck": null,
+      "statedBlockers": [
+        183
+      ],
       "digest": "0ac8fda408ec3b84affb05c5783a3b5192b09f796f367e5edbda106fc88cb8cb"
     },
     "250": {
       "number": 250,
-      "kind": "test",
+      "kind": "bug",
+      "category": "bug",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Confirmed against code: sendToServerGeneration's error (internal/soulseek/client.go:585-591) is the documented consequence, and startConnectedClient's fake server (connectpeer_test.go:124-161) does report the real failure via t.Logf from a background goroutine -- exactly the kind of output that gets dropped when the process exits before it flushes, but plausible rather than proven without an actual container run. The issue's own proposed next step is diagnostic (rerun with -v inside Gitea act_runner to surface the swallowed log line) before any fix can even be scoped as harness-side or client-side; that requires iterating against a container-only repro CLAUDE.md's Known Noise table already documents (#250), which is exactly the kind of environment-specific, non-locally-reproducible diagnosis this repo's triage convention routes to a human rather than an agent.",
       "prodImpact": "none",
-      "impactEvidence": "The defect is confined to a test harness sequencing issue in internal/soulseek/connectpeer_test.go (startConnectedClient, lines ~124-161) and internal/soulseek/client_test.go (drainInitialTreeAdvertisements, ~207-226); the only production code involved is the generation-mismatch check at internal/soulseek/client.go:528-531, which reports a real but downstream symptom of the fake server closing its connection early, not a defect in production behavior. No runtime path of the deployed binary is affected — this only fails inside the Gitea act_runner CI container, never locally, and is already carried as a documented exemption in CLAUDE.md line 384's Known noise table.",
+      "impactEvidence": "Test-only flake in internal/soulseek/connectpeer_test.go (TestConnectPeerIndirectSuccess) that fails only inside the CI container and never reproduces locally per the issue's own 50-run/12-core test; no code path here runs in the production binary. CLAUDE.md's Known Noise table lists it as a permitted CI failure, not a runtime defect.",
       "touches": [
         "internal/soulseek/connectpeer_test.go",
-        "internal/soulseek/client_test.go"
+        "internal/soulseek/client_test.go",
+        "internal/soulseek/client.go"
       ],
       "frontend": false,
-      "effort": "M",
-      "concurrency": true,
-      "reproCheck": "Run `go test -v ./internal/soulseek/ -run TestConnectPeerIndirectSuccess` inside the Gitea act_runner container (docker.gitea.com/runner-images:ubuntu-latest) and check whether the fake server's t.Logf lines from its startup drain sequence (drainLoginRequest / SetListenPort frame / the six-step drainInitialTreeAdvertisements) surface a diverging step — this cannot be checked locally; 50 local runs including 20 under CPU load have never reproduced it.",
+      "effort": "L",
+      "reproCheck": "go test -v ./internal/soulseek/ -run TestConnectPeerIndirectSuccess run inside the Gitea act_runner container (docker.gitea.com/runner-images:ubuntu-latest) -- passes locally per the issue, so a local run proves nothing about it",
       "statedBlockers": [],
+      "concurrency": true,
       "digest": "c59ec27327cca95f66f4d0924231883e5231b61cd4ed630494367e6a920f788d"
     },
     "267": {
       "number": 267,
-      "kind": "techdebt",
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The issue lays out two architecturally distinct fixes (move pagination to URL search params for synchronous scope, vs. defer the first stream open by a tick) with real tradeoffs -- shareable filtered links vs. a startup delay before live data -- and says the choice is undecided. That is a product/architecture call, not something an agent can pick unilaterally; the code's own comment in stream.tsx (lines 235-255) independently confirms a fix needs \"a real restructuring of how useJobScope publishes.\" Confirms the current ready-for-human label.",
       "prodImpact": "degraded",
-      "impactEvidence": "web/src/api/stream.tsx:257-336 — mounting /jobs via client-side navigation opens an unscoped EventSource first (jobsScope still undefined on first commit), then a scoped one once useJobScope's child effect runs; each source.onopen (line 329) fires invalidateQueries on queryKeys.jobs and queryKeys.charts (extra REST round trips), and each open triggers internal/observ/stream.go:1050 refreshCorrelation server-side (three DB queries per open, per doc comment at stream.tsx:38-45/235-255). Confirmed by browser verification in the issue's 2026-07-30 comment: three GET /api/stream calls on client nav to /jobs vs one on a direct page load. Bounded per-navigation waste, not unbounded growth or data loss — fits 'degraded' (wasted work, repeated REST/DB calls) not 'dataloss' or 'outage'.",
+      "impactEvidence": "web/src/api/stream.tsx:235-255 (the jobsScope doc comment, which names #267 explicitly) documents that mounting a scope-publishing route opens THREE EventSource connections in quick succession, not two -- an unscoped first commit plus two useJobScope republishes as the async query resolves. Each open triggers onopen's invalidateQueries on queryKeys.jobs and queryKeys.charts (stream.tsx:329-332), i.e. extra REST rounds, and the server-side subscribe path runs a synchronous refreshCorrelation per the issue body (three DB queries; that claim lives in internal/observ/stream.go, outside the paths I read, so not independently verified here). This is wasted work on every client-side navigation to /jobs or Overview, not a correctness or availability failure -- fits \"degraded\", not \"outage\"/\"dataloss\".",
       "touches": [
         "web/src/api/stream.tsx",
-        "web/src/routes/Jobs.tsx"
+        "web/src/routes/Jobs.tsx",
+        "web/src/routes/Overview.tsx"
       ],
       "frontend": true,
       "effort": "M",
-      "reproCheck": "In the PR lab, load `/` then click into the `jobs` nav link (client-side navigation, not a direct URL load) and watch the network tab for /api/stream — expect two or three GET /api/stream requests in quick succession (one unscoped ?jobs=, then a scoped ?jobs=1,2,5 request), with the first aborted.",
+      "reproCheck": "Open the /jobs route via client-side navigation (not a hard reload) with the network panel open and watch for two or three EventSource connections to /api/stream opening in quick succession -- the pinning test referenced in stream.tsx's comment (in web/src/api/stream.test.tsx) is the automated version of this check.",
       "statedBlockers": [],
-      "needsDecision": {
-        "architecture": true,
-        "configKey": false,
-        "migration": false
-      },
-      "concurrency": false,
-      "digest": "a461e8de0a8971a943cbf0c1a438fdd434e49fd899b20db1d30b51deb4e437d1"
+      "digest": "09e1593479a4672ce1fb70718264bf2bc73eab3f7f331bea05733203f55fd8da"
     },
     "273": {
       "number": 273,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The backend prerequisites this issue was blocked on are now done — #470 (closed) added the IMPORT_REFUSED state, import_refused_reason column (internal/store/migrations/0019_album_jobs_import_refused_reason.sql) and a rejected-file path written to the event log — but the issue itself still has no spec: no route, no wireframe, no decision on whether the view is informational-only or also offers retry/force-import actions. That is a product/IA call, not something an agent can infer from the code, so it stays ready-for-human despite the maintainer's 2026-08-09 note moving it from 'parked' to 'next in line to become specifiable' — specifiable is not yet specified.",
       "prodImpact": "none",
-      "impactEvidence": "Feature request only, no defect in running code. Backend already tracks NOT_IMPORTED jobs and reasons (internal/app/jobs.go:166 references core.StateNotImported; internal/store/dashboard.go and internal/observ/observ.go already surface NOT_IMPORTED); this issue asks for a new frontend view, not a fix to existing behaviour.",
+      "impactEvidence": "Pure UI feature request; no route or component for this view exists yet (web/src/App.tsx:78-90 lists all current routes and none covers import-failure explanation), so nothing running in production is degraded by its absence.",
       "touches": [
+        "web/src/App.tsx",
+        "web/src/routes/Jobs.tsx",
+        "web/src/api/queries.ts",
         "web/src/api/types.ts",
-        "web/src/components/JobActions.tsx",
         "web/src/strings.ts"
       ],
       "frontend": true,
       "effort": "L",
       "reproCheck": null,
-      "statedBlockers": [
-        368
-      ],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": true,
-        "configKey": false,
-        "migration": false
-      },
-      "digest": "81a058836c920f43b216bc00ffcf601c97fb6a6d4a7e1a32ea00e449a63bd7c6"
+      "statedBlockers": [],
+      "digest": "dc02773f83b521643587f98f7d5c30d03e5fc484bc4caa870d4c33446e066248"
     },
     "278": {
       "number": 278,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Feature request for a pre-import hook script with no existing implementation to point an agent at; requires product decisions (which template params, blocking vs fire-and-forget, timeout/error handling, config location, security implications of running arbitrary scripts with daemon privileges) before any code can be written. internal/config's strict-unknown-keys validation (internal/config) means the config surface for this must be designed deliberately, reinforcing this is a human call, not an agent one.",
       "prodImpact": "none",
-      "impactEvidence": "No production impact: this is a feature request for a not-yet-existing capability. Confirmed via grep -rn \"exec.Command|os/exec\" internal/ returning zero matches — no script-execution mechanism exists anywhere in the codebase today, so nothing in production can be affected by its absence.",
+      "impactEvidence": "Feature does not exist yet — nothing runs in production today that this issue affects; it is a request for new functionality, not a defect in shipped code.",
       "touches": [
-        "internal/pipeline/importing.go",
         "internal/config/config.go",
         "config.example.toml"
       ],
       "frontend": false,
-      "effort": "L",
-      "reproCheck": null,
-      "statedBlockers": [],
       "concurrency": false,
-      "needsDecision": {
-        "architecture": true,
-        "configKey": true,
-        "migration": false
-      },
-      "digest": "61acc7d38268606f84820cfe9ae2f9df92851cc9189b8ddb77eddda89d6755f6"
-    },
-    "280": {
-      "number": 280,
-      "kind": "feature",
-      "prodImpact": "none",
-      "impactEvidence": "Nothing in internal/lidarr/client.go (read in full, all exported methods) calls a Lidarr logs endpoint, and no code under internal/lidarr or internal/pipeline/importing.go detects an \"already exists\" rejection reason today — this asks for functionality that does not exist yet, so it has no effect on the running instance as the code stands.",
-      "touches": [
-        "internal/lidarr/client.go",
-        "internal/pipeline/importing.go"
-      ],
-      "frontend": false,
-      "effort": "L",
-      "reproCheck": null,
-      "statedBlockers": [],
-      "concurrency": false,
-      "digest": "5ae34f60703ac75b6cee651a79171dd5c24eee2914d7fe28c6d8cf33e84e159f"
-    },
-    "291": {
-      "number": 291,
-      "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/api/queries.ts:487 (useJobs) unconditionally applies replaceLiveJobPage to every page regardless of params.filter, and web/src/routes/Overview.tsx:125-128,346 feeds that into the RECENTLY FINISHED panel's <Tag status={job.status} bare /> — confirmed still present on origin/main. Effect is a transient, self-healing UI mislabel (wrong status tag + slightly stale age column) for up to LIVE_JOB_FRESH_MS=10s (web/src/api/queries.ts:122) on a row that has already completed correctly server-side; no data is lost or corrupted and the job's actual persisted state is unaffected.",
-      "touches": [
-        "web/src/api/queries.ts",
-        "web/src/routes/Overview.tsx"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "In the browser, watch the Overview RECENTLY FINISHED panel immediately after a job transitions to a terminal state and check within ~10s whether the row briefly shows an ACTIVE/DL tag and a pre-completion age. The issue's own last verification comment found this was never actually caught in 3 browser attempts (earliest observed row was 22s post-transition), so a direct unit test on replaceLiveJobPage/useJobs (per the issue's acceptance criteria) is the reliable way to verify, not further browser polling.",
-      "statedBlockers": [],
-      "digest": "72e0f666baebc76a5bf5ae10b0c9c80bee7bc3be69cfd15f69afc65b8653c0e4"
-    },
-    "293": {
-      "number": 293,
-      "kind": "test",
-      "prodImpact": "none",
-      "impactEvidence": "cmd/slusk/main.go:295-343 (pagedJobsFn/bulkRetryFn) maps every field of PagedJobsQuery to store.DashboardJobsQuery correctly today, and no test file in cmd/slusk (checked main_test.go et al.) exercises this closure — internal/observ/observ_test.go mocks PagedJobs away (e.g. line 337) and internal/store/dashboard_test.go constructs DashboardJobsQuery directly, never through this mapping. As the code stands the mapping is correct, so there is no current runtime defect — the risk is a future field-dropping regression going undetected, which is a test-coverage gap, not an active production effect.",
-      "touches": [
-        "cmd/slusk/main.go",
-        "cmd/slusk/main_test.go"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": null,
-      "statedBlockers": [],
-      "concurrency": false,
-      "digest": "d3c82183f4b2b2c294a8553b021ad0e6cfd1fad6bfa781a50cbeecaf0504168b"
-    },
-    "294": {
-      "number": 294,
-      "kind": "techdebt",
-      "prodImpact": "none",
-      "impactEvidence": "internal/store/candidates.go:57-61 is a real invariant violation (see internal/store/pipeline.go:140-155 and 164-168, which document \"every transition UPDATE must be conditional\" for this table), and it is reachable, not just theoretical: CancelJobsNotWanted (internal/store/pipeline.go, invoked from WantedSync at internal/pipeline/wanted.go) can move a WANTED job to CANCELLED concurrently with Discovery's InsertCandidates call at internal/pipeline/discovery.go:490. When that race lands, InsertCandidates still resets retries/empty_searches/not_before/updated_at on the now-CANCELLED row. But CANCELLED is terminal and excluded from the dashboard's job list query (internal/store/dashboard.go:261: `WHERE j.state != $1` bound to StateCancelled) and from RunnableJobsInState, so the clobbered fields are never read again by anything - no retry, no re-display, no re-processing. Real guard omission, no reachable production consequence given today's callers/queries.",
-      "touches": [
-        "internal/store/candidates.go",
-        "internal/store/candidates_test.go"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": "go test ./internal/store/ -run TestInsertCandidates -v (currently passes without a state guard; add a case that forces a job to DONE/CANCELLED then calls InsertCandidates and asserts retries/not_before/updated_at are unchanged — it fails against the current unconditional UPDATE)",
-      "statedBlockers": [],
-      "digest": "1fc772f2fca1af886c034e8e93494ef4c6c3c0d4ab71bfd5e79ce37ea299db61"
-    },
-    "298": {
-      "number": 298,
-      "kind": "techdebt",
-      "prodImpact": "none",
-      "impactEvidence": "scripts/triage/waves.mjs and docs/triage/state.json are dev tooling for the backlog-triage skill, wired only into the Makefile test target (`node --test scripts/triage/*.test.mjs`, Makefile:15) — grep confirms no cmd/ or internal/ path references \"triage\" at all, so this cache-invalidation gap cannot affect the running slusk instance; it only degrades the trustworthiness of a maintainer-facing triage report. (The distillation's third path, internal/store/candidates.go, is unrelated to this issue — read in full, it's the pipeline candidates persistence layer; the issue body itself cites only scripts/triage/waves.mjs's invalidate() and docs/triage/state.json.)",
-      "touches": [
-        "scripts/triage/waves.mjs",
-        "scripts/triage/waves.test.mjs",
-        ".claude/skills/backlog-triage/SKILL.md"
-      ],
-      "frontend": false,
       "effort": "M",
       "reproCheck": null,
       "statedBlockers": [],
-      "needsDecision": {
-        "architecture": true
-      },
-      "digest": "0b3e3c209b34c113fcf3622843244e1101cd0852b810824d7df32b7ba141eedd"
-    },
-    "299": {
-      "number": 299,
-      "kind": "bug",
-      "prodImpact": "none",
-      "impactEvidence": "scripts/triage/waves.mjs is the backlog-triage CLI tool (a dev-tooling script), not code that ships in the built binary or runs against the production slusk instance — internal/store and internal/pipeline (listed in the distilled issue's paths) are not actually touched by this bug. Confirmed the defect itself at scripts/triage/waves.mjs:66-90: contractsTouched() (line 76 `.map(c => c.name)`) discards which side matched, and conflicts() (line 88-89) intersects by contract name only, so two issues on the same side of a contract (e.g. both touching different files under internal/config/, contract 'config' at waves.test.mjs:82) are wrongly flagged as conflicting. waves.test.mjs has a test for opposite-sides conflicting (line 95-100) but none for same-side non-conflict, confirming the gap is untested.",
-      "touches": [
-        "scripts/triage/waves.mjs",
-        "scripts/triage/waves.test.mjs"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": "Add a test case with two issues touching different files on the same side of a contract and assert conflicts(a, b, CONTRACTS) is false. Run node --test scripts/triage/waves.test.mjs — it currently returns true, confirming the bug still reproduces.",
-      "statedBlockers": [],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": false,
-        "configKey": false,
-        "migration": false
-      },
-      "digest": "5a343b090b1665eca6219c3638da418762fcd60800966b6e8aec24560f76fb99"
-    },
-    "300": {
-      "number": 300,
-      "kind": "techdebt",
-      "prodImpact": "none",
-      "impactEvidence": "The affected code is the backlog-triage dev tool itself (.claude/workflows/backlog-triage.js:279), not the slusk application shipped to production — running it cannot affect the deployed canary or any user instance. Confirmed the filter `.filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature')` (line 279) checks kind !== 'feature' but has no corresponding kind !== 'test' check, so a test-kind issue with frontend:true and a reproCheck set would wrongly enter the browser-verification candidate pool and, under BROWSER_CAP (4 per run, line ~287), could displace a genuinely browser-verifiable issue.",
-      "touches": [
-        ".claude/workflows/backlog-triage.js"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "concurrency": false,
-      "reproCheck": "Read the browser-phase filter predicate and confirm it omits kind !== 'test'; to see it manifest, run the triage workflow against a backlog containing a test-kind issue with frontend true and a non-null reproCheck and confirm it appears in the browser-phase candidate list.",
-      "statedBlockers": [],
-      "digest": "adb1d35f1c4e0f3b8fc0798b1515d02a4742fb2b5899477ace29acb329b7cd2b"
+      "digest": "61acc7d38268606f84820cfe9ae2f9df92851cc9189b8ddb77eddda89d6755f6"
     },
     "308": {
       "number": 308,
       "kind": "feature",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "No functional behavior changes for any user of the app; only what a screen reader announces for activatable rows is affected. Confirmed at web/src/routes/Overview.tsx:290-294 (transfer rows), :339-343 (finished rows), and :379-383 (failed rows): each is `role=\"row\"` with `tabIndex={0}` and an onKeyDown handler, but no `aria-roledescription`, button role, or other marker distinguishing it from a plain non-interactive table row. Keyboard operability itself (added in #292) is intact and unaffected.",
+      "category": "enhancement",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Confirmed against web/src/routes/Overview.tsx: all three tables use role=\"table\"/role=\"row\" (lines 264-291, 330-341, 368-380) with tabIndex={0} on data rows but no role or aria-label conveying that the row activates on Enter/Space, so a screen reader announces an ordinary row. Fixing it requires choosing between APG's role=\"grid\"+roving-tabindex (comprehensive but a real interaction-model change) or per-row role/aria-label (smaller but breaks table semantics) -- and Jobs.tsx already solves keyboard access differently, via a caret button and a Link inside the row (Jobs.tsx:143-197) rather than the row itself as the target, so any answer has to reconcile two different row shapes. That is a design decision with cross-cutting consequences, not a scoped code change, which is exactly what ready-for-human/enhancement already say. One caveat: the issue text cites Jobs.test.tsx:375-379 as documenting a prior failed attempt at this pattern, but that range, read directly, is unrelated -- it's a comment about the #416 source-filter-chip ALL toggle. Worth flagging to whoever picks this up.",
+      "prodImpact": "degraded",
+      "impactEvidence": "web/src/routes/Overview.tsx:291-292 -- role=\"row\" tabIndex={0} on TRANSFERS rows carries no accessible name or role indicating the row is activatable; a screen-reader user tabs onto it and hears only \"row\", with no cue that Enter/Space does anything. Same pattern repeats at lines 340-341 (RECENTLY FINISHED) and 380-381 (FAILED). Real usability degradation for screen-reader users, not data loss or an outage.",
       "touches": [
-        "web/src/routes/Overview.tsx"
+        "web/src/routes/Overview.tsx",
+        "web/src/routes/Jobs.tsx",
+        "web/src/routes/Overview.test.tsx",
+        "web/src/routes/Jobs.test.tsx"
       ],
       "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open Overview in a screen reader, tab to a transfer/finished/failed row, and confirm it is announced only as row, with no indication it is activatable via Enter/Space.",
+      "effort": "L",
+      "reproCheck": "Open the Overview dashboard, enable a screen reader (VoiceOver/NVDA), Tab onto a TRANSFERS/RECENTLY FINISHED/FAILED row -- it announces only \"row\", with no indication Enter/Space activates it. Falsified if the announcement already conveys actionability.",
       "statedBlockers": [],
       "digest": "c2763518c86d84469c9b0ba5498c1999cb07581aa57832a42b64e9c36b9ae7a0"
-    },
-    "314": {
-      "number": 314,
-      "kind": "techdebt",
-      "prodImpact": "dataloss",
-      "impactEvidence": "internal/pipeline/paths.go:47-51 (cleanupFolder) and :95-99 (cleanupCompletedFolder) both call commonLeaf(filenames) and silently `return` with zero logging when it yields \"\" (paths.go:236-238 returns \"\" for len(filenames)==0). The DONE-job path that hits this with zero transfer rows is measured in production (issue comment, 2026-07-30): 77 of 3004 DONE jobs in a 30-day window. Confirmed also structurally: internal/store/pipeline.go:190-196 ResetJobToWanted deletes candidates/transfers on every non-terminal retry, so any job that retries more than once can only ever have its last search cycle's folders derived - earlier cycles' folders become permanently unreachable by any cleanup path in the codebase. This matches the dataloss row's own wording: \"files left behind that nothing will ever clean up.\"",
-      "touches": [
-        "internal/store/migrations/0014_job_download_folders.sql",
-        "internal/store/pipeline.go",
-        "internal/pipeline/paths.go",
-        "internal/pipeline/selecting.go",
-        "internal/pipeline/downloading.go",
-        "internal/pipeline/importing.go"
-      ],
-      "frontend": false,
-      "effort": "L",
-      "reproCheck": "Run the production SQL from the 2026-07-30 issue comment against the live DB (or an equivalent testenv query): jobs whose successful candidate has zero transfers rows fall into the silent branch of commonLeaf/cleanupFolder with no log line and no job_event - grep internal/pipeline/paths.go:47-51 confirms no logging occurs on the leaf==\"\" return.",
-      "statedBlockers": [],
-      "digest": "27e67a593cc04b9c8b8c8f0b91acbb8ac87eb563975fd3556494406146e58979"
-    },
-    "317": {
-      "number": 317,
-      "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "internal/pipeline/discovery.go:393-397 documents that no cross-cycle rejection filter exists; internal/store/pipeline.go:190-196 (ResetJobToWanted) deletes all candidates/transfers on every WANTED reset; internal/pipeline/selecting.go:216-222 calls failOrBackoff(resetToWanted=true) when candidates are exhausted. Since Soulseek search results are deterministic for a fixed query, the next cycle re-caches and re-downloads the same already-failed candidate, wasting up to MaxRetries x candidate-count full downloads before the job fails. No data loss (rejected files are cleaned up in Importing.failCandidate for non-manual jobs) and no outage (job still eventually fails/succeeds per normal retry accounting) -- purely wasted bandwidth/time, so degraded not dataloss/outage.",
-      "touches": [
-        "internal/store/pipeline.go",
-        "internal/pipeline/discovery.go",
-        "internal/pipeline/selecting.go",
-        "internal/pipeline/importing.go",
-        "internal/core/types.go"
-      ],
-      "frontend": false,
-      "effort": "M",
-      "reproCheck": "Seed a job whose only Soulseek search result is a candidate that Lidarr will reject on import, let it run through IMPORTING->SELECTING->exhausted->WANTED->Discovery again, and confirm the same (username, release_directory) candidate is re-downloaded rather than filtered out.",
-      "statedBlockers": [],
-      "digest": "c3ed76074398a287d9651a905837f41c38e922fd4f14c17f6f1ea25d6dfc286c"
-    },
-    "318": {
-      "number": 318,
-      "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "internal/pipeline/backoff.go:76 (recordBackoffEvent) hardcodes detail=\"\" for every job_failed event written via failOrBackoff (called at backoff.go:57). This is purely an audit-trail/UI gap: internal/store/dashboard.go:799-818 (LatestFailureDetails) already has a documented fallback (comment at dashboard.go:790-798, added for #310) that falls back to the newest non-empty-detail event of any kind when job_failed itself has none. No pipeline state, retry logic, or job outcome is affected -- only how informative the FAILED JOBS panel's reason text is.",
-      "touches": [
-        "internal/pipeline/backoff.go",
-        "internal/pipeline/backoff_test.go"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": "Trigger a job to exhaust retries and fail, then SELECT detail FROM job_events WHERE event='job_failed' ORDER BY id DESC LIMIT 5; detail is empty string for every row.",
-      "statedBlockers": [],
-      "digest": "df759806dad8083925ec0c889772340e68fa93eb8eacd728bacac5a08b597c4c"
     },
     "319": {
       "number": 319,
       "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "internal/pipeline/discovery.go:291-352 — when Peers.Search returns 0 raw results, Discovery already retries with a normalized query and (past a threshold) a token-dropped rewrite (mitigation shipped for #334), but when all attempts still return zero it records `searched album, query=%q results=0 candidates=0` (line 349) and the job can end FAILED with that same string surfaced in the FAILED JOBS panel (per issue body, post-#310). That message is indistinguishable from a genuine no-peer-has-it outcome even though the issue's own measurements show some zeros are network-level filtering of specific word combinations, not absence — \"missing observability that hides a genuine failure\" per the rubric.",
+      "category": "bug",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Root cause is confirmed external to slusk (server-side filtering behavior on Soulseek, reproduced identically via native client and slskd), and a mitigation already merged in PR #334 (verified in internal/pipeline/discovery.go: emptySearchRewriteThreshold=2 triggers matcher.DropTokenQuery fallback). What remains is a product/UX judgement call -- whether and how confidently to surface \"possibly filtered\" vs \"no peer has this\" in the FAILED JOBS panel -- which the thread itself says cannot be delegated to an agent because it is a claim-confidence decision, not an implementation detail.",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "internal/pipeline/discovery.go:333-338 shows the empty-search fallback (matcher.DropTokenQuery, triggered at emptySearchRewriteThreshold) already fires and records core.EventSearchFallback, so jobs are no longer needlessly burning retry budget on this post-#334. What remains is that the FAILED JOBS panel message \"searched album, query=%q results=%d candidates=%d\" (internal/pipeline/discovery.go, per issue comment 4057) does not distinguish a filtered zero from a genuine zero -- a reporting/observability gap, not data loss or degraded pipeline throughput.",
       "touches": [
         "internal/pipeline/discovery.go",
-        "internal/store/dashboard.go"
+        "web/src (FAILED JOBS panel messaging, exact component not yet identified)"
       ],
-      "frontend": false,
-      "effort": "S",
+      "frontend": true,
+      "effort": "M",
       "reproCheck": null,
-      "statedBlockers": [],
-      "digest": "33f999d7aa4a1d4689d7e44886e93cf429189c4aa30bd6a6297d61277d431889"
-    },
-    "324": {
-      "number": 324,
-      "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "internal/soulseek/shares.go:1057-1069 (matchesShareSearch) and shares.go:1071-1143 (shareSnapshot.match) never consult c.excludedPhrases, so respondToSearch (shares.go:870-929) serves peer.File results whose paths contain the server's pushed excluded-search-phrase list (client.go:301-307 documents the list exists so \"well-behaved peers never answer a search whose terms cover one of these phrases\" — slusk answers anyway with matching files). Confirmed the outgoing-query filter (search.go:237, matchExcludedPhrase at search.go:503-524) uses token-set semantics and only guards queries slusk sends, not files slusk returns to others' searches — no code path filters response files at all. This doesn't stall the pipeline or lose data, but it is a real, continuous protocol-etiquette violation each time another peer searches and matches an excluded file, with plausible risk to the account's standing on the network; not \"cosmetic\" since the actual bytes sent over the wire are wrong, not just a log/UI string.",
-      "touches": [
-        "internal/soulseek/shares.go"
+      "statedBlockers": [
+        334
       ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": "Push a server excluded-search-phrase list that covers a token present in a locally shared file's virtual path, have another test peer send a query that matches that file, and check whether shareSnapshot().match(...) still returns that file in results — it will, since matchesShareSearch never checks c.excludedPhrases.",
-      "statedBlockers": [],
-      "digest": "d5cfb4dc2e9dfc2540e3e2006d80fe33c44175b65a3a4917340c2b688ac704f4"
+      "digest": "a4139cf76b752544e717b20faf68e6682738985c446a0589c0f1ad5c0113181d"
     },
     "327": {
       "number": 327,
       "kind": "bug",
+      "category": "bug",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Confirmed against internal/matcher/relevance.go: minDirPrecision=0.6 (line 35) and the fail-open SourceNoData path (line 141) both exist as described, and the numeric-title behavior is pinned by a named test in relevance_test.go. The issue itself explicitly forbids changing thresholds without lab calibration data that has never been collected (no lab-run comment exists), and two prior triage passes on this issue independently reached the same ready-for-human conclusion for the same reason: the lab run serialises, needs real Soulseek creds, and the output is a threshold trade-off judgement call, not a pass/fail an agent can make alone.",
       "prodImpact": "degraded",
-      "impactEvidence": "internal/matcher/normalize.go:103 (yearRe `^(19|20)\\d{2}$`) and :174 (isNoise's yearRe branch) classify a purely-numeric album title like \"1984\"/\"1989\"/\"1999\" as noise; relevance.go:138-142 then finds titleTokens empty and returns Match:true via SourceNoData unconditionally, i.e. the #316 relevance gate is silently disabled for these albums. This is locked in as expected/current behavior by the existing test at internal/matcher/relevance_test.go:298 (\"purely numeric title fails open via SourceNoData\"). Effect: CheckRelevance accepts any wrong-album candidate whose path happens to satisfy Soulseek's token-AND search for a numerically-titled album - wasted downloads / possible wrong imports, not a stalled pipeline or destroyed data, so degraded rather than dataloss.",
+      "impactEvidence": "internal/matcher/relevance.go:141 (SourceNoData accepts every candidate unchecked for numeric-only titles) and internal/matcher/relevance.go:35 (minDirPrecision=0.6 rejects verified-correct albums, e.g. collaboration/label directory names)",
       "touches": [
-        "internal/matcher/normalize.go",
         "internal/matcher/relevance.go",
+        "internal/matcher/normalize.go",
         "internal/matcher/relevance_test.go"
       ],
       "frontend": false,
       "effort": "M",
-      "reproCheck": "go test ./internal/matcher/ -run TestCheckRelevance -v (already green today, confirming the fail-open case at internal/matcher/relevance_test.go:298); or call matcher.CheckRelevance with AlbumTitle:\"1984\" and Files from an unrelated directory and observe Match:true, Source:SourceNoData.",
+      "reproCheck": "./testenv/lab.sh reset, then compare SELECT state, count(*) FROM album_jobs GROUP BY state against a pre-gate baseline, and read SELECT detail FROM job_events WHERE event='candidate_rejected' for rows containing 'not matching the requested album'",
       "statedBlockers": [],
-      "concurrency": false,
       "digest": "8752b3c15f971bf4b56ab5a94a4f927f6215b0251b78ec1d18c0e05eb28afb61"
-    },
-    "367": {
-      "number": 367,
-      "kind": "techdebt",
-      "prodImpact": "degraded",
-      "impactEvidence": "web/src/api/queries.ts:1010 sets refetchInterval: THREAD_INTERVAL (3000ms, defined line 113) on useThread's useInfiniteQuery. TanStack Query v5 refetches every already-fetched page of an infinite query on each interval tick, not just the first, so once a user has clicked \"load older\" several times in a chat thread, every 3s tick issues one GET per loaded page (queryFn at line 1003) instead of one — real wasted request volume against the peer/server that scales with how far back the user has scrolled. That is exactly the 'degraded' row's \"wasted work, repeated retries... under real load.\"",
-      "touches": [
-        "web/src/api/queries.ts"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open a chat thread in the SPA, click \"load older\" 4-5 times to load multiple pages, then watch the Network tab: every ~3s a full round of requests fires (one per loaded page) instead of a single request.",
-      "statedBlockers": [],
-      "concurrency": false,
-      "digest": "360907d788aebb247b348e73cf3c4bc3cd6047cc66553edcf4859ffef4a82ca9"
-    },
-    "368": {
-      "number": 368,
-      "kind": "feature",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "No data is lost or behaves worse: internal/observ/observ.go:997 and internal/store/dashboard.go's validateDashboardJobsQuery (switch on q.Filter, case list ending 'failures') both reject filter=notImported with a 400 (correct rejection, just missing a value), and internal/store/dashboard.go:590-609 computes DashboardStatusFacets without a NotImported field/COUNT(*) FILTER, so the chip row (web/src/routes/Jobs.tsx:46 CHIP_ORDER) omits notImported while Facets.Status.All still includes those jobs. Every value returned is correct; the UI just fails to expose one status, matching the cosmetic row ('something the UI says is wrong or misleading') rather than degraded — nothing retries, nothing queries slower, and no observability that hides a genuine backend failure is lost (the underlying job and its NOT_IMPORTED state remain fully queryable elsewhere, e.g. the job detail view and the DB).",
-      "touches": [
-        "internal/store/dashboard.go",
-        "internal/observ/observ.go",
-        "web/src/api/types.ts",
-        "web/src/routes/Jobs.tsx",
-        "web/src/routes/Jobs.test.tsx",
-        "internal/store/dashboard_test.go"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "GET /api/jobs?filter=notImported returns 400 'invalid filter' (internal/observ/observ.go:997); on the Jobs page, sum the seven status chip counts against the ALL total when a NOT_IMPORTED job exists — they will not match.",
-      "statedBlockers": [],
-      "digest": "b1ac816dc720d7a61ba174359f95bb4268faebb13d549fae2ad8c19fecf60d77"
     },
     "382": {
       "number": 382,
       "kind": "techdebt",
+      "category": "tech-debt",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "This is an unresolved architecture proposal (author explicitly states \"Inget beslut fattat\", no ADR written yet, three alternatives A/B/C weighed with no pick made). It requires a maintainer decision on scope and direction before any implementation work — not something an agent can pick up and execute.",
       "prodImpact": "none",
-      "impactEvidence": "Pure architectural proposal, not yet decided (issue body: \"Inget beslut fattat\"). Confirmed internal/observ/observ.go:375-539 does hold a 60+-field ServerDeps struct of mostly function closures, matching the claim, but the issue only documents the problem and lists three considered approaches (A/B/C) with four open questions — no code change is proposed or requested yet, so nothing here can affect the running instance.",
-      "touches": [],
+      "impactEvidence": "Pure documentation/design proposal, no code change proposed or implied; internal/observ and internal/app already coexist in production as described without functional defect.",
+      "touches": [
+        "cmd/sluskdarr/main.go",
+        "internal/observ/serverdeps.go",
+        "internal/observ/identify.go",
+        "internal/app/identify.go",
+        "CONTEXT.md",
+        "docs/adr"
+      ],
       "frontend": false,
       "effort": "L",
       "reproCheck": null,
       "statedBlockers": [],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": true
-      },
       "digest": "b05763d5e322b228c4151f4a39f2d458e0a5f9cfb1566ee0305f7156f628ffce"
-    },
-    "386": {
-      "number": 386,
-      "kind": "bug",
-      "prodImpact": "dataloss",
-      "impactEvidence": "internal/soulseek/fileconn.go:170-176 (streamFile writes the resume offset then os.OpenFile's the .part file, with no ctx check in between) races internal/soulseek/downloads.go:702-718 (Remove cancels the transfer, deregisters it via c.downloads.remove(tr), then calls os.Remove(partPath) once). If OpenFile runs after Remove's os.Remove, it recreates partPath after Remove already reported success and deregistered the transfer; grepping `.part` across internal/soulseek and internal/pipeline shows nothing ever revisits or cleans up a .part file for a deregistered id, so the recreated file is permanently stranded on disk -- the dataloss row's own wording (\"files left behind that nothing will ever clean up\").",
-      "touches": [
-        "internal/soulseek/downloads.go",
-        "internal/soulseek/fileconn.go"
-      ],
-      "frontend": false,
-      "effort": "M",
-      "reproCheck": "Add a -race unit test that pauses streamFile (via a test hook/sleep) between the Offset write and os.OpenFile while Remove runs concurrently, then assert no .part file exists on disk after Remove returns and after the paused goroutine resumes.",
-      "statedBlockers": [],
-      "concurrency": true,
-      "digest": "c11859ba3956cbe18b383ebd316830a7d2a1f868adf5c98ebc5aed187ebef89d"
-    },
-    "391": {
-      "number": 391,
-      "kind": "feature",
-      "prodImpact": "none",
-      "impactEvidence": "Feature request, not a defect: web/src/components/chrome/TopBar.tsx renders correctly today and nothing in the running instance behaves incorrectly as a result of the missing link. The gap is legal/compliance (AGPL §13 offer-of-source), not a runtime effect — docs/adr/0002-agpl-3.0-license.md itself states 'Nothing in the UI does that yet' as a stated consequence of the license choice, not a bug in existing code.",
-      "touches": [
-        "web/src/components/chrome/TopBar.tsx",
-        "web/src/components/chrome/TopBar.test.tsx"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": null,
-      "statedBlockers": [],
-      "digest": "4b1942349548e560237ba715a9e6ac3640ad8a1031ac10ca27c60271abb486f5"
-    },
-    "395": {
-      "number": 395,
-      "kind": "feature",
-      "prodImpact": "degraded",
-      "impactEvidence": "internal/soulseek/client.go:710-720 (trySetup) fetches the gluetun forwarded port exactly once, only from retryStartup at process start; c.listenPort (client.go:604, read at client.go:855 in SetListenPort) is never re-fetched or re-advertised afterward. When gluetun rotates the forwarded port, slusk keeps listening on and advertising the stale port, so peers must fall back to indirect (server-relayed) connections instead of direct ones -- a functioning-but-worse state, with no log line anywhere in the file marking the divergence. README.md:226-228 already documents this exact limitation and names 'restart slusk' as the only recovery, confirming it is real and current, not speculative.",
-      "touches": [
-        "internal/soulseek/client.go",
-        "internal/soulseek/listener.go",
-        "README.md"
-      ],
-      "frontend": false,
-      "effort": "L",
-      "reproCheck": "Run slusk behind gluetun with port forwarding configured, let it bind and advertise the forwarded port, then trigger gluetun to rotate the forwarded port without restarting slusk; confirm slusk keeps listening/advertising the old port and logs nothing about the change.",
-      "statedBlockers": [],
-      "needsDecision": {
-        "architecture": true,
-        "concurrency": true,
-        "configKey": false
-      },
-      "concurrency": true,
-      "digest": "17b76b0a6c9abe6c0368019b46c7e0943a02023b90dfc9b4f13872f05ad85b7a"
-    },
-    "399": {
-      "number": 399,
-      "kind": "techdebt",
-      "prodImpact": "none",
-      "impactEvidence": "go.mod:1 declares `module github.com/hyzr-dev/slusk` with no /v2 suffix, and .gitea/workflows/deploy.yml builds/publishes the running canary from a Docker image (tag-triggered), never via `go install` — README.md's current \"Building from source\" section (lines 323-330) only documents `make build`. The module-proxy versioning gap cannot affect the deployed instance; it only misleads an external user who runs `go install github.com/hyzr-dev/slusk/cmd/slusk@latest` outside this repo's own tooling.",
-      "touches": [
-        "README.md"
-      ],
-      "frontend": false,
-      "effort": "S",
-      "reproCheck": "go install github.com/hyzr-dev/slusk/cmd/slusk@latest; the installed binary reports v1.59.2 instead of the current v2.x tag, because the module proxy ignores v2+ tags without a /v2 path suffix",
-      "statedBlockers": [],
-      "digest": "fab91c0450b2f1ea3f459c266dd0ca38e86354ae887c926c0aa6e135e86fde65"
     },
     "402": {
       "number": 402,
-      "kind": "feature",
+      "kind": "techdebt",
+      "category": null,
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Issue carries zero labels in the tracker (confirmed via tea issues 402 --output json). It's an unresolved three-way decision (manual re-filing vs scheduled GitHub->Gitea mirror vs issue template) with tradeoffs the author explicitly declines to pick between -- exactly the product/process judgement call that needs a human, not a spec an agent could implement without someone choosing a direction first.",
       "prodImpact": "none",
-      "impactEvidence": "This is a process/decision-point issue about routing bug reports from the public GitHub mirror (github.com/hyzr-dev/slusk) into the private Gitea tracker. No code implements or is implicated by any of the three proposed options today — there is no ISSUE_TEMPLATE, no mirror-sync workflow, and no GitHub webhook config anywhere in the repo (confirmed: find for *ISSUE_TEMPLATE*/*CONTRIBUTING* returns nothing, and grep for \"mirror\" across .gitea/workflows/ only turns up promote.yml's release-announcement step, unrelated to bug-report routing). Nothing in the running slusk instance is affected either way.",
+      "impactEvidence": "Purely a process/tooling gap about how public bug reports reach the internal tracker; it changes no code path in the running slusk instance. The issue body itself says \"no report has ever arrived, and volume is expected to be low\" and \"Not urgent\".",
       "touches": [],
       "frontend": false,
       "effort": "S",
-      "concurrency": false,
       "reproCheck": null,
-      "statedBlockers": [],
+      "statedBlockers": [
+        401
+      ],
       "digest": "e4edd3eaffb63b53b8e348adbdc031e3e6c1258116c50b206cc3ecdb3d4f28bc"
     },
     "406": {
       "number": 406,
       "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "needs-triage",
+      "labelReason": "Feature is well-scoped but the issue's own follow-up comment (verified against internal/store/users.go:71, internal/config/write.go:155/681, internal/observ/config.go:489) concludes the build should wait on measurement of whether #404's config.example.toml restructuring already solved the reported friction, and obstacle 2 (unauthenticated pre-DB endpoint receiving Postgres DSN + Soulseek passwords in plaintext) needs an ADR decision before implementation starts — not something an agent should decide unilaterally.",
       "prodImpact": "none",
-      "impactEvidence": "Pure feature request for a new pre-database setup wizard; nothing in the running instance changes as a result of this issue existing. Confirmed by reading the code it points at: internal/config/write.go (748 lines) already implements ApplySettings/TOML write machinery for the *post-login* settings view, and internal/store/users.go:1-33 plus internal/store/migrations/0011_users_and_sessions.sql already implement a first-user bootstrap flow (issue #279) that assumes Postgres is already up. web/src/routes/Setup.tsx (189 lines) already exists and is exactly that post-DB first-account flow, confirming the previous triage comment's point that the name 'Setup' is taken. None of this touches or degrades any currently running code path.",
+      "impactEvidence": "Pure feature request for tooling that does not exist yet; nothing in the current codebase is affected until this is built, so there is no running-instance impact to cite.",
       "touches": [
         "cmd/slusk/main.go",
-        "internal/config/write.go",
         "internal/observ/config.go",
-        "internal/store/users.go",
+        "internal/config/write.go",
         "web/src/routes/Setup.tsx",
-        "web/src/strings.ts",
         "config.example.toml",
-        "docker-compose.example.yml"
+        "docker-compose.example.yml",
+        "CONTEXT.md"
       ],
       "frontend": true,
+      "concurrency": false,
       "effort": "L",
       "reproCheck": null,
-      "statedBlockers": [],
-      "concurrency": false,
-      "needsDecision": {
-        "architecture": true,
-        "configKey": false,
-        "migration": false
-      },
+      "statedBlockers": [
+        404
+      ],
       "digest": "6cf079677fa00377186dfd6038af8ad7c757a41294f21a10e582fe01c37e4bd5"
     },
     "409": {
       "number": 409,
-      "kind": "bug",
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The research is done (PR #410) and pinpoints the code precisely (internal/soulseek/soul/peer/sharedfileistresponse.go:16-23), but the doc itself ends by laying out four unendorsed options -- split the constant into separate encode/decode bounds, raise the shared cap while keeping symmetry, keep the cap and instead limit how much a share can publish, and/or change error-vs-silent-skip behavior on inbound overflow -- and explicitly states 'the maintainer decides the actual constant(s) and error-handling behavior.' Picking which numbers and which failure mode to ship is a product/architecture call an agent shouldn't make unattended.",
       "prodImpact": "degraded",
-      "impactEvidence": "internal/soulseek/soul/peer/sharedfileistresponse.go:18 uses the same maxSharedFileListDecompressedSize (16 MiB) constant on both the outgoing Serialize path (line 90) and the incoming Deserialize path (line 238). Because it is applied symmetrically to slusk's own outgoing share, internal/soulseek/shares.go:662-673 turns any library beyond roughly 170,000 files into a permanent ErrShareTooLarge and disables sharing entirely for that user ('sharing is disabled until fewer files are shared', shares.go:670-672) -- a real, currently-shipping feature (publishing a share) breaks for large libraries, even though nothing in the protocol or in Nicotine+/Soulseek.NET imposes any such outbound cap (per docs/research/2026-08-03-shared-file-list-size-limits.md).",
+      "impactEvidence": "internal/soulseek/soul/peer/sharedfileistresponse.go:18 sets maxSharedFileListDecompressedSize = 16<<20 and line 90 applies it via sharedFileListLimitWriter to slusk's own outgoing Serialize path, so a library over roughly 170,000 files fails to publish its browse response (ErrMessageTooLarge raised at sharedfileistresponse.go:41) -- a real, reproducible feature limitation for large libraries, not data loss or an outage.",
       "touches": [
         "internal/soulseek/soul/peer/sharedfileistresponse.go",
-        "internal/soulseek/soul/peer/sharedfileistresponse_test.go",
-        "internal/soulseek/shares.go"
+        "internal/soulseek/soul/peer/sharing_response_test.go",
+        "internal/soulseek/soul/peer/browse_response_deserialize_test.go"
       ],
       "frontend": false,
-      "effort": "M",
-      "reproCheck": "Build a share with more than ~170,000 files so the uncompressed payload exceeds 16 MiB; confirm scanShares still returns ErrShareTooLarge, i.e. that the outbound path is still capped at the same 16 MiB as the inbound decode path.",
+      "effort": "S",
+      "reproCheck": "Serialize a share with more than ~170,000 files (or any Directories slice whose uncompressed payload exceeds 16 MiB); SharedFileListResponse.Serialize still returns ErrMessageTooLarge from sharedfileistresponse.go:41, confirming the self-imposed outbound cap is unchanged.",
       "statedBlockers": [],
+      "concurrency": false,
       "needsDecision": {
         "architecture": true,
         "configKey": false,
         "migration": false
       },
-      "concurrency": false,
       "digest": "1812aef8f99c17134efea337af8f777569f4c3b36c5eac4263b3c0ff09deaae3"
     },
     "412": {
       "number": 412,
       "kind": "bug",
-      "prodImpact": "degraded",
-      "impactEvidence": "config.example.toml's slskd option block (the '--- Option: the slskd backend instead of the native client ---' comment) tells the user the [soulseek] section 'becomes optional... but see the note above it: shares, private messaging and uploads still need it' and never says slskd needs its OWN, separate Soulseek login. docker-compose.example.yml's matching slskd option block repeats the same omission (its note says [soulseek] is 'still worth configuring under this backend' with no account-separation warning). cmd/slusk/main.go:185-206 and the comment at main.go:538-539 confirm the native soulClient is wired up independently of pipeline.backend — a slskd-download + native-share configuration is explicitly supported — and internal/soulseek/client.go:593-663 shows the native client auto-reconnects with exponential backoff after any disconnect, including a same-account login kick from a separately configured slskd instance (slskd's own login lives entirely outside slusk's config.toml, e.g. testenv/compose.yml:57-58's SLSKD_SLSK_USERNAME/PASSWORD). If a self-hoster follows the example files' recommendation and reuses one Soulseek account for both, the two processes repeatedly kick each other off the single allowed session: shares/uploads/messaging become unreliable and, in the worst case, slskd's own search/download session gets bounced too. That is 'works, but measurably worse: wasted work, repeated retries' (degraded), not outage, since slskd's search path is not permanently broken by this. CLAUDE.md and testenv/README.md already show the project knows the two-account requirement is real (the lab configures two distinct accounts, testenv/README.md:16-27), but that knowledge was never carried into the production-facing config.example.toml / docker-compose.example.yml.",
+      "category": "bug",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Verified in code (cmd/slusk/main.go:217-221, cfg.Soulseek.Enabled()) that the native soulseek client connects and logs in whenever [soulseek] is configured, regardless of pipeline.backend -- so under backend=\"slskd\" with [soulseek] filled in as config.example.toml:106-110 and docker-compose.example.yml:157-160 recommend, a user who reuses the same Soulseek account for both blocks will trigger the one-login-per-account server kick the issue describes. The fix is a scoped documentation clarification (state explicitly that the [soulseek] credentials must belong to a second, distinct Soulseek account from the one slskd itself logs in with), not an architecture or product call, so an agent can implement it without further human decision.",
+      "prodImpact": "none",
+      "impactEvidence": "config.example.toml and docker-compose.example.yml are template/example files with no runtime effect of their own (config.example.toml:1-15 documents them as PART1/2/3 templates a human copies and fills in) -- the defect only manifests if a human follows the misleading recommendation into their own instance's config, which is exactly the 'outcome means what the system does, not what a human might do in response to what it displays' bound in the rubric. Production's recommended/default-exercised backend is soulseek (native), not slskd (config.example.toml:44-50), so the canary itself is not exposed by this doc gap as things stand.",
       "touches": [
         "config.example.toml",
         "docker-compose.example.yml"
       ],
       "frontend": false,
       "effort": "S",
-      "reproCheck": "grep config.example.toml and docker-compose.example.yml's slskd option blocks for any mention of separate account or two accounts near the [soulseek]/[slskd] guidance — currently absent in both files, while testenv/README.md and CLAUDE.md already state the two-account requirement for the lab.",
+      "reproCheck": "Set pipeline.backend=\"slskd\", fill [slskd] with a working slskd install, and fill [soulseek] with the SAME Soulseek account slskd.yml uses for its own login; confirm one of the two sessions gets dropped by the Soulseek server (visible as the native client's /status soulseek module flapping between Connected/Failed, main.go:520-532).",
       "statedBlockers": [],
-      "needsDecision": {
-        "configKey": false,
-        "migration": false,
-        "architecture": false
-      },
-      "concurrency": false,
       "digest": "fca0c1f2ca53eea2775d6597b2d7997f4fe901209ad652c7329562af75818e25"
-    },
-    "414": {
-      "number": 414,
-      "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/strings.ts:67 holds the string \"slusk validates the config you already wrote — it never writes it\", rendered as the Setup page subtitle at web/src/routes/Setup.tsx:106 and :118. It is factually wrong: internal/config/write.go:155 defines ApplySettings, which writes config, and it is wired at cmd/slusk/main.go:510. Purely a misleading UI string on a page that doesn't itself write config — no functional or data-safety consequence.",
-      "touches": [
-        "web/src/strings.ts"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open the Setup page in the running UI and compare its subtitle text against the Config view, which can write config via ApplySettings.",
-      "statedBlockers": [],
-      "digest": "81d7b9db447366614110936975d011804ae2bdd3c11b7d27cd35ffb2847c0da6"
-    },
-    "417": {
-      "number": 417,
-      "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "internal/observ/observ.go:73-77 declares Queued/Stalled on StatusReport; cmd/slusk/main.go:281-289 statusFn only sets Active and Parked, so Queued/Stalled always serialize as 0. web/src/routes/Health.tsx:40-41 renders status?.queued and status?.stalled directly into the Health page. Every backend behaviour is still correct (pipeline logic untouched) — this is purely a wrong/stale number displayed on a monitoring page. Per the rubric's clarification (\"outcome means what the system does, not what a human might do in response\"), a defect that only misinforms a reader is cosmetic; nothing in the system itself behaves worse as a result.",
-      "touches": [
-        "internal/observ/observ.go",
-        "cmd/slusk/main.go",
-        "internal/store/dashboard_jobs.go",
-        "web/src/api/types.ts",
-        "web/src/routes/Health.tsx",
-        "web/src/strings.ts"
-      ],
-      "frontend": true,
-      "effort": "M",
-      "reproCheck": "GET /status while jobs exist in queued/stalled transfer states; queued and stalled fields will read 0 regardless of actual pipeline state.",
-      "statedBlockers": [
-        416
-      ],
-      "concurrency": false,
-      "digest": "3136d7fb49c75c724f3dbc75e85aafaa01e63b69d3c061f13ea4043c1ce30fab"
     },
     "420": {
       "number": 420,
       "kind": "bug",
+      "category": "bug",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Reading testenv/lab.sh confirms up() runs `compose up --detach --build --force-recreate slskd slusk` as a single step under set -eu; if the build stage fails, compose aborts before recreating anything and the previous containers (from an earlier successful build) keep answering on the lab port. wait_ready.py (testenv/wait_ready.py) only polls /healthz for any 200, which a stale container also returns, and the compose service for slusk (testenv/compose.yml) passes no build args, so the Dockerfile's `ARG VERSION=dev` default (Dockerfile:18) is never overridden and /status's version field is constant across builds. The fix (build identity via VERSION build-arg, readiness check against /status instead of /healthz, and teardown on failed build) is concretely locatable in these three files, matching the maintainer's own investigation comments on the issue. Exit-code framing was explicitly withdrawn by the reporter's own follow-up comments, so the surviving spec is narrow and well-scoped -- exactly ready-for-agent territory.",
       "prodImpact": "none",
-      "impactEvidence": "Confined entirely to testenv/, the local PR-verification lab (per CLAUDE.md: \"The local PR lab is the substitute for staging\" — explicitly not production). The stale-serving bug lives in testenv/lab.sh:66 (up() calls `compose up --detach --build --force-recreate slskd slusk` unguarded under `set -eu`, then testenv/wait_ready.py:29 polls only /healthz for liveness); if that build step fails, the script aborts via set -eu before recreating containers, leaving whatever slusk container was already running from a prior successful up/reset still serving old code, and wait_ready.py has no build/version identity check to catch that. This never touches the deployed canary or a promoted instance, so it has zero effect on the running production instance.",
+      "impactEvidence": "testenv/ is the local PR-verification lab (Postgres/Lidarr/slskd/slusk stack driven by testenv/lab.sh); it is explicitly not run in CI (per the issue's own out-of-scope section) and has no code path reachable from the deployed canary or production instances. The defect can cause an agent to falsely believe a PR is verified, but it cannot itself alter or degrade the running production service.",
       "touches": [
         "testenv/lab.sh",
         "testenv/wait_ready.py",
+        "testenv/compose.yml",
+        "testenv/README.md"
+      ],
+      "frontend": false,
+      "effort": "M",
+      "reproCheck": "In testenv/, run `./testenv/lab.sh up` once successfully, then force a build failure (e.g. point the slusk build at an unreachable base image or introduce a compile error) and run `./testenv/lab.sh up` again: confirm the previous slskd/slusk containers are still answering on the lab's dashboard port (`curl -s http://127.0.0.1:9090/healthz` returns 200) despite the failed build, and that GET /status's `version` field is identical before and after because no VERSION build-arg is passed in testenv/compose.yml.",
+      "statedBlockers": [],
+      "digest": "b5320da594a7adab42db18b920fe68245bfd27064baeb891e1f353c07462b53e"
+    },
+    "438": {
+      "number": 438,
+      "kind": "techdebt",
+      "category": "tech-debt",
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Tracker carries needs-triage + tech-debt only, no role decision yet. The issue itself lists three unexplored directions (fetch closed issues from tracker, maintain a seenOpen list, or accept the documented gap) and says outright \"Inget utrett\" (nothing worked out) -- picking among them is a product/process call about how much invalidation accuracy this triage tooling needs, not a spec an agent can execute against.",
+      "prodImpact": "none",
+      "impactEvidence": "scripts/triage/waves.mjs and docs/triage/state.json are backlog-triage tooling consumed by .claude/skills/backlog-triage and .claude/workflows/backlog-triage.js -- they never run inside the deployed slusk binary (cmd/slusk, internal/*) and cannot affect album_jobs, the pipeline, or any served endpoint. Worst case is a stale cached triage judgement in a report a maintainer reads.",
+      "touches": [
+        "scripts/triage/waves.mjs",
+        "docs/triage/state.json"
+      ],
+      "frontend": false,
+      "concurrency": false,
+      "effort": "M",
+      "reproCheck": "Craft an `invalidate` stdin payload (per waves.mjs CLI) where a cached judgement's impactEvidence cites `#999`, `state.issues` never contained a row for 999 (opened and closed entirely between runs), and `openIssues` omits 999. Run `node scripts/triage/waves.mjs invalidate` on it and confirm the judgement is returned in `fresh`, not `stale` -- demonstrating closedSince() never sees 999 because it derives closed issues only from state.json's own prior rows, exactly as the code's own doc comment on closedSince describes.",
+      "statedBlockers": [],
+      "digest": "468afd22fffb722bdedd6055a7534a62b3b5127a1d8beb479fbabac4245a8a83"
+    },
+    "447": {
+      "number": 447,
+      "kind": "bug",
+      "category": "bug",
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Verified in web/src/routes/Peers.module.css (lines 134-154) and web/src/components/Layout.module.css (line 30) that the narrowing is real and pre-existing. The issue itself frames three competing fixes (move the 640px breakpoint to 900px and lose OK/FAIL columns on laptop widths, add a container query to the shared Panel component, or accept as degraded-not-broken) and says the decision is \"undecided on purpose\" — that is an architecture/product call for a human, not a repro an agent can just implement.",
+      "prodImpact": "cosmetic",
+      "impactEvidence": "web/src/routes/Peers.module.css:151-154 — at 641px viewport the username column renders to ~56px (clips to ~8 chars); main still computes overflow-x:auto per the issue's own measurement, so content is scrollable and no functionality is lost, only readability of the username at one narrow viewport band.",
+      "touches": [
+        "web/src/routes/Peers.module.css",
+        "web/src/components/Layout.module.css",
+        "web/src/components/tui/Panel.module.css",
+        "web/src/components/tui/Panel.tsx"
+      ],
+      "frontend": true,
+      "concurrency": false,
+      "effort": "M",
+      "reproCheck": "Open the Peers view in a browser at 641x812 viewport and observe the PEER column/username clipping to ~8 characters; compare against 375x812 where it renders the full username, per the grid-template-columns measurements in the issue body.",
+      "statedBlockers": [],
+      "digest": "92433dc846716064fbf68bbd3fbbc51c88cd1e6cc084a6e509115081b8b5b54d"
+    },
+    "457": {
+      "number": 457,
+      "kind": "bug",
+      "category": "bug",
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "The issue carries only the category label \"bug\" — no triage-role label is present, so triageLabel is null. Repro steps are concrete and mechanical (docker-compose.with-lidarr.example.yml and testenv/compose.yml:78-84 already document the shared-uid precondition PR #456 fixed; what's left is running the lab end-to-end with a test Soulseek account, adding one artist, and checking that an album job reaches DONE with the source dir under /music/slskd-downloads actually removed). That's a scripted verification an agent can execute via testenv/lab.sh, contingent on testenv/.env already holding dedicated test Soulseek credentials per CLAUDE.md's lab setup.",
+      "prodImpact": "none",
+      "impactEvidence": "docker-compose.with-lidarr.example.yml is a copy-and-fill-in template users run on their own hosts (see its header instructions) — it is not deployed to the canary and has no code path executed in the running production instance. The underlying EACCES precondition it exists to prevent was already fixed and confirmed by PR #456 (same PUID:PGID for slusk and Lidarr, testenv/compose.yml:78-84); this issue only verifies the observable outcome (DONE + directory cleanup) for future adopters of the example file, so there is no defect currently reachable in production.",
+      "touches": [
+        "docker-compose.with-lidarr.example.yml",
         "testenv/compose.yml"
       ],
       "frontend": false,
       "effort": "M",
-      "reproCheck": "Run ./testenv/lab.sh up once to get a healthy lab, then introduce a build error in the checkout and run ./testenv/lab.sh up again — the script exits nonzero via set -eu while the previously running slusk container keeps answering GET http://127.0.0.1:9090/healthz with 200, serving the old binary.",
+      "reproCheck": "Run `testenv/lab.sh reset` with a dedicated Soulseek test account configured in testenv/.env, add one artist in Lidarr, wait for an album_jobs row to reach DONE, then confirm the corresponding source directory under /music/slskd-downloads (the shared downloads volume) is actually gone rather than left behind — a leftover directory is the EACCES symptom described in the issue.",
+      "statedBlockers": [],
+      "digest": "1ff940f9c87eb79174147caa5a056dcb0915a3641d5d1f6e7a56a7e8baad64fa"
+    },
+    "458": {
+      "number": 458,
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Issue carries no triage-role label yet (only 'enhancement' category), so triageLabel is null. The fix is fully specified: render_config.py:45-75 (write_lidarr_config) and its call at :190 write ApiKey/AuthenticationMethod=None into config.xml, verified against a real code path; compose.yml's lidarr service (31-46) sets no LIDARR__AUTH__APIKEY today. Steps are concrete (move key to compose env var, delete write_lidarr_config, drop the path.exists() preservation branch, verify BindAddress/Port/InstanceName equivalents) and confined to testenv/, so an agent can implement and verify via the lab without a product decision.",
+      "prodImpact": "none",
+      "impactEvidence": "testenv/render_config.py and testenv/compose.yml are local PR-lab harness files only, never deployed; no production code path touches write_lidarr_config or the lidarr service's env in compose.yml.",
+      "touches": [
+        "testenv/render_config.py",
+        "testenv/compose.yml"
+      ],
+      "frontend": false,
+      "effort": "S",
+      "reproCheck": null,
+      "statedBlockers": [],
+      "digest": "77b57aec438e32941602fa08a21001f6d3c03262f5ff970a6aab11fa31383f3f"
+    },
+    "464": {
+      "number": 464,
+      "kind": "test",
+      "category": null,
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "The issue carries no labels at all. Reading internal/soulseek/tree.go shows runCandidates launches all parent candidates concurrently (maxConcurrentParentCandidates=4, tree.go:21,309) via separate goroutines, so there is no serialization that would let a silent first candidate starve a valid later one by design -- the test's own comment at tree.go:304-307 confirms this is what it's guarding. The failure is a hard 1-second wall-clock deadline (tree_test.go:404-408) waiting for a real TCP dial+PeerInit round trip on loopback, which is exactly the kind of budget a loaded CI container can blow without any logic being wrong -- the same shape as the already-fixed #171 flake CLAUDE.md documents. That gives an agent a concrete, scoped path: harden the test's timeouts (or determine via -race and constrained-container repro that it's a genuine race) and either fix or add the known-noise line, mirroring the #171 precedent already in CLAUDE.md.",
+      "prodImpact": "none",
+      "impactEvidence": "Only internal/soulseek/tree_test.go is implicated; the code exercised (tree.go's offerParents/runCandidates) shows no code change in the flagged PR #460 touched it at all -- this is a CI test-flake report, not a runtime defect.",
+      "touches": [
+        "internal/soulseek/tree_test.go",
+        "CLAUDE.md"
+      ],
+      "frontend": false,
+      "effort": "S",
+      "reproCheck": "go test ./internal/soulseek/ -run TestPossibleParentsSilentFirstDoesNotStarveValidLater -race -count=20 inside a CPU/memory-constrained container (e.g. docker run --cpus=1 --memory=256m golang:1.26.3) to try to reproduce the 1s deadline failure under load, since it has not reproduced locally, isolated, or concurrently with other suites per the issue's own repro table.",
+      "statedBlockers": [],
+      "concurrency": true,
+      "digest": "321910349e8cd5b3a952d3386914a9cd54f46e837d9762610742f9ef481662fe"
+    },
+    "465": {
+      "number": 465,
+      "kind": "techdebt",
+      "category": null,
+      "triageLabel": null,
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "The issue documents a real gap (Gitea's actions/checkout@v4 on pull_request checks out PR head, not a merge with current main -- confirmed unmodified in .gitea/workflows/ci.yml:53) but explicitly offers three competing fixes with stated tradeoffs (merge-ref checkout, a separate best-effort merge-check job, or requiring rebase-before-merge as a Gitea repo setting) and picks none. Choosing among them is a CI/process design call, not something an agent should infer.",
+      "prodImpact": "degraded",
+      "impactEvidence": ".gitea/workflows/ci.yml:53 (actions/checkout@v4 with no ref override, so Gitea checks out PR head rather than a merge with main) combined with the go job at ci.yml:76-77 (go vet) and :96-104 (go test) -- both only see the PR's own tree, so a semantic incompatibility against files a concurrently-green PR is about to add is invisible before merge. Already manifested once: main briefly failed to compile its tests after #441 and #461 merged (different files, no textual conflict) -- limited that time to a test file, but the mechanism is unchanged in the current workflow and could next hit production code before a fix:/feat: merge auto-deploys to the canary.",
+      "touches": [
+        "/Users/samuelenocsson/dev/slskdarr/.gitea/workflows/ci.yml"
+      ],
+      "frontend": false,
+      "effort": "S",
+      "reproCheck": "Branch A from main and change a public function's signature in production code; branch B from an earlier main commit and add/modify a different file calling the old signature; merge A first (CI green), then confirm B's CI run (against its own head, not merged-with-new-main) still reports green despite being incompatible with the new main -- mirrors what already happened with #441/#461 on download_folders_test.go.",
       "statedBlockers": [],
       "concurrency": false,
-      "digest": "b5320da594a7adab42db18b920fe68245bfd27064baeb891e1f353c07462b53e"
+      "digest": "865fe6de133b82198f7ebe27c0e065d5276facfe3f161384eef25d0df30d24af"
     },
-    "432": {
-      "number": 432,
+    "466": {
+      "number": 466,
       "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/routes/Jobs.tsx:468-473 renders the pagination nav (result range + Pager) whenever hasData(phase) is true, with no totalPages>1 guard — unlike web/src/routes/Peers.tsx:202 which gates the identical UI on `totalPages > 1`. This only affects a purely visual element (an inert single-page-button pager); no data, request, or state is affected.",
+      "category": "bug",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Issue carries both 'bug' and 'tech-debt' category labels simultaneously (tracker applied both); reported 'bug' as primary since it appears first in the label list and the fix mirrors #294's bugfix pattern. Code confirms the exact gap claimed: SetJobBackoff/SetJobEmptySearchBackoff (internal/store/pipeline.go:100,115) lack the state='WANTED' guard InsertCandidates has (internal/store/candidates.go), and dashboard.go:268 confirms CANCELLED is excluded from the recent-jobs query, matching the issue's reachability claim. Fix is a mechanical two-line SQL change plus a test modeled directly on TestInsertCandidatesLeavesTerminalJobUntouched (internal/store/candidates_test.go:243) — fully specified, no design call needed.",
+      "prodImpact": "none",
+      "impactEvidence": "internal/store/dashboard.go:268 (`WHERE j.state != $1` with StateCancelled) excludes the only concurrently-reachable non-WANTED exit from the recently-finished panel that #294's guard protected, so the consistency gap has no observable symptom today, exactly as the issue itself states.",
       "touches": [
-        "web/src/routes/Jobs.tsx",
-        "web/src/routes/Jobs.test.tsx"
+        "internal/store/pipeline.go",
+        "internal/store/candidates_test.go"
+      ],
+      "frontend": false,
+      "effort": "S",
+      "reproCheck": "Add a table-driven case (styled on TestInsertCandidatesLeavesTerminalJobUntouched) for SetJobBackoff/SetJobEmptySearchBackoff: set job to CANCELLED, call each function, confirm updated_at/not_before/retries/empty_searches did not move — currently they would, since neither has a state guard.",
+      "statedBlockers": [],
+      "digest": "ed525e462ea89f0185014e4296579992087500d69bbbc0bb08141c1c8d6ac2d6"
+    },
+    "477": {
+      "number": 477,
+      "kind": "techdebt",
+      "category": "tech-debt",
+      "triageLabel": "ready-for-human",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Verified all four terminal-state registries (internal/core/state.go Terminal()/PipelineTerminal(), internal/store/dashboard.go's finished/inflight membership, web/src/components/JobActions.tsx TERMINAL_STATES) plus the two filter allowlists (dashboard.go:428 vs observ.go:1082, exact strings match today) and the two facets structs (store.JobFacets vs observ.StatusReport) all exist as described. The issue correctly flags that dashboard.go's 'finished' set is deliberately narrower than PipelineTerminal (excludes PARKED and CANCELLED, adds a time window) rather than glossing over that nuance. This is a real architectural consolidation spanning Go and TypeScript with a stated risk of touching every existing status computation — a human call on the unification design, matching its current label.",
+      "prodImpact": "none",
+      "impactEvidence": "No behavioral change requested; the issue is about consolidating duplicated definitions that currently agree with each other. No bug is reported and none was found while reading the code.",
+      "touches": [
+        "internal/core/state.go",
+        "internal/store/dashboard.go",
+        "internal/observ/observ.go",
+        "web/src/components/JobActions.tsx"
       ],
       "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open the Jobs view with a filter that yields <= JOBS_PAGE_SIZE results and confirm the pagination nav (result range + single-page-button Pager) still renders, versus the Peers view with <= PEERS_PAGE_SIZE results where the pager is correctly suppressed (web/src/routes/Peers.tsx:202).",
+      "effort": "L",
+      "reproCheck": null,
       "statedBlockers": [],
-      "digest": "90ed4d4586dc4dca133c1c52d67b433795ea78a00db0aafc9158724102dde8d2"
+      "digest": "a886ac7d870dba8811af432f0e5d222264003bf48afdc509932dabb25a798bb1"
     },
-    "433": {
-      "number": 433,
-      "kind": "bug",
+    "480": {
+      "number": 480,
+      "kind": "techdebt",
+      "category": null,
+      "triageLabel": "needs-triage",
+      "suggestedLabel": "ready-for-human",
+      "labelReason": "Code confirms the description: destLeaf/downloadDestPath in internal/soulseek/downloads.go:58-77 deliberately duplicate internal/pipeline/paths.go's commonLeaf to avoid an inverted import, and the issue correctly identifies that a per-job namespace would create backend-specific on-disk layouts. This is explicitly a design trade-off record ('filed so the option is on record with its price attached'), not a specified task -- it depends on whether #471's ownership detection proves sufficient, which is a judgement call for a human, not something an agent can decide or implement speculatively.",
+      "prodImpact": "none",
+      "impactEvidence": "The issue proposes no code change to make now -- it explicitly says 'If ownership detection turns out to be sufficient in practice, this stays closed' pending #471. Nothing in current production behavior is affected by filing this issue.",
+      "touches": [],
+      "frontend": false,
+      "effort": "M",
+      "reproCheck": null,
+      "statedBlockers": [
+        471
+      ],
+      "digest": "30c32fb8a0ed86c978af617e5d36f0028e6fe5e03aee7366626e45243bf9356f"
+    },
+    "484": {
+      "number": 484,
+      "kind": "feature",
+      "category": "enhancement",
+      "triageLabel": "ready-for-agent",
+      "suggestedLabel": "ready-for-agent",
+      "labelReason": "Verified against current main: enrichJobDTOs (internal/observ/observ.go:1128) gates FailDetail enrichment on view.Status==\"failed\", excluding parked jobs exactly as claimed; toJobDetailDTO (internal/observ/jobdetail.go:111) has no FailureDetails lookup at all, confirming finding 1; ParkedExplanation (web/src/components/ParkedExplanation.tsx) takes only state/source props with no detail, confirming it needs new plumbing. The issue plus its two agent-brief comments give exact file:line pointers, a four-case fallback matrix, explicit acceptance criteria and scope boundaries, and already split out and merged a sub-piece (#487/#488, visible in git log 06fb90f). This is about as fully specified as an issue gets.",
       "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/routes/Peers.module.css:5 sets grid-template-columns: minmax(0, 1fr) 70px 56px 56px 90px with a 10px gap (line 6), and .row's padding is 7px 16px (Peers.module.css:39). Fixed tracks + 4 gaps + row left/right padding = 70+56+56+90+40+32 = 344px. Page.module.css:2 adds 24px page padding on each side, so at a 375px viewport the content column is roughly 375-48=327px wide, less than the 344px the non-PEER tracks alone demand — minmax(0,1fr) is forced toward 0 and the PEER column (holding the only identifying data, the username) becomes illegible/overlapping. This is a pure CSS layout defect: the table still renders, sorts, paginates and expands correctly; no data is lost or corrupted and no backend behavior changes, so per the rubric (\"every behaviour is correct; something the UI says/shows is wrong\") this is cosmetic, not degraded.",
+      "impactEvidence": "No functional or data-safety impact: the feature is inert, not broken — a parked job simply shows the pre-existing static ParkedExplanation copy instead of its specific job_parked reason (internal/observ/observ.go:1128 excludes parked jobs from FailDetail lookup, so nothing crashes or misleads, it's just missing information the operator can still get from the per-job event timeline).",
       "touches": [
-        "web/src/routes/Peers.module.css"
+        "internal/observ/observ.go",
+        "internal/observ/jobdetail.go",
+        "web/src/components/ParkedExplanation.tsx",
+        "web/src/routes/JobExpansion.tsx",
+        "web/src/routes/JobDetail.tsx"
       ],
       "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open /peers in a browser resized to 375px width and inspect the PEER column: usernames should be unreadable/collapsed and header labels should visually overlap (\"PEEDCORE\"); resize back to a desktop width and confirm the layout is normal and no horizontal overflow is introduced.",
-      "statedBlockers": [],
       "concurrency": false,
-      "needsDecision": {
-        "architecture": false,
-        "configKey": false,
-        "migration": false
-      },
-      "digest": "759d290ebe168d34f972757f0d84743a6feff0ba6aca09b283136236e2cdbc62"
-    },
-    "434": {
-      "number": 434,
-      "kind": "bug",
-      "prodImpact": "cosmetic",
-      "impactEvidence": "web/src/strings.ts:234-235 hardcodes '[,] PREV' / 'NEXT [.]' as the shared t.pager labels; web/src/routes/Peers.tsx:205 mounts the same Pager but has no keydown handler anywhere in the file (only Jobs.tsx:308-327 binds ',' and '.' via goToPage). Verified: on /peers the button's accessible name falsely advertises a shortcut that does nothing. No behavior is wrong -- clicking still pages correctly -- this is purely a misleading label/accessible-name, which is the rubric's 'cosmetic' row verbatim ('every behaviour is correct; something the UI... says is wrong, misleading').",
-      "touches": [
-        "web/src/strings.ts",
-        "web/src/components/tui/Pager.tsx",
-        "web/src/routes/Jobs.tsx",
-        "web/src/routes/Peers.tsx"
-      ],
-      "frontend": true,
-      "effort": "S",
-      "reproCheck": "Open /peers with enough peers to paginate, inspect the PREV/NEXT button accessible name or visible label, press '.' -- the label reads 'NEXT [.]' but the page does not change (no keydown listener in web/src/routes/Peers.tsx).",
+      "effort": "M",
+      "reproCheck": null,
       "statedBlockers": [],
-      "digest": "175ae0e71812431d1bb33f78cea6d22350953b04c2c5f05444dccfd1ac6ff07d"
+      "digest": "ae080bf875442644ac911f52c89fc680d87ee98813f1cfad4f613de8b1fc503f"
     }
   },
   "waves": [
     [
       186,
-      386,
-      215,
-      324,
-      367,
-      412,
+      409,
+      465,
       267,
       327,
-      395,
-      308,
-      414,
-      433,
-      154,
+      447,
+      484,
       192,
-      293,
-      294,
-      299,
-      300,
-      391,
-      250
+      412,
+      464,
+      466,
+      438,
+      86,
+      106
     ],
     [
-      314,
-      409,
-      291,
-      368,
-      399,
-      106,
-      298,
-      420,
-      86
-    ],
-    [
-      319,
-      432,
-      417
-    ],
-    [
+      308,
       238,
-      434
-    ],
-    [
-      317,
+      458,
       200,
-      199
-    ],
-    [
-      318,
-      406
+      278,
+      250
     ],
     [
       402
     ],
     [
+      180,
+      420,
       128,
-      273
+      199
     ],
     [
-      180
+      457,
+      120,
+      273,
+      477
     ],
     [
-      184,
-      129
+      480
     ],
     [
       69
     ],
     [
-      120
+      184
     ],
     [
-      278
-    ],
-    [
-      280
-    ],
-    [
-      382
+      406
     ]
   ],
   "unassessable": [],
-  "unschedulable": [],
-  "unassessed": []
+  "unschedulable": [
+    382,
+    319
+  ],
+  "unassessed": [],
+  "deferred": [
+    129
+  ]
 }
