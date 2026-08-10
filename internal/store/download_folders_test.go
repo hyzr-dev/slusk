@@ -272,3 +272,155 @@ func backfillStatement(t *testing.T) string {
 	}
 	return string(raw)[i:]
 }
+
+// TestRegisterDownloadFolderTreatsCaseVariantsAsOneFolder is issue #479's
+// runtime half: on a case-insensitive download root two casings are one
+// directory, and registering both used to produce two rows — so cleanup stamped
+// one and left the other uncleaned forever, naming a folder already gone.
+//
+// The surviving row keeps the casing it was first seen under. That value is
+// handed verbatim to DeleteDownloadFolder, so it must stay a name something has
+// actually been written under rather than the latest spelling observed.
+func TestRegisterDownloadFolderTreatsCaseVariantsAsOneFolder(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	jobID, _ := seedJobWithCandidate(t, s, 1100, []string{`music\Artist\Cd1\01.flac`}, now)
+
+	for _, leaf := range []string{"Cd1", "cd1", "CD1"} {
+		if err := s.RegisterDownloadFolder(ctx, jobID, leaf, now); err != nil {
+			t.Fatalf("RegisterDownloadFolder(%q): %v", leaf, err)
+		}
+	}
+
+	if n := countDownloadFolders(t, s, jobID); n != 1 {
+		t.Errorf("rows = %d, want 1: three casings are one folder", n)
+	}
+	leaves, err := s.DownloadFoldersForJob(ctx, jobID)
+	if err != nil || len(leaves) != 1 || leaves[0] != "Cd1" {
+		t.Errorf("leaves = %v (%v), want [Cd1]: the first-seen casing is the one on disk", leaves, err)
+	}
+}
+
+// TestMarkDownloadFolderCleanedMatchesCaseInsensitively pins the other side of
+// the same comparison. A caller holding a differently-cased spelling of a
+// registered folder must still be able to stamp it: matching exactly here while
+// registering case-insensitively would leave the row permanently uncleaned,
+// which is the defect #479 exists to remove.
+func TestMarkDownloadFolderCleanedMatchesCaseInsensitively(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	jobID, _ := seedJobWithCandidate(t, s, 1101, []string{`music\Artist\Cd1\01.flac`}, now)
+	if err := s.RegisterDownloadFolder(ctx, jobID, "Cd1", now); err != nil {
+		t.Fatalf("RegisterDownloadFolder: %v", err)
+	}
+
+	if err := s.MarkDownloadFolderCleaned(ctx, jobID, "cd1", now); err != nil {
+		t.Fatalf("MarkDownloadFolderCleaned: %v", err)
+	}
+
+	leaves, err := s.DownloadFoldersForJob(ctx, jobID)
+	if err != nil || len(leaves) != 0 {
+		t.Errorf("uncleaned leaves = %v (%v), want none", leaves, err)
+	}
+}
+
+// TestDownloadFolderCaseDedupe exercises migration 0017's data step against the
+// shipped SQL. The index the migration creates makes violating rows
+// unreachable through the normal path, so the test drops it, seeds the rows the
+// canary actually had, and re-runs the dedupe.
+//
+// The two decisions it pins are the ones that could lose data rather than
+// merely tidy it: the survivor is the OLDEST row (agreeing with
+// RegisterDownloadFolder, which never rewrites a row's casing), and it is
+// uncleaned if ANY row in the group was uncleaned. A cleaned survivor hiding a
+// folder still on disk is exactly the leak #314 closed.
+func TestDownloadFolderCaseDedupe(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	older := now.Add(-time.Hour)
+
+	if _, err := s.db.Exec(`DROP INDEX job_download_folders_job_lower_leaf_key`); err != nil {
+		t.Fatalf("drop index (premise: migration 0017 created it): %v", err)
+	}
+
+	// Distinct remote filenames per job: activation refuses a candidate whose
+	// remote file another live candidate already owns.
+	mixed, _ := seedJobWithCandidate(t, s, 1102, []string{`music\Artist\Mixed\01.flac`}, now)
+	allCleaned, _ := seedJobWithCandidate(t, s, 1103, []string{`music\Artist\Cleaned\01.flac`}, now)
+	otherJob, _ := seedJobWithCandidate(t, s, 1104, []string{`music\Artist\Other\01.flac`}, now)
+
+	// mixed: older row cleaned, newer row uncleaned. The survivor must be the
+	// older casing AND uncleaned - neither row has both properties.
+	rawInsertFolder(t, s, mixed, "Cd1", older, &now)
+	rawInsertFolder(t, s, mixed, "cd1", now, nil)
+	// allCleaned: nothing uncleaned, so the newest cleaned_at is kept.
+	rawInsertFolder(t, s, allCleaned, "Greatest Hits", older, &older)
+	rawInsertFolder(t, s, allCleaned, "greatest hits", now, &now)
+	// otherJob: same leaf, different job - not a duplicate, must survive whole.
+	rawInsertFolder(t, s, otherJob, "cd1", now, nil)
+
+	stmts := dedupeStatements(t)
+	if _, err := s.db.Exec(stmts); err != nil {
+		t.Fatalf("run 0017 dedupe: %v", err)
+	}
+
+	if n := countDownloadFolders(t, s, mixed); n != 1 {
+		t.Errorf("mixed rows = %d, want 1", n)
+	}
+	leaves, err := s.DownloadFoldersForJob(ctx, mixed)
+	if err != nil || len(leaves) != 1 || leaves[0] != "Cd1" {
+		t.Errorf("mixed uncleaned leaves = %v (%v), want [Cd1]: an uncleaned duplicate must not be hidden", leaves, err)
+	}
+
+	if n := countDownloadFolders(t, s, allCleaned); n != 1 {
+		t.Errorf("all-cleaned rows = %d, want 1", n)
+	}
+	if leaves, err := s.DownloadFoldersForJob(ctx, allCleaned); err != nil || len(leaves) != 0 {
+		t.Errorf("all-cleaned uncleaned leaves = %v (%v), want none", leaves, err)
+	}
+
+	if n := countDownloadFolders(t, s, otherJob); n != 1 {
+		t.Errorf("other job rows = %d, want 1: uniqueness is per job, not global", n)
+	}
+
+	// The point of the dedupe: the index can now be created. If it cannot, the
+	// migration would fail at startup and the container would not come up.
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX job_download_folders_job_lower_leaf_key
+		ON job_download_folders (album_job_id, lower(leaf))`); err != nil {
+		t.Fatalf("recreate index after dedupe: %v", err)
+	}
+}
+
+// rawInsertFolder writes a register row directly, bypassing
+// RegisterDownloadFolder, which is the only way to produce the case-variant
+// rows migration 0017 exists to clean up.
+func rawInsertFolder(t *testing.T, s *Store, jobID int64, leaf string, created time.Time, cleaned *time.Time) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`INSERT INTO job_download_folders (album_job_id, leaf, created_at, cleaned_at)
+		 VALUES ($1, $2, $3, $4)`, jobID, leaf, created, cleaned); err != nil {
+		t.Fatalf("raw insert %q: %v", leaf, err)
+	}
+}
+
+// dedupeStatements extracts migration 0017's data step - everything before the
+// index it enables - from the embedded migrations, so the test exercises the
+// shipped SQL rather than a copy that could drift from it.
+func dedupeStatements(t *testing.T) string {
+	t.Helper()
+	raw, err := migrationsFS.ReadFile("migrations/0017_download_folder_leaf_case.sql")
+	if err != nil {
+		t.Fatalf("read migration 0017: %v", err)
+	}
+	const start = "WITH ranked AS ("
+	const end = "CREATE UNIQUE INDEX"
+	i := strings.Index(string(raw), start)
+	j := strings.Index(string(raw), end)
+	if i < 0 || j < 0 || j < i {
+		t.Fatalf("migration 0017 no longer contains %q .. %q; update this test", start, end)
+	}
+	return string(raw)[i:j]
+}

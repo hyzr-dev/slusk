@@ -38,8 +38,15 @@ func validDownloadLeaf(leaf string) error {
 
 // RegisterDownloadFolder records that jobID's downloads are being written into
 // the local folder named leaf, directly below the download root. It is
-// idempotent per (job, leaf): a candidate writes many files into one folder and
-// every one of them registers.
+// idempotent per (job, leaf) compared case-insensitively: a candidate writes
+// many files into one folder and every one of them registers, and two casings
+// of one directory are one folder, not two (issue #479).
+//
+// The row keeps the casing it was first registered under. A later registration
+// of the same folder under a different casing updates nothing but cleaned_at:
+// the stored value is an address at the backend — handed verbatim to
+// DeleteDownloadFolder, which base64-encodes it for slskd — so rewriting it
+// would repoint a recursive delete at a name no one has seen on disk.
 //
 // A re-registration clears cleaned_at rather than doing nothing. That case is
 // real: a candidate fails, its folder is deleted and marked cleaned, and a
@@ -53,7 +60,7 @@ func (s *Store) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf st
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO job_download_folders (album_job_id, leaf, created_at) VALUES ($1, $2, $3)
-		 ON CONFLICT ON CONSTRAINT job_download_folders_job_leaf_key
+		 ON CONFLICT (album_job_id, lower(leaf))
 		 DO UPDATE SET cleaned_at = NULL, created_at = $3
 		 WHERE job_download_folders.cleaned_at IS NOT NULL`,
 		jobID, leaf, now)
@@ -94,10 +101,17 @@ func (s *Store) DownloadFoldersForJob(ctx context.Context, jobID int64) ([]strin
 // MarkDownloadFolderCleaned stamps one registered folder as no longer on disk,
 // so later cleanups stop asking about it. The row is kept rather than deleted:
 // it is the record that the folder existed and was dealt with.
+//
+// leaf is matched case-insensitively, the same comparison that decides whether
+// two registrations are one folder (issue #479). Matching exactly here while
+// registering case-insensitively would leave a caller holding a leaf whose
+// casing no longer matches the stored row unable to stamp it at all — an
+// uncleaned row for a folder that is already gone, which is the defect this
+// issue is about.
 func (s *Store) MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE job_download_folders SET cleaned_at = $1
-		 WHERE album_job_id = $2 AND leaf = $3 AND cleaned_at IS NULL`,
+		 WHERE album_job_id = $2 AND lower(leaf) = lower($3) AND cleaned_at IS NULL`,
 		now, jobID, leaf)
 	if err != nil {
 		return fmt.Errorf("mark download folder cleaned: %w", err)
