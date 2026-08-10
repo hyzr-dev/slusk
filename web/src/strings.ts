@@ -301,15 +301,23 @@ export const t = {
     // Name the button by its rendered label — #376 renamed this control from
     // 'Force search', and copy pointing at a button that is not on screen is
     // worse than copy that names none.
+    //
+    // The pointer to the events names no location, and must not (issue #487).
+    // ParkedExplanation renders on two surfaces and only JobDetail has an
+    // EVENTS section under it; JobExpansion renders a meta tree and a file
+    // list, so 'the events below' sent a jobs-list reader looking at filenames
+    // for a reason that was never going to be there. The events are still
+    // where the cause lives on both surfaces - one below, one a navigation
+    // away - so the pointer stays and only the locator goes.
     parkedExplanation:
-      'Automation stopped here and is waiting for you; the events below say what parked it. Retry starts over — it forgets which peers already failed, so it may try them again. Re-run pipeline keeps that record and searches only for peers it has not tried.',
+      'Automation stopped here and is waiting for you; the events on this job say what parked it. Retry starts over — it forgets which peers already failed, so it may try them again. Re-run pipeline keeps that record and searches only for peers it has not tried.',
     // A manual job (issue #59) reaches PARKED only through the transfer path,
     // and neither half of the Lidarr copy is true for it: JobActions does not
     // offer it 'Re-run pipeline' at all, and its Retry is RetryManualJob,
     // which keeps the one candidate and re-downloads from the same peer
     // rather than starting a fresh search.
     parkedExplanationManual:
-      'Automation stopped here and is waiting for you; the events below say what parked it. Retry downloads from the same peer again — a manual job has no other candidate to fall back on.',
+      'Automation stopped here and is waiting for you; the events on this job say what parked it. Retry downloads from the same peer again — a manual job has no other candidate to fall back on.',
     // 'Force search' used to double as both "re-run the automated pipeline"
     // and (implicitly) "search manually" — issue #376 split those into two
     // distinct actions, so this one is named for what it actually does:
