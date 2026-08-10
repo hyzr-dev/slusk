@@ -1104,7 +1104,7 @@ func TestRetryManualJobRevivesParkedManualJob(t *testing.T) {
 		t.Fatalf("TransfersForCandidate = %d (%v)", len(transfers), err)
 	}
 
-	parked, err := s.ParkJobForCandidate(ctx, transfers[0].ID, cand.ID, core.TransferErrored, 5, 10, now.Add(time.Minute))
+	_, parked, err := s.ParkJobForCandidate(ctx, transfers[0].ID, cand.ID, core.TransferErrored, 5, 10, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ParkJobForCandidate: %v", err)
 	}
@@ -1237,6 +1237,186 @@ func TestRetryManualJobNoopWhenNotRetryable(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected RetryManualJob to return false for a still-DOWNLOADING job")
+	}
+}
+
+// TestRetryRefusedJobRevivesJob covers issue #470's RetryRefusedJob: unlike
+// RetryFailedJob it must not go back to WANTED (the files were never the
+// problem - Lidarr rejected a complete, correct download) and unlike
+// RetryManualJob it must not go to SELECTING - it goes straight to IMPORTING
+// so Importing can restore the quarantined folder and resubmit the same
+// files. All five effects the issue lists are asserted: job state, candidate
+// state, import_submitted_at, the rejection-history entry, and
+// import_refused_reason.
+func TestRetryRefusedJobRevivesJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+
+	jobID, candID := helperActivateFiles(t, s, 910, "alice",
+		[]core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}, now)
+	if err := s.MarkImportSubmitted(ctx, candID, now); err != nil {
+		t.Fatalf("MarkImportSubmitted: %v", err)
+	}
+	if _, err := s.AdvanceJobStateFrom(ctx, jobID, core.StateDownloading, core.StateImporting, now); err != nil {
+		t.Fatalf("AdvanceJobStateFrom: %v", err)
+	}
+	// The refusal path (importing.go, out of this package's scope) routes
+	// through RejectCandidateAndAdvance, which writes import_refused_reason
+	// itself for a transition into IMPORT_REFUSED (terminalCandidateAndAdvance,
+	// candidates.go).
+	if _, err := s.RejectCandidateAndAdvance(ctx, candID, jobID, "Lidarr permanently refused: bad tags", core.StateImporting, core.StateImportRefused, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	rejections, err := s.RejectedCandidates(ctx, jobID)
+	if err != nil || len(rejections) != 1 {
+		t.Fatalf("test setup: expected 1 rejection before retry, got %d (%v)", len(rejections), err)
+	}
+
+	later := now.Add(time.Minute)
+	ok, err := s.RetryRefusedJob(ctx, jobID, later)
+	if err != nil {
+		t.Fatalf("RetryRefusedJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected RetryRefusedJob to return true for an IMPORT_REFUSED job")
+	}
+
+	view, found, err := s.JobWithTransfer(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("JobWithTransfer: found=%v (%v)", found, err)
+	}
+	if view.Job.State != core.StateImporting {
+		t.Errorf("job state = %q, want IMPORTING", view.Job.State)
+	}
+
+	var importRefusedReason string
+	if err := s.db.QueryRowContext(ctx, `SELECT import_refused_reason FROM album_jobs WHERE id = $1`, jobID).Scan(&importRefusedReason); err != nil {
+		t.Fatalf("read import_refused_reason: %v", err)
+	}
+	if importRefusedReason != "" {
+		t.Errorf("import_refused_reason = %q, want cleared", importRefusedReason)
+	}
+
+	cands, err := s.CandidatesForJob(ctx, jobID)
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("CandidatesForJob = %d (%v)", len(cands), err)
+	}
+	if cands[0].ID != candID {
+		t.Errorf("candidate id = %d, want the same original candidate %d", cands[0].ID, candID)
+	}
+	if cands[0].State != core.CandidateActive {
+		t.Errorf("candidate state = %q, want ACTIVE", cands[0].State)
+	}
+	if cands[0].ImportSubmittedAt != nil {
+		t.Errorf("import_submitted_at = %v, want cleared", cands[0].ImportSubmittedAt)
+	}
+
+	rejections, err = s.RejectedCandidates(ctx, jobID)
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(rejections) != 0 {
+		t.Errorf("expected the candidate's rejection lifted, got %+v", rejections)
+	}
+}
+
+// TestRetryRefusedJobKeepsOtherRejections proves RetryRefusedJob deletes only
+// the retried candidate's (username, release_dir) pair from candidate_
+// rejections, not the job's whole history - other peers this job already
+// tried and rejected must stay blacklisted.
+func TestRetryRefusedJobKeepsOtherRejections(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+
+	job, err := s.UpsertWantedJob(ctx, 911, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	if err := s.InsertCandidates(ctx, job.ID,
+		[]NewCandidate{{Username: "bob", Score: 1.0, Files: []core.CandidateFile{{Filename: `music\Other - Album\01.flac`, Size: 1}}}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	oldCand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	if ok, _, err := s.ActivateCandidateWithTransfers(ctx, oldCand.ID, job.ID, 100, now.Add(time.Hour), now); err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: %v ok=%v", err, ok)
+	}
+	if _, err := s.RejectCandidateAndAdvance(ctx, oldCand.ID, job.ID, "already rejected once", core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	if err := s.InsertCandidates(ctx, job.ID,
+		[]NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	newCand, found, err := s.NextNewCandidate(ctx, job.ID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	if ok, _, err := s.ActivateCandidateWithTransfers(ctx, newCand.ID, job.ID, 100, now.Add(time.Hour), now); err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: %v ok=%v", err, ok)
+	}
+	if _, err := s.AdvanceJobStateFrom(ctx, job.ID, core.StateDownloading, core.StateImporting, now); err != nil {
+		t.Fatalf("AdvanceJobStateFrom: %v", err)
+	}
+	if _, err := s.RejectCandidateAndAdvance(ctx, newCand.ID, job.ID, "Lidarr permanently refused", core.StateImporting, core.StateImportRefused, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	if ok, err := s.RetryRefusedJob(ctx, job.ID, now.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("RetryRefusedJob: ok=%v err=%v", ok, err)
+	}
+
+	rejections, err := s.RejectedCandidates(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(rejections) != 1 || rejections[0].Username != "bob" {
+		t.Errorf("rejections = %+v, want just bob's still blacklisted", rejections)
+	}
+}
+
+// TestRetryRefusedJobNoopWhenNotRefused guards the race the dashboard button
+// can lose: if a module moved the job out of IMPORT_REFUSED between the
+// dashboard fetching its state and the retry click landing, RetryRefusedJob
+// must not touch it.
+func TestRetryRefusedJobNoopWhenNotRefused(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+
+	job, _ := s.UpsertWantedJob(ctx, 912, now)
+	if err := s.MarkJobFailed(ctx, job.ID, now); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	ok, err := s.RetryRefusedJob(ctx, job.ID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RetryRefusedJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryRefusedJob to return false for a FAILED (not IMPORT_REFUSED) job")
+	}
+}
+
+func TestRetryRefusedJobUnknownID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	ok, err := s.RetryRefusedJob(ctx, 99999, time.Now())
+	if err != nil {
+		t.Fatalf("RetryRefusedJob: %v", err)
+	}
+	if ok {
+		t.Fatal("expected RetryRefusedJob to return false for an unknown job id")
 	}
 }
 
@@ -2611,6 +2791,89 @@ func TestListDashboardJobsFilterNotImported(t *testing.T) {
 	// Facets ignore the status filter, so both jobs are still counted.
 	if page.Facets.Status.All != 2 || page.Facets.Status.NotImported != 1 || page.Facets.Status.Done != 1 {
 		t.Errorf("facets = %+v, want all=2 notImported=1 done=1", page.Facets.Status)
+	}
+}
+
+// An IMPORT_REFUSED job (issue #470) must render as its own status, never
+// collapsed into 'failed' (the candidate cache was not exhausted, Lidarr
+// said no) or 'done' (nothing was imported).
+func TestListDashboardJobsImportRefusedStatus(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	id := insertDashboardTestJob(t, s, 0, core.SourceLidarr, core.StateImportRefused, "", "Kid A", "Radiohead", "peer1", 0, now.Add(-time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "all", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != id {
+		t.Fatalf("jobs = %+v, want just %d", page.Jobs, id)
+	}
+	if page.Jobs[0].Status != "importRefused" {
+		t.Errorf("status = %q, want %q", page.Jobs[0].Status, "importRefused")
+	}
+	if page.Facets.Status.All != 1 || page.Facets.Status.ImportRefused != 1 {
+		t.Errorf("facets.status = %+v, want all=1 importRefused=1 (#470: the status carries "+
+			"its own facet, so the chips still sum to ALL)", page.Facets.Status)
+	}
+}
+
+// TestListDashboardJobsFilterImportRefused covers issue #470's filter half:
+// "importRefused" is an accepted Filter value, and it selects exactly the
+// IMPORT_REFUSED jobs, not the FAILED ones beside them.
+func TestListDashboardJobsFilterImportRefused(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	want := insertDashboardTestJob(t, s, 0, core.SourceLidarr, core.StateImportRefused, "", "Kid A", "Radiohead", "peer1", 0, now.Add(-time.Minute))
+	insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateFailed, "", "OK Computer", "Radiohead", "peer2", 0, now.Add(-time.Minute))
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "importRefused", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	if len(page.Jobs) != 1 || page.Jobs[0].Job.ID != want {
+		t.Fatalf("filter=importRefused returned %+v, want just job %d", page.Jobs, want)
+	}
+	// Facets ignore the status filter, so both jobs are still counted.
+	if page.Facets.Status.All != 2 || page.Facets.Status.ImportRefused != 1 || page.Facets.Status.Failed != 1 {
+		t.Errorf("facets = %+v, want all=2 importRefused=1 failed=1", page.Facets.Status)
+	}
+}
+
+// TestListDashboardJobsFinishedIncludesImportRefused covers issue #470: an
+// IMPORT_REFUSED job's download genuinely completed - Lidarr refused it
+// afterward - so it must surface in Overview's recently-finished panel the
+// same way NOT_IMPORTED does above, for the same reason.
+func TestListDashboardJobsFinishedIncludesImportRefused(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-time.Minute)
+
+	refused := insertDashboardTestJob(t, s, 0, core.SourceLidarr, core.StateImportRefused, "", "Kid A", "Radiohead", "peer1", 0, at)
+	done := insertDashboardTestJob(t, s, 1, core.SourceLidarr, core.StateDone, "", "Rounds", "Four Tet", "peer2", 0, at)
+
+	page, err := s.ListDashboardJobs(context.Background(), DashboardJobsQuery{
+		Page: 0, Sort: "recent", Dir: "desc", Filter: "finished", Source: "all", PageSize: 20, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("ListDashboardJobs: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, j := range page.Jobs {
+		got[j.Job.ID] = true
+	}
+	if !got[refused] {
+		t.Errorf("IMPORT_REFUSED job %d missing from filter=finished, want present", refused)
+	}
+	if !got[done] {
+		t.Errorf("DONE job %d missing from filter=finished, want present", done)
+	}
+	if len(got) != 2 {
+		t.Errorf("finished returned %d jobs (%v), want exactly the DONE and IMPORT_REFUSED ones", len(got), got)
 	}
 }
 

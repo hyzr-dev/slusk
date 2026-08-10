@@ -467,7 +467,7 @@ func TestParkJobForCandidate(t *testing.T) {
 		ctx := context.Background()
 		jobID, candID, transferID := seedParkJobFixture(t, s, 500, now)
 
-		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		_, changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
 		if err != nil {
 			t.Fatalf("ParkJobForCandidate: %v", err)
 		}
@@ -487,7 +487,7 @@ func TestParkJobForCandidate(t *testing.T) {
 		}
 
 		// The transfer is already terminal, so a stale second call is a quiet no-op.
-		changed, err = s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 30, 100, now.Add(2*time.Minute))
+		_, changed, err = s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 30, 100, now.Add(2*time.Minute))
 		if err != nil {
 			t.Fatalf("ParkJobForCandidate (already terminal): %v", err)
 		}
@@ -504,7 +504,7 @@ func TestParkJobForCandidate(t *testing.T) {
 			t.Fatalf("cancel job: %v", err)
 		}
 
-		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(2*time.Minute))
+		_, changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(2*time.Minute))
 		if err != nil {
 			t.Fatalf("ParkJobForCandidate: %v", err)
 		}
@@ -560,7 +560,7 @@ func TestParkJobForCandidateLocksJobBeforeTransferWhenCancellationOverlaps(t *te
 	}
 	parkDone := make(chan parkResult, 1)
 	go func() {
-		changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
+		_, changed, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute))
 		parkDone <- parkResult{changed: changed, err: err}
 	}()
 	waitForStoreQueryWait(t, s, `%UPDATE transfers SET state = $1, bytes_done%`, "advisory")
@@ -692,7 +692,7 @@ func TestParkJobForCandidateRollsBackOnEitherWriteFailure(t *testing.T) {
 				t.Fatalf("install failure trigger: %v", err)
 			}
 
-			if _, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute)); err == nil {
+			if _, _, err := s.ParkJobForCandidate(ctx, transferID, candID, core.TransferErrored, 25, 100, now.Add(time.Minute)); err == nil {
 				t.Fatal("ParkJobForCandidate unexpectedly succeeded")
 			}
 			if got := jobStateForStore(t, s, jobID); got != core.StateDownloading {

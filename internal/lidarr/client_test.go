@@ -115,7 +115,7 @@ func TestManualImportCandidatesParsesRejections(t *testing.T) {
 	if items[1].Importable {
 		t.Errorf("item 1 has a rejection, should not be importable")
 	}
-	if items[1].Rejections[0] != "Quality Unknown not in profile" {
+	if items[1].Rejections[0].Reason != "Quality Unknown not in profile" {
 		t.Errorf("rejection reason not parsed: %v", items[1].Rejections)
 	}
 }

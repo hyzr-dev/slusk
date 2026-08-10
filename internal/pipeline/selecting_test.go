@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -932,5 +933,208 @@ func TestRegisteredLeafMatchesAlbumFolder(t *testing.T) {
 		if want := filepath.Join(completeDir, leaf); folder != want {
 			t.Errorf("%q registers leaf %q but AlbumFolder = %q, want %q", f, leaf, folder, want)
 		}
+	}
+}
+
+// seedCollidingJob creates a SELECTING job with one candidate whose single file
+// lives in a remote folder named leaf. The artist part of the path differs per
+// job so the two candidates are not the same remote file — that is a separate
+// conflict, resolved inside ActivateCandidateWithTransfers, and it would mask
+// the folder collision these tests are about.
+func seedCollidingJob(t *testing.T, st *store.Store, albumID int64, artist, leaf string, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	job, err := st.UpsertWantedJob(ctx, albumID, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	filename := fmt.Sprintf(`music\%s\%s\01.flac`, artist, leaf)
+	if err := st.InsertCandidates(ctx, job.ID, []store.NewCandidate{{
+		Username: artist, Score: 1.0,
+		Files: []core.CandidateFile{{Filename: filename, Size: 10}},
+	}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	if err := st.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
+		t.Fatalf("AdvanceJobState: %v", err)
+	}
+	return job.ID
+}
+
+func eventTypes(t *testing.T, st *store.Store, jobID int64) []core.JobEventType {
+	t.Helper()
+	events, err := st.JobEvents(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("JobEvents: %v", err)
+	}
+	types := make([]core.JobEventType, 0, len(events))
+	for _, e := range events {
+		types = append(types, e.Event)
+	}
+	return types
+}
+
+func countEvent(types []core.JobEventType, want core.JobEventType) int {
+	n := 0
+	for _, e := range types {
+		if e == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSelectingDefersOnDownloadFolderCollision is issue #471 at the seam that
+// matters: not the cleanup, but the download itself. Two peers sharing a folder
+// name — `cd1`, `Digital Media 02`, a format directory — is enough for two jobs
+// to write into one local directory at the same time, because neither backend
+// lets slusk choose that directory. The second job must enqueue nothing.
+//
+// It is deliberately not failed or rejected. A collision says "not right now",
+// never "bad candidate": failing it would burn a retry, and a rejection (#317)
+// would blacklist a good peer permanently because a neighbour happened to be
+// downloading at the same moment.
+func TestSelectingDefersOnDownloadFolderCollision(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+
+	seedCollidingJob(t, st, 1, "Artist A", "cd1", now)
+	second := seedCollidingJob(t, st, 2, "Artist B", "cd1", now.Add(time.Second))
+
+	if err := NewSelecting(p).Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if len(searcher.enqueued) != 1 || !strings.Contains(searcher.enqueued[0], "Artist A") {
+		t.Fatalf("enqueued = %v, want only the first job's file", searcher.enqueued)
+	}
+	if leaves, err := st.DownloadFoldersForJob(ctx, second); err != nil || len(leaves) != 0 {
+		t.Errorf("deferred job registered %v (err %v), want nothing — a row is a licence to delete", leaves, err)
+	}
+
+	types := eventTypes(t, st, second)
+	if countEvent(types, core.EventCandidateDeferred) != 1 {
+		t.Errorf("deferred job's events = %v, want exactly one candidate_deferred", types)
+	}
+	if countEvent(types, core.EventCandidateRejected) != 0 {
+		t.Errorf("deferred job was recorded as rejected: %v", types)
+	}
+	if state := jobStateFor(t, st, second); state != core.StateDownloading {
+		t.Errorf("deferred job state = %s, want DOWNLOADING — it keeps its candidate and retries", state)
+	}
+}
+
+// TestDeferredCandidateReportsOncePerWait: the event is written when the wait
+// begins, not on every tick. Downloading calls topUpCandidate once per tick for
+// every DOWNLOADING job, so a per-tick event would bury the job's own history
+// under one row per interval — on the one screen whose purpose is explaining
+// stuck jobs.
+func TestDeferredCandidateReportsOncePerWait(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+
+	seedCollidingJob(t, st, 1, "Artist A", "cd1", now)
+	second := seedCollidingJob(t, st, 2, "Artist B", "cd1", now.Add(time.Second))
+
+	if err := NewSelecting(p).Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, second)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	for i := 1; i <= 3; i++ {
+		at := now.Add(time.Duration(i) * time.Minute)
+		if _, err := topUpCandidate(ctx, p, second, cand.ID, at, p.MaxInflightPerPeer, p.MaxTransferRetries, p.TransferDeadline, p.Logger); err != nil {
+			t.Fatalf("topUpCandidate: %v", err)
+		}
+	}
+	if n := countEvent(eventTypes(t, st, second), core.EventCandidateDeferred); n != 1 {
+		t.Errorf("candidate_deferred written %d times across four deferred ticks, want 1", n)
+	}
+}
+
+// TestDeferredCandidateFailsAtTheCeiling: nothing else can break this wait.
+// TransfersPastDeadline and StallTimeout only look at transfers already
+// QUEUED/IN_PROGRESS/STALLED, and a deferred candidate's are all still PENDING
+// with no deadline set — so without this the job waits on its owner forever.
+func TestDeferredCandidateFailsAtTheCeiling(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+
+	seedCollidingJob(t, st, 1, "Artist A", "cd1", now)
+	second := seedCollidingJob(t, st, 2, "Artist B", "cd1", now.Add(time.Second))
+
+	if err := NewSelecting(p).Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, second)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+
+	// One tick inside the deadline changes nothing; the next one past it gives up.
+	inside := now.Add(time.Minute + p.TransferDeadline)
+	if _, err := topUpCandidate(ctx, p, second, cand.ID, inside, p.MaxInflightPerPeer, p.MaxTransferRetries, p.TransferDeadline, p.Logger); err != nil {
+		t.Fatalf("topUpCandidate: %v", err)
+	}
+	if state := jobStateFor(t, st, second); state != core.StateDownloading {
+		t.Fatalf("job gave up at exactly the deadline (state %s), want DOWNLOADING", state)
+	}
+
+	past := inside.Add(time.Minute)
+	if _, err := topUpCandidate(ctx, p, second, cand.ID, past, p.MaxInflightPerPeer, p.MaxTransferRetries, p.TransferDeadline, p.Logger); err != nil {
+		t.Fatalf("topUpCandidate: %v", err)
+	}
+	if state := jobStateFor(t, st, second); state != core.StateSelecting {
+		t.Errorf("job state after the ceiling = %s, want SELECTING so another candidate can be tried", state)
+	}
+	if len(searcher.enqueued) != 1 {
+		t.Errorf("enqueued = %v, want the first job's file only", searcher.enqueued)
+	}
+}
+
+// TestDeferredCandidateProceedsWhenTheOwnerFinishes closes the loop: the whole
+// design is a wait, so it is only correct if the wait actually ends. Cleanup
+// stamping cleaned_at is what releases the folder.
+func TestDeferredCandidateProceedsWhenTheOwnerFinishes(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+
+	first := seedCollidingJob(t, st, 1, "Artist A", "cd1", now)
+	second := seedCollidingJob(t, st, 2, "Artist B", "cd1", now.Add(time.Second))
+
+	if err := NewSelecting(p).Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if err := st.MarkDownloadFolderCleaned(ctx, first, "cd1", now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("MarkDownloadFolderCleaned: %v", err)
+	}
+
+	cand, found, err := st.ActiveCandidate(ctx, second)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+	sent, err := topUpCandidate(ctx, p, second, cand.ID, now.Add(3*time.Minute), p.MaxInflightPerPeer, p.MaxTransferRetries, p.TransferDeadline, p.Logger)
+	if err != nil {
+		t.Fatalf("topUpCandidate: %v", err)
+	}
+	if sent != 1 {
+		t.Fatalf("sent = %d after the owner released the folder, want 1", sent)
+	}
+	if leaves, err := st.DownloadFoldersForJob(ctx, second); err != nil || len(leaves) != 1 || leaves[0] != "cd1" {
+		t.Errorf("released job's leaves = %v (err %v), want [cd1]", leaves, err)
 	}
 }

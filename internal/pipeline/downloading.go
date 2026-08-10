@@ -54,8 +54,10 @@ type DownloadingStore interface {
 	AttachTransferID(ctx context.Context, transferID int64, remoteID string, now time.Time) (bool, error)
 	// ParkJobForCandidate atomically terminalizes an exhausted transfer and parks
 	// its DOWNLOADING job, so an operator can manually retry or delete it
-	// (issue #158). false means the job already left DOWNLOADING.
-	ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error)
+	// (issue #158). false means the job already left DOWNLOADING. The job id is
+	// returned because the caller has only a transfer to hand and needs it to
+	// record the job_parked event; it is 0 when no job owns the pair.
+	ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (int64, bool, error)
 
 	// --- Resolve phase (port of resolveDownloadingJob) ---
 	// RunnableJobsInState is used with StateDownloading to pick this tick's
@@ -90,7 +92,14 @@ type DownloadingStore interface {
 	// downloaded into, so cleanup can look it up rather than re-derive it
 	// (issue #314). Shared by the top-up phase; the two methods below are the
 	// resolve phase's cleanupFolder half of the same register.
-	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
+	// It also decides ownership (issue #471): false means another live job is
+	// writing into that folder, and this candidate must wait rather than
+	// download into it.
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error)
+	// DeferCandidate/ClearCandidateDeferral bound that wait, so a candidate
+	// whose owner never finishes cannot sit in DOWNLOADING forever.
+	DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error)
+	ClearCandidateDeferral(ctx context.Context, candidateID int64) error
 	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
 	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
@@ -123,8 +132,24 @@ func (p DownloadingParams) TransfersForCandidate(ctx context.Context, candidateI
 	return p.Store.TransfersForCandidate(ctx, candidateID)
 }
 
-func (p DownloadingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+func (p DownloadingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error) {
 	return p.Store.RegisterDownloadFolder(ctx, jobID, leaf, now)
+}
+
+func (p DownloadingParams) DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error) {
+	return p.Store.DeferCandidate(ctx, candidateID, now)
+}
+
+func (p DownloadingParams) ClearCandidateDeferral(ctx context.Context, candidateID int64) error {
+	return p.Store.ClearCandidateDeferral(ctx, candidateID)
+}
+
+func (p DownloadingParams) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return p.Store.FailCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, now)
+}
+
+func (p DownloadingParams) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
+	return p.Store.AddJobEvent(ctx, jobID, event, detail, now)
 }
 
 func (p DownloadingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error) {
@@ -390,7 +415,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				d.log().Warn("remote cancel still failing past grace, parking job",
 					"transfer", tr.ID, "candidate", tr.CandidateID, "user", tr.Username,
 					"remote_id", effectiveID, "overdue_by", now.Sub(tr.Deadline), "err", err)
-				parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
+				jobID, parked, perr := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID,
 					core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 				if perr != nil {
 					return stats, fmt.Errorf("park job for uncancellable transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, effectiveID, perr)
@@ -399,6 +424,8 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 				// transfer path: on a race the transfer write still commits.
 				if parked {
 					stats.Parked++
+					d.recordEvent(ctx, jobID, core.EventJobParked,
+						"the backend would not confirm cancelling this transfer, so automation stopped", now)
 				}
 				handled[tr.ID] = true
 				continue
@@ -446,7 +473,7 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// and park the owning job for manual action. The guarded job transition
 			// may bounce if another module already moved it, but the ERRORED transfer
 			// still commits; any database failure rolls both writes back.
-			ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
+			jobID, ok, err := d.p.Store.ParkJobForCandidate(ctx, tr.ID, tr.CandidateID, core.TransferErrored, tr.BytesDone, tr.BytesTotal, now)
 			if err != nil {
 				return stats, fmt.Errorf("park job for lost transfer: transfer %d candidate %d remote %q: %w", tr.ID, tr.CandidateID, tr.SlskdID, err)
 			}
@@ -456,6 +483,8 @@ func (d *Downloading) reconcile(ctx context.Context, now time.Time) (ReconcileSt
 			// ERRORED above, but there is no newly parked job to report.
 			if ok {
 				stats.Parked++
+				d.recordEvent(ctx, jobID, core.EventJobParked,
+					"the download kept vanishing from the backend and ran out of retries, so automation stopped", now)
 			}
 			continue
 		}

@@ -56,7 +56,7 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
           <span className={styles.reasonTitle}>{t.status[job.status]}</span> — {job.failReason}
         </div>
       )}
-      <ParkedExplanation state={job.state} className={styles.reasonBox} />
+      <ParkedExplanation state={job.state} source={job.source} className={styles.reasonBox} />
 
       <div className={styles.columns}>
         {/* The meta tree only reads fields already on `job`, so it renders

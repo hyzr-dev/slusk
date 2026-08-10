@@ -59,6 +59,37 @@ func (s *Store) RejectedCandidates(ctx context.Context, jobID int64) ([]Candidat
 	return out, nil
 }
 
+// CountRejectionsByReason returns how many distinct candidates this job has had
+// rejected under the given reason. It backs Importing's cap on a job that keeps
+// being told the same thing (issue #472).
+//
+// The count is over distinct (username, release directory) pairs, not over
+// attempts: recordRejectionTx upserts on that key, so re-failing the same peer
+// and folder does not advance it. It also skips a candidate whose cached files
+// carry no usable filename, which under-counts - a cap built on this fires
+// late, never early.
+//
+// The lifetime is the one the caller needs and comes for free: these rows
+// survive ResetJobToWanted, so a fresh search cycle does not reset the count.
+// They are cleared by RetryFailedJob and both SyncWantedJobs re-entry
+// branches.
+//
+// RetryManualJob is the exception, and the one worth knowing about: it resets
+// retries like the others but deliberately keeps the candidate row, and clears
+// no rejections. A manual job's count therefore survives every press of Retry.
+// Nothing depends on that today - a manual job has one candidate and Selecting
+// fails it on the first rejection, so it cannot reach a cap - but a caller
+// that assumes "any retry starts the count over" is wrong for that branch.
+func (s *Store) CountRejectionsByReason(ctx context.Context, jobID int64, reason string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM candidate_rejections WHERE album_job_id = $1 AND reason = $2`,
+		jobID, reason).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count rejections by reason: %w", err)
+	}
+	return n, nil
+}
+
 // recordRejectionTx appends the given candidate's (username, release directory)
 // to the job's rejection history, inside the caller's transaction.
 //

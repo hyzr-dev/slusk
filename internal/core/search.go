@@ -183,8 +183,50 @@ type ImportItem struct {
 	Quality                 json.RawMessage // opaque round-trip payload, echoed back to Lidarr byte-for-byte on import
 	IndexerFlags            int64
 	DisableReleaseSwitching bool
-	Rejections              []string
+	Rejections              []ImportRejection
 	Importable              bool // true when Rejections is empty
+}
+
+// ImportRejection is one reason Lidarr gave for refusing a file, with the
+// permanence Lidarr assigned it.
+//
+// Permanent is Lidarr's own verdict that the answer will not change on a
+// retry, and is what lets a job reach StateImportRefused rather than cycling
+// through every remaining candidate for an album none of them can satisfy.
+//
+// Read it knowing how Lidarr produces it: `Rejection(string reason,
+// RejectionType type = RejectionType.Permanent)` defaults to permanent, so a
+// rejection built from a reason alone arrives here as Permanent whether or not
+// it describes something durable. "Not enough free space" and "File is still
+// being unpacked" are both constructed that way. Issue #470 decided to act on
+// the flag as given regardless; a caller that needs to distinguish those has to
+// read Reason.
+type ImportRejection struct {
+	Reason    string
+	Permanent bool
+}
+
+// Reasons flattens rejections to their text, for logging and event details
+// where the permanence is not what the reader needs.
+func Reasons(rejections []ImportRejection) []string {
+	out := make([]string, 0, len(rejections))
+	for _, r := range rejections {
+		out = append(out, r.Reason)
+	}
+	return out
+}
+
+// AnyPermanent reports whether any rejection carries Lidarr's Permanent
+// verdict. Any, not all: a single durable reason is enough to make retrying
+// the same folder pointless, and Lidarr stamps folder-level reasons onto every
+// file it could not place.
+func AnyPermanent(rejections []ImportRejection) bool {
+	for _, r := range rejections {
+		if r.Permanent {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoteTransfer is one file download a remote peer-to-peer provider (e.g.

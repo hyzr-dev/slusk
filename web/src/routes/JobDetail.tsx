@@ -138,7 +138,7 @@ export default function JobDetail() {
         <QueryNotice phase={detailPhase} />
       )}
 
-      <ParkedExplanation state={parkedState} className={styles.failReason} />
+      <ParkedExplanation state={parkedState} source={actionSource} className={styles.failReason} />
 
       <div className={styles.actionsWrap}>
         <JobActions

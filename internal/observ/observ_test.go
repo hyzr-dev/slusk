@@ -357,6 +357,47 @@ func TestHealthEndpointsSeparateLivenessAndReadiness(t *testing.T) {
 	}
 }
 
+// The settings view polls /healthz across a config-change restart and tells
+// the restarted process from the dying one by this id (issue #154), so a
+// healthy /healthz must carry it and an unhealthy one must stay generic.
+func TestHealthzReportsInstanceID(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	live := true
+	deps := testServerDeps(reg)
+	deps.Live = func() bool { return live }
+	deps.InstanceID = "PROCESS-ONE"
+	h := NewServer(deps)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var body struct {
+		Instance string `json:"instance"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if body.Instance != "PROCESS-ONE" {
+		t.Errorf("instance = %q, want %q", body.Instance, "PROCESS-ONE")
+	}
+
+	live = false
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unhealthy status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(rec.Body.String(), "PROCESS-ONE") {
+		t.Errorf("unhealthy body leaks the instance id: %q", rec.Body.String())
+	}
+}
+
 func TestMetricsEndpointServes(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg)

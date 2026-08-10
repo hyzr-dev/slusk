@@ -227,9 +227,16 @@ func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jo
 		return false, nil
 	}
 
+	// import_refused_reason is written in the same statement as the state that
+	// gives it meaning (issue #470). Keying it on the destination state rather
+	// than on a separate flag makes both "IMPORT_REFUSED with no reason" and "a
+	// reason on a job that is not refused" unrepresentable, and leaves every
+	// other destination's value untouched.
 	res, err = tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
-		string(to), now, jobID, string(from))
+		`UPDATE album_jobs SET state = $1, updated_at = $2,
+		        import_refused_reason = CASE WHEN $1 = $5 THEN $6 ELSE import_refused_reason END
+		 WHERE id = $3 AND state = $4`,
+		string(to), now, jobID, string(from), string(core.StateImportRefused), reason)
 	if err != nil {
 		return false, fmt.Errorf("advance job: %w", err)
 	}
@@ -412,6 +419,52 @@ func (s *Store) DeferSelectingJob(ctx context.Context, jobID int64, now time.Tim
 		`UPDATE album_jobs SET updated_at = $1 WHERE id = $2 AND state = $3`,
 		now, jobID, string(core.StateSelecting)); err != nil {
 		return fmt.Errorf("defer selecting job: %w", err)
+	}
+	return nil
+}
+
+// DeferCandidate records that candidateID is waiting for another job to release
+// its download folder (issue #471), and returns when the wait began together
+// with whether this call is what started it.
+//
+// The stored timestamp is the FIRST deferral's, not the latest: a candidate
+// re-deferred on every tick would otherwise push its own deadline forward
+// forever, and the ceiling that breaks an unbounded wait would never fire.
+//
+// first is true exactly once per wait, because it is true exactly when the
+// column goes NULL → set. That is what de-duplicates the candidate_deferred
+// event — one per wait rather than one per tick — with no counter to keep.
+func (s *Store) DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (since time.Time, first bool, err error) {
+	// The old value has to be read in the same statement as the write: reading
+	// it separately under READ COMMITTED would let two ticks both see NULL and
+	// both report a fresh wait. FOR UPDATE serializes the row against itself.
+	err = s.db.QueryRowContext(ctx,
+		`WITH prev AS (SELECT id, deferred_since FROM candidates WHERE id = $1 FOR UPDATE)
+		 UPDATE candidates c SET deferred_since = COALESCE(prev.deferred_since, $2), updated_at = $2
+		 FROM prev WHERE c.id = prev.id
+		 RETURNING c.deferred_since, prev.deferred_since IS NULL`,
+		candidateID, now).Scan(&since, &first)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The candidate was deleted under us (a reset or a manual action). Not
+		// an error: the caller's next read finds no active candidate and moves
+		// on.
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("defer candidate: %w", err)
+	}
+	return since, first, nil
+}
+
+// ClearCandidateDeferral ends a wait recorded by DeferCandidate, so a candidate
+// that is deferred again later starts a fresh clock and reports a fresh event.
+// Leaving a stale timestamp behind would make the next wait inherit an expired
+// deadline and fail the candidate on its first deferred tick.
+func (s *Store) ClearCandidateDeferral(ctx context.Context, candidateID int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE candidates SET deferred_since = NULL WHERE id = $1 AND deferred_since IS NOT NULL`,
+		candidateID); err != nil {
+		return fmt.Errorf("clear candidate deferral: %w", err)
 	}
 	return nil
 }

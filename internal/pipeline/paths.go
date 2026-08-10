@@ -75,11 +75,11 @@ func cleanupFolder(ctx context.Context, peers FolderCleaner, reg DownloadFolderR
 		return
 	}
 	for _, leaf := range leaves {
-		// A peer's remote folder can legitimately be named ".failed"; deleting it
-		// would take every already-quarantined album with it, since both backends'
-		// DeleteDownloadFolder is recursive. Same guard, same reason, as
-		// quarantineFolder's.
-		if leaf == quarantineDirName {
+		// A peer's remote folder can legitimately be named like a quarantine
+		// directory; deleting it would take every already-quarantined album with
+		// it, since both backends' DeleteDownloadFolder is recursive. Same guard,
+		// same reason, as quarantineFolder's.
+		if isQuarantineDir(leaf) {
 			log.Info("skipping cleanup of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
 			continue
 		}
@@ -196,12 +196,44 @@ func cleanupCompletedFolder(ctx context.Context, reg DownloadFolderRegistry, log
 // download root.
 const quarantineDirName = ".failed"
 
+// refusedDirName holds the files of a job Lidarr permanently refused
+// (StateImportRefused, issue #470). A SECOND quarantine, deliberately not
+// .failed: that name means "retry budget exhausted, this is cruft", and these
+// files are the opposite - complete, correct, and worth rescuing. Mixing them
+// would leave the user unable to tell which folders are which.
+//
+// Plain-named rather than dotted, because unlike .failed these are meant to be
+// found. Fixed under completeDir for the same two reasons quarantineFolder
+// documents: a configurable path would be a new required config key, and a
+// shared parent keeps a cross-device os.Rename unreachable.
+const refusedDirName = "_import_rejected"
+
+// isQuarantineDir reports whether leaf names one of the two quarantine
+// directories. A peer's remote folder can legitimately carry either name, and
+// both cleanupFolder and quarantineFolder must refuse to act on it: the
+// backends' DeleteDownloadFolder is recursive, so deleting one would take every
+// album already quarantined under it, and moving one into itself is never what
+// was meant.
+//
+// One predicate rather than two comparisons at each site, because the guard has
+// to grow whenever a quarantine directory does - and a guard that covers one
+// name out of two reads exactly like a guard that works.
+func isQuarantineDir(leaf string) bool {
+	return leaf == quarantineDirName || leaf == refusedDirName
+}
+
 // quarantineFolder moves one leftover album folder out of completeDir and into
-// completeDir/.failed, so a job that has exhausted its retry budget doesn't
-// strand its partial download in the root Lidarr and the next job both scan.
-// It returns the destination and whether anything actually moved; the common
-// case is that there is nothing left to move, because cleanupFolder already
-// removed the folder when the last candidate failed.
+// completeDir/dirName, so files that must not be scanned by Lidarr or the next
+// job do not sit in the download root. It returns the destination and whether
+// anything actually moved.
+//
+// dirName selects WHICH quarantine, and the two mean opposite things:
+// quarantineDirName (.failed) for a job that exhausted its retry budget, where
+// the common case is that there is nothing left to move because cleanupFolder
+// already removed it; refusedDirName (_import_rejected) for a job Lidarr
+// permanently refused, where the files are complete and correct and moving them
+// is the whole point. Passing the wrong one is not detectable here - the caller
+// owns that choice.
 //
 // The destination is a fixed subdirectory of completeDir rather than a
 // configurable path for two reasons: a configurable path would be a new
@@ -214,13 +246,15 @@ const quarantineDirName = ".failed"
 // Nothing here can block the job's FAILED transition, which has already
 // committed by the time this runs: every failure path logs and returns, the
 // same contract as cleanupCompletedFolder.
-func quarantineFolder(log *slog.Logger, jobID int64, completeDir, leaf string) (string, bool) {
+func quarantineFolder(log *slog.Logger, jobID int64, completeDir, leaf, dirName string) (string, bool) {
 	if completeDir == "" || leaf == "" {
 		return "", false
 	}
-	// A peer's remote folder can legitimately be named ".failed"; moving the
-	// quarantine directory into itself is never what was meant.
-	if leaf == quarantineDirName {
+	// A peer's remote folder can legitimately be named like a quarantine
+	// directory; moving one into itself is never what was meant. Both names are
+	// refused whichever destination this call is for, since the folder being
+	// moved is named by a peer, not by the caller.
+	if isQuarantineDir(leaf) {
 		log.Info("skipping quarantine of a folder named like the quarantine dir", "album_job", jobID, "folder", leaf)
 		return "", false
 	}
@@ -248,7 +282,7 @@ func quarantineFolder(log *slog.Logger, jobID int64, completeDir, leaf string) (
 		return "", false
 	}
 
-	dstRoot := filepath.Join(completeDir, quarantineDirName)
+	dstRoot := filepath.Join(completeDir, dirName)
 	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
 		log.Error("create quarantine directory failed", "album_job", jobID, "dir", dstRoot, "err", err)
 		return "", false

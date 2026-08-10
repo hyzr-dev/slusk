@@ -21,6 +21,10 @@ describe('tagFor', () => {
     expect(tagFor('notImported')).toBe('NI');
   });
 
+  it('reports a job Lidarr permanently refused as import refused (issue #470)', () => {
+    expect(tagFor('importRefused')).toBe('IR');
+  });
+
   // Issue #416 split wanted/selecting/waiting out of queued/active, and
   // moved the "waiting in a peer queue" fact (formerly a client-side
   // queuePosition check on an 'active' job — issue #190) onto the backend's
@@ -58,5 +62,16 @@ describe('Tag', () => {
     // What does need pinning is that it never reads as a failure — nothing
     // went wrong, the download succeeded and the files are on disk.
     expect(t.tagTitle.NI).not.toMatch(/fail|error/i);
+  });
+
+  it('renders IR with the title from strings and a --bad tone (issue #470)', () => {
+    render(<Tag status="importRefused" />);
+    const el = screen.getByText('IR');
+    expect(el).toHaveAttribute('title', t.tagTitle.IR);
+    // Unlike NI, IR IS a terminal outcome that needs a person's attention —
+    // it must carry --bad, the same class as FA/ST/PA. Asserted via the CSS
+    // module class name it renders with, mirroring the class-name check
+    // elsewhere in this suite.
+    expect(el.className).toMatch(/bad/);
   });
 });

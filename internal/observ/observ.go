@@ -326,6 +326,10 @@ type JobStatusFacets struct {
 	// finished, no Lidarr album to import into). Counted separately from Done
 	// and Failed (issue #368) so the client's chips sum to All.
 	NotImported int64 `json:"notImported"`
+	// ImportRefused is the terminal outcome from issue #470: the download
+	// finished complete and correct, and Lidarr permanently refused to
+	// import it. Counted separately for the same reason as NotImported.
+	ImportRefused int64 `json:"importRefused"`
 }
 
 // JobSourceFacets contains counts for every persisted source. All ignores the
@@ -493,6 +497,15 @@ type ServerDeps struct {
 	// /readyz; when nil, Live answers both checks.
 	Live  HealthyFunc
 	Ready HealthyFunc
+	// InstanceID identifies this process run and is echoed by /healthz so a
+	// client can tell one process from its replacement. A settings save
+	// restarts the whole process (see config.go's serveConfigPost), and the
+	// old HTTP server keeps answering for a moment after the response is
+	// flushed — without an identity on the wire the settings view would read
+	// that dying process as the restarted one (issue #154). Empty means
+	// /healthz reports no identity, which only costs a caller that
+	// discrimination.
+	InstanceID string
 	// Modules reports each pipeline module's runtime state for /status.
 	Modules ModulesFunc
 	// FailedRetryAfter and MaxCandidates are engine values surfaced by the job
@@ -645,7 +658,15 @@ func NewServer(deps ServerDeps) http.Handler {
 			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 			return
 		}
+		// The body carries only this run's opaque instance id (see
+		// ServerDeps.InstanceID) — public, but it describes nothing about
+		// the configuration or the pipeline. Callers that only check the
+		// status code (the Docker HEALTHCHECK in cmd/slusk) are unaffected.
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(struct {
+			Instance string `json:"instance"`
+		}{Instance: deps.InstanceID})
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if !ready() {
@@ -946,7 +967,7 @@ func NewServer(deps ServerDeps) http.Handler {
 	})
 	registerPeers(mux, deps.Peers, deps.PeerHistory)
 	registerAuth(mux, deps.TokenAuth, deps.SetupRequired, deps.SessionUser, deps.Setup, deps.Login, deps.Logout)
-	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart)
+	registerConfig(mux, deps.Config, deps.ConnectionTester, deps.ConfigWriter, deps.Restart, deps.InstanceID)
 	registerCharts(mux, deps.Charts, deps.Throughput)
 	registerShares(mux, deps.Shares, deps.RescanShares)
 	registerSearch(mux, deps.StartSearch, deps.SearchSnapshot, deps.StopSearch)
@@ -1058,7 +1079,7 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	// two independent allowlists over the same value have already drifted once
 	// in this repo, and a value accepted here but refused there 500s instead of
 	// 400s.
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "inflight", "finished") {
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "importRefused", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

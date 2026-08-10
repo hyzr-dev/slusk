@@ -32,8 +32,15 @@ async function parseErrorBody(res: Response): Promise<ApiErrorBody | undefined> 
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+// signal is for the few callers that drive their own request loop outside
+// TanStack Query (the settings view's restart poll, issue #154) and must be
+// able to drop an in-flight probe on unmount. Every query-backed caller omits
+// it — Query owns cancellation there.
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  // Deliberately not fetch(path, { signal }) for the signal-less case: that
+  // hands every ordinary GET a second argument it does not need, and the
+  // request shape is something tests here assert on.
+  const res = signal ? await fetch(path, { signal }) : await fetch(path);
   if (!res.ok) {
     throw new ApiError(res.status, `GET ${path} failed with ${res.status}`, await parseErrorBody(res));
   }

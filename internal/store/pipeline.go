@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
 )
 
 // ErrJobImporting is returned by DeleteJob when the job is currently
@@ -361,15 +362,103 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 	return true, nil
 }
 
+// RetryRefusedJob manually revives one IMPORT_REFUSED job (issue #470): unlike
+// RetryFailedJob it does not go back to WANTED, because the files were never
+// the problem - Lidarr rejected them after a complete, correct download. It
+// goes straight to IMPORTING with the same candidate, so Importing's restore
+// step (importing.go) can move the quarantined folder back and re-submit the
+// same files.
+//
+// In one transaction: the job moves IMPORT_REFUSED -> IMPORTING and its
+// import_refused_reason is cleared; the job's FAILED candidate (the one
+// RejectCandidateAndAdvance left behind) is revived to ACTIVE with
+// fail_reason and import_submitted_at cleared, for the same reasons
+// RetryManualJob clears them - a stale fail_reason would show the old refusal
+// on the dashboard mid-retry, and a stale import_submitted_at would make
+// Importing.Tick key off it and time out instantly; and the candidate's row
+// in candidate_rejections (#317) is deleted, since RejectCandidateAndAdvance
+// is exactly what put it there and leaving it would have Selecting - if the
+// retry ever failed back that far - immediately re-reject the same peer.
+// Only that one (username, release_dir) pair is deleted, not the whole job's
+// history: other peers this job already tried and rejected should stay
+// blacklisted.
+//
+// The candidate to revive is picked by currentCandidateOrder (dashboard.go),
+// the same rule the dashboard itself uses for "the job's current candidate":
+// a job can carry more than one FAILED candidate (earlier rejections from
+// the same search cycle, still sitting there since RejectCandidateAndAdvance
+// never deletes them), and a plain WHERE state = 'FAILED' would match all of
+// them - reviving stale peers alongside the one Lidarr actually refused.
+//
+// Returns false when the job is not IMPORT_REFUSED or has no FAILED
+// candidate to revive (the dashboard button raced a state change), or does
+// not exist.
+func (s *Store) RetryRefusedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, import_refused_reason = '', updated_at = $2
+		 WHERE id = $3 AND state = $4`,
+		string(core.StateImporting), now, jobID, string(core.StateImportRefused))
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: update job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: job rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	var username string
+	var firstFile sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`UPDATE candidates SET state = $1, fail_reason = '', import_submitted_at = NULL, updated_at = $2
+		 WHERE id = (SELECT id FROM candidates WHERE album_job_id = $3 `+currentCandidateOrder+` LIMIT 1)
+		   AND state = $4
+		 RETURNING username, files->0->>'filename'`,
+		string(core.CandidateActive), now, jobID, string(core.CandidateFailed)).Scan(&username, &firstFile)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: revive candidate: %w", err)
+	}
+
+	if firstFile.Valid && firstFile.String != "" {
+		dir := matcher.ReleaseDir(firstFile.String)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM candidate_rejections WHERE album_job_id = $1 AND username = $2 AND release_dir = $3`,
+			jobID, username, dir); err != nil {
+			return false, fmt.Errorf("retry refused job: delete candidate rejection: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("retry refused job: commit: %w", err)
+	}
+	return true, nil
+}
+
 // ParkJobForCandidate atomically records a transfer's terminal state/progress
 // and marks its candidate's owning job PARKED (issue #158), but only if the job
 // is still DOWNLOADING. If another transition (for example WantedSync
 // cancellation) already moved the job, the transfer write still commits and
 // false is returned. A stale transfer that already became terminal is a no-op.
-func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (bool, error) {
+//
+// The owning job's id is returned alongside, because the caller reaches this
+// with a transfer in hand and no other way to name the job it just parked in
+// the audit trail (issue #472). It is 0 when no job owns the (candidate,
+// transfer) pair.
+func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID int64, transferState core.TransferState, bytesDone, bytesTotal int64, now time.Time) (int64, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: begin: %w", err)
+		return 0, false, fmt.Errorf("park job for candidate: begin: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -385,10 +474,10 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 		 WHERE c.id = $1 AND t.id = $2
 		 FOR UPDATE OF j`, candidateID, transferID).Scan(&jobID, &jobState)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: lock job: %w", err)
+		return 0, false, fmt.Errorf("park job for candidate: lock job: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,
@@ -401,14 +490,14 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 		string(core.TransferPending), string(core.TransferQueued),
 		string(core.TransferInProgress), string(core.TransferStalled))
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: update transfer: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: update transfer: %w", err)
 	}
 	transferRows, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: transfer rows affected: %w", err)
 	}
 	if transferRows == 0 {
-		return false, nil
+		return jobID, false, nil
 	}
 
 	var jobRows int64
@@ -418,17 +507,17 @@ func (s *Store) ParkJobForCandidate(ctx context.Context, transferID, candidateID
 			 WHERE id = $3 AND state = $4`,
 			string(core.StateParked), now, jobID, string(core.StateDownloading))
 		if err != nil {
-			return false, fmt.Errorf("park job for candidate: update job: %w", err)
+			return jobID, false, fmt.Errorf("park job for candidate: update job: %w", err)
 		}
 		jobRows, err = res.RowsAffected()
 		if err != nil {
-			return false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
+			return jobID, false, fmt.Errorf("park job for candidate: job rows affected: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("park job for candidate: commit: %w", err)
+		return jobID, false, fmt.Errorf("park job for candidate: commit: %w", err)
 	}
-	return jobRows > 0, nil
+	return jobID, jobRows > 0, nil
 }
 
 // AdvanceJobStateFrom is the conditional transition every module uses:

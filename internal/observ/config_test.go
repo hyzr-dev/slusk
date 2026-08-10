@@ -64,7 +64,7 @@ func TestConfigHandlerGETReturnsFullNestedShapeWithNoSecrets(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 
-	newConfigHandler(func() AppConfig { return cfg }, noopConfigWriter, noopRestart).ServeHTTP(rec, req)
+	newConfigHandler(func() AppConfig { return cfg }, noopConfigWriter, noopRestart, "").ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
@@ -105,7 +105,7 @@ func TestConfigHandlerGETReportsUnconfiguredSecretsAndDisabledSoulseek(t *testin
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 
-	newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart).ServeHTTP(rec, req)
+	newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart, "").ServeHTTP(rec, req)
 
 	body := rec.Body.String()
 	for _, configured := range []string{
@@ -171,7 +171,7 @@ func postConfig(t *testing.T, writer ConfigWriter, restart func(), body any) *ht
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(string(raw)))
-	newConfigHandler(func() AppConfig { return AppConfig{} }, writer, restart).ServeHTTP(rec, req)
+	newConfigHandler(func() AppConfig { return AppConfig{} }, writer, restart, "").ServeHTTP(rec, req)
 	return rec
 }
 
@@ -430,7 +430,7 @@ func TestConfigHandlerPOSTMalformedBodyReports400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader("not json"))
 
-	newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart).ServeHTTP(rec, req)
+	newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart, "").ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
@@ -442,7 +442,7 @@ func TestConfigHandlerRejectsUnsupportedMethods(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(method, "/api/config", nil)
 
-		newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart).ServeHTTP(rec, req)
+		newConfigHandler(func() AppConfig { return AppConfig{} }, noopConfigWriter, noopRestart, "").ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s status = %d, want 405", method, rec.Code)
