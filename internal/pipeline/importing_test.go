@@ -190,7 +190,7 @@ func TestImportingIncompleteCoverageFailsCandidate(t *testing.T) {
 		}
 	}
 	if strings.Contains(ev.Detail, "duplicates") {
-		t.Errorf("event detail = %q, want no duplicate count when dedup never ran", ev.Detail)
+		t.Errorf("event detail = %q, want no duplicate count when dedup removed nothing", ev.Detail)
 	}
 	if len(peers.deletedFolders) != 1 || peers.deletedFolders[0] != "A" {
 		t.Errorf("expected incomplete candidate's folder cleaned up, got %+v", peers.deletedFolders)
@@ -217,6 +217,13 @@ func TestImportingIncompleteCoverageReportsDedupCount(t *testing.T) {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
+	// Both files are the same track, so dedup removes one before Lidarr scans -
+	// the #280 shape, where the missing coverage is slusk's own doing.
+	orig := readFileMeta
+	t.Cleanup(func() { readFileMeta = orig })
+	readFileMeta = func(path string, size int64) dedupFile {
+		return df(path, size, 1, 1, "One", filepath.Ext(path) == ".flac")
+	}
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
 			{ID: 1, Path: filepath.Join(folder, "01.mp3"), Importable: true, TrackIDs: []int64{101}},
@@ -238,12 +245,45 @@ func TestImportingIncompleteCoverageReportsDedupCount(t *testing.T) {
 	if ev.Event != core.EventImportRejected {
 		t.Fatalf("last event = %v, want %v", ev.Event, core.EventImportRejected)
 	}
-	// Untagged files can't be identified as duplicates of anything, so dedup
-	// ran and removed nothing - a real zero, not an invented one.
-	for _, want := range []string{"2 downloaded", "0 removed as duplicates", "2 offered by Lidarr", "1 unmatched by Lidarr"} {
+	for _, want := range []string{"2 downloaded", "1 removed as duplicates", "2 offered by Lidarr", "1 unmatched by Lidarr"} {
 		if !strings.Contains(ev.Detail, want) {
 			t.Errorf("event detail = %q, want it to contain %q", ev.Detail, want)
 		}
+	}
+}
+
+// TestImportDerivationString pins the two cases where the counts must not be
+// read as candidate-scoped facts (issue #476): a zero dedup count, which a
+// re-entered verify over an already-deduped folder produces, and a scan that
+// fell back to the whole download root.
+func TestImportDerivationString(t *testing.T) {
+	cases := []struct {
+		name string
+		d    importDerivation
+		want string
+	}{
+		{
+			name: "full counts",
+			d:    importDerivation{downloaded: 18, dedupRemoved: 11, offered: 7, unmatched: 0},
+			want: "18 downloaded, 11 removed as duplicates, 7 offered by Lidarr, 0 unmatched by Lidarr",
+		},
+		{
+			name: "zero dedup count is omitted, not printed",
+			d:    importDerivation{downloaded: 18, offered: 7, unmatched: 2},
+			want: "18 downloaded, 7 offered by Lidarr, 2 unmatched by Lidarr",
+		},
+		{
+			name: "root scan says whose files it counted",
+			d:    importDerivation{downloaded: 2, offered: 450, unmatched: 449, rootScan: true},
+			want: "2 downloaded, 450 offered by Lidarr, 449 unmatched by Lidarr (whole download root, not one album folder)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.d.String(); got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
