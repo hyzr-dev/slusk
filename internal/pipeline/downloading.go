@@ -92,7 +92,14 @@ type DownloadingStore interface {
 	// downloaded into, so cleanup can look it up rather than re-derive it
 	// (issue #314). Shared by the top-up phase; the two methods below are the
 	// resolve phase's cleanupFolder half of the same register.
-	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error
+	// It also decides ownership (issue #471): false means another live job is
+	// writing into that folder, and this candidate must wait rather than
+	// download into it.
+	RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error)
+	// DeferCandidate/ClearCandidateDeferral bound that wait, so a candidate
+	// whose owner never finishes cannot sit in DOWNLOADING forever.
+	DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error)
+	ClearCandidateDeferral(ctx context.Context, candidateID int64) error
 	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
 	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
@@ -125,8 +132,24 @@ func (p DownloadingParams) TransfersForCandidate(ctx context.Context, candidateI
 	return p.Store.TransfersForCandidate(ctx, candidateID)
 }
 
-func (p DownloadingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) error {
+func (p DownloadingParams) RegisterDownloadFolder(ctx context.Context, jobID int64, leaf string, now time.Time) (int64, bool, error) {
 	return p.Store.RegisterDownloadFolder(ctx, jobID, leaf, now)
+}
+
+func (p DownloadingParams) DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (time.Time, bool, error) {
+	return p.Store.DeferCandidate(ctx, candidateID, now)
+}
+
+func (p DownloadingParams) ClearCandidateDeferral(ctx context.Context, candidateID int64) error {
+	return p.Store.ClearCandidateDeferral(ctx, candidateID)
+}
+
+func (p DownloadingParams) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
+	return p.Store.FailCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, now)
+}
+
+func (p DownloadingParams) AddJobEvent(ctx context.Context, jobID int64, event core.JobEventType, detail string, now time.Time) error {
+	return p.Store.AddJobEvent(ctx, jobID, event, detail, now)
 }
 
 func (p DownloadingParams) RecordEnqueueIntent(ctx context.Context, candidateID int64, username, filename string, deadline, now time.Time) (int64, bool, error) {

@@ -37,16 +37,17 @@ function bulkRetryFilter(status: JobStatusFilter): BulkRetryFilter | null {
 }
 
 // The approved status row (issue #416 adds WANTED/SELECTING/WAITING to the
-// original seven; issue #368 adds NOT IMPORTED, eleven in total). IMPORTING,
-// INFLIGHT, FINISHED and FAILURES (issues #287, #310) are all server-only
-// filter values used by Overview's own useJobs calls, not chips a user picks
-// here — JobStatusFacets has no count for any of them, and IMPORTING is
-// otherwise represented under ALL by its IM tag. Ordered to mirror the
-// backend's `sort=st` ranking, which puts notImported last among the real
-// statuses. Every chip here must have a JobStatusFacets counter, or the row
-// stops summing to ALL — which is the bug #368 closed.
+// original seven; issue #368 adds NOT IMPORTED; issue #470 adds IMPORT
+// REFUSED, twelve in total). IMPORTING, INFLIGHT, FINISHED and FAILURES
+// (issues #287, #310) are all server-only filter values used by Overview's
+// own useJobs calls, not chips a user picks here — JobStatusFacets has no
+// count for any of them, and IMPORTING is otherwise represented under ALL by
+// its IM tag. Ordered to mirror the backend's `sort=st` ranking, which puts
+// the terminal-and-needs-attention statuses (notImported, importRefused)
+// last among the real statuses. Every chip here must have a JobStatusFacets
+// counter, or the row stops summing to ALL — which is the bug #368 closed.
 type ChipKey = Exclude<JobStatusFilter, 'importing' | 'inflight' | 'finished' | 'failures'>;
-const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting', 'wanted', 'stalled', 'failed', 'parked', 'done', 'notImported'];
+const CHIP_ORDER: ChipKey[] = ['all', 'active', 'waiting', 'queued', 'selecting', 'wanted', 'stalled', 'failed', 'parked', 'done', 'notImported', 'importRefused'];
 
 // A second, orthogonal axis of chips (Manual vs Lidarr-sourced jobs). The
 // mock doesn't draw this control — its designer was working against a data
@@ -71,11 +72,14 @@ const SOURCE_CHIP_ORDER: Exclude<JobSourceFilter, 'all'>[] = ['manual', 'lidarr'
 // 'selecting'/'wanted' fall through to the neutral bar instead — neither has
 // reached a candidate or transfer yet, so there's no "waiting on bytes"
 // story to tell with the queued tone. done is the one unambiguous success
-// color, and the three failure-ish statuses share the bad tone.
+// color, and the failure-ish statuses share the bad tone — importRefused
+// (issue #470) joins that group since Tag.tsx colours its IR tag --bad for
+// the same reason. notImported deliberately stays out of it and falls
+// through to the neutral bar, matching Tag's NI tone.
 function rowTone(job: Job): TickTone {
   if (job.status === 'queued' || job.status === 'waiting') return 'queued';
   if (job.status === 'done') return 'ok';
-  if (job.status === 'stalled' || job.status === 'failed' || job.status === 'parked') return 'bad';
+  if (job.status === 'stalled' || job.status === 'failed' || job.status === 'parked' || job.status === 'importRefused') return 'bad';
   return 'bar';
 }
 

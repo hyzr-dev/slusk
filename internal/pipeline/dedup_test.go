@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -8,8 +9,22 @@ import (
 	"testing"
 )
 
+// df builds a file tagged with one fixed album, for the cases that are about
+// dedup within a single album. dfIn names the album explicitly.
 func df(path string, size int64, disc, track int, title string, lossless bool) dedupFile {
-	return dedupFile{path: path, size: size, disc: disc, track: track, titleKey: normalizeTitle(title), lossless: lossless}
+	return dfIn("The Album", path, size, disc, track, title, lossless)
+}
+
+func dfIn(album, path string, size int64, disc, track int, title string, lossless bool) dedupFile {
+	return dedupFile{
+		path:     path,
+		size:     size,
+		albumKey: normalizeTitle(album),
+		disc:     disc,
+		track:    track,
+		titleKey: normalizeTitle(title),
+		lossless: lossless,
+	}
 }
 
 func loserPaths(files []dedupFile) []string {
@@ -78,6 +93,93 @@ func TestDedupFilesDistinctTracksUntouched(t *testing.T) {
 		df("1.flac", 30_000_000, 1, 1, "One", true),
 		df("2.flac", 31_000_000, 1, 2, "Two", true),
 		df("d2-1.flac", 32_000_000, 2, 1, "One Reprise", true),
+	}
+	if got := loserPaths(files); len(got) != 0 {
+		t.Errorf("losers = %v, want none", got)
+	}
+}
+
+// TestDedupFilesKeepsAlbumsWithOverlappingTrackNumbers is the #280 regression:
+// a peer sharing a whole discography under one artist folder gives slusk a
+// folder holding several albums, whose track numbers necessarily collide.
+// Nothing here is a duplicate of anything.
+func TestDedupFilesKeepsAlbumsWithOverlappingTrackNumbers(t *testing.T) {
+	var files []dedupFile
+	for _, album := range []string{"777 Sect(s)", "777 The Desanctification", "777 Cosmosophy"} {
+		for track := 1; track <= 3; track++ {
+			p := fmt.Sprintf("%s - %02d.mp3", album, track)
+			files = append(files, dfIn(album, p, 8_000_000, 1, track, fmt.Sprintf("Epitome %d", track), false))
+		}
+	}
+	if got := loserPaths(files); len(got) != 0 {
+		t.Errorf("losers = %v, want none", got)
+	}
+}
+
+// TestDedupFilesStillDedupsWithinOneAlbumOfABundle: album-awareness must not
+// cost the dedup its actual job — a real duplicate inside one of the bundled
+// albums is still removed.
+func TestDedupFilesStillDedupsWithinOneAlbumOfABundle(t *testing.T) {
+	files := []dedupFile{
+		dfIn("Sects", "a.flac", 30_000_000, 1, 1, "One", true),
+		dfIn("Sects", "a.mp3", 8_000_000, 1, 1, "One", false),
+		dfIn("Cosmosophy", "b.mp3", 9_000_000, 1, 1, "Other One", false),
+	}
+	if got, want := loserPaths(files), []string{"a.mp3"}; !slices.Equal(got, want) {
+		t.Errorf("losers = %v, want %v", got, want)
+	}
+}
+
+// TestDedupFilesUntaggedAlbumIsNotGroupedOnTrackNumberAlone: once the folder
+// is known to hold several albums, a track number on a file that names none of
+// them says nothing about which release it belongs to.
+func TestDedupFilesUntaggedAlbumIsNotGroupedOnTrackNumberAlone(t *testing.T) {
+	files := []dedupFile{
+		dfIn("First", "a.mp3", 8_000_000, 1, 1, "One", false),
+		dfIn("Second", "b.mp3", 8_000_000, 1, 1, "Two", false),
+		dfIn("", "x.mp3", 8_000_000, 1, 1, "", false),
+		dfIn("", "y.mp3", 9_000_000, 1, 1, "", false),
+	}
+	if got := loserPaths(files); len(got) != 0 {
+		t.Errorf("losers = %v, want none", got)
+	}
+}
+
+// TestDedupFilesSingleAlbumFolderIgnoresMissingAlbumTags is the regression
+// guarding the common case: one album's folder where a stray transcode carries
+// track and title but an empty ALBUM frame. The folder names at most one
+// album, so the album plays no part in grouping and the duplicate still goes.
+func TestDedupFilesSingleAlbumFolderIgnoresMissingAlbumTags(t *testing.T) {
+	files := []dedupFile{
+		dfIn("The Album", "one.flac", 30_000_000, 1, 1, "One", true),
+		dfIn("", "one.mp3", 8_000_000, 1, 1, "", false),
+		dfIn("The Album", "two.flac", 31_000_000, 1, 2, "Two", true),
+	}
+	if got, want := loserPaths(files), []string{"one.mp3"}; !slices.Equal(got, want) {
+		t.Errorf("losers = %v, want %v", got, want)
+	}
+}
+
+// TestDedupFilesUntaggedAlbumStillDedupsOnTitle: a folder whose files name no
+// album at all is indistinguishable from a single-album folder, so grouping
+// works exactly as it did before album-awareness.
+func TestDedupFilesUntaggedAlbumStillDedupsOnTitle(t *testing.T) {
+	files := []dedupFile{
+		dfIn("", "song.flac", 30_000_000, 1, 1, "Song", true),
+		dfIn("", "song.mp3", 8_000_000, 1, 1, "Song", false),
+	}
+	if got, want := loserPaths(files), []string{"song.mp3"}; !slices.Equal(got, want) {
+		t.Errorf("losers = %v, want %v", got, want)
+	}
+}
+
+// TestDedupFilesSameTitleInDifferentAlbumsSurvives: a title shared by two
+// albums in the bundle (an intro, a reprise, a re-recording) is not a
+// duplicate either.
+func TestDedupFilesSameTitleInDifferentAlbumsSurvives(t *testing.T) {
+	files := []dedupFile{
+		dfIn("First", "first-intro.flac", 30_000_000, 1, 1, "Intro", true),
+		dfIn("Second", "second-intro.mp3", 8_000_000, 0, 0, "Intro", false),
 	}
 	if got := loserPaths(files); len(got) != 0 {
 		t.Errorf("losers = %v, want none", got)

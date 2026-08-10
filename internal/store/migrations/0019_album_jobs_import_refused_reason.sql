@@ -1,0 +1,21 @@
+-- IMPORT_REFUSED (issue #470) means Lidarr permanently refused a download that
+-- was complete and correct. The state alone does not say WHY, and the job then
+-- sits waiting for a person - deliberately, since nothing revives it.
+--
+-- album_jobs has no column for a reason, only failed_at. The two places the
+-- reason lives today are both wrong for this:
+--
+--   candidates.fail_reason is per candidate and cleared by RetryManualJob, and
+--   the candidate is not the cause here - Lidarr is.
+--
+--   job_events.detail is append-only but PRUNED on a retention window, so a
+--   job refused three months ago loses its explanation at exactly the moment
+--   the user finally looks at it.
+--
+-- No migration is needed for the state itself: album_jobs.state is bare TEXT
+-- with no CHECK or enum (0001_baseline_schema.sql:19) and idx_jobs_state is a
+-- plain btree.
+--
+-- NOT NULL DEFAULT '' rather than nullable: every existing row genuinely has
+-- no reason, and '' says that without making every reader handle a NULL.
+ALTER TABLE album_jobs ADD COLUMN IF NOT EXISTS import_refused_reason TEXT NOT NULL DEFAULT '';

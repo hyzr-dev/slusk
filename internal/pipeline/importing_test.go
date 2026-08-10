@@ -165,12 +165,16 @@ func lastJobEvent(t *testing.T, st *store.Store, jobID int64) core.JobEvent {
 	return events[0] // JobEvents orders newest first
 }
 
+// TestImportingVerifyRejectionFailsCandidateToSelecting pins the ordinary
+// rejection path: the candidate is rejected and the job goes on to the next
+// one. Temporary on purpose - see the note on
+// TestImportingVerifyAllUnmatchedStillFailsCandidate.
 func TestImportingVerifyRejectionFailsCandidateToSelecting(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
-			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
+			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []core.ImportRejection{{Reason: "Quality not in profile", Permanent: false}}, Importable: false},
 		},
 	}
 	peers := &fakeSearcher{}
@@ -341,9 +345,9 @@ func TestImportingVerifyKeepsTrackMatchedFilesDespiteFolderRejection(t *testing.
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
-			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: []int64{1}, Rejections: []string{"Has unmatched tracks"}},
-			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: []int64{2}, Rejections: []string{"Has unmatched tracks"}},
-			{ID: 3, Path: "/music/complete/A/03.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: []int64{1}, Rejections: []core.ImportRejection{{Reason: "Has unmatched tracks", Permanent: false}}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: []int64{2}, Rejections: []core.ImportRejection{{Reason: "Has unmatched tracks", Permanent: false}}},
+			{ID: 3, Path: "/music/complete/A/03.mp3", Importable: false, TrackIDs: nil, Rejections: []core.ImportRejection{{Reason: "Has unmatched tracks", Permanent: false}}},
 		},
 	}
 	peers := &fakeSearcher{}
@@ -491,13 +495,19 @@ func TestImportingRunsVerifyAfterManualRetryClearsImportSubmittedAt(t *testing.T
 
 // TestImportingVerifyAllUnmatchedStillFailsCandidate: when no file at all has
 // a TrackID, the candidate fails to SELECTING exactly as before.
+//
+// The rejections are Temporary on purpose. Since issue #470 that is what keeps
+// this on the try-the-next-candidate path: a Permanent rejection ends the job
+// at IMPORT_REFUSED instead, which is
+// TestImportingVerifyPermanentRejectionRefusesImport below. Lidarr sends most
+// real rejections as Permanent, so this branch is the narrower of the two.
 func TestImportingVerifyAllUnmatchedStillFailsCandidate(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
-			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
-			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Has unmatched tracks"}},
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []core.ImportRejection{{Reason: "Has unmatched tracks", Permanent: false}}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []core.ImportRejection{{Reason: "Has unmatched tracks", Permanent: false}}},
 		},
 	}
 	peers := &fakeSearcher{}
@@ -533,8 +543,8 @@ func TestImportingVerifyAlreadyCompleteInLidarrSucceeds(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
-			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Album already downloaded"}},
-			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []string{"Album already downloaded"}},
+			{ID: 1, Path: "/music/complete/A/01.mp3", Importable: false, TrackIDs: nil, Rejections: []core.ImportRejection{{Reason: "Album already downloaded", Permanent: true}}},
+			{ID: 2, Path: "/music/complete/A/02.mp3", Importable: false, TrackIDs: nil, Rejections: []core.ImportRejection{{Reason: "Album already downloaded", Permanent: true}}},
 		},
 		albumPresent: 2,
 		albumTotal:   2,
@@ -1374,10 +1384,14 @@ func TestImportingParksAfterRepeatedIdenticalRejections(t *testing.T) {
 func TestImportingCapCountsEachReasonSeparately(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
-	// Lidarr refuses every file: the "import rejected" path.
+	// Lidarr refuses every file: the "import rejected" path. Permanent must be
+	// false — #470 routes a permanent refusal to IMPORT_REFUSED instead, which
+	// is terminal and never reaches this cap at all (see #472's own note that
+	// the cap covers only temporary rejections and the paths carrying no
+	// Lidarr verdict, the coverage gate being the important one).
 	music := &fakeMusic{
 		manualImportItems: []core.ImportItem{
-			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []string{"Quality not in profile"}, Importable: false},
+			{ID: 1, Path: "/music/complete/A/01.mp3", Rejections: []core.ImportRejection{{Reason: "Quality not in profile", Permanent: false}}, Importable: false},
 		},
 	}
 	peers := &fakeSearcher{}
@@ -1476,5 +1490,143 @@ func TestImportingCapDisabledWithoutMaxCandidates(t *testing.T) {
 		if got := jobStateFor(t, st, jobID); got != core.StateSelecting {
 			t.Fatalf("cap must be off with MaxCandidates unset, tick %d got %v", i, got)
 		}
+	}
+}
+
+// refusedTestParams gives Importing a real download root, so the quarantine
+// move and the restore actually touch a filesystem rather than failing on a
+// path that was never there.
+func refusedTestParams(t *testing.T, music *fakeMusic, peers *fakeSearcher) (ImportingParams, *store.Store, string) {
+	t.Helper()
+	p, st := newImportingParams(t, music, peers)
+	p.CompleteDir = t.TempDir()
+	return p, st, p.CompleteDir
+}
+
+// TestImportingVerifyPermanentRejectionRefusesImport is issue #470's producer.
+// Lidarr marking a rejection Permanent is its own statement that the answer
+// will not change, so trying the remaining candidates only burns bandwidth to
+// reach the same refusal - nineteen consecutive candidates did exactly that on
+// the canary.
+//
+// The three things that separate this from the ordinary rejection path are all
+// asserted: the job ends terminal rather than returning to SELECTING, the
+// files are KEPT (moved, not handed to the recursive delete), and the reason
+// survives on the job row rather than only in the pruned event log.
+func TestImportingVerifyPermanentRejectionRefusesImport(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "A/01.mp3", Importable: false, TrackIDs: nil,
+				Rejections: []core.ImportRejection{{Reason: "Couldn't find similar album", Permanent: true}}},
+		},
+	}
+	peers := &fakeSearcher{}
+	p, st, completeDir := refusedTestParams(t, music, peers)
+
+	// Real files in a real album folder, so "the files are kept" is a claim
+	// about the disk and not about a log line.
+	albumDir := filepath.Join(completeDir, "A")
+	if err := os.MkdirAll(albumDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(albumDir, "01.mp3"), []byte("bytes"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	if err := NewImporting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := jobStateFor(t, st, jobID); got != core.StateImportRefused {
+		t.Errorf("job state = %v, want IMPORT_REFUSED", got)
+	}
+	if ev := lastJobEvent(t, st, jobID); ev.Event != core.EventImportRefused {
+		t.Errorf("last event = %v, want %v", ev.Event, core.EventImportRefused)
+	}
+	if len(peers.deletedFolders) != 0 {
+		t.Errorf("refused job deleted %v - the files are the deliverable, they must be kept", peers.deletedFolders)
+	}
+	moved := filepath.Join(completeDir, refusedDirName, "A", "01.mp3")
+	if _, err := os.Stat(moved); err != nil {
+		t.Errorf("expected the files under %s, stat err = %v", refusedDirName, err)
+	}
+	if _, err := os.Stat(albumDir); !os.IsNotExist(err) {
+		t.Errorf("album folder still in the download root, where Lidarr and the next job both scan (err %v)", err)
+	}
+}
+
+// TestImportingRestoresRefusedFolderOnRetry closes the loop the retry depends
+// on. RetryRefusedJob returns the job to IMPORTING with the same files, but
+// verify derives its folder from AlbumFolder(CompleteDir, ...) - which after
+// the refusal names a directory that is no longer there. Without the restore
+// the retry scans nothing and dies as "import not confirmed in time", so the
+// whole retry path would be decorative.
+func TestImportingRestoresRefusedFolderOnRetry(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	music := &fakeMusic{
+		manualImportItems: []core.ImportItem{
+			{ID: 1, Path: "A/01.mp3", Importable: true, TrackIDs: []int64{1}},
+		},
+		albumReleases: []core.AlbumRelease{{TrackCount: 1}},
+	}
+	peers := &fakeSearcher{}
+	p, st, completeDir := refusedTestParams(t, music, peers)
+
+	// The state a refused job is in when a person retries it: files parked in
+	// the quarantine, nothing in the download root.
+	quarantined := filepath.Join(completeDir, refusedDirName, "A")
+	if err := os.MkdirAll(quarantined, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(quarantined, "01.mp3"), []byte("bytes"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	jobID, _ := seedImportingJob(t, st, 1, "bob", []core.CandidateFile{{Filename: `A\01.mp3`, Size: 10}}, now)
+
+	if err := NewImporting(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	restored := filepath.Join(completeDir, "A", "01.mp3")
+	if _, err := os.Stat(restored); err != nil {
+		t.Fatalf("files not restored to the download root, stat err = %v", err)
+	}
+	if _, err := os.Stat(quarantined); !os.IsNotExist(err) {
+		t.Errorf("quarantine copy still present (err %v) - a second copy is a second album for Lidarr to find", err)
+	}
+	if got := jobStateFor(t, st, jobID); got == core.StateImportRefused {
+		t.Errorf("job stayed IMPORT_REFUSED after a retry that had files to import")
+	}
+	_ = jobID
+}
+
+// TestRefusedQuarantineSourceFindsCollisionRenamedFolder: quarantineFolder
+// resolves a name collision by appending ".job<id>", so a restore that only
+// looked for the plain name would find nothing exactly when two jobs shared a
+// folder name - and the retry would import from an empty directory while
+// every test using unique names stayed green.
+func TestRefusedQuarantineSourceFindsCollisionRenamedFolder(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Album [2020].job42"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	got, found := refusedQuarantineSource(root, "Album [2020]", 42)
+	if !found {
+		t.Fatalf("collision-renamed folder not found")
+	}
+	if want := filepath.Join(root, "Album [2020].job42"); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// The brackets matter: filepath.Match would read "[2020]" as a character
+	// class, which is why this scans the directory instead of globbing.
+	if _, found := refusedQuarantineSource(root, "Album [2020]", 7); found {
+		t.Error("another job's quarantined folder was claimed")
 	}
 }

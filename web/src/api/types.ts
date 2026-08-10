@@ -18,6 +18,11 @@
 // 'queued' narrows to its literal Soulseek meaning — a candidate is chosen and
 // its files sit in the peer's queue with nothing delivered yet — and 'waiting'
 // is the gap between files of the same candidate, at least one already here.
+// 'importRefused' (issue #470) is the terminal state of a job that downloaded
+// correctly but Lidarr permanently refused to accept — unlike 'notImported'
+// the files were identified against a real Lidarr album, Lidarr just would
+// not take them, so it needs a person's attention rather than reading as an
+// ordinary failure.
 export type JobStatus =
   | 'wanted'
   | 'selecting'
@@ -29,14 +34,15 @@ export type JobStatus =
   | 'done'
   | 'failed'
   | 'parked'
-  | 'notImported';
-// NOT_IMPORTED is terminal. JobActions.TERMINAL_STATES must list it: the
-// store's cancel path rewrites a job's state unconditionally, so hiding the
-// Cancel button is the only thing stopping a terminal job from being
-// rewritten to CANCELLED.
+  | 'notImported'
+  | 'importRefused';
+// NOT_IMPORTED and IMPORT_REFUSED are terminal. JobActions.TERMINAL_STATES
+// must list both: the store's cancel path rewrites a job's state
+// unconditionally, so hiding the Cancel button is the only thing stopping a
+// terminal job from being rewritten to CANCELLED.
 export type JobState =
   | 'WANTED' | 'SELECTING' | 'DOWNLOADING' | 'IMPORTING'
-  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED' | 'NOT_IMPORTED';
+  | 'DONE' | 'FAILED' | 'CANCELLED' | 'PARKED' | 'NOT_IMPORTED' | 'IMPORT_REFUSED';
 export type WireJobStatus = JobStatus | 'orphaned';
 export type WireJobState = JobState | 'ORPHANED';
 export type CandidateState = 'NEW' | 'ACTIVE' | 'SUCCEEDED' | 'FAILED';
@@ -78,6 +84,7 @@ export type JobStatusFilter =
   | 'parked'
   | 'done'
   | 'notImported'
+  | 'importRefused'
   | 'inflight'
   | 'finished'
   | 'failures';
@@ -118,6 +125,7 @@ export interface JobStatusFacets {
   parked: number;
   done: number;
   notImported: number;
+  importRefused: number;
 }
 
 export interface JobSourceFacets {
@@ -610,6 +618,18 @@ export interface ConfigUpdateRequest {
 export interface ConfigUpdateResult {
   ok: boolean;
   restarting: boolean;
+  /**
+   * Identifies the process that served this save and is about to exit. The
+   * settings view holds it as the baseline for its /healthz poll: the dying
+   * server keeps answering for a moment after this response is flushed, and
+   * the same id coming back means the restart has not happened yet (#154).
+   */
+  instance: string;
+}
+
+/** GET /healthz 200 response body — see ServerDeps.InstanceID. */
+export interface HealthResult {
+  instance: string;
 }
 
 /**
