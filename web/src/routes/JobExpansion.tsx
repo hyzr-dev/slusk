@@ -56,10 +56,19 @@ export default function JobExpansion({ job, onCollapse }: { job: Job; onCollapse
           <span className={styles.reasonTitle}>{t.status[job.status]}</span> — {job.failReason}
         </div>
       )}
+      {/* The reason comes from the DETAIL query, not from `job`. The jobs-list
+          row is live-mergeable — replaceLiveJobs swaps the whole REST row for a
+          streamed one while its framedAt is fresh (see queries.ts) — and stream
+          job-list frames deliberately carry no parkDetail, so reading it off
+          `job` makes the reason vanish and reappear on a ~10s cycle after every
+          connect, rescope and reconnect. `detail` is the same body the detail
+          route renders and nothing overwrites it. Falling back to `job` covers
+          only the window before useJobDetail resolves; the two can never
+          disagree, since one enrichment fills both. */}
       <ParkedExplanation
         state={job.state}
         source={job.source}
-        detail={job.parkDetail}
+        detail={detail?.job.parkDetail ?? job.parkDetail}
         className={styles.reasonBox}
       />
 

@@ -1089,27 +1089,31 @@ func (h *streamHub) fetchReasons(ctx context.Context, ids []int64, views map[int
 	}
 
 	out := make(map[int64]jobReasons, len(ids))
-
-	if len(failedIDs) > 0 {
-		details, err := h.callFailureDetails(ctx, failedIDs)
-		for _, id := range failedIDs {
+	// One resolve for both halves, so the retain-on-error rule — the subtle
+	// part, and the one issue #258's finding C1 is about — exists once. Written
+	// twice it drifts: a fix applied to the failed half alone would leave a
+	// parked job's reason vanishing on a transient Postgres error while a
+	// failed job's survived.
+	// field addresses the one jobReasons member this kind owns, so the same
+	// accessor reads the previous value and writes the new one.
+	resolve := func(idsForKind []int64, lookup func(context.Context, []int64) (map[int64]string, error), field func(*jobReasons) *string) {
+		if len(idsForKind) == 0 {
+			return
+		}
+		found, err := lookup(ctx, idsForKind)
+		for _, id := range idsForKind {
+			var r jobReasons
 			if err != nil {
-				out[id] = jobReasons{fail: previous[id].fail}
-				continue
+				prev := previous[id]
+				*field(&r) = *field(&prev)
+			} else {
+				*field(&r) = found[id]
 			}
-			out[id] = jobReasons{fail: details[id]}
+			out[id] = r
 		}
 	}
-	if len(parkedIDs) > 0 {
-		reasons, err := h.callParkReasons(ctx, parkedIDs)
-		for _, id := range parkedIDs {
-			if err != nil {
-				out[id] = jobReasons{park: previous[id].park}
-				continue
-			}
-			out[id] = jobReasons{park: reasons[id]}
-		}
-	}
+	resolve(failedIDs, h.callFailureDetails, func(r *jobReasons) *string { return &r.fail })
+	resolve(parkedIDs, h.callParkReasons, func(r *jobReasons) *string { return &r.park })
 	return out
 }
 

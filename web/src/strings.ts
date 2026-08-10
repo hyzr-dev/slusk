@@ -311,12 +311,17 @@ export const t = {
     parkedLead:
       'Automation stopped here and is waiting for you; the events on this job say what parked it.',
     // Replaces parkedLead when the job carries a parkDetail (issue #484):
-    // the backend's own job_parked event text, a lowercase mid-sentence
-    // fragment (e.g. 'no candidate could satisfy this album: ...'). The
-    // 'Parked — ' label exists because that fragment read bare would look
-    // like a rendering bug, not a sentence; the trailing period closes the
-    // backend's unpunctuated text.
-    parkedReason: (detail: string) => `Parked — ${detail}.`,
+    // the backend's own job_parked event text, a lowercase unpunctuated
+    // fragment (e.g. 'no candidate could satisfy this album: ...').
+    //
+    // Sentence-cased and closed with a period, and nothing else. An earlier
+    // version prefixed 'Parked — ' to stop the bare fragment reading like a
+    // rendering bug, but JobExpansion already renders
+    // '<status> — <failReason>' in the box immediately above, and for a job
+    // parked by the rejection cap that status IS 'Parked' — so the label
+    // appeared twice, one line apart. Casing the first letter adds no words
+    // to what the backend said; a label would.
+    parkedReason: (detail: string) => `${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`,
     // The button sentence exists because the two carry different budgets and
     // nothing else shows it: Retry clears the job's rejection history,
     // Re-run pipeline deliberately keeps it (#317), so re-running the

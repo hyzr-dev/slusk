@@ -84,24 +84,37 @@ describe('parkedExplanation', () => {
   // first reports success on the second. Causal verbs are the thing being
   // banned, so ban the grammar.
   //
-  // This ban applies only to parkedLead, the static fallback shown when the
-  // job carries no parkDetail (issue #484). parkedReason interpolates the
-  // backend's own job_parked event text — which is free to name any of the
-  // three causes, because it is reporting the one that actually happened for
-  // *this* job, not guessing at one of three — so it is deliberately exempt.
+  // The ban covers every AUTHORED string in the parked block — the lead and
+  // both action sentences. #484 split one blob into several keys, and for a
+  // while the assertion only named the lead: the action strings were then
+  // free to grow an invented cause with the suite green, and the manual one
+  // already sits a word away from tripping this ('no other candidate' vs the
+  // regex's 'no candidate'). Splitting a string must not narrow what guards
+  // it.
+  //
+  // parkedReason is the one exemption, and it is not an authored string: it
+  // interpolates the backend's own job_parked event text, which is free to
+  // name any of the three causes because it reports the one that actually
+  // happened for *this* job rather than guessing among them.
   const causalClaim = /because|repeated|exhaust|disappear|no candidate|offline|unavailable|could not (be )?(find|found)/i;
 
-  it('states no cause in the static fallback lead, because the backend has three', () => {
-    expect(t.jobs.parkedLead).not.toMatch(causalClaim);
+  it.each([
+    ['lead', t.jobs.parkedLead],
+    ['lidarr actions', t.jobs.parkedActions],
+    ['manual actions', t.jobs.parkedActionsManual],
+  ])('states no cause in the authored %s copy, because the backend has three', (_name, copy) => {
+    expect(copy).not.toMatch(causalClaim);
   });
 
   it('points at the job\'s own events, which do know the cause', () => {
     expect(t.jobs.parkedLead).toMatch(/events/i);
   });
 
-  it('renders a backend-supplied reason as a labelled, punctuated sentence', () => {
+  // Sentence-cased and closed, with no label of its own — JobExpansion
+  // already renders the status label in the box directly above.
+  it('renders a backend-supplied reason as a punctuated sentence, unlabelled', () => {
     expect(t.jobs.parkedReason('no candidate could satisfy this album: 5 rejected')).toBe(
-      'Parked — no candidate could satisfy this album: 5 rejected.',
+      'No candidate could satisfy this album: 5 rejected.',
     );
   });
 
