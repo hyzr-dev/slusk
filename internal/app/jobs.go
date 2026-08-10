@@ -58,6 +58,7 @@ type JobStore interface {
 	PrepareDeleteJob(ctx context.Context, jobID int64, now time.Time) ([]core.Transfer, bool, error)
 	RetryFailedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	RetryManualJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
+	RetryRefusedJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, deadline, now time.Time) (core.AlbumJob, error)
 	ForceSearchJob(ctx context.Context, jobID int64, now time.Time) (bool, error)
 	DeleteJob(ctx context.Context, jobID int64) (bool, error)
@@ -123,15 +124,19 @@ func (j *Jobs) Cancel(ctx context.Context, jobID int64) error {
 	return nil
 }
 
-// Retry manually revives one FAILED, PARKED, or legacy ORPHANED job by id:
-// ErrJobNotFound if no such job exists, ErrJobNotRetryable if it exists but is
-// not currently retryable (the caller raced a state change). A manual job
-// (issue #347) retries the same peer via RetryManualJob rather than
-// re-searching: the user picked that peer for a reason the protocol carries
-// nowhere, and the pipeline must never go hunting on a manual job's behalf.
-// A manual job whose candidate rows are already gone (a pre-#347 retry or
-// force-search deleted them) is reported ErrJobNotRetryable: the peer the user
-// chose cannot be recovered, so there is nothing to retry.
+// Retry manually revives one FAILED, PARKED, IMPORT_REFUSED, or legacy
+// ORPHANED job by id: ErrJobNotFound if no such job exists, ErrJobNotRetryable
+// if it exists but is not currently retryable (the caller raced a state
+// change). A manual job (issue #347) retries the same peer via
+// RetryManualJob rather than re-searching: the user picked that peer for a
+// reason the protocol carries nowhere, and the pipeline must never go
+// hunting on a manual job's behalf. A manual job whose candidate rows are
+// already gone (a pre-#347 retry or force-search deleted them) is reported
+// ErrJobNotRetryable: the peer the user chose cannot be recovered, so there
+// is nothing to retry. IMPORT_REFUSED (issue #470) goes through
+// RetryRefusedJob regardless of source: the download was complete and
+// correct, so the retry resubmits the same files rather than re-searching or
+// re-downloading from the same peer.
 func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 	view, found, err := j.Store.JobWithTransfer(ctx, jobID)
 	if err != nil {
@@ -141,9 +146,12 @@ func (j *Jobs) Retry(ctx context.Context, jobID int64) error {
 		return ErrJobNotFound
 	}
 	var ok bool
-	if view.Job.Source == core.SourceManual {
+	switch {
+	case view.Job.State == core.StateImportRefused:
+		ok, err = j.Store.RetryRefusedJob(ctx, jobID, time.Now())
+	case view.Job.Source == core.SourceManual:
 		ok, err = j.Store.RetryManualJob(ctx, jobID, time.Now())
-	} else {
+	default:
 		ok, err = j.Store.RetryFailedJob(ctx, jobID, time.Now())
 	}
 	if err != nil {

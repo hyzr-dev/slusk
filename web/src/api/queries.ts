@@ -276,11 +276,13 @@ export function replaceLiveJobs(jobs: Job[] | undefined, live: WireJob[] | undef
 // Membership follows the backend's own predicates in
 // internal/store/dashboard.go (dashboardJobsWhere and dashboardJobStatusSQL):
 //
-//   - 'finished' and 'failures' are state-keyed (DONE/FAILED/NOT_IMPORTED and
-//     FAILED respectively) and are Overview's terminal panels.
-//   - 'done', 'notImported' and 'parked' are status-derived, but each maps
-//     one-to-one onto a terminal j.state (DONE/COMPLETED, NOT_IMPORTED,
-//     PARKED/ORPHANED) with no transfer-aggregate fallback.
+//   - 'finished' and 'failures' are state-keyed (DONE/FAILED/NOT_IMPORTED/
+//     IMPORT_REFUSED and FAILED respectively) and are Overview's terminal
+//     panels.
+//   - 'done', 'notImported', 'importRefused' and 'parked' are status-derived,
+//     but each maps one-to-one onto a terminal j.state (DONE/COMPLETED,
+//     NOT_IMPORTED, IMPORT_REFUSED, PARKED/ORPHANED) with no transfer-
+//     aggregate fallback.
 //   - 'failed' is deliberately absent. It is status-derived and also matches a
 //     job still DOWNLOADING whose current candidate's transfers all errored
 //     and which the pipeline will retry — that job is genuinely live, and its
@@ -290,6 +292,7 @@ const TERMINAL_JOB_FILTERS: ReadonlySet<JobStatusFilter> = new Set<JobStatusFilt
   'failures',
   'done',
   'notImported',
+  'importRefused',
   'parked',
 ]);
 

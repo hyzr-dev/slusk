@@ -67,7 +67,7 @@ describe('wire compatibility normalization', () => {
       jobs: [wireJob({ status: 'orphaned', state: 'ORPHANED' })],
       total: 25,
       facets: {
-        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4, notImported: 0 },
+        status: { all: 25, wanted: 0, selecting: 0, queued: 0, active: 2, importing: 1, waiting: 3, stalled: 4, failed: 5, parked: 6, done: 4, notImported: 0, importRefused: 0 },
         source: { all: 25, manual: 5, lidarr: 20 },
       },
     });

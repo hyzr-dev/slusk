@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -239,6 +240,133 @@ func (m *Importing) failCandidate(ctx context.Context, job core.AlbumJob, cand c
 	return nil
 }
 
+// refuseImport ends a job at StateImportRefused: Lidarr permanently refused a
+// download, and no other candidate can change that answer (issue #470).
+//
+// It is failCandidate's terminal sibling, and differs in the two ways that
+// matter. The files are MOVED, not deleted - failCandidate calls cleanupFolder,
+// which is right when the next candidate is about to replace them and wrong
+// here, where they are complete, correct, and the only copy. And the
+// destination is IMPORT_REFUSED rather than SELECTING, which is terminal and
+// has no automatic revival, so this is the last thing that happens to the job
+// until a person retries it.
+//
+// The candidate is still routed through RejectCandidateAndAdvance, so it enters
+// the job's permanent rejection history (#317) and a later search cannot
+// re-cache the same peer. RetryRefusedJob lifts it back out; that pairing is
+// load-bearing, and a retry that skipped it would immediately re-reject.
+func (m *Importing) refuseImport(ctx context.Context, job core.AlbumJob, cand core.Candidate, folder string, rejections []core.ImportRejection, now time.Time) error {
+	reason := strings.Join(core.Reasons(rejections), "; ")
+
+	// Quarantine before the state write, not after: the move is the part that
+	// can fail, and a job marked IMPORT_REFUSED whose files are still in the
+	// download root would be rescanned by Lidarr and picked over by the next
+	// job. A failed move leaves them in place and is logged - never fatal, the
+	// same contract quarantineFolder holds everywhere else.
+	detail := fmt.Sprintf("import refused by Lidarr (folder %s): %s", folder, reason)
+	// AlbumFolder falls back to CompleteDir itself when a candidate's files
+	// span two directories. Quarantining that would mean moving the download
+	// root, so this only acts on a real subfolder. quarantineFolder refuses it
+	// too; checking here keeps the reason visible at the decision.
+	if m.p.CompleteDir != "" && filepath.Clean(folder) != filepath.Clean(m.p.CompleteDir) {
+		if dst, moved := quarantineFolder(m.log(), job.ID, m.p.CompleteDir, filepath.Base(folder), refusedDirName); moved {
+			// Say where the files went. The user is the only thing that moves
+			// this job now, and a terminal state that does not say where its
+			// deliverable is leaves them hunting the filesystem.
+			detail = fmt.Sprintf("%s; files kept in %s", detail, dst)
+		}
+	}
+
+	m.log().Info("import refused, job terminal", "album_job", job.ID, "folder", folder, "reasons", core.Reasons(rejections))
+	m.recordOutcome(ctx, job, cand.Username, false, now)
+	if _, err := m.p.Store.RejectCandidateAndAdvance(ctx, cand.ID, job.ID, reason,
+		core.StateImporting, core.StateImportRefused, now); err != nil {
+		return err
+	}
+	m.recordEvent(ctx, job.ID, core.EventImportRefused, detail, now)
+	return nil
+}
+
+// restoreRefusedFolder moves a folder back out of the _import_rejected
+// quarantine when a refused job is retried (issue #470).
+//
+// Without it a retry imports nothing: RetryRefusedJob returns the job to
+// IMPORTING with the same files, but verify derives its folder from
+// AlbumFolder(CompleteDir, names), which after the refusal points at a
+// directory that is no longer there - and the job times out as "import not
+// confirmed in time" having never had anything to scan.
+//
+// It lives here rather than in internal/app, which owns the retry, because the
+// filesystem belongs to pipeline: app is transport-neutral services between the
+// store and the HTTP edge, and this would be the first time it touched disk.
+// Doing it inside verify also makes it idempotent and crash-safe the same way
+// the rest of that function is - a retry that dies mid-step simply redoes it on
+// the next tick.
+//
+// Every failure is logged and swallowed. A folder that is already in place
+// (the ordinary case, on every job that was never refused) costs one Stat.
+func restoreRefusedFolder(log *slog.Logger, jobID int64, completeDir, folder string) {
+	if completeDir == "" || filepath.Clean(folder) == filepath.Clean(completeDir) {
+		return
+	}
+	if _, err := os.Stat(folder); err == nil {
+		return // already where verify expects it
+	}
+	leaf := filepath.Base(folder)
+	if isQuarantineDir(leaf) {
+		return
+	}
+	src, found := refusedQuarantineSource(filepath.Join(completeDir, refusedDirName), leaf, jobID)
+	if !found {
+		// Nothing quarantined for this job. Not worth a log line: this is the
+		// path every ordinary job takes when its folder was simply consumed by
+		// a successful import.
+		return
+	}
+	if err := os.Rename(src, folder); err != nil {
+		log.Error("restoring refused folder failed", "album_job", jobID, "src", src, "dst", folder, "err", err)
+		return
+	}
+	log.Info("restored refused folder for retry", "album_job", jobID, "src", src, "dst", folder)
+}
+
+// refusedQuarantineSource finds where a job's folder actually landed under the
+// refusal quarantine.
+//
+// It is not always dstRoot/leaf. quarantineFolder resolves a name collision
+// through freeQuarantinePath, which falls back to "<leaf>.job<id>" and then to
+// "<leaf>.job<id>.<unix>" - so a restore that only looked for the plain name
+// would silently find nothing exactly when two jobs had shared a folder name,
+// and the retry would import from an empty directory.
+//
+// The plain name wins when present; otherwise the newest "<leaf>.job<id>"
+// variant does, which is the one quarantineFolder wrote last for this job.
+// Matching is a directory scan rather than a glob because album names contain
+// brackets, and filepath.Match would read "[2020]" as a character class.
+func refusedQuarantineSource(dstRoot, leaf string, jobID int64) (string, bool) {
+	plain := filepath.Join(dstRoot, leaf)
+	if _, err := os.Stat(plain); err == nil {
+		return plain, true
+	}
+	entries, err := os.ReadDir(dstRoot)
+	if err != nil {
+		return "", false
+	}
+	prefix := fmt.Sprintf("%s.job%d", leaf, jobID)
+	best := ""
+	for _, e := range entries {
+		if name := e.Name(); name == prefix || strings.HasPrefix(name, prefix+".") {
+			if name > best {
+				best = name
+			}
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return filepath.Join(dstRoot, best), true
+}
+
 // verify is the verify-phase gate (ImportSubmittedAt is NULL): it asks Lidarr
 // what it would import from the album folder and decides whether to import at
 // all. Files Lidarr assigned a real track ID are imported even if it also
@@ -265,6 +393,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// job.LidarrAlbumID is already resolved by Tick (see resolveAlbumID), so
 	// it is non-zero here for every job, manual or not.
 	folder := AlbumFolder(m.p.CompleteDir, names)
+	restoreRefusedFolder(m.log(), job.ID, m.p.CompleteDir, folder)
 	if folder != m.p.CompleteDir {
 		// Best-effort dedup before Lidarr scans the folder: a messy share can
 		// contain the same track twice (mixed formats, stray copies), which
@@ -322,7 +451,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 	// more real track IDs was matched and is importable; only files with no
 	// track ID at all are genuinely unmatched.
 	var importable []core.ImportItem
-	var rejections []string
+	var rejections []core.ImportRejection
 	for _, it := range items {
 		if len(it.TrackIDs) > 0 {
 			importable = append(importable, it)
@@ -343,8 +472,8 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		if err != nil {
 			m.log().Warn("album status check before import-rejected failure failed", "album_job", job.ID, "err", err)
 		} else if complete {
-			alreadyDetail := fmt.Sprintf("import rejected but album already complete in Lidarr (folder %s): %s", folder, strings.Join(rejections, "; "))
-			m.log().Info(alreadyDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
+			alreadyDetail := fmt.Sprintf("import rejected but album already complete in Lidarr (folder %s): %s", folder, strings.Join(core.Reasons(rejections), "; "))
+			m.log().Info(alreadyDetail, "album_job", job.ID, "folder", folder, "reasons", core.Reasons(rejections))
 			m.recordEvent(ctx, job.ID, core.EventAttemptSucceeded, alreadyDetail, now)
 			if _, err := m.p.Store.SucceedCandidateAndAdvance(ctx, cand.ID, job.ID, core.StateImporting, core.StateDone, now); err != nil {
 				return err
@@ -352,10 +481,18 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 			cleanupFolder(ctx, m.p.Peers, m.p.Store, m.log(), job.ID, now)
 			return nil
 		}
+		// A rejection Lidarr marked Permanent will not read differently on a
+		// retry, so trying the remaining candidates would burn bandwidth to
+		// arrive at the same answer - nineteen consecutive candidates did
+		// exactly that on the canary. The job stops here instead, keeping its
+		// files, and waits for a person (issue #470).
+		if core.AnyPermanent(rejections) {
+			return m.refuseImport(ctx, job, cand, folder, rejections, now)
+		}
 		// Other candidates usually remain, so the next SELECTING tick tries one
 		// immediately — no cooldown.
-		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(rejections, "; "))
-		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", rejections)
+		rejectedDetail := fmt.Sprintf("import rejected (folder %s): %s", folder, strings.Join(core.Reasons(rejections), "; "))
+		m.log().Info(rejectedDetail, "album_job", job.ID, "folder", folder, "reasons", core.Reasons(rejections))
 		m.recordEvent(ctx, job.ID, core.EventImportRejected, rejectedDetail, now)
 		return m.failCandidate(ctx, job, cand, "import rejected", true, now)
 	}
@@ -364,7 +501,7 @@ func (m *Importing) verify(ctx context.Context, job core.AlbumJob, cand core.Can
 		// decides completeness. They are left behind in the download folder
 		// (cleanupCompletedFolder already leaves non-empty folders in place).
 		m.log().Info("ignoring unmatched files in album folder",
-			"album_job", job.ID, "folder", folder, "unmatched", len(items)-len(importable), "reasons", rejections)
+			"album_job", job.ID, "folder", folder, "unmatched", len(items)-len(importable), "reasons", core.Reasons(rejections))
 	}
 	// Completeness is judged against the smallest valid edition
 	// (MinTrackCount, cached by Discovery from Lidarr's release list): with

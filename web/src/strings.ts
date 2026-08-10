@@ -141,6 +141,9 @@ export const t = {
     // A manual job (issue #59) that finished downloading with no Lidarr album
     // to import into. Not a failure: the files are on disk.
     notImported: 'Not imported',
+    // A job (issue #470) that downloaded correctly but Lidarr permanently
+    // refused to accept it. The files are kept; the job awaits a person.
+    importRefused: 'Import refused',
   },
   // Two-letter status tags in the TUI job grid. The long labels in `status`
   // and `state` are still used wherever there is room for them.
@@ -156,6 +159,7 @@ export const t = {
     WA: 'WA',
     SE: 'SE',
     WT: 'WT',
+    IR: 'IR',
     // Uploads panel marker, not a JobStatus/JobState — the map already
     // serves as a general two-letter tag vocabulary, so it's added here
     // rather than duplicated in its own small map.
@@ -179,6 +183,11 @@ export const t = {
     // applied. The specific reason is recorded as a job event and shown in
     // the job's detail view, which is where someone troubleshooting looks.
     NI: 'Downloaded, not imported — no Lidarr album to import into',
+    // Issue #470. Distinct from NI above: this download WAS identified
+    // against a real Lidarr album, and Lidarr itself declined it — the files
+    // are complete and correct, kept on disk, awaiting a person's decision
+    // rather than another automatic retry.
+    IR: 'Downloaded, but Lidarr refused the import — files kept',
     UL: 'Uploading',
   },
   state: {
@@ -195,6 +204,9 @@ export const t = {
     // the wording states the outcome rather than which of the two routes
     // there produced it.
     NOT_IMPORTED: 'Not imported',
+    // Terminal state (issue #470) for a job that downloaded correctly but
+    // Lidarr permanently refused to accept it. See tagTitle.IR's comment.
+    IMPORT_REFUSED: 'Import refused',
   },
   candidateState: {
     NEW: 'Not tried',
@@ -359,6 +371,16 @@ export const t = {
       // sits in a column the user has already learned, while a chip is the
       // only place this status names itself.
       notImported: 'NOT IMPORTED',
+      // Spelled out rather than reusing the 'IR' tag, same reasoning as
+      // notImported above - but one word, not two. .controlsRow has a ~1240px
+      // budget that issue #416 already blew once by 137px and had to buy back
+      // (see Jobs.module.css), and this is the twelfth chip on it. 'IMPORT
+      // REFUSED' costs roughly 155px against 'REFUSED''s ~98px, and the row
+      // wraps rather than clips - which pushes the source axis onto its own
+      // line at every width, exactly the regression #416 fixed. 'REFUSED'
+      // beside DONE and NOT IMPORTED is unambiguous, and the full wording
+      // lives in the tag's title and the job's own state label.
+      importRefused: 'REFUSED',
     },
     // A second, orthogonal chip row (Manual vs Lidarr-sourced jobs) — not in
     // the mock, but source filtering is an approved Jobs control. The group's

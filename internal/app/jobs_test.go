@@ -33,6 +33,8 @@ type fakeJobStore struct {
 	retryOK          bool
 	retryManualErr   error
 	retryManualOK    bool
+	retryRefusedErr  error
+	retryRefusedOK   bool
 	createErr        error
 	createJob        core.AlbumJob
 	forceSearchErr   error
@@ -40,16 +42,17 @@ type fakeJobStore struct {
 	deleteErr        error
 	deleteOK         bool
 
-	cancelCalled      bool
-	cancelJobID       int64
-	prepareCalled     bool
-	retryCalled       bool
-	retryManualCalled bool
-	forceSearchCalled bool
-	deleteCalled      bool
-	lookupIDs         []int64
-	operations        *[]string
-	createCalled      struct {
+	cancelCalled       bool
+	cancelJobID        int64
+	prepareCalled      bool
+	retryCalled        bool
+	retryManualCalled  bool
+	retryRefusedCalled bool
+	forceSearchCalled  bool
+	deleteCalled       bool
+	lookupIDs          []int64
+	operations         *[]string
+	createCalled       struct {
 		title, artistName, peer, albumMBID string
 		files                              []store.ManualJobFile
 	}
@@ -101,6 +104,14 @@ func (f *fakeJobStore) RetryManualJob(ctx context.Context, jobID int64, now time
 		return false, f.retryManualErr
 	}
 	return f.retryManualOK, nil
+}
+
+func (f *fakeJobStore) RetryRefusedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	f.retryRefusedCalled = true
+	if f.retryRefusedErr != nil {
+		return false, f.retryRefusedErr
+	}
+	return f.retryRefusedOK, nil
 }
 
 func (f *fakeJobStore) CreateManualJob(ctx context.Context, title, artistName, peer, albumMBID string, files []store.ManualJobFile, deadline, now time.Time) (core.AlbumJob, error) {
@@ -304,6 +315,38 @@ func TestJobsRetryRoutesBySource(t *testing.T) {
 				if store.retryManualCalled {
 					t.Error("expected RetryManualJob NOT called for a lidarr job")
 				}
+			}
+		})
+	}
+}
+
+// TestJobsRetryRoutesImportRefusedRegardlessOfSource covers issue #470: an
+// IMPORT_REFUSED job must go through RetryRefusedJob no matter its source,
+// taking priority over the manual/lidarr split above - the job's state, not
+// its source, decides here.
+func TestJobsRetryRoutesImportRefusedRegardlessOfSource(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		source core.JobSource
+	}{
+		{"manual", core.SourceManual},
+		{"lidarr", core.SourceLidarr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeJobStore{
+				jobs:           map[int64]core.JobView{1: {Job: core.AlbumJob{ID: 1, Source: tt.source, State: core.StateImportRefused}}},
+				retryRefusedOK: true,
+			}
+			j := &Jobs{Store: store, Peers: &fakePeerCanceller{}}
+
+			if err := j.Retry(context.Background(), 1); err != nil {
+				t.Fatalf("Retry() = %v, want nil", err)
+			}
+			if !store.retryRefusedCalled {
+				t.Error("expected RetryRefusedJob called for an IMPORT_REFUSED job")
+			}
+			if store.retryCalled || store.retryManualCalled {
+				t.Error("expected neither RetryFailedJob nor RetryManualJob called for an IMPORT_REFUSED job")
 			}
 		})
 	}

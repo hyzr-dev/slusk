@@ -2,7 +2,7 @@ import type { JobStatus } from '../../api/types';
 import { t } from '../../strings';
 import styles from './Tag.module.css';
 
-export type TagKind = 'DL' | 'QU' | 'ST' | 'PA' | 'FA' | 'OK' | 'IM' | 'NI' | 'WA' | 'SE' | 'WT';
+export type TagKind = 'DL' | 'QU' | 'ST' | 'PA' | 'FA' | 'OK' | 'IM' | 'NI' | 'WA' | 'SE' | 'WT' | 'IR';
 
 const BY_STATUS: Record<JobStatus, TagKind> = {
   wanted: 'WA',
@@ -16,11 +16,17 @@ const BY_STATUS: Record<JobStatus, TagKind> = {
   failed: 'FA',
   parked: 'PA',
   notImported: 'NI',
+  importRefused: 'IR',
 };
 
 // NI (issue #59) is neither --ok nor --bad: the download succeeded and the
 // files are on disk, it just never reached Lidarr — reading it as a failure
 // would be exactly the invented-certainty the design brief forbids.
+//
+// IR (issue #470) is --bad, unlike NI above: the download was complete and
+// correct, but Lidarr *actively refused* to accept it — the same class of
+// terminal, user-action-required outcome as FAILED/STALLED/PARKED, which is
+// exactly what --bad is reserved for.
 //
 // WA/SE/WT (issue #416) get the same quiet tone as QU: none of them have
 // bytes moving, and per CLAUDE.md's design rules status carries no per-state
@@ -38,6 +44,7 @@ const TONE: Record<TagKind, string> = {
   ST: styles.bad,
   FA: styles.bad,
   PA: styles.bad,
+  IR: styles.bad,
 };
 
 /**

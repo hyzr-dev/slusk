@@ -353,15 +353,7 @@ func main() {
 			Jobs:  page.Jobs,
 			Total: page.Total,
 			Facets: observ.JobFacets{
-				Status: observ.JobStatusFacets{
-					All: page.Facets.Status.All, Active: page.Facets.Status.Active,
-					Importing: page.Facets.Status.Importing, Queued: page.Facets.Status.Queued,
-					Waiting: page.Facets.Status.Waiting, Selecting: page.Facets.Status.Selecting,
-					Wanted: page.Facets.Status.Wanted, Stalled: page.Facets.Status.Stalled,
-					Failed: page.Facets.Status.Failed,
-					Parked: page.Facets.Status.Parked, Done: page.Facets.Status.Done,
-					NotImported: page.Facets.Status.NotImported,
-				},
+				Status: jobStatusFacets(page.Facets.Status),
 				Source: observ.JobSourceFacets{
 					All: page.Facets.Source.All, Manual: page.Facets.Source.Manual,
 					Lidarr: page.Facets.Source.Lidarr,
@@ -895,6 +887,29 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("slusk stopped cleanly")
+}
+
+// jobStatusFacets copies the store's status counts onto observ's wire shape.
+//
+// It is a named function rather than a struct literal inline at the call site
+// so that TestJobStatusFacetsCopiesEveryField can reach it. The two structs are
+// deliberately separate - internal/observ declares its own types rather than
+// importing the store's - and the cost of that boundary is this hand-written
+// copy, which the compiler cannot check: a field added to both sides but
+// forgotten here silently serves 0 forever, and every test in the repo stays
+// green. Issue #470's importRefused facet shipped exactly that way for the
+// length of one review.
+func jobStatusFacets(f store.DashboardStatusFacets) observ.JobStatusFacets {
+	return observ.JobStatusFacets{
+		All: f.All, Active: f.Active,
+		Importing: f.Importing, Queued: f.Queued,
+		Waiting: f.Waiting, Selecting: f.Selecting,
+		Wanted: f.Wanted, Stalled: f.Stalled,
+		Failed: f.Failed,
+		Parked: f.Parked, Done: f.Done,
+		NotImported:   f.NotImported,
+		ImportRefused: f.ImportRefused,
+	}
 }
 
 // buildAppConfig renders the settings view's read model from the loaded

@@ -33,8 +33,9 @@ interface Props {
 // its own — so this list is the only thing stopping an already-finished job
 // from being rewritten to CANCELLED. NOT_IMPORTED (issue #59) belongs here
 // for exactly that reason: the download completed, there is nothing left to
-// cancel.
-const TERMINAL_STATES: JobState[] = ['DONE', 'FAILED', 'CANCELLED', 'NOT_IMPORTED'];
+// cancel. IMPORT_REFUSED (issue #470) is the same story — the download is
+// done and Lidarr has already given its final answer.
+const TERMINAL_STATES: JobState[] = ['DONE', 'FAILED', 'CANCELLED', 'NOT_IMPORTED', 'IMPORT_REFUSED'];
 
 /** FAILED or PARKED are the two states Retry is offered for; exported so
  * JobDetail can share this rule instead of re-declaring it. */

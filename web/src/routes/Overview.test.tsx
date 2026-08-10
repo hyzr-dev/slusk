@@ -91,6 +91,7 @@ function makeFacets(jobs: Job[]): JobFacets {
       parked: 0,
       done: jobs.filter((j) => j.status === 'done').length,
       notImported: jobs.filter((j) => j.status === 'notImported').length,
+      importRefused: jobs.filter((j) => j.status === 'importRefused').length,
     },
     source: { all: jobs.length, manual: 0, lidarr: jobs.length },
   };

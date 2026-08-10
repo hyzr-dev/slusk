@@ -15,8 +15,8 @@ _Avoid_: task, item, download (a download is one part of a job)
 
 **Job state**:
 The lifecycle value stored on the job row — `WANTED`, `SELECTING`, `DOWNLOADING`,
-`IMPORTING`, `DONE`, `PARKED`, `FAILED`, `CANCELLED`, `NOT_IMPORTED` — and the only
-vocabulary the pipeline itself reads or writes. Not the same as dashboard status:
+`IMPORTING`, `DONE`, `PARKED`, `FAILED`, `CANCELLED`, `NOT_IMPORTED`, `IMPORT_REFUSED` —
+and the only vocabulary the pipeline itself reads or writes. Not the same as dashboard status:
 several statuses are derived from transfer activity rather than the job row, and one
 job state can present as more than one status.
 _Avoid_: status on its own (ambiguous with dashboard status)
@@ -44,8 +44,12 @@ _Avoid_: album folder, source folder
 **Download folder**:
 The directory a job owns beneath the local download root, named after the remote folder
 it copies. Only one live job may own one at a time: owning it is what confers the right
-to write into it and, later, to delete it.
-_Avoid_: leaf, target folder, complete dir
+to write into it and, later, to delete it. It is what Lidarr is pointed at to scan, and
+it carries whatever name the peer chose — so it is not a promise that one album, or only
+one album, is inside it.
+_Avoid_: album folder (it holds what a peer put in one directory, which is not the same
+as one album — reading it the other way is what #280 lived in), leaf, target folder,
+complete dir
 
 **Backend**:
 The Soulseek implementation in use — the native protocol client, or slskd over HTTP.
@@ -58,9 +62,18 @@ jobs await a person's decision; failed jobs await a retry.
 _Avoid_: stalled, blocked, held
 
 **Not imported**:
-A job whose files arrived but which Lidarr would not take. The download succeeded and
-the album is still absent from the library.
-_Avoid_: failed, rejected
+A job whose download completed but that never reached Lidarr at all — either it was
+never identified against a MusicBrainz release group, or the identified release group is
+not in Lidarr's library. Manual-jobs-only, and not a failure: nothing went wrong, Lidarr
+was simply never asked. Never retried, never treated as an error.
+_Avoid_: failed, rejected, import refused (that term is for a job Lidarr *did* see and
+turned away — see Import refused)
+
+**Import refused**:
+A job whose download was complete and correct, and which Lidarr permanently refused to
+accept. The files are kept; the job awaits a person.
+_Avoid_: not imported (that term is for a job that never reached Lidarr — see Not
+imported), failed, rejected
 
 ### The dashboard
 

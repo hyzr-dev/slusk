@@ -42,6 +42,28 @@ const (
 	// condition. Only a manual job can reach it; a Lidarr-sourced job always
 	// has a real LidarrAlbumID by construction.
 	StateNotImported AlbumJobState = "NOT_IMPORTED"
+	// StateImportRefused is the terminal outcome of a job whose download was
+	// complete and correct and which Lidarr permanently refused to accept
+	// (issue #470). The files are kept, under CompleteDir/_import_rejected/,
+	// and the job awaits a person.
+	//
+	// It is deliberately none of the other three terminals. FAILED means the
+	// candidate cache was exhausted and is revived on a schedule; nothing was
+	// exhausted here. NOT_IMPORTED is manual-job-only and explicitly must never
+	// be retried, where this is resolvable - fix the tags, add the release in
+	// Lidarr - so it must stay retryable. PARKED's "awaits a person's decision"
+	// fits but its "no candidate could satisfy it" does not: the candidate was
+	// fine and Lidarr said no.
+	//
+	// Named REFUSED rather than REJECTED on purpose. EventImportRejected
+	// already exists and is written every time a candidate is rejected and the
+	// job moves on to the next one - the opposite outcome. One job on the
+	// canary carries 59 of them and was never terminal. See docs/adr.
+	//
+	// There is no automatic revival: SyncWantedJobs' revive acts only on
+	// FAILED, and a timer that decides for the user contradicts what the state
+	// means. ForceSearch is the escape hatch and already accepts it.
+	StateImportRefused AlbumJobState = "IMPORT_REFUSED"
 )
 
 // Terminal reports whether the state is an end state that needs no further work
@@ -57,7 +79,8 @@ func (s AlbumJobState) Terminal() bool {
 // normal advance. Distinct from Terminal() (the legacy engine's notion) until
 // the engine is deleted.
 func (s AlbumJobState) PipelineTerminal() bool {
-	return s == StateDone || s == StateCancelled || s == StateFailed || s == StateNotImported
+	return s == StateDone || s == StateCancelled || s == StateFailed ||
+		s == StateNotImported || s == StateImportRefused
 }
 
 // TransferState mirrors slskd's transfer states, plus STALLED which slusk
@@ -111,6 +134,14 @@ const (
 	// is not in Lidarr's library. Deliberately distinct from
 	// EventAttemptFailed/EventJobFailed: this is not a failure.
 	EventNotImported JobEventType = "not_imported"
+	// EventImportRefused records a job reaching StateImportRefused: Lidarr
+	// permanently refused the files and they were moved to the
+	// _import_rejected quarantine (issue #470). Distinct from
+	// EventImportRejected, which is written on the ordinary path where a
+	// candidate is rejected and the job goes on to try the next one - the two
+	// read alike and mean opposite things, which is why the state is spelled
+	// REFUSED. The detail carries Lidarr's reason and where the files went.
+	EventImportRefused JobEventType = "import_refused"
 )
 
 // CandidateState is the lifecycle of one cached candidate (see core.Candidate).

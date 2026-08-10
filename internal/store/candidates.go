@@ -227,9 +227,16 @@ func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jo
 		return false, nil
 	}
 
+	// import_refused_reason is written in the same statement as the state that
+	// gives it meaning (issue #470). Keying it on the destination state rather
+	// than on a separate flag makes both "IMPORT_REFUSED with no reason" and "a
+	// reason on a job that is not refused" unrepresentable, and leaves every
+	// other destination's value untouched.
 	res, err = tx.ExecContext(ctx,
-		`UPDATE album_jobs SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
-		string(to), now, jobID, string(from))
+		`UPDATE album_jobs SET state = $1, updated_at = $2,
+		        import_refused_reason = CASE WHEN $1 = $5 THEN $6 ELSE import_refused_reason END
+		 WHERE id = $3 AND state = $4`,
+		string(to), now, jobID, string(from), string(core.StateImportRefused), reason)
 	if err != nil {
 		return false, fmt.Errorf("advance job: %w", err)
 	}

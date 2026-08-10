@@ -356,7 +356,7 @@ func (s *Selecting) quarantineLeftovers(ctx context.Context, job core.AlbumJob, 
 	}
 	var moved []string
 	for _, leaf := range leaves {
-		dst, ok := quarantineFolder(s.log(), job.ID, s.p.CompleteDir, leaf)
+		dst, ok := quarantineFolder(s.log(), job.ID, s.p.CompleteDir, leaf, quarantineDirName)
 		if !ok {
 			continue
 		}

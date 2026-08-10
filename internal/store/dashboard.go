@@ -176,6 +176,11 @@ const dashboardJobStatusSQL = `CASE
 	-- imported. Checked alongside the other job-level states above, before
 	-- any transfer-aggregate fallback applies.
 	WHEN j.state = 'NOT_IMPORTED'           THEN 'notImported'
+	-- A job whose download was complete and correct, and which Lidarr
+	-- permanently refused (issue #470). Terminal, and deliberately its own
+	-- status like 'notImported' above rather than folding into 'failed':
+	-- the candidate cache was not exhausted, Lidarr said no.
+	WHEN j.state = 'IMPORT_REFUSED'         THEN 'importRefused'
 	WHEN j.state = 'WANTED'                 THEN 'wanted'
 	WHEN j.state = 'SELECTING'              THEN 'selecting'
 	WHEN agg.in_progress > 0                THEN 'active'
@@ -351,6 +356,11 @@ type DashboardStatusFacets struct {
 	// counter of its own (issue #368) rather than folding into Done or
 	// Failed, so the rendered chips still sum to All.
 	NotImported int64
+	// ImportRefused is the terminal outcome from issue #470: the download
+	// finished complete and correct, and Lidarr permanently refused to
+	// import it. Its own counter for the same reason as NotImported - the
+	// chips must still sum to All.
+	ImportRefused int64
 }
 
 // DashboardSourceFacets contains counts for each persisted job source. All
@@ -411,10 +421,11 @@ func validateDashboardJobsQuery(q DashboardJobsQuery) error {
 	// dashboardJobsWhere's default case — it is NOT the same set as
 	// "failures" below; see that case's comment for why the two must never
 	// be merged.
-	// "notImported" (issue #368) is status-derived like the rest of this row;
-	// its twin in internal/observ/observ.go must accept exactly the same set,
-	// or a value passes one gate and is refused by the other.
-	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "wanted", "selecting", "waiting", "notImported", "inflight", "finished", "failures":
+	// "notImported" (issue #368) and "importRefused" (issue #470) are
+	// status-derived like the rest of this row; their twin in
+	// internal/observ/observ.go must accept exactly the same set, or a value
+	// passes one gate and is refused by the other.
+	case "all", "active", "importing", "queued", "stalled", "failed", "parked", "done", "wanted", "selecting", "waiting", "notImported", "importRefused", "inflight", "finished", "failures":
 	default:
 		return fmt.Errorf("invalid dashboard jobs filter %q", q.Filter)
 	}
@@ -468,10 +479,13 @@ func dashboardJobsWhere(q DashboardJobsQuery, includeStatus, includeSource bool)
 			// its updated_at marks that moment, so a manual job that finishes
 			// with no Lidarr album to import into must still surface here —
 			// omitting it would make a successful download vanish from the
-			// one panel the user watches for completions.
+			// one panel the user watches for completions. IMPORT_REFUSED
+			// (issue #470) is included for the same reason: the download
+			// completed and its updated_at marks that moment, even though
+			// the outcome awaits a person rather than being fully done.
 			clauses = append(clauses,
 				"j.state IN ("+bind(string(core.StateDone))+", "+bind(string(core.StateFailed))+
-					", "+bind(string(core.StateNotImported))+")"+
+					", "+bind(string(core.StateNotImported))+", "+bind(string(core.StateImportRefused))+")"+
 					" AND j.updated_at > "+bind(q.Now.Add(-DashboardFinishedWindow)))
 		case "failures":
 			// Overview's FAILED panel (issue #310/review follow-up). Keyed on
@@ -519,7 +533,7 @@ func dashboardJobsOrder(q DashboardJobsQuery) string {
 			WHEN 'active' THEN 1 WHEN 'importing' THEN 2 WHEN 'waiting' THEN 3
 			WHEN 'queued' THEN 4 WHEN 'selecting' THEN 5 WHEN 'wanted' THEN 6
 			WHEN 'stalled' THEN 7 WHEN 'failed' THEN 8 WHEN 'parked' THEN 9
-			WHEN 'done' THEN 10 WHEN 'notImported' THEN 11 ELSE 12 END ` + direction + `, j.id ASC`
+			WHEN 'done' THEN 10 WHEN 'notImported' THEN 11 WHEN 'importRefused' THEN 12 ELSE 13 END ` + direction + `, j.id ASC`
 	case "album":
 		return " ORDER BY lower(j.title) " + direction + ", lower(j.artist_name) " + direction + ", j.id ASC"
 	case "peer":
@@ -671,7 +685,8 @@ func dashboardStatusFacetSQL(where string) string {
 		COUNT(*) FILTER (WHERE status = 'failed'),
 		COUNT(*) FILTER (WHERE status = 'parked'),
 		COUNT(*) FILTER (WHERE status = 'done'),
-		COUNT(*) FILTER (WHERE status = 'notImported')
+		COUNT(*) FILTER (WHERE status = 'notImported'),
+		COUNT(*) FILTER (WHERE status = 'importRefused')
 		FROM (SELECT ` + dashboardJobStatusSQL + ` AS status` + jobViewFrom + where + `) dashboard_jobs`
 }
 
@@ -682,7 +697,7 @@ func scanDashboardStatusFacets(row *sql.Row, facets *DashboardStatusFacets) erro
 		&facets.All, &facets.Active, &facets.Importing,
 		&facets.Queued, &facets.Waiting, &facets.Selecting,
 		&facets.Wanted, &facets.Stalled, &facets.Failed,
-		&facets.Parked, &facets.Done, &facets.NotImported,
+		&facets.Parked, &facets.Done, &facets.NotImported, &facets.ImportRefused,
 	)
 }
 
