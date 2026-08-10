@@ -208,6 +208,13 @@ export const t = {
     search_excluded: 'Search excluded by server',
     candidate_selected: 'Candidate selected',
     candidate_rejected: 'Candidate rejected',
+    // Not a rejection: another job is downloading into the same folder, so
+    // this one waits for it rather than being blamed for the collision
+    // (issue #471). Which folder and which job holds it live in the detail
+    // column beside this, which is also why the label stays inside the width
+    // the existing candidate_* labels already occupy - the event column is a
+    // fixed 190px.
+    candidate_deferred: 'Candidate waiting',
     attempt_failed: 'Attempt failed',
     attempt_succeeded: 'Attempt succeeded',
     transfer_stalled: 'Transfer stalled',

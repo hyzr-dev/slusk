@@ -35,6 +35,18 @@ _Avoid_: result, match, option
 One file moving from one peer to this machine. A candidate becomes many transfers.
 _Avoid_: download (ambiguous between the file and the whole job)
 
+**Remote folder**:
+The directory a peer shares a candidate's files from. A name slusk observes and copies,
+never chooses — and one that says nothing about the album, since a peer is free to call
+it `cd1` or `FLAC (24bit-44.1kHz)`.
+_Avoid_: album folder, source folder
+
+**Download folder**:
+The directory a job owns beneath the local download root, named after the remote folder
+it copies. Only one live job may own one at a time: owning it is what confers the right
+to write into it and, later, to delete it.
+_Avoid_: leaf, target folder, complete dir
+
 **Backend**:
 The Soulseek implementation in use — the native protocol client, or slskd over HTTP.
 A deployment picks exactly one; both satisfy the same ports.

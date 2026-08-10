@@ -416,6 +416,52 @@ func (s *Store) DeferSelectingJob(ctx context.Context, jobID int64, now time.Tim
 	return nil
 }
 
+// DeferCandidate records that candidateID is waiting for another job to release
+// its download folder (issue #471), and returns when the wait began together
+// with whether this call is what started it.
+//
+// The stored timestamp is the FIRST deferral's, not the latest: a candidate
+// re-deferred on every tick would otherwise push its own deadline forward
+// forever, and the ceiling that breaks an unbounded wait would never fire.
+//
+// first is true exactly once per wait, because it is true exactly when the
+// column goes NULL → set. That is what de-duplicates the candidate_deferred
+// event — one per wait rather than one per tick — with no counter to keep.
+func (s *Store) DeferCandidate(ctx context.Context, candidateID int64, now time.Time) (since time.Time, first bool, err error) {
+	// The old value has to be read in the same statement as the write: reading
+	// it separately under READ COMMITTED would let two ticks both see NULL and
+	// both report a fresh wait. FOR UPDATE serializes the row against itself.
+	err = s.db.QueryRowContext(ctx,
+		`WITH prev AS (SELECT id, deferred_since FROM candidates WHERE id = $1 FOR UPDATE)
+		 UPDATE candidates c SET deferred_since = COALESCE(prev.deferred_since, $2), updated_at = $2
+		 FROM prev WHERE c.id = prev.id
+		 RETURNING c.deferred_since, prev.deferred_since IS NULL`,
+		candidateID, now).Scan(&since, &first)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The candidate was deleted under us (a reset or a manual action). Not
+		// an error: the caller's next read finds no active candidate and moves
+		// on.
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("defer candidate: %w", err)
+	}
+	return since, first, nil
+}
+
+// ClearCandidateDeferral ends a wait recorded by DeferCandidate, so a candidate
+// that is deferred again later starts a fresh clock and reports a fresh event.
+// Leaving a stale timestamp behind would make the next wait inherit an expired
+// deadline and fail the candidate on its first deferred tick.
+func (s *Store) ClearCandidateDeferral(ctx context.Context, candidateID int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE candidates SET deferred_since = NULL WHERE id = $1 AND deferred_since IS NOT NULL`,
+		candidateID); err != nil {
+		return fmt.Errorf("clear candidate deferral: %w", err)
+	}
+	return nil
+}
+
 // TransfersForCandidate returns all transfers belonging to a candidate.
 func (s *Store) TransfersForCandidate(ctx context.Context, candidateID int64) ([]core.Transfer, error) {
 	rows, err := s.db.QueryContext(ctx, transferSelect+` WHERE candidate_id = $1`, candidateID)
