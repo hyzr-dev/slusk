@@ -20,6 +20,13 @@ import (
 // as fallback. Per track, lossless always beats lossy; within the same format
 // class the larger file (a bitrate proxy — tag headers don't carry bitrate)
 // wins.
+//
+// The folder is not guaranteed to hold one album, though: a peer that shares a
+// discography under a single artist directory makes that directory the
+// download's common leaf, and every album in it numbers its tracks from 1.
+// Keying on the track number alone reduced such a bundle to one album's worth
+// of files and the candidate was then rejected as incomplete (#280), so when
+// the folder names more than one album the album joins the key.
 
 // audioExts are the file extensions considered audio files; anything else in
 // the folder (covers, cue sheets, logs) is ignored entirely.
@@ -36,6 +43,7 @@ var losslessExts = map[string]bool{".flac": true, ".wav": true, ".ape": true, ".
 type dedupFile struct {
 	path     string
 	size     int64
+	albumKey string // normalizeTitle of the tag album; "" when untagged
 	disc     int
 	track    int
 	titleKey string // normalizeTitle of the tag title; "" when untagged
@@ -60,6 +68,7 @@ var readFileMeta = func(path string, size int64) dedupFile {
 	}
 	df.track, _ = m.Track()
 	df.disc, _ = m.Disc()
+	df.albumKey = normalizeTitle(m.Album())
 	df.titleKey = normalizeTitle(m.Title())
 	if ft := m.FileType(); ft == tag.FLAC || ft == tag.ALAC {
 		df.lossless = true
@@ -98,21 +107,58 @@ func dedupAlbumFolder(log *slog.Logger, folder string) (removed []string, err er
 	return removed, nil
 }
 
+// multiAlbum reports whether the files name more than one album between them,
+// which is the only situation where the album is worth grouping on. Tagging in
+// the wild is inconsistent enough that treating the album as a discriminator
+// unconditionally costs real dedups — a stray transcode with an empty ALBUM
+// frame, or an edition suffix on half the files, would stop matching its own
+// twin. A folder that names at most one album cannot be the #280 case, so it
+// keeps the pre-#280 grouping exactly.
+func multiAlbum(files []dedupFile) bool {
+	first := ""
+	for _, f := range files {
+		switch {
+		case f.albumKey == "":
+		case first == "":
+			first = f.albumKey
+		case f.albumKey != first:
+			return true
+		}
+	}
+	return false
+}
+
 // dedupFiles groups files into same-track sets and returns the losers (every
 // file except each group's winner). Grouping is track-number-first: files
-// with a positive track number group on (disc, track); files without one join
-// a numbered group whose title matches, or failing that group with other
-// unnumbered files by title. A file with neither track number nor title can't
-// be identified as a duplicate of anything and is never removed.
+// with a positive track number group on (album, disc, track); files without
+// one join a numbered group of the same album whose title matches, or failing
+// that group with other files by (album, title). A file with neither track
+// number nor title can't be identified as a duplicate of anything and is never
+// removed.
+//
+// The album participates in every key only when the folder holds more than one
+// album (see multiAlbum); otherwise it is dropped from the keys entirely and
+// grouping is by (disc, track) and title alone. When it does participate, a
+// file carrying no album tag is grouped by title only — a bare track number
+// cannot say which of the folder's albums it belongs to.
 func dedupFiles(files []dedupFile) (losers []dedupFile) {
+	scoped := multiAlbum(files)
+	albumOf := func(f dedupFile) string {
+		if scoped {
+			return f.albumKey
+		}
+		return ""
+	}
 	var groups [][]dedupFile
-	byNum := make(map[string]int)   // "disc/track" → groups index
-	byTitle := make(map[string]int) // titleKey → groups index
-	for _, f := range files {
-		if f.track <= 0 {
+	byNum := make(map[string]int)   // "album/disc/track" → groups index
+	byTitle := make(map[string]int) // "album/titleKey" → groups index
+	numbered := make([]bool, len(files))
+	for i, f := range files {
+		if f.track <= 0 || (scoped && f.albumKey == "") {
 			continue
 		}
-		k := fmt.Sprintf("%d/%d", f.disc, f.track)
+		numbered[i] = true
+		k := fmt.Sprintf("%s/%d/%d", albumOf(f), f.disc, f.track)
 		idx, ok := byNum[k]
 		if !ok {
 			groups = append(groups, nil)
@@ -121,20 +167,22 @@ func dedupFiles(files []dedupFile) (losers []dedupFile) {
 		}
 		groups[idx] = append(groups[idx], f)
 		if f.titleKey != "" {
-			if _, taken := byTitle[f.titleKey]; !taken {
-				byTitle[f.titleKey] = idx
+			tk := albumOf(f) + "/" + f.titleKey
+			if _, taken := byTitle[tk]; !taken {
+				byTitle[tk] = idx
 			}
 		}
 	}
-	for _, f := range files {
-		if f.track > 0 || f.titleKey == "" {
+	for i, f := range files {
+		if numbered[i] || f.titleKey == "" {
 			continue
 		}
-		idx, ok := byTitle[f.titleKey]
+		tk := albumOf(f) + "/" + f.titleKey
+		idx, ok := byTitle[tk]
 		if !ok {
 			groups = append(groups, nil)
 			idx = len(groups) - 1
-			byTitle[f.titleKey] = idx
+			byTitle[tk] = idx
 		}
 		groups[idx] = append(groups[idx], f)
 	}
