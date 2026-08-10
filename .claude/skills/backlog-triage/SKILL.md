@@ -9,7 +9,11 @@ Read every open issue, rank it by what it does to the running instance, compute 
 issues can be worked in parallel, and write a dated report. The report is the deliverable.
 
 **This capability never implements anything.** No branches, no commits, no PRs, no Gitea
-writes, no closing issues. Merging to `main` deploys within minutes, so the thing that
+writes, no closing issues, **and no label changes** — it reads triage labels and prints a
+suggested one per issue, and that is where it stops. The label clause is spelled out
+separately even though "no Gitea writes" already covers it, because computing a suggestion
+and applying it are one keystroke apart and the run that produced the suggestion is exactly
+the wrong thing to trust with applying it. Merging to `main` deploys within minutes, so the thing that
 ranks work must not also ship it. It also never starts the PR lab.
 
 ## Production-impact rubric
@@ -287,10 +291,17 @@ skew is silent and green, because each side is tested against its own mock.
 If a contract is missing from `contracts.json`, the waves cannot see it. Add it there when
 you find one.
 
-This also returns two lists of issues it refused to schedule. Both are excluded from every
-wave — they never got ranked, they did not rank last — and both go in the report and in
+This also returns three lists of issues it refused to schedule. All are excluded from every
+wave — they never got ranked, they did not rank last — and all go in the report and in
 `state.json` (step 4). They are kept apart because they need different repairs:
 
+- `deferred` — the issue carries a `wontfix` or `needs-info` triage label, so the maintainer
+  has already decided its fate and there is nothing to schedule. **No repair.** This is the
+  only one of the three that is a decision rather than a data defect, which is why it is
+  checked *first*: an issue that is both deferred and has a typo'd `effort` is reported as
+  `deferred` only, because telling a reader to fix an enum on an issue that will never be
+  actioned is noise. Do not "fix" one of these by re-judging it — the fix, if any, is to
+  change the label in Gitea, which this capability never does.
 - `unassessable` — `prodImpact` or `effort` was not one of the recognised values (a typo, an
   omitted field, anything else `isAssessable()` rejects). Fix the judgement's enum value.
 - `unschedulable` — a `touches` entry named a directory rather than a file. Fix the
@@ -373,10 +384,21 @@ anywhere in the report without stating one too.
    normal) that drawing it is both unreadable and beside the point a count and a short
    offender list already make. Keep this section separate from Blocking dependencies for
    that reason, and do not "simplify" the report by merging them back into one graph later.
-7. **Full judgement** — a table: issue, kind, impact, evidence, effort, **repro check**,
-   touches; rows listed by issue number, descending. This table is a lookup reference, not a
-   priority ranking — rank order already lives in Waves, so re-sorting this table by rank
-   would just duplicate it under a different name.
+7. **Full judgement** — a table: issue, kind, **label**, impact, evidence, effort, **repro
+   check**, touches; rows listed by issue number, descending. This table is a lookup
+   reference, not a priority ranking — rank order already lives in Waves, so re-sorting this
+   table by rank would just duplicate it under a different name.
+
+   The third column holds `triageLabel` — the role the issue carries in Gitea *right now*,
+   or `—` when it carries none. Not `suggestedLabel`: this table reports the tracker's state,
+   and the suggestion has its own section precisely so the two can be told apart at a glance.
+
+   The `kind` column is no longer the judge's own reading whenever the issue carries a
+   category label: `bug`, `enhancement` and `tech-debt` map onto `bug`, `feature` and
+   `techdebt` respectively, and only an issue with no category label leaves the judge to
+   derive one (`test` is reachable only that way, since no label maps to it). Note in this
+   section how many rows fell back to derivation — a large count is a gap in the tracker's
+   labelling, not a defect in the run, and it is invisible unless counted.
 
    The sixth column holds the judgement's `reproCheck` string verbatim, and its heading is
    **"Repro check"** — not "repro status". The two words mean different things and only one
@@ -403,13 +425,38 @@ anywhere in the report without stating one too.
     both sections above it: Unassessed has no judgement, Unassessable has one that cannot be
     ranked, this one has a judgement that ranks fine and a file set nothing can be compared
     against.
-11. **Candidates to close** — the browser verdicts that came back `PASS`: what was observed,
+11. **Deferred by label** — the `deferred` issue numbers from step 3, listed by issue number,
+    descending, each with the label that deferred it (`wontfix` or `needs-info`). The fourth
+    and last excluded bucket, and the only one that is **not** a failure: the three sections
+    above it each describe a judgement that came back broken, this one describes a backlog
+    working as intended. Say that explicitly, because a reader who has just scanned three
+    fault lists will otherwise read a fourth as a fourth fault. Do not propose repairs here
+    and do not argue with the label — if an issue looks wrongly deferred, that belongs in
+    Label suggestions below, where it is a suggestion the maintainer can act on rather than
+    a verdict this capability has no standing to reach.
+12. **Candidates to close** — the browser verdicts that came back `PASS`: what was observed,
     listed by issue number, descending. Not a conclusion: "I could not reproduce it" and "it
     is fixed" are different claims, and the second is the maintainer's.
-12. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
+13. **Not verified (BLOCKED)** — listed by issue number, descending: the reason and the
     command that would unblock it. Printing
     that command is the whole job here; running it yourself is not — that is exactly the PR
     lab / browser-verification territory this capability stays out of.
+14. **Label suggestions** — every judgement whose `suggestedLabel` differs from its
+    `triageLabel`, listed by issue number, descending. Give the current label (or `—` when
+    the issue carries none), the suggested one, and the judgement's `labelReason` verbatim.
+    Print the exact command beside each, so acting on the section is a paste rather than a
+    translation:
+
+    ```bash
+    tea issues edit <n> --add-labels "<suggested>" --remove-labels "<current>"
+    ```
+
+    Omit `--remove-labels` when the issue carries no triage label today. **Never run these.**
+    Printing them is the whole job — this capability makes no Gitea writes, and a label
+    applied by the thing that ranks the backlog is the same conflict of interest as a merge
+    performed by it. Issues where the suggestion matches the current label are correctly
+    labelled and belong nowhere in this section; state the count of those instead of listing
+    them, so a reader can tell "agreed with 38 of 42" apart from "only looked at 4".
 
 Then write `docs/triage/state.json`. Every value below shown without quotes is a real JSON
 object, array or number — not a string; only `computedAt` and the map keys under `issues`
@@ -422,7 +469,8 @@ are actual strings:
   "waves": [[<issue numbers>]],
   "unassessable": [<issue numbers>],
   "unschedulable": [<issue numbers>],
-  "unassessed": [<issue numbers>]
+  "unassessed": [<issue numbers>],
+  "deferred": [<issue numbers>]
 }
 ```
 
@@ -437,11 +485,21 @@ issue number as a string, so next run's `invalidate` step can find them. That is
 *open* issue and nothing else: carrying a closed issue's entry forward would be read next
 run as "still open at cache time, closed since", and would permanently stale every judgement
 whose evidence names its number. `waves` is what
-makes the report checkable after the fact. `unassessable` and `unschedulable` (both from step
-3's result) and `unassessed` (from step 2's result) are kept apart deliberately: a judgement
-with a value the scheduler didn't recognise, a judgement whose `touches` named a directory,
-and no judgement at all. Collapsing any two of them would hide which failure mode actually
-happened, and each takes a different repair.
+makes the report checkable after the fact. `unassessable`, `unschedulable` and `deferred`
+(all three from step 3's result) and `unassessed` (from step 2's result) are kept apart
+deliberately: a judgement with a value the scheduler didn't recognise, a judgement whose
+`touches` named a directory, an issue the maintainer already parked with a `wontfix` or
+`needs-info` label, and no judgement at all. Collapsing any two of them would hide which
+failure mode actually happened — and `deferred` is not a failure mode at all, which is
+exactly why merging it into the other three would be the worst of the four collapses.
+Each takes a different repair, and `deferred` takes none.
+
+The judgement objects under `issues` now carry `category`, `triageLabel`, `suggestedLabel`
+and `labelReason` alongside the fields they always had. Cache them like the rest: the
+digest computed in step 1 already covers the issue's labels, so a label changed in Gitea
+between runs stales that judgement on its own and the suggestion gets re-derived against
+the new state. Nothing extra is needed to keep the label fields honest — but note the
+consequence, which is that relabelling an issue costs a re-judgement of it next run.
 
 **Leave both files unstaged and uncommitted.** Writing a file and committing it is the
 reflex in this repo, but this capability never commits anything — that is the prohibition
@@ -523,6 +581,11 @@ and heredocs, which fish does not support at all.
 | Kept a closed issue's judgement in `state.json` | The closed-reference axis reads the cache's own keys as "was open then"; a stale entry stales every judgement citing that number, forever |
 | Forced a judgement stale by hand because it rested on an issue that had since closed | That axis is mechanical now (#298) — if it didn't fire, the evidence never wrote the number as `#N`; fix the judgement's evidence, not the cache |
 | Merged `unassessable`, `unschedulable` and `unassessed` into one bucket | Three different failure modes with three different repairs; keep them apart in the report and in `state.json` |
+| Folded `deferred` into the other excluded buckets, or reported it as a fourth fault | It is a maintainer decision with no repair, not a defect — its own section, and say so in it |
+| Ran a `tea issues edit` command the Label suggestions section printed | Printing it is the job; applying it is a Gitea write this capability never makes |
+| Re-judged a `deferred` issue to "unblock" it, or argued the label was wrong in that section | The repair is a label change in Gitea, which is the maintainer's; a disagreement belongs in Label suggestions |
+| Put `suggestedLabel` in the judgement table's label column | That column reports the tracker's current `triageLabel`; the suggestion has its own section so the two can be told apart |
+| Let the judge pick `kind` freely on an issue that carries a category label | `bug`/`enhancement`/`tech-debt` decide it (`enhancement` → `feature`); free derivation is the no-label fallback only, and a wrong `kind` mis-gates browser verification |
 | Assumed the prompt's "never a directory in `touches`" rule holds | `computeWaves` enforces it now, because the prompt didn't — such an issue lands in `unschedulable` and in no wave; report it and fix the judgement |
 | Committed the report or `state.json` | Leave both unstaged; this capability never commits anything, including its own output |
 | Called a browser check PASS without rendering | That is BLOCKED; `verifying-ui-in-browser` owns the contract |

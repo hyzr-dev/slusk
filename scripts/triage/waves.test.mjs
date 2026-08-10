@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { filesConflict, contractsTouched, conflicts, rank, isAssessable, isBrowserVerifiable, computeWaves, namesDirectory, hasDirectoryTouch } from './waves.mjs'
+import { filesConflict, contractsTouched, conflicts, rank, isAssessable, isBrowserVerifiable, computeWaves, namesDirectory, hasDirectoryTouch, isDeferred } from './waves.mjs'
 
 test('issues touching the same file conflict', () => {
   const a = { number: 1, touches: ['internal/pipeline/importing.go'] }
@@ -75,6 +75,63 @@ test('an issue failing both checks is reported as unassessable only', () => {
   assert.deepEqual(result.waves, [[81]])
   assert.deepEqual(result.unassessable, [80])
   assert.deepEqual(result.unschedulable, [])
+})
+
+test('isDeferred is true for wontfix and needs-info', () => {
+  assert.equal(isDeferred({ number: 1, triageLabel: 'wontfix' }), true)
+  assert.equal(isDeferred({ number: 2, triageLabel: 'needs-info' }), true)
+})
+
+test('isDeferred is false for the three schedulable roles, for null, and for a missing field', () => {
+  assert.equal(isDeferred({ number: 1, triageLabel: 'needs-triage' }), false)
+  assert.equal(isDeferred({ number: 2, triageLabel: 'ready-for-agent' }), false)
+  assert.equal(isDeferred({ number: 3, triageLabel: 'ready-for-human' }), false)
+  assert.equal(isDeferred({ number: 4, triageLabel: null }), false)
+  assert.equal(isDeferred({ number: 5 }), false)
+})
+
+test('a deferred issue lands in deferred and in no wave', () => {
+  const issues = [
+    { number: 90, prodImpact: 'outage', effort: 'S', touches: ['a.go'], triageLabel: 'wontfix' },
+    { number: 91, prodImpact: 'cosmetic', effort: 'S', touches: ['b.go'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[91]])
+  assert.deepEqual(result.deferred, [90])
+})
+
+test('an issue that is deferred and unassessable is reported as deferred only', () => {
+  const issues = [
+    { number: 92, prodImpact: 'sever', effort: 'S', touches: ['a.go'], triageLabel: 'needs-info' },
+    { number: 93, prodImpact: 'outage', effort: 'S', touches: ['b.go'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[93]])
+  assert.deepEqual(result.deferred, [92])
+  assert.deepEqual(result.unassessable, [])
+})
+
+test('an issue that is deferred and has a directory touch is reported as deferred only', () => {
+  const issues = [
+    { number: 94, prodImpact: 'degraded', effort: 'M', touches: ['web/src/api'], triageLabel: 'wontfix' },
+    { number: 95, prodImpact: 'outage', effort: 'S', touches: ['web/src/api/stream.tsx'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[95]])
+  assert.deepEqual(result.deferred, [94])
+  assert.deepEqual(result.unschedulable, [])
+})
+
+test('a backlog with no triageLabel fields at all behaves exactly as before', () => {
+  const issues = [
+    { number: 10, prodImpact: 'cosmetic', effort: 'S', touches: ['a.go'] },
+    { number: 11, prodImpact: 'outage', effort: 'M', touches: ['b.go'] },
+  ]
+  const result = computeWaves(issues, [])
+  assert.deepEqual(result.waves, [[11, 10]])
+  assert.deepEqual(result.unassessable, [])
+  assert.deepEqual(result.unschedulable, [])
+  assert.deepEqual(result.deferred, [])
 })
 
 const CONTRACTS = [
@@ -438,7 +495,7 @@ test('the CLI computes waves from stdin JSON', () => {
     contracts: [],
   })
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
-  assert.deepEqual(JSON.parse(out), { waves: [[1], [2]], unassessable: [], unschedulable: [] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1], [2]], unassessable: [], unschedulable: [], deferred: [] })
 })
 
 test('the CLI reports unassessable issues alongside the waves', () => {
@@ -450,7 +507,7 @@ test('the CLI reports unassessable issues alongside the waves', () => {
     contracts: [],
   })
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], { input })
-  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [2], unschedulable: [] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [2], unschedulable: [], deferred: [] })
 })
 
 test('the CLI rejects an unknown mode with a non-zero exit', () => {
@@ -473,7 +530,7 @@ test('the CLI round-trips a large multi-byte payload through stdin', () => {
   const out = execFileSync('node', ['scripts/triage/waves.mjs', 'waves'], {
     input, maxBuffer: 10 * 1024 * 1024,
   })
-  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [], unschedulable: [] })
+  assert.deepEqual(JSON.parse(out), { waves: [[1]], unassessable: [], unschedulable: [], deferred: [] })
 })
 
 test('decodeChunks reassembles a multi-byte character split across a chunk boundary', () => {

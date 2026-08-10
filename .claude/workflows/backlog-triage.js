@@ -10,12 +10,37 @@ export const meta = {
   ],
 }
 
+// The five canonical triage roles and the three category labels, from
+// docs/agents/triage-labels.md. They are two orthogonal axes -- an issue
+// normally carries one of each -- which is why they are two fields here and not
+// one. Collapsing them would make "carries no category label" indistinguishable
+// from "categorised as a bug", and the first is a gap in the tracker worth
+// seeing in the report.
+const TRIAGE_LABELS = ['needs-triage', 'needs-info', 'ready-for-agent', 'ready-for-human', 'wontfix']
+const CATEGORY_LABELS = ['bug', 'enhancement', 'tech-debt']
+
 const JUDGEMENT = {
   type: 'object',
-  required: ['number', 'kind', 'prodImpact', 'impactEvidence', 'touches', 'frontend', 'effort', 'reproCheck', 'statedBlockers'],
+  required: ['number', 'kind', 'category', 'triageLabel', 'suggestedLabel', 'labelReason', 'prodImpact', 'impactEvidence', 'touches', 'frontend', 'effort', 'reproCheck', 'statedBlockers'],
   properties: {
     number: { type: 'number' },
     kind: { enum: ['bug', 'feature', 'techdebt', 'test'] },
+    // The category label as the tracker actually records it, or null when the
+    // issue carries none. Kept alongside `kind` rather than replacing it
+    // because `kind` is read by isBrowserVerifiable() in
+    // scripts/triage/waves.mjs and by the browser-candidate filter below;
+    // changing its enum to the label strings would silently stop gating
+    // features out of browser verification. So the label is the *source* of
+    // `kind` and this field is the receipt showing where it came from.
+    category: { type: ['string', 'null'], enum: [...CATEGORY_LABELS, null] },
+    // The triage role the issue carries today, or null. computeWaves() reads
+    // this to keep `wontfix` and `needs-info` issues out of the waves.
+    triageLabel: { type: ['string', 'null'], enum: [...TRIAGE_LABELS, null] },
+    // The role the judge believes the issue should carry after reading the
+    // code. Never applied -- this capability makes no Gitea writes -- it only
+    // reaches the report as a command the maintainer can choose to run.
+    suggestedLabel: { enum: TRIAGE_LABELS },
+    labelReason: { type: 'string', minLength: 1 },
     prodImpact: { enum: ['none', 'cosmetic', 'degraded', 'dataloss', 'outage'] },
     // minLength only rules out the empty string -- the original hole. It
     // deliberately does not try to express the real rule ("a path:line
@@ -43,11 +68,17 @@ const JUDGEMENT = {
 
 const COLLECTED = {
   type: 'object',
-  required: ['number', 'summary', 'paths', 'thin'],
+  required: ['number', 'summary', 'paths', 'labels', 'thin'],
   properties: {
     number: { type: 'number' },
     summary: { type: 'string' },
     paths: { type: 'array', items: { type: 'string' } },
+    // Every label verbatim, unsorted into axes. The collector is haiku reading
+    // raw tea JSON and must not interpret: splitting triage roles from
+    // categories is the judge's job, and a collector that "helpfully" dropped a
+    // label it did not recognise would make an unknown label invisible rather
+    // than reportable.
+    labels: { type: 'array', items: { type: 'string' } },
     thin: { type: 'boolean' },
   },
 }
@@ -185,12 +216,21 @@ const judged = await pipeline(
     `Use the issue-tracker-cli skill for the tea invocation, then read Gitea issue #${n}
      with --comments -- without that flag the comments never come back at all.
 
-     Extract: a short factual summary of what the issue claims, and every repo
-     path the issue text or its comments name. Do not judge severity and do not
-     read the code -- that is the next stage's job.
+     Extract: a short factual summary of what the issue claims, every repo
+     path the issue text or its comments name, and every label the issue
+     carries. Do not judge severity and do not read the code -- that is the next
+     stage's job.
 
-     If the issue no longer exists or is already closed, still return all four
-     required fields: say so plainly in summary, and use an empty paths array.
+     Report labels exactly as the tea JSON spells them, all of them, in the
+     order they appear. Do not translate, normalise, deduplicate or drop one you
+     do not recognise: an unfamiliar label is something the next stage and the
+     report need to see, and a collector that quietly filters it makes it
+     invisible instead. Return an empty array only when the issue genuinely has
+     no labels.
+
+     If the issue no longer exists or is already closed, still return all five
+     required fields: say so plainly in summary, and use empty paths and labels
+     arrays.
 
      Set thin: true when the comment thread was long and technical enough that
      your summary may have dropped something load-bearing.`,
@@ -206,6 +246,51 @@ const judged = await pipeline(
 
      READ THE CODE the issue points at. Reading only the issue text produces a
      summary, not a judgement, and a summary is worthless here.
+
+     LABELS. Read docs/agents/triage-labels.md before filling any label field.
+     This repo runs two orthogonal label axes and an issue normally carries one
+     of each, so do not treat them as one list. \`1.0\` and \`Public\` belong to
+     neither axis; ignore them here.
+
+     category is the CATEGORY label the issue actually carries -- one of
+     'bug', 'enhancement', 'tech-debt' -- or null when it carries none. Report
+     what the tracker says, not what you think it should say; the gap between
+     the two is the point of having the field.
+
+     kind FOLLOWS category whenever category is non-null, and is not an
+     independent judgement:
+       bug -> 'bug'   enhancement -> 'feature'   tech-debt -> 'techdebt'
+     Only when category is null do you derive kind from the issue yourself.
+     'test' is reachable only that way, because no category label maps to it.
+     This mapping is load-bearing rather than cosmetic: kind gates browser
+     verification, and an 'enhancement' silently judged 'bug' sends an agent to
+     reproduce behaviour that was never built.
+
+     triageLabel is the TRIAGE ROLE the issue carries today -- one of
+     'needs-triage', 'needs-info', 'ready-for-agent', 'ready-for-human',
+     'wontfix' -- or null when it carries none. Report the tracker's current
+     state, never your opinion of it. If the issue somehow carries more than one
+     role the tracker state is malformed: pick the most restrictive, in the order
+     wontfix > needs-info > needs-triage > ready-for-human > ready-for-agent, and
+     say in labelReason that you had to. That order fails safe, because the
+     scheduler drops 'wontfix' and 'needs-info' from the waves entirely and the
+     conservative mistake is to leave work out rather than schedule work nobody
+     wants done.
+
+     suggestedLabel is your opinion, and it is required on every issue even when
+     it is identical to triageLabel -- an unchanged suggestion is a judgement
+     that the current label is right, which is a different and more useful fact
+     than a missing field. Base it on the code you just read: an issue whose
+     repro steps you could follow and whose fix you could point at is
+     'ready-for-agent'; one that needs a product or architecture call is
+     'ready-for-human'; one you could not evaluate without asking the reporter
+     something is 'needs-info'; one nobody has evaluated yet is 'needs-triage'.
+     labelReason says why, in one or two sentences, and must name what in the
+     code or the thread decided it.
+
+     You are NOT applying any label. Do not run \`tea issues edit\`, do not
+     write to the tracker in any form. The suggestion reaches a report the
+     maintainer reads and acts on, or does not.
 
      prodImpact is about the running production instance, not about how annoying
      the issue is. The five levels are DEFINED in
@@ -275,11 +360,21 @@ log(`${judged.filter(Boolean).length} judged, ${cached.length} reused from cache
 // Browser reproduction is serial: the Playwright MCP server owns one browser for
 // the session, and two verifiers at once return verdicts about each other's tab.
 phase('Browser')
-// Mirrors isBrowserVerifiable() in scripts/triage/waves.mjs -- a Workflow
-// script cannot import that module, so this predicate is duplicated here and
-// must be kept in step with it by hand.
+// The first four conditions mirror isBrowserVerifiable() in
+// scripts/triage/waves.mjs -- a Workflow script cannot import that module, so
+// that predicate is duplicated here and must be kept in step with it by hand.
+//
+// The fifth is deliberately NOT part of that predicate and must not be folded
+// into it. isBrowserVerifiable answers whether a browser session *can settle*
+// the question; dropping 'wontfix' answers whether it is worth one of four
+// scarce serial slots, which is a different question with a different owner.
+// Note that only 'wontfix' is dropped, not everything computeWaves defers:
+// a 'needs-info' issue is blocked on its reporter, and reproducing it in a
+// browser is precisely the evidence that would unblock it, so it keeps its
+// claim on a slot even though it cannot be scheduled into a wave.
 const candidates = judgements
-  .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature' && j?.kind !== 'test')
+  .filter(j => j?.frontend && j?.reproCheck && j?.kind !== 'feature' && j?.kind !== 'test'
+    && j?.triageLabel !== 'wontfix')
   .sort((a, b) => (IMPACT_RANK[b.prodImpact] - IMPACT_RANK[a.prodImpact])
     || (EFFORT_COST[a.effort] - EFFORT_COST[b.effort])
     || (a.number - b.number))

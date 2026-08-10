@@ -108,6 +108,27 @@ export function conflicts(a, b, contracts) {
   return mine.some(x => theirs.some(y => x.name === y.name && x.side !== y.side))
 }
 
+/**
+ * True when the maintainer has already decided this issue's fate through a
+ * triage label, and that decision means it can never land in a wave. Two
+ * labels qualify, for two different reasons: `wontfix` will not be actioned
+ * at all, so scheduling it wastes an agent on work that gets thrown away, and
+ * `needs-info` is blocked on the reporter, so no agent in this repo can move
+ * it forward regardless of how well-specified the rest of the judgement looks.
+ *
+ * The other three canonical roles -- `needs-triage`, `ready-for-agent`,
+ * `ready-for-human` -- are all still live work and must not be excluded here:
+ * `needs-triage` just means the maintainer hasn't looked yet, not that the
+ * issue is unschedulable, and the other two are exactly the states this
+ * scheduler exists to place into waves. A missing or null `triageLabel` is
+ * schedulable by default -- the field is new, most cached judgements will not
+ * carry it yet, and reading absence as deferral would silently empty every
+ * wave the day this shipped.
+ */
+export function isDeferred(issue) {
+  return issue.triageLabel === 'wontfix' || issue.triageLabel === 'needs-info'
+}
+
 const IMPACT_RANK = { none: 0, cosmetic: 1, degraded: 2, dataloss: 3, outage: 4 }
 const EFFORT_COST = { S: 0, M: 1, L: 2 }
 
@@ -163,21 +184,34 @@ export function rank(issue) {
  * Cyclic blockers (A blocks B, B blocks A) do not hang; one is silently placed
  * before its own blocker. Cyclic input is malformed and resolved arbitrarily.
  *
- * Two exclusions are returned rather than scheduled, and they are kept apart
+ * Three exclusions are returned rather than scheduled, and they are kept apart
  * because they need different repairs: `unassessable` means the judgement's
  * `prodImpact` or `effort` was not a recognised value, `unschedulable` means its
  * `touches` named a directory (see hasDirectoryTouch) and so cannot be compared
- * against anything. An issue failing both is reported as `unassessable` only --
- * there is no ranking to schedule either way, and listing it twice would
- * double-count it in the report.
+ * against anything, and `deferred` means the maintainer already dismissed or
+ * paused the issue through a triage label (see isDeferred) and there is nothing
+ * to schedule at all.
+ *
+ * `deferred` is checked first, ahead of the other two, and that ordering is
+ * deliberate rather than incidental: `unassessable` and `unschedulable` name
+ * data defects in the judgement with a repair on the other end -- fix the
+ * `prodImpact` typo, split out the directory into real files -- while
+ * `deferred` names a decision that has nothing to repair. An issue that is
+ * both deferred and has a typo'd `effort` is reported as `deferred` only;
+ * telling a reader to fix the enum on an issue that will never be actioned is
+ * noise, not help. Below that, an issue failing both remaining checks is
+ * reported as `unassessable` only -- there is no ranking to schedule either
+ * way, and listing it twice would double-count it in the report.
  */
 export function computeWaves(issues, contracts) {
   const issueNumbers = new Set(issues.map(i => i.number))
-  const unassessable = issues.filter(i => !isAssessable(i)).map(i => i.number)
-  const unschedulable = issues
+  const deferred = issues.filter(i => isDeferred(i)).map(i => i.number)
+  const undeferred = issues.filter(i => !isDeferred(i))
+  const unassessable = undeferred.filter(i => !isAssessable(i)).map(i => i.number)
+  const unschedulable = undeferred
     .filter(i => isAssessable(i) && hasDirectoryTouch(i))
     .map(i => i.number)
-  const assessable = issues.filter(i => isAssessable(i) && !hasDirectoryTouch(i))
+  const assessable = undeferred.filter(i => isAssessable(i) && !hasDirectoryTouch(i))
 
   const ordered = [...assessable].sort((a, b) => {
     const aHasBlockers = (a.statedBlockers ?? []).some(n => issueNumbers.has(n))
@@ -209,7 +243,8 @@ export function computeWaves(issues, contracts) {
   return {
     waves: waves.map(wave => wave.map(issue => issue.number)),
     unassessable,
-    unschedulable
+    unschedulable,
+    deferred
   }
 }
 
