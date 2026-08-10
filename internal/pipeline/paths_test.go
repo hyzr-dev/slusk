@@ -220,7 +220,7 @@ func TestQuarantineFolderMovesLeftovers(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	dst, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "1000 Forms of Fear (2014)")
+	dst, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "1000 Forms of Fear (2014)", quarantineDirName)
 
 	if !moved {
 		t.Fatalf("moved = false, want true; log = %q", buf.String())
@@ -244,7 +244,7 @@ func TestQuarantineFolderNoOpWhenSourceAbsent(t *testing.T) {
 	completeDir := t.TempDir()
 
 	var buf bytes.Buffer
-	if _, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "never downloaded"); moved {
+	if _, moved := quarantineFolder(newTestLogger(&buf), 7, completeDir, "never downloaded", quarantineDirName); moved {
 		t.Error("moved = true, want false when the source never existed")
 	}
 	if _, err := os.Stat(filepath.Join(completeDir, quarantineDirName)); !os.IsNotExist(err) {
@@ -269,17 +269,17 @@ func TestQuarantineFolderSkipsAmbiguousLeafAndQuarantineDir(t *testing.T) {
 	var buf bytes.Buffer
 	log := newTestLogger(&buf)
 	// commonLeaf's ambiguous result: the caller passes "" straight through.
-	if _, moved := quarantineFolder(log, 7, completeDir, ""); moved {
+	if _, moved := quarantineFolder(log, 7, completeDir, "", quarantineDirName); moved {
 		t.Error("moved = true, want false for an ambiguous leaf")
 	}
 	// A peer whose remote folder is literally named like the quarantine dir.
-	if _, moved := quarantineFolder(log, 7, completeDir, quarantineDirName); moved {
+	if _, moved := quarantineFolder(log, 7, completeDir, quarantineDirName, quarantineDirName); moved {
 		t.Error("moved = true, want false for the quarantine dir itself")
 	}
 	if _, err := os.Stat(self); err != nil {
 		t.Errorf("expected the quarantine dir untouched, stat err = %v", err)
 	}
-	if _, moved := quarantineFolder(log, 7, "", "some album"); moved {
+	if _, moved := quarantineFolder(log, 7, "", "some album", quarantineDirName); moved {
 		t.Error("moved = true, want false when completeDir is empty")
 	}
 }
@@ -302,7 +302,7 @@ func TestQuarantineFolderSuffixesOnCollision(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	dst, moved := quarantineFolder(newTestLogger(&buf), 42, completeDir, "Album")
+	dst, moved := quarantineFolder(newTestLogger(&buf), 42, completeDir, "Album", quarantineDirName)
 
 	if !moved {
 		t.Fatalf("moved = false, want true; log = %q", buf.String())

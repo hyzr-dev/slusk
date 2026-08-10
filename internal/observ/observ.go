@@ -326,6 +326,10 @@ type JobStatusFacets struct {
 	// finished, no Lidarr album to import into). Counted separately from Done
 	// and Failed (issue #368) so the client's chips sum to All.
 	NotImported int64 `json:"notImported"`
+	// ImportRefused is the terminal outcome from issue #470: the download
+	// finished complete and correct, and Lidarr permanently refused to
+	// import it. Counted separately for the same reason as NotImported.
+	ImportRefused int64 `json:"importRefused"`
 }
 
 // JobSourceFacets contains counts for every persisted source. All ignores the
@@ -1075,7 +1079,7 @@ func parsePagedJobsQuery(u *url.URL) (PagedJobsQuery, error) {
 	// two independent allowlists over the same value have already drifted once
 	// in this repo, and a value accepted here but refused there 500s instead of
 	// 400s.
-	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "inflight", "finished") {
+	if !oneOf(query.Filter, "all", "active", "importing", "queued", "waiting", "selecting", "wanted", "stalled", "failed", "failures", "parked", "done", "notImported", "importRefused", "inflight", "finished") {
 		return PagedJobsQuery{}, errors.New("invalid filter")
 	}
 	if !oneOf(query.Source, "all", "manual", "lidarr") {

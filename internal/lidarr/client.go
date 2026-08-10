@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
@@ -241,8 +242,16 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]c
 		Tracks                  []struct {
 			ID int64 `json:"id"`
 		} `json:"tracks"`
+		// Lidarr's Rejection is { reason, type: "Permanent" | "Temporary" }
+		// (src/NzbDrone.Core/DecisionEngine/Rejection.cs). The type is what
+		// lets a job reach IMPORT_REFUSED instead of cycling through every
+		// remaining candidate (issue #470). Note the constructor defaults to
+		// Permanent, so a rejection built from a reason alone arrives here as
+		// Permanent even when it describes something transient - see
+		// core.ImportRejection.
 		Rejections []struct {
 			Reason string `json:"reason"`
+			Type   string `json:"type"`
 		} `json:"rejections"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -250,9 +259,15 @@ func (c *Client) ManualImportCandidates(ctx context.Context, folder string) ([]c
 	}
 	out := make([]core.ImportItem, 0, len(raw))
 	for _, it := range raw {
-		reasons := make([]string, 0, len(it.Rejections))
+		reasons := make([]core.ImportRejection, 0, len(it.Rejections))
 		for _, r := range it.Rejections {
-			reasons = append(reasons, r.Reason)
+			// An absent or unrecognised type reads as permanent, matching
+			// Lidarr's own constructor default. Only the explicit "Temporary"
+			// buys a retry.
+			reasons = append(reasons, core.ImportRejection{
+				Reason:    r.Reason,
+				Permanent: !strings.EqualFold(r.Type, "Temporary"),
+			})
 		}
 		trackIDs := make([]int64, 0, len(it.Tracks))
 		for _, tr := range it.Tracks {

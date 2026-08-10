@@ -54,4 +54,9 @@ describe('stateLabel', () => {
   it('returns the translated state for NOT_IMPORTED', () => {
     expect(stateLabel('NOT_IMPORTED', 'notImported')).toBe(t.state.NOT_IMPORTED);
   });
+
+  // Issue #470: IMPORT_REFUSED is likewise a real terminal state.
+  it('returns the translated state for IMPORT_REFUSED', () => {
+    expect(stateLabel('IMPORT_REFUSED', 'importRefused')).toBe(t.state.IMPORT_REFUSED);
+  });
 });

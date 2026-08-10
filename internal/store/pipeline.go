@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/matcher"
 )
 
 // ErrJobImporting is returned by DeleteJob when the job is currently
@@ -357,6 +358,89 @@ func (s *Store) RetryManualJob(ctx context.Context, jobID int64, now time.Time) 
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("retry manual job: commit: %w", err)
+	}
+	return true, nil
+}
+
+// RetryRefusedJob manually revives one IMPORT_REFUSED job (issue #470): unlike
+// RetryFailedJob it does not go back to WANTED, because the files were never
+// the problem - Lidarr rejected them after a complete, correct download. It
+// goes straight to IMPORTING with the same candidate, so Importing's restore
+// step (importing.go) can move the quarantined folder back and re-submit the
+// same files.
+//
+// In one transaction: the job moves IMPORT_REFUSED -> IMPORTING and its
+// import_refused_reason is cleared; the job's FAILED candidate (the one
+// RejectCandidateAndAdvance left behind) is revived to ACTIVE with
+// fail_reason and import_submitted_at cleared, for the same reasons
+// RetryManualJob clears them - a stale fail_reason would show the old refusal
+// on the dashboard mid-retry, and a stale import_submitted_at would make
+// Importing.Tick key off it and time out instantly; and the candidate's row
+// in candidate_rejections (#317) is deleted, since RejectCandidateAndAdvance
+// is exactly what put it there and leaving it would have Selecting - if the
+// retry ever failed back that far - immediately re-reject the same peer.
+// Only that one (username, release_dir) pair is deleted, not the whole job's
+// history: other peers this job already tried and rejected should stay
+// blacklisted.
+//
+// The candidate to revive is picked by currentCandidateOrder (dashboard.go),
+// the same rule the dashboard itself uses for "the job's current candidate":
+// a job can carry more than one FAILED candidate (earlier rejections from
+// the same search cycle, still sitting there since RejectCandidateAndAdvance
+// never deletes them), and a plain WHERE state = 'FAILED' would match all of
+// them - reviving stale peers alongside the one Lidarr actually refused.
+//
+// Returns false when the job is not IMPORT_REFUSED or has no FAILED
+// candidate to revive (the dashboard button raced a state change), or does
+// not exist.
+func (s *Store) RetryRefusedJob(ctx context.Context, jobID int64, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE album_jobs SET state = $1, import_refused_reason = '', updated_at = $2
+		 WHERE id = $3 AND state = $4`,
+		string(core.StateImporting), now, jobID, string(core.StateImportRefused))
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: update job: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: job rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+
+	var username string
+	var firstFile sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`UPDATE candidates SET state = $1, fail_reason = '', import_submitted_at = NULL, updated_at = $2
+		 WHERE id = (SELECT id FROM candidates WHERE album_job_id = $3 `+currentCandidateOrder+` LIMIT 1)
+		   AND state = $4
+		 RETURNING username, files->0->>'filename'`,
+		string(core.CandidateActive), now, jobID, string(core.CandidateFailed)).Scan(&username, &firstFile)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("retry refused job: revive candidate: %w", err)
+	}
+
+	if firstFile.Valid && firstFile.String != "" {
+		dir := matcher.ReleaseDir(firstFile.String)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM candidate_rejections WHERE album_job_id = $1 AND username = $2 AND release_dir = $3`,
+			jobID, username, dir); err != nil {
+			return false, fmt.Errorf("retry refused job: delete candidate rejection: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("retry refused job: commit: %w", err)
 	}
 	return true, nil
 }
