@@ -910,6 +910,50 @@ func (s *Store) LatestFailureDetails(ctx context.Context, jobIDs []int64) (map[i
 	return out, rows.Err()
 }
 
+// LatestParkReasons returns one job_events detail per given job id, keyed by
+// job id, restricted to the job's own job_parked events (issue #484). Jobs
+// with no such row are absent from the map, never present with "". An empty
+// or nil jobIDs yields an empty, non-nil map.
+//
+// This is deliberately NOT a call to LatestFailureDetails with a widened
+// gate. failureExplainingEvents is a ranking, not a filter: it falls back to
+// the newest detail of ANY event kind when a job has no explanatory one, so a
+// job parked before #472 (which is when job_parked started carrying a real
+// detail) has no job_parked row at all, and the fallback would surface
+// whatever the pipeline last logged for it — a 'search' or
+// 'candidate_rejected' detail — as if it were the reason the job was parked.
+// That is exactly the fabrication interface-must-not-invent-data forbids, so
+// parked jobs get their own single-tier, single-event-kind lookup instead.
+func (s *Store) LatestParkReasons(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(jobIDs))
+	if len(jobIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (album_job_id) album_job_id, detail
+		FROM job_events
+		WHERE album_job_id = ANY($1) AND event = $2 AND detail <> ''
+		-- id DESC is load-bearing for the same reason it is in
+		-- LatestFailureDetails: one pipeline pass shares a single value of now
+		-- across every recordEvent call, so multiple rows for the same job can
+		-- genuinely share created_at.
+		ORDER BY album_job_id, created_at DESC, id DESC`,
+		jobIDs, string(core.EventJobParked))
+	if err != nil {
+		return nil, fmt.Errorf("latest park reasons: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID int64
+		var detail string
+		if err := rows.Scan(&jobID, &detail); err != nil {
+			return nil, fmt.Errorf("latest park reasons: scan: %w", err)
+		}
+		out[jobID] = detail
+	}
+	return out, rows.Err()
+}
+
 // PeersPageSize is the default number of peers in one page of the dashboard's
 // Peers list when a query leaves PeersQuery.PageSize unset.
 // PeersPageSizeMin/Max bound an explicit choice, matching the jobs list's

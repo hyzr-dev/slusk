@@ -185,9 +185,25 @@ type jobDTO struct {
 	// the CURRENT candidate's generic core.Candidate.FailReason (a short,
 	// engine-assigned category), while FailDetail is whatever detail string
 	// the pipeline actually wrote to the audit trail for the failure — often
-	// far more specific. It is populated only on the REST list path (see
-	// enrichJobDTOs) and is therefore absent from stream frames.
-	FailDetail    string  `json:"failDetail,omitempty"`
+	// far more specific. Populated on the REST list path (see enrichJobDTOs)
+	// and on stream.go's SCOPED single-job detail frame (issue #484, see
+	// streamHub.fetchReasons) — but NOT on the stream's job-list frames,
+	// which stay out of this enrichment's scope; see enrichFailAndParkDetails.
+	FailDetail string `json:"failDetail,omitempty"`
+	// ParkDetail is the job's own last recorded job_parked job_events detail
+	// (see store.LatestParkReasons, issue #484). It is NOT FailDetail: a
+	// parked job's FailDetail (if any) would come from
+	// failureExplainingEvents' ranking, which falls back to the newest detail
+	// of ANY event kind when no explanatory one exists — for a job parked
+	// before #472 introduced a real job_parked detail, that fallback can
+	// surface an unrelated 'search' or 'candidate_rejected' text as if it
+	// were the park reason. ParkDetail is instead a dedicated, single-kind
+	// lookup that is simply absent rather than fabricated when the job has no
+	// job_parked row. Populated on the REST paths (see
+	// enrichFailAndParkDetails) and on stream.go's SCOPED single-job detail
+	// frame — but not the stream's job-list frames — for the same reason
+	// FailDetail is; see that field's comment.
+	ParkDetail    string  `json:"parkDetail,omitempty"`
 	NextAttemptAt string  `json:"nextAttemptAt"`
 	Retries       int     `json:"retries"`
 	NotBefore     string  `json:"notBefore"`
@@ -376,6 +392,11 @@ type BulkRetryFunc func(ctx context.Context, query PagedJobsQuery) (BulkRetryRes
 // keyed by job id. Ids with no matching event are absent from the result.
 type FailureDetailsFunc func(ctx context.Context, jobIDs []int64) (map[int64]string, error)
 
+// ParkReasonsFunc looks up the job's own job_parked job_events detail for
+// each of the given job ids (typically backed by store.LatestParkReasons),
+// keyed by job id. Ids with no job_parked event are absent from the result.
+type ParkReasonsFunc func(ctx context.Context, jobIDs []int64) (map[int64]string, error)
+
 // CancelFunc cancels a job by id (typically backed by app.Jobs.Cancel).
 // Errors are mapped to a status code by the /api/jobs/{id}/cancel handler:
 // errors.Is(err, app.ErrJobNotFound) -> 404, anything else -> 502.
@@ -464,6 +485,10 @@ type ServerDeps struct {
 	// (issue #310, Overview's Failed panel). A nil func is tolerated — see
 	// enrichJobDTOs.
 	FailureDetails FailureDetailsFunc
+	// ParkReasons enriches GET /api/jobs and GET /api/jobs/{id}/detail's
+	// parked rows with jobDTO.ParkDetail (issue #484). A nil func is
+	// tolerated — see enrichFailAndParkDetails.
+	ParkReasons ParkReasonsFunc
 	// Cancel, Retry, SearchJob and DeleteJob back the per-job actions under
 	// /api/jobs/{id}.
 	Cancel    CancelFunc
@@ -930,8 +955,16 @@ func NewServer(deps ServerDeps) http.Handler {
 		}
 		idx := newLiveTransferIndex(live)
 		persisted := fetchPersistedBytes(r.Context(), []core.JobView{view}, idx, deps.TransferBytes)
+		dto := toJobDetailDTO(view, d, idx, persisted, deps.FailedRetryAfter, deps.MaxCandidates, time.Now())
+		// FailDetail/ParkDetail enrichment (issue #484): the detail route had
+		// no such enrichment at all before this, so a failed job's FailDetail
+		// was blind here too — fixed by reusing the same helper the list path
+		// uses rather than duplicating its lookup logic.
+		jobDTOs := []jobDTO{dto.Job}
+		enrichFailAndParkDetails(r.Context(), jobDTOs, []core.JobView{view}, deps)
+		dto.Job = jobDTOs[0]
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toJobDetailDTO(view, d, idx, persisted, deps.FailedRetryAfter, deps.MaxCandidates, time.Now()))
+		_ = json.NewEncoder(w).Encode(dto)
 	})
 	mux.HandleFunc("/api/jobs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		jobID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -1115,13 +1148,31 @@ func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) [
 	for i, view := range views {
 		dtos[i] = toJobDTO(view, deps.FailedRetryAfter, deps.MaxCandidates, liveIdx, persisted, now)
 	}
-	// FailDetail enrichment is best-effort, exactly like live album speed/ETA
-	// above: a lookup failure degrades to no detail rather than failing the
-	// whole request. It is REST-only — internal/observ/stream.go calls
-	// toJobDTO directly and deliberately does not do this, since terminal jobs
-	// are out of the stream's scope — so a job that just failed but is still
-	// rendered from a stale live frame shows no reason for up to
-	// LIVE_JOB_FRESH_MS; the next REST poll (this path) corrects it.
+	enrichFailAndParkDetails(ctx, dtos, views, deps)
+	return dtos
+}
+
+// enrichFailAndParkDetails fills in jobDTO.FailDetail and jobDTO.ParkDetail
+// for the jobs in dtos (parallel-indexed with views) — the enrichment shared
+// by the paged job list (enrichJobDTOs) and the single-job detail route
+// (/api/jobs/{id}/detail). It is REST-only for the job-LIST half: this
+// function is never called for stream.go's job-list frames, since terminal
+// and parked jobs are out of that scope — a job that just failed or parked
+// but is still rendered from a stale live-list frame shows no reason for up
+// to LIVE_JOB_FRESH_MS; the next REST poll (this path) corrects it. The
+// scoped SINGLE-JOB detail half is different (issue #484): stream.go's
+// buildStreamDetail overlays the equivalent of this function's own
+// FailDetail/ParkDetail logic (via streamHub.fetchReasons, refreshed on
+// correlationInterval rather than per-request) onto its own ?job=<id> frame,
+// because the frontend's pickJobDetail REPLACES REST's jobDetailDTO with
+// that frame outright (issue #258) — leaving the stream side unenriched
+// there would make the two transports disagree about the same job, not
+// merely differ in freshness the way the list half is allowed to.
+//
+// Both lookups are best-effort, exactly like live album speed/ETA elsewhere
+// in this file: a nil func or a lookup failure degrades to no detail rather
+// than failing the whole request.
+func enrichFailAndParkDetails(ctx context.Context, dtos []jobDTO, views []core.JobView, deps ServerDeps) {
 	if deps.FailureDetails != nil {
 		var failedIDs []int64
 		for _, view := range views {
@@ -1139,7 +1190,33 @@ func enrichJobDTOs(ctx context.Context, views []core.JobView, deps ServerDeps) [
 			}
 		}
 	}
-	return dtos
+	if deps.ParkReasons != nil {
+		var parkedIDs []int64
+		for _, view := range views {
+			// Status-based, not state-based (issue #484): this deliberately
+			// also admits ORPHANED jobs, which carry Status == "parked" (see
+			// dashboardJobStatusSQL). That is not a wasted lookup — the
+			// frontend normalizes state ORPHANED to PARKED at the wire
+			// boundary (web/src/api/normalize.ts), so such a job really does
+			// render the parked explanation. ORPHANED is the deprecated
+			// pre-migration-0008 spelling of PARKED (core/state.go), so it
+			// predates job_parked existing at all and ParkReasons returns
+			// nothing for it — absent, not fabricated, and the static copy
+			// renders exactly as it did before this change.
+			if view.Status == "parked" {
+				parkedIDs = append(parkedIDs, view.Job.ID)
+			}
+		}
+		if len(parkedIDs) > 0 {
+			if reasons, err := deps.ParkReasons(ctx, parkedIDs); err == nil {
+				for i, view := range views {
+					if reason, ok := reasons[view.Job.ID]; ok {
+						dtos[i].ParkDetail = reason
+					}
+				}
+			}
+		}
+	}
 }
 
 // fetchPersistedBytes fetches per-file persisted bytes-done for exactly the

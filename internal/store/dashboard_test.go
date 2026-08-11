@@ -3132,6 +3132,134 @@ func TestLatestFailureDetails(t *testing.T) {
 	})
 }
 
+// TestLatestParkReasons covers issue #484's LatestParkReasons: a dedicated,
+// job_parked-only lookup, deliberately separate from LatestFailureDetails'
+// two-tier ranking. See LatestParkReasons' doc comment for why widening the
+// existing gate was rejected.
+func TestLatestParkReasons(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("empty input", func(t *testing.T) {
+		got, err := s.LatestParkReasons(ctx, nil)
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if got == nil || len(got) != 0 {
+			t.Errorf("got %#v, want empty non-nil map", got)
+		}
+	})
+
+	t.Run("job with a job_parked detail", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 200, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobParked, "parked reason", now); err != nil {
+			t.Fatalf("AddJobEvent job_parked: %v", err)
+		}
+		got, err := s.LatestParkReasons(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if got[job.ID] != "parked reason" {
+			t.Errorf("detail = %q, want %q", got[job.ID], "parked reason")
+		}
+	})
+
+	// The regression this design exists to prevent: a job parked before #472
+	// (which introduced the job_parked detail) has no such row at all, only
+	// other detailed events. LatestFailureDetails' fallback tier would surface
+	// one of those as if it were the park reason - LatestParkReasons must not.
+	t.Run("job with other detailed events but no job_parked row returns nothing", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 201, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventSearch, "searched album, results=3", now); err != nil {
+			t.Fatalf("AddJobEvent search: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventCandidateRejected, "rejected candidate", now.Add(time.Minute)); err != nil {
+			t.Fatalf("AddJobEvent candidate_rejected: %v", err)
+		}
+		got, err := s.LatestParkReasons(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if _, ok := got[job.ID]; ok {
+			t.Errorf("job should be absent, got %q", got[job.ID])
+		}
+	})
+
+	t.Run("newest job_parked wins", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 202, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobParked, "older park reason", now); err != nil {
+			t.Fatalf("AddJobEvent older: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobParked, "newer park reason", now.Add(time.Minute)); err != nil {
+			t.Fatalf("AddJobEvent newer: %v", err)
+		}
+		got, err := s.LatestParkReasons(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if got[job.ID] != "newer park reason" {
+			t.Errorf("detail = %q, want %q", got[job.ID], "newer park reason")
+		}
+	})
+
+	t.Run("created_at tie broken by id", func(t *testing.T) {
+		job, err := s.UpsertWantedJob(ctx, 203, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob: %v", err)
+		}
+		// Both rows share created_at, mirroring a single pipeline pass that
+		// threads one `now` into every recordEvent call.
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobParked, "first", now); err != nil {
+			t.Fatalf("AddJobEvent first: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, job.ID, core.EventJobParked, "second", now); err != nil {
+			t.Fatalf("AddJobEvent second: %v", err)
+		}
+		got, err := s.LatestParkReasons(ctx, []int64{job.ID})
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if got[job.ID] != "second" {
+			t.Errorf("detail = %q, want %q (the higher id)", got[job.ID], "second")
+		}
+	})
+
+	t.Run("multiple job ids resolve independently, missing ids are absent", func(t *testing.T) {
+		jobA, err := s.UpsertWantedJob(ctx, 204, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob A: %v", err)
+		}
+		jobB, err := s.UpsertWantedJob(ctx, 205, now)
+		if err != nil {
+			t.Fatalf("UpsertWantedJob B: %v", err)
+		}
+		if err := s.AddJobEvent(ctx, jobA.ID, core.EventJobParked, "reason A", now); err != nil {
+			t.Fatalf("AddJobEvent A: %v", err)
+		}
+		// jobB gets no job_parked event.
+		got, err := s.LatestParkReasons(ctx, []int64{jobA.ID, jobB.ID})
+		if err != nil {
+			t.Fatalf("LatestParkReasons: %v", err)
+		}
+		if got[jobA.ID] != "reason A" {
+			t.Errorf("job A detail = %q, want %q", got[jobA.ID], "reason A")
+		}
+		if _, ok := got[jobB.ID]; ok {
+			t.Errorf("job B should be absent, got %q", got[jobB.ID])
+		}
+	})
+}
+
 // TestCountDashboardStatusesMatchesListFacets is the regression test for
 // issue #417: /status used to derive its counts itself (and left two of them
 // unassigned), so it disagreed with the Jobs page about the word "queued" —

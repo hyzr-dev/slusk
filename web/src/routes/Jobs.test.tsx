@@ -486,7 +486,7 @@ describe('row expansion', () => {
     expect(screen.getByTitle(t.tagTitle.PA)).toHaveTextContent('PA');
     fireEvent.click(screen.getByRole('button', { name: t.jobs.showDetails }));
 
-    expect(screen.getByText(t.jobs.parkedExplanation)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(t.jobs.parkedLead))).toBeInTheDocument();
     expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
   });
 

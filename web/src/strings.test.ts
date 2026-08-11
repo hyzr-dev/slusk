@@ -83,20 +83,39 @@ describe('parkedExplanation', () => {
   // another ('no candidate could satisfy this album'), and a blocklist of the
   // first reports success on the second. Causal verbs are the thing being
   // banned, so ban the grammar.
+  //
+  // The ban covers every AUTHORED string in the parked block — the lead and
+  // both action sentences. #484 split one blob into several keys, and for a
+  // while the assertion only named the lead: the action strings were then
+  // free to grow an invented cause with the suite green, and the manual one
+  // already sits a word away from tripping this ('no other candidate' vs the
+  // regex's 'no candidate'). Splitting a string must not narrow what guards
+  // it.
+  //
+  // parkedReason is the one exemption, and it is not an authored string: it
+  // interpolates the backend's own job_parked event text, which is free to
+  // name any of the three causes because it reports the one that actually
+  // happened for *this* job rather than guessing among them.
   const causalClaim = /because|repeated|exhaust|disappear|no candidate|offline|unavailable|could not (be )?(find|found)/i;
 
   it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('states no cause for a %s job, because the backend has three', (_source, copy) => {
+    ['lead', t.jobs.parkedLead],
+    ['lidarr actions', t.jobs.parkedActions],
+    ['manual actions', t.jobs.parkedActionsManual],
+  ])('states no cause in the authored %s copy, because the backend has three', (_name, copy) => {
     expect(copy).not.toMatch(causalClaim);
   });
 
-  it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('points a %s job at the events, which do know the cause', (_source, copy) => {
-    expect(copy).toMatch(/events/i);
+  it('points at the job\'s own events, which do know the cause', () => {
+    expect(t.jobs.parkedLead).toMatch(/events/i);
+  });
+
+  // Sentence-cased and closed, with no label of its own — JobExpansion
+  // already renders the status label in the box directly above.
+  it('renders a backend-supplied reason as a punctuated sentence, unlabelled', () => {
+    expect(t.jobs.parkedReason('no candidate could satisfy this album: 5 rejected')).toBe(
+      'No candidate could satisfy this album: 5 rejected.',
+    );
   });
 
   // Issue #487. The pointer above is right; naming *where* it points was not.
@@ -115,11 +134,11 @@ describe('parkedExplanation', () => {
   // guard has to live on the string.
   const positionalLocator = /\b(below|above|beneath|underneath|further down|down the page)\b/i;
 
-  it.each([
-    ['lidarr', t.jobs.parkedExplanation],
-    ['manual', t.jobs.parkedExplanationManual],
-  ])('does not tell a %s job where the events are, having two hosts', (_source, copy) => {
-    expect(copy).not.toMatch(positionalLocator);
+  // #484 split the two blobs into lead + actions, so the pointer this guards
+  // now lives in exactly one string. Asserted on the lead alone rather than
+  // dropped: it is the only string that still names the events.
+  it('does not tell the reader where the events are, having two hosts', () => {
+    expect(t.jobs.parkedLead).not.toMatch(positionalLocator);
   });
 
   // The two buttons carry different budgets and nothing else on screen shows
@@ -127,14 +146,14 @@ describe('parkedExplanation', () => {
   // renamed 'Force search' to 'Re-run pipeline', and copy naming a button
   // that is not on screen misdirects rather than helps.
   it('names the Lidarr buttons exactly as they are rendered', () => {
-    expect(t.jobs.parkedExplanation).toContain(t.jobs.retry);
-    expect(t.jobs.parkedExplanation).toContain(t.jobs.forceSearch);
+    expect(t.jobs.parkedActions).toContain(t.jobs.retry);
+    expect(t.jobs.parkedActions).toContain(t.jobs.forceSearch);
   });
 
   // JobActions gates 'Re-run pipeline' on source !== 'manual', so naming it
   // in the manual copy sends the user hunting for a button that is not there.
   it('does not offer a manual job the button it cannot have', () => {
-    expect(t.jobs.parkedExplanationManual).not.toContain(t.jobs.forceSearch);
-    expect(t.jobs.parkedExplanationManual).toContain(t.jobs.retry);
+    expect(t.jobs.parkedActionsManual).not.toContain(t.jobs.forceSearch);
+    expect(t.jobs.parkedActionsManual).toContain(t.jobs.retry);
   });
 });

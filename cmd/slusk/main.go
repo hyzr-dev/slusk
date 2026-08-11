@@ -392,6 +392,9 @@ func main() {
 	failureDetailsFn := func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
 		return st.LatestFailureDetails(ctx, jobIDs)
 	}
+	parkReasonsFn := func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return st.LatestParkReasons(ctx, jobIDs)
+	}
 	recentEventsFn := func(ctx context.Context, limit int) ([]core.JobEvent, error) {
 		return st.RecentEvents(ctx, limit)
 	}
@@ -744,6 +747,7 @@ func main() {
 		Jobs:           jobsFn,
 		PagedJobs:      pagedJobsFn,
 		FailureDetails: failureDetailsFn,
+		ParkReasons:    parkReasonsFn,
 		Cancel:         jobs.Cancel,
 		Retry:          jobs.Retry,
 		BulkRetry:      bulkRetryFn,

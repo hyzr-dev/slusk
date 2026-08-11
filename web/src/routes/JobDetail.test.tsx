@@ -101,7 +101,7 @@ describe('retry visibility', () => {
     renderJobDetail('/jobs/1', client);
 
     expect(screen.getByRole('button', { name: t.jobs.retry })).toBeInTheDocument();
-    expect(screen.getByText(t.jobs.parkedExplanation)).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(t.jobs.parkedLead))).toBeInTheDocument();
   });
 });
 

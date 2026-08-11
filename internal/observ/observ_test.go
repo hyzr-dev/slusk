@@ -1070,6 +1070,157 @@ func TestJobsEndpointSerializesFailDetailUnderItsWireKey(t *testing.T) {
 	}
 }
 
+// TestJobsEndpointReturnsParkDetailForParkedJob is issue #484: a parked job's
+// jobDTO should carry its own recorded job_parked explanation.
+func TestJobsEndpointReturnsParkDetailForParkedJob(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{
+				Job:    core.AlbumJob{ID: 9, Title: "Parked Album", ArtistName: "Nobody"},
+				Status: "parked",
+			},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		if len(jobIDs) != 1 || jobIDs[0] != 9 {
+			t.Fatalf("ParkReasons called with %v, want [9]", jobIDs)
+		}
+		return map[int64]string{9: "all candidates exhausted"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].ParkDetail != "all candidates exhausted" {
+		t.Errorf("ParkDetail = %q, want %q", got[0].ParkDetail, "all candidates exhausted")
+	}
+}
+
+// TestJobsEndpointToleratesNilAndErroringParkReasons mirrors
+// TestJobsEndpointToleratesNilAndErroringFailureDetails: a nil ParkReasons
+// dep and one that errors must both still produce a 200 with the rest of the
+// payload intact.
+func TestJobsEndpointToleratesNilAndErroringParkReasons(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 9, Title: "Parked Album", ArtistName: "Nobody"}, Status: "parked"},
+		}, nil
+	}
+
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.ParkReasons = nil
+	h := NewServer(deps)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil ParkReasons: status = %d, want 200", rec.Code)
+	}
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if got[0].ParkDetail != "" || got[0].Title != "Parked Album" {
+		t.Errorf("nil ParkReasons: got %+v", got[0])
+	}
+
+	deps2 := testServerDeps(reg)
+	deps2.PagedJobs = pagedJobsFromFunc(jobs)
+	deps2.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return nil, errors.New("boom")
+	}
+	h2 := NewServer(deps2)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("erroring ParkReasons: status = %d, want 200", rec2.Code)
+	}
+	got2 := decodeJobsList(t, rec2.Body.Bytes())
+	if got2[0].ParkDetail != "" || got2[0].Title != "Parked Album" {
+		t.Errorf("erroring ParkReasons: got %+v", got2[0])
+	}
+}
+
+// TestJobsEndpointAssignsParkDetailToTheCorrectJobInAMixedPage mirrors
+// TestJobsEndpointAssignsFailDetailToTheCorrectJobInAMixedPage: a non-parked
+// job ordered before the parked one pins that ParkDetail is assigned by job
+// id, not by looping index.
+func TestJobsEndpointAssignsParkDetailToTheCorrectJobInAMixedPage(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 1, Title: "Still Going", ArtistName: "Someone"}, Status: "active"},
+			{Job: core.AlbumJob{ID: 2, Title: "Parked", ArtistName: "Nobody"}, Status: "parked"},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		if len(jobIDs) != 1 || jobIDs[0] != 2 {
+			t.Fatalf("ParkReasons called with %v, want [2]", jobIDs)
+		}
+		return map[int64]string{2: "all candidates exhausted"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	got := decodeJobsList(t, rec.Body.Bytes())
+	if len(got) != 2 {
+		t.Fatalf("expected 2 jobs, got %d", len(got))
+	}
+	if got[0].ID != 1 || got[0].ParkDetail != "" {
+		t.Errorf("non-parked job (index 0) = %+v, want ParkDetail empty", got[0])
+	}
+	if got[1].ID != 2 || got[1].ParkDetail != "all candidates exhausted" {
+		t.Errorf("parked job (index 1) = %+v, want ParkDetail %q", got[1], "all candidates exhausted")
+	}
+}
+
+// TestJobsEndpointSerializesParkDetailUnderItsWireKey mirrors
+// TestJobsEndpointSerializesFailDetailUnderItsWireKey: decodes the raw
+// response body generically so it checks the literal "parkDetail" wire key
+// the frontend depends on, not just the struct tag round-tripping itself.
+func TestJobsEndpointSerializesParkDetailUnderItsWireKey(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobs := func(ctx context.Context) ([]core.JobView, error) {
+		return []core.JobView{
+			{Job: core.AlbumJob{ID: 9, Title: "Parked Album", ArtistName: "Nobody"}, Status: "parked"},
+		}, nil
+	}
+	deps := testServerDeps(reg)
+	deps.PagedJobs = pagedJobsFromFunc(jobs)
+	deps.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return map[int64]string{9: "all candidates exhausted"}, nil
+	}
+	h := NewServer(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var raw struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if len(raw.Jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(raw.Jobs))
+	}
+	if got, want := raw.Jobs[0]["parkDetail"], "all candidates exhausted"; got != want {
+		t.Errorf(`wire key "parkDetail" = %v, want %q`, got, want)
+	}
+}
+
 // CreatedAt must reflect core.AlbumJob.CreatedAt distinctly from UpdatedAt —
 // the frontend sorts the TRANSFERS panel by createdAt specifically because it
 // does NOT change on progress/state updates (#233), so this guards against
@@ -2110,6 +2261,133 @@ func TestJobDetailEndpointReturnsDetail(t *testing.T) {
 	}
 	if a.Transfers[0].LastProgressAt != lastProgress.Format(timeFormat) {
 		t.Errorf("LastProgressAt = %q, want %q", a.Transfers[0].LastProgressAt, lastProgress.Format(timeFormat))
+	}
+}
+
+// TestJobDetailEndpointReturnsFailDetailAndParkDetail is issue #484: before
+// this change, /api/jobs/{id}/detail performed no FailDetail/ParkDetail
+// enrichment at all (only the paged list did), so a failed job's own detail
+// was blind on this route too. This pins that both a failed job's failDetail
+// and a parked job's parkDetail now reach the embedded jobDTO header here,
+// via the same lookups the list path uses.
+func TestJobDetailEndpointReturnsFailDetailAndParkDetail(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	t.Run("failed job carries failDetail", func(t *testing.T) {
+		deps := testServerDeps(reg)
+		deps.JobDetail = func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+			return core.JobDetail{Job: core.AlbumJob{ID: jobID, State: core.StateFailed}}, true, nil
+		}
+		deps.JobView = func(ctx context.Context, jobID int64) (core.JobView, bool, error) {
+			return core.JobView{Job: core.AlbumJob{ID: jobID, Title: "Rounds"}, Status: "failed"}, true, nil
+		}
+		deps.FailureDetails = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+			if len(jobIDs) != 1 || jobIDs[0] != 7 {
+				t.Fatalf("FailureDetails called with %v, want [7]", jobIDs)
+			}
+			return map[int64]string{7: "Lidarr rejected: track count mismatch"}, nil
+		}
+		h := NewServer(deps)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var got jobDetailDTO
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Job.FailDetail != "Lidarr rejected: track count mismatch" {
+			t.Errorf("FailDetail = %q, want %q", got.Job.FailDetail, "Lidarr rejected: track count mismatch")
+		}
+	})
+
+	t.Run("parked job carries parkDetail", func(t *testing.T) {
+		deps := testServerDeps(reg)
+		deps.JobDetail = func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+			return core.JobDetail{Job: core.AlbumJob{ID: jobID, State: core.StateParked}}, true, nil
+		}
+		deps.JobView = func(ctx context.Context, jobID int64) (core.JobView, bool, error) {
+			return core.JobView{Job: core.AlbumJob{ID: jobID, Title: "Parked Album"}, Status: "parked"}, true, nil
+		}
+		deps.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+			if len(jobIDs) != 1 || jobIDs[0] != 8 {
+				t.Fatalf("ParkReasons called with %v, want [8]", jobIDs)
+			}
+			return map[int64]string{8: "all candidates exhausted"}, nil
+		}
+		h := NewServer(deps)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs/8/detail", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		var got jobDetailDTO
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Job.ParkDetail != "all candidates exhausted" {
+			t.Errorf("ParkDetail = %q, want %q", got.Job.ParkDetail, "all candidates exhausted")
+		}
+	})
+}
+
+// TestJobDetailEndpointToleratesNilAndErroringDetailLookups is the detail
+// route's analogue of TestJobsEndpointToleratesNilAndErroringFailureDetails
+// / ...ParkReasons: a nil or erroring FailureDetails/ParkReasons dep must
+// still produce a 200 with an unenriched (but otherwise intact) job header.
+func TestJobDetailEndpointToleratesNilAndErroringDetailLookups(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	jobDetail := func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+		return core.JobDetail{Job: core.AlbumJob{ID: jobID, State: core.StateParked}}, true, nil
+	}
+	jobView := func(ctx context.Context, jobID int64) (core.JobView, bool, error) {
+		return core.JobView{Job: core.AlbumJob{ID: jobID, Title: "Parked Album"}, Status: "parked"}, true, nil
+	}
+
+	deps := testServerDeps(reg)
+	deps.JobDetail = jobDetail
+	deps.JobView = jobView
+	deps.FailureDetails = nil
+	deps.ParkReasons = nil
+	h := NewServer(deps)
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/8/detail", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nil lookups: status = %d, want 200", rec.Code)
+	}
+	var got jobDetailDTO
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Job.ParkDetail != "" || got.Job.Title != "Parked Album" {
+		t.Errorf("nil lookups: got %+v", got.Job)
+	}
+
+	deps2 := testServerDeps(reg)
+	deps2.JobDetail = jobDetail
+	deps2.JobView = jobView
+	deps2.ParkReasons = func(ctx context.Context, jobIDs []int64) (map[int64]string, error) {
+		return nil, errors.New("boom")
+	}
+	h2 := NewServer(deps2)
+	req2 := httptest.NewRequest(http.MethodGet, "/api/jobs/8/detail", nil)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("erroring ParkReasons: status = %d, want 200", rec2.Code)
+	}
+	var got2 jobDetailDTO
+	if err := json.NewDecoder(rec2.Body).Decode(&got2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got2.Job.ParkDetail != "" || got2.Job.Title != "Parked Album" {
+		t.Errorf("erroring ParkReasons: got %+v", got2.Job)
 	}
 }
 
