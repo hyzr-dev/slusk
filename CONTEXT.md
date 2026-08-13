@@ -75,6 +75,33 @@ accept. The files are kept; the job awaits a person.
 _Avoid_: not imported (that term is for a job that never reached Lidarr — see Not
 imported), failed, rejected
 
+### Sharing
+
+Offering our own files to Soulseek peers, as opposed to fetching theirs. "Share" on its
+own names the folder, the result and the whole feature, so it is never the right word.
+
+**Shared folder**:
+A local directory offered to peers under a public name of its own. The name is all a peer
+ever sees; the path beneath it never goes on the wire. The set of them is the only thing
+that decides what can be offered at all.
+_Avoid_: share (ambiguous — see above), root, mount
+
+**Share scan**:
+Reading the filesystem to find out what the shared folders currently hold. The only thing
+that discovers a newly added file, and the expensive step — so it happens when it is
+asked for, not on a timer.
+_Avoid_: index (that is the result, not the act), search (a search goes out to the
+network; this never leaves the machine), sync
+
+**Share index**:
+What slusk offers peers: every file, the public path it is offered under, and the detail
+a peer is shown about it. Produced by a share scan, and it outlives the process that
+produced it — a restart reuses the last one rather than reading the disk again. So it is
+never fresher than its scan: putting music into a shared folder does not change it until
+a scan runs.
+_Avoid_: snapshot (the code's word for how the index is published, not for what it is),
+share, cache (it is what peers are served, not an accelerator in front of something else)
+
 ### The dashboard
 
 **Dashboard status**:
