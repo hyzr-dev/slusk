@@ -713,6 +713,17 @@ export const t = {
     scanFailedBody:
       'The last scan failed in a way that retrying will not fix, so no files are being shared and slusk has stopped trying. It reported:',
     scanFailedSuffix: 'Resolve the cause, then run a rescan.',
+    // The stale-index warning (#497). Since the index now survives a
+    // restart (it is loaded from Postgres, not rebuilt from the
+    // filesystem), a fresh process no longer implies a fresh index — so
+    // this has to say plainly that the index is not being refreshed on its
+    // own. `staleBody` takes the same indexedLabel already shown in the
+    // header, which is the only timestamp the frontend has: the original
+    // scan's time, never the load's. Do not imply the index was checked or
+    // refreshed at any other moment than that.
+    staleTitle: 'Share index has not been rescanned recently',
+    staleBody: (indexedAt: string) =>
+      `The filesystem was last read at ${indexedAt}. New files stay invisible to peers until you rescan.`,
     statNever: 'Never',
     panelTitle: 'SHARED FOLDERS',
     summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,

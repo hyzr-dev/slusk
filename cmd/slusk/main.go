@@ -218,7 +218,8 @@ func main() {
 	if cfg.Soulseek.Enabled() {
 		sink := &messageSink{store: st, logger: logger}
 		shareCache := &shareMetaCache{store: st}
-		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, &uploadSink{store: st}, shareCache, logger)
+		shareIndex := &shareIndexAdapter{store: st}
+		soulClient = newSoulseekClient(cfg.Soulseek, cfg.Paths.SlskdCompleteDir, sink, &uploadSink{store: st}, shareCache, shareIndex, logger)
 	}
 
 	// Backend selection: config.Validate already guarantees soulClient != nil

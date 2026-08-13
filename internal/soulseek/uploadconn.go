@@ -183,7 +183,21 @@ func openIndexedFile(indexed *indexedFile) (*os.File, error) {
 		return nil, fmt.Errorf("shared file escaped resolved root")
 	}
 	before, err := os.Stat(resolvedBefore)
-	if err != nil || !before.Mode().IsRegular() || !os.SameFile(indexed.info, before) || before.Size() != int64(indexed.wire.Size) || !before.ModTime().Equal(indexed.info.ModTime()) {
+	if err != nil || !before.Mode().IsRegular() || before.Size() != int64(indexed.wire.Size) ||
+		before.ModTime().UnixMicro() != indexed.modTime.UnixMicro() {
+		return nil, fmt.Errorf("shared file changed since scan")
+	}
+	// os.SameFile catches a replacement that kept the size and mtime, but it
+	// needs the os.FileInfo the walk produced - which an entry restored from a
+	// persisted index does not have, since that path never touched the
+	// filesystem (issue #497). Size and mtime are the same pair share_file_meta
+	// data has always trusted to mean "unchanged", and every other check here,
+	// including the SameFile checks across the open below, still applies.
+	//
+	// Compared on UnixMicro rather than time.Equal because a restored mtime has
+	// been through Postgres and lost sub-microsecond precision; comparing at
+	// full resolution would refuse every upload of a restored entry.
+	if indexed.info != nil && !os.SameFile(indexed.info, before) {
 		return nil, fmt.Errorf("shared file changed since scan")
 	}
 	f, err := os.Open(indexed.local)

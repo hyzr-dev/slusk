@@ -20,10 +20,20 @@ import UploadsPanel from './UploadsPanel';
 // report-level timestamp (SharesReport.indexedAt) — ShareFolder carries no
 // per-folder equivalent, so it belongs only in the summary line, not in the
 // folder grid (see internal/observ/shares.go ShareFolderStats).
-const STALE_INDEX_MS = 24 * 60 * 60 * 1000;
+//
+// The meaning of this constant changed under #497: the index used to be
+// rebuilt from the filesystem on every process start, so "stale" could only
+// ever mean "this process has been up a long time without a rescan" — it was
+// effectively a process-lifetime measurement. Now the index survives a
+// restart and is loaded from Postgres, so the same field can be weeks old
+// with the process itself freshly started. Seven days (rather than the old
+// one) reflects that this is now a genuine "nobody has rescanned in a while"
+// signal, not a process-age proxy.
+const STALE_INDEX_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Shared by the two warning cards below (empty shares, and a scan that failed
-// permanently — #408), which differ only in their copy.
+// Shared by the warning cards below (empty shares, a scan that failed
+// permanently — #408, and a stale index — #497), which differ only in their
+// copy.
 function WarningIcon() {
   return (
     <svg
@@ -97,11 +107,19 @@ export default function Shares() {
   return (
     <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
       <QueryNotice phase={phase} />
-      {/* A permanently failed scan (#408) also reports zero folders, so these
-          two warnings are mutually exclusive rather than stacked: showing "no
-          shared folders configured" to someone whose folders are configured
-          and merely unpublishable sends them to fix the wrong thing. The
-          empty-shares branch is unchanged, just no longer the only one. */}
+      {/* These three warnings are mutually exclusive rather than stacked, in
+          order of how actionable they are:
+            1. A permanently failed scan (#408) also reports zero folders, so
+               it must outrank "no shared folders configured" — showing that
+               to someone whose folders are configured and merely
+               unpublishable sends them to fix the wrong thing.
+            2. Zero folders configured — nothing to index at all, which also
+               subsumes "never scanned" (no folders means no scan has
+               anything to report on, so `stale` is trivially true too).
+            3. A stale index (#497) — everything below is real and was
+               indexed successfully, it is just old. This is the mildest of
+               the three: the share is working, it just does not reflect
+               what is on disk right now. */}
       {data.lastError ? (
         <div className={styles.warningCard}>
           <WarningIcon />
@@ -115,18 +133,30 @@ export default function Shares() {
             <div className={styles.warningBody}>{t.shares.scanFailedSuffix}</div>
           </div>
         </div>
+      ) : data.folders.length === 0 ? (
+        <div className={styles.warningCard}>
+          <WarningIcon />
+          <div>
+            <div className={styles.warningTitle}>{t.shares.emptyTitle}</div>
+            <div className={styles.warningBody}>
+              {t.shares.emptyBodyPrefix}{' '}
+              <Link to="/settings">{t.nav.settings}</Link>
+              {t.shares.emptyBodySuffix}
+            </div>
+            <pre className={styles.warningSnippet}>{t.shares.emptyConfigSnippet}</pre>
+          </div>
+        </div>
       ) : (
-        data.folders.length === 0 && (
+        // data.indexedAt is guaranteed non-null here: folders.length > 0
+        // (the branch above returned otherwise) means a scan has completed
+        // and reported an indexedAt, so `stale` at this point can only mean
+        // "old", never "never scanned" — the label is never "Never" here.
+        stale && (
           <div className={styles.warningCard}>
             <WarningIcon />
             <div>
-              <div className={styles.warningTitle}>{t.shares.emptyTitle}</div>
-              <div className={styles.warningBody}>
-                {t.shares.emptyBodyPrefix}{' '}
-                <Link to="/settings">{t.nav.settings}</Link>
-                {t.shares.emptyBodySuffix}
-              </div>
-              <pre className={styles.warningSnippet}>{t.shares.emptyConfigSnippet}</pre>
+              <div className={styles.warningTitle}>{t.shares.staleTitle}</div>
+              <div className={styles.warningBody}>{t.shares.staleBody(indexedLabel)}</div>
             </div>
           </div>
         )

@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { queryKeys } from '../api/queries';
 import type { SharesReport, UploadsReport } from '../api/types';
+import { formatDateTime } from '../format';
 import { t } from '../strings';
 import Shares from './Shares';
 
@@ -165,6 +166,52 @@ describe('permanent scan failure', () => {
     renderShares(client);
     expect(screen.getByText(t.shares.emptyTitle)).toBeInTheDocument();
     expect(screen.queryByText(t.shares.scanFailedTitle)).not.toBeInTheDocument();
+  });
+});
+
+describe('stale index (#497)', () => {
+  it('shows the stale warning card once the index is older than 7 days', () => {
+    // makeReport's default indexedAt is fixed and, relative to real "now",
+    // already well past the 7-day threshold — this is the same fixture the
+    // "loaded state" tests below use for an ordinary, non-stale render.
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport());
+    renderShares(client);
+    expect(screen.getByText(t.shares.staleTitle)).toBeInTheDocument();
+    // The body names the original scan's time, not "now" — it must read the
+    // same label the header summary already shows for the same indexedAt,
+    // never a fabricated load or check time.
+    const indexedLabel = formatDateTime('2026-07-20T14:32:05Z');
+    expect(screen.getByText(t.shares.staleBody(indexedLabel))).toBeInTheDocument();
+  });
+
+  it('does not show the stale warning card for a recently completed scan', () => {
+    const client = newClient();
+    client.setQueryData(
+      queryKeys.shares,
+      makeReport({ indexedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+    );
+    renderShares(client);
+    expect(screen.queryByText(t.shares.staleTitle)).not.toBeInTheDocument();
+  });
+
+  it('is superseded by the permanent-failure card rather than stacking with it', () => {
+    const client = newClient();
+    client.setQueryData(
+      queryKeys.shares,
+      makeReport({ folders: [], files: 0, lastError: 'boom' }),
+    );
+    renderShares(client);
+    expect(screen.getByText(t.shares.scanFailedTitle)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.staleTitle)).not.toBeInTheDocument();
+  });
+
+  it('is superseded by the empty-shares card rather than stacking with it', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [] }));
+    renderShares(client);
+    expect(screen.getByText(t.shares.emptyTitle)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.staleTitle)).not.toBeInTheDocument();
   });
 });
 
