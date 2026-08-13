@@ -723,7 +723,7 @@ export const t = {
     // refreshed at any other moment than that.
     staleTitle: 'Share index has not been rescanned recently',
     staleBody: (indexedAt: string) =>
-      `The filesystem was last read at ${indexedAt}. A restart does not read it again, so anything added since then stays invisible to peers until you run a rescan.`,
+      `The filesystem was last read at ${indexedAt}. New files stay invisible to peers until you rescan.`,
     statNever: 'Never',
     panelTitle: 'SHARED FOLDERS',
     summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,
