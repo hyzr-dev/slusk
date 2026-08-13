@@ -107,19 +107,26 @@ export default function Shares() {
   return (
     <Page title={t.page.shares.title} subtitle={t.page.shares.subtitle}>
       <QueryNotice phase={phase} />
-      {/* These three warnings are mutually exclusive rather than stacked, in
-          order of how actionable they are:
+      {/* Zero folders has three different causes and only one of them is the
+          user's configuration, so these notices are mutually exclusive rather
+          than stacked, in order of how actionable they are:
             1. A permanently failed scan (#408) also reports zero folders, so
                it must outrank "no shared folders configured" — showing that
                to someone whose folders are configured and merely
                unpublishable sends them to fix the wrong thing.
-            2. Zero folders configured — nothing to index at all, which also
+            2. An index that has not been published yet (#505): until the
+               first scan or index load of this process finishes, the client
+               answers from the empty snapshot, which is indistinguishable
+               from an empty configuration by folder count alone. `scanning`
+               is what tells them apart, and it covers both the filesystem
+               walk and the load. Neutral, not a warning: nothing is wrong.
+            3. Zero folders configured — nothing to index at all, which also
                subsumes "never scanned" (no folders means no scan has
                anything to report on, so `stale` is trivially true too).
-            3. A stale index (#497) — everything below is real and was
-               indexed successfully, it is just old. This is the mildest of
-               the three: the share is working, it just does not reflect
-               what is on disk right now. */}
+            4. A stale index (#497) — everything below is real and was
+               indexed successfully, it is just old. This is the mildest:
+               the share is working, it just does not reflect what is on
+               disk right now. */}
       {data.lastError ? (
         <div className={styles.warningCard}>
           <WarningIcon />
@@ -133,6 +140,8 @@ export default function Shares() {
             <div className={styles.warningBody}>{t.shares.scanFailedSuffix}</div>
           </div>
         </div>
+      ) : data.folders.length === 0 && scanning ? (
+        <div className={styles.notice}>{t.shares.scanningNotice}</div>
       ) : data.folders.length === 0 ? (
         <div className={styles.warningCard}>
           <WarningIcon />
