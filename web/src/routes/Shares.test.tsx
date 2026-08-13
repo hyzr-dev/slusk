@@ -138,6 +138,27 @@ describe('no shares configured', () => {
     expect(screen.getByRole('button', { name: t.shares.rescan })).toBeInTheDocument();
     expect(screen.queryByText(t.shares.disabledNotice)).not.toBeInTheDocument();
   });
+
+  // A share scan that has not published a snapshot yet reports zero folders
+  // too (#505): the client answers from the empty snapshot until the first
+  // scan or index load finishes. Telling someone whose folders are configured
+  // to go and configure them is the #408 mistake in a third guise.
+  it('says a scan is running rather than blaming the configuration', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [], files: 0, scanning: true }));
+    renderShares(client);
+    expect(screen.getByText(t.shares.scanningNotice)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.emptyTitle)).not.toBeInTheDocument();
+    expect(screen.queryByText(t.shares.emptyConfigSnippet)).not.toBeInTheDocument();
+  });
+
+  it('still blames the configuration once the scan has finished with nothing', () => {
+    const client = newClient();
+    client.setQueryData(queryKeys.shares, makeReport({ folders: [], files: 0, scanning: false }));
+    renderShares(client);
+    expect(screen.getByText(t.shares.emptyTitle)).toBeInTheDocument();
+    expect(screen.queryByText(t.shares.scanningNotice)).not.toBeInTheDocument();
+  });
 });
 
 describe('permanent scan failure', () => {

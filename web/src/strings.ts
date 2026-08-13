@@ -702,6 +702,12 @@ export const t = {
     // for a user in exactly the state this warning card is shown to. Shown as
     // the fallback for a read-only config mount; Settings is the primary path.
     emptyConfigSnippet: '[[soulseek.shared_folders]]\nname = "Library"\npath = "/music/library"',
+    // Shown in place of the empty-shares card while SharesReport.scanning is
+    // true and nothing has been published yet (#505). "Indexing" rather than
+    // "scanning" deliberately: `scanning` is true both for a filesystem walk
+    // and for loading the stored index (#497), and the report carries nothing
+    // that tells the two apart - so the copy must be true of either.
+    scanningNotice: 'Indexing the shared folders. Nothing is published to peers until it finishes.',
     // The permanent scan failure (SharesReport.lastError, issue #408). It
     // takes the place of emptyTitle above rather than stacking with it: a
     // failed scan also reports zero folders, and "no shared folders
