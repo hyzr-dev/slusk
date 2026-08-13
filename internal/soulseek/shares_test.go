@@ -260,6 +260,35 @@ func TestSharingHooksBrowseFolderAndDownloadCoexistence(t *testing.T) {
 	}
 }
 
+// TestSessionWriteBudgetAdmitsAMaximumBrowseFrame covers the arithmetic
+// between the two halves of issue #409's seam, which is the part that does not
+// follow from sharing a constant. The browse serializer bounds the frame it
+// builds at peer.MaxOrdinaryFrameSize; Pack then prepends a 4-byte size prefix
+// that the serializer's own limit never saw. So the largest frame browse can
+// hand to TrySend is MaxOrdinaryFrameSize+4, and the write budget has to admit
+// exactly that and no more - one byte either way and the largest publishable
+// share is either rejected here or accepted past the bound.
+//
+// That the two packages agree on the value itself is structural: the
+// serializer uses the exported constant directly, with no local alias to
+// drift.
+func TestSessionWriteBudgetAdmitsAMaximumBrowseFrame(t *testing.T) {
+	c := New(Config{Username: "me"}, testLogger())
+	startSessionLifecycle(t, c)
+	local, remote := net.Pipe()
+	defer remote.Close()
+	s := c.newSession(local, sessionKey{username: "browser", connType: peer.ConnectionType}, sessionInitiatorRemote, sessionRoleOrdinary, 0, nil)
+	defer s.Close(errors.New("test complete"))
+
+	largest := make([]byte, peer.MaxOrdinaryFrameSize+4)
+	if !s.TrySend(largest) {
+		t.Fatalf("a maximum-sized browse frame (%d bytes) was refused by the session write budget", len(largest))
+	}
+	if s.TrySend(make([]byte, peer.MaxOrdinaryFrameSize+5)) {
+		t.Fatal("a frame one byte over the maximum was accepted, so the budget is not the bound it claims")
+	}
+}
+
 func TestRepeatedHugeBrowseResponsesRespectSessionByteBudget(t *testing.T) {
 	c := New(Config{Username: "me"}, testLogger())
 	largeFrame := make([]byte, int(maxOrdinaryPeerQueuedBytes/2)+1)
@@ -1062,19 +1091,28 @@ func TestRunInitialShareScanRetriesThenPublishes(t *testing.T) {
 // The error is produced by the real serializer, not hand-written: what has to
 // hold is that scanShares classifies the error peer actually returns at its
 // limit, and a fake error string would keep passing if that shape ever
-// changed. Only the *input* is synthetic - a share index that reaches the
-// limit for real needs around 170k files on disk (issue #408), while 17
-// maximum-length names reach it in memory - so the substitution costs nothing
-// the classification depends on.
+// changed. Only the *input* is synthetic - a share index that reaches a limit
+// for real needs six figures of files on disk (issue #408) - so the
+// substitution costs nothing the classification depends on.
+//
+// The bound it trips is the directory count. Before #409 this used 17
+// maximum-length names to reach a 16 MiB byte cap, but that cap now bounds
+// only pathological path lengths and sits at 256 MiB, so tripping it would
+// mean actually compressing 256 MiB on every call. A count bound is rejected
+// before any encoding happens, and it is also the shape a real oversized
+// share now meets first: the byte caps are far out of reach behind the file
+// and directory counts.
+//
+// browseDirectoryLimit mirrors peer's own unexported bound. It is not imported
+// because it is not part of that package's API; the assertion below is what
+// keeps the copy honest if it ever moves.
+const browseDirectoryLimit = 100_000
+
 func failSerializeTooLarge(t *testing.T) {
 	t.Helper()
-	files := make([]peer.File, 17)
-	for i := range files {
-		files[i].Name = strings.Repeat("a", 1<<20)
+	oversized := &peer.SharedFileListResponse{
+		Directories: make([]peer.Directory, browseDirectoryLimit+1),
 	}
-	oversized := &peer.SharedFileListResponse{Directories: []peer.Directory{{Name: "Music", Files: files}}}
-	// Serialized once and the error reused: reaching the limit means actually
-	// writing 16 MiB, which is the bulk of this test's runtime.
 	_, tooLarge := oversized.Serialize(oversized)
 	// Asserted, not assumed: if peer's limit ever rises above this fixture,
 	// the seam would start returning success and every test using it would
@@ -1131,7 +1169,7 @@ func TestRunInitialShareScanStopsAfterPermanentFailure(t *testing.T) {
 	}
 
 	report := c.ShareReport()
-	for _, want := range []string{"1 shared files", "16777216", "sharing is disabled"} {
+	for _, want := range []string{"1 shared files", fmt.Sprint(browseDirectoryLimit), "sharing is disabled"} {
 		if !strings.Contains(report.LastError, want) {
 			t.Fatalf("LastError = %q, want it to contain %q", report.LastError, want)
 		}
