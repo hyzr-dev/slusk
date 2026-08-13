@@ -1138,3 +1138,51 @@ func TestDeferredCandidateProceedsWhenTheOwnerFinishes(t *testing.T) {
 		t.Errorf("released job's leaves = %v (err %v), want [cd1]", leaves, err)
 	}
 }
+
+// TestDeferredCandidateCeilingRecordsNoCooldown guards the one place issue
+// #507's cooldown must NOT reach. A candidate that hits the folder-collision
+// ceiling goes through the same store call the transfer-failure path used to
+// use, but the peer did nothing wrong: another job of ours happened to be
+// writing into the directory the backend derives from its share path.
+//
+// Cooling it down would bar a perfectly good peer from the next search cycles
+// because of a purely local collision — the same over-reach #471 already warns
+// about for RejectCandidateAndAdvance, one step softer. The split is upheld at
+// the call site, not inside the store, so only a test at this level can catch it
+// being moved.
+func TestDeferredCandidateCeilingRecordsNoCooldown(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+
+	searcher := &fakeSearcher{}
+	p, st := newSelectingParams(t, searcher)
+
+	seedCollidingJob(t, st, 1, "Artist A", "cd1", now)
+	second := seedCollidingJob(t, st, 2, "Artist B", "cd1", now.Add(time.Second))
+
+	if err := NewSelecting(p).Tick(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	cand, found, err := st.ActiveCandidate(ctx, second)
+	if err != nil || !found {
+		t.Fatalf("ActiveCandidate: %v found=%v", err, found)
+	}
+
+	past := now.Add(2*time.Minute + 2*p.TransferDeadline)
+	if _, err := topUpCandidate(ctx, p, second, cand.ID, past, p.MaxInflightPerPeer, p.MaxTransferRetries, p.TransferDeadline, p.Logger); err != nil {
+		t.Fatalf("topUpCandidate: %v", err)
+	}
+	if state := jobStateFor(t, st, second); state != core.StateSelecting {
+		t.Fatalf("precondition: the ceiling did not fire (state %s)", state)
+	}
+
+	// Far past any cooldown the ladder could produce, so this fails whether the
+	// peer was barred permanently or merely cooled down.
+	rejections, err := st.RejectedCandidates(ctx, second, past.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(rejections) != 0 {
+		t.Errorf("a local folder collision must not penalise the peer, got %+v", rejections)
+	}
+}

@@ -160,7 +160,34 @@ func (s *Store) SucceedCandidate(ctx context.Context, candidateID int64, now tim
 // It records no rejection history: use RejectCandidateAndAdvance when the
 // candidate's own content is what failed. See that function for the split.
 func (s *Store) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
-	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, false, now)
+	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, rejectionRule{}, now)
+}
+
+// CooldownCandidateAndAdvance is the middle setting between
+// FailCandidateAndAdvance (forget it happened) and RejectCandidateAndAdvance
+// (remember forever): the candidate is recorded in the job's rejection history
+// with an expiry, so Discovery skips it for a while and reconsiders it after
+// (issue #507).
+//
+// It exists because a failed *download* sits between the two cases
+// RejectCandidateAndAdvance's doc comment describes. Forgetting is wrong -
+// ResetJobToWanted wipes the candidate cache, the next search returns
+// substantially the same peers, and the job re-downloads the peer that just
+// failed, which is what #507 observed in production. Remembering forever is
+// equally wrong for exactly the reason given there: a single mid-transfer
+// dropout would make an album with one seeder permanently unfetchable.
+//
+// The delay escalates from policy.Base per failure of the same (username,
+// release directory) pair, bounded by policy.Cap. Callers own the policy
+// because backoff shape is pipeline configuration, not a storage concern.
+//
+// NOT for a failure that is slusk's own fault. A candidate deferred because
+// another job holds its download folder (issue #471) reaches its ceiling
+// through FailCandidateAndAdvance, and must keep doing so: the peer did
+// nothing wrong and cooling it down would punish it for a local collision.
+func (s *Store) CooldownCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, policy CooldownPolicy, now time.Time) (bool, error) {
+	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to,
+		rejectionRule{record: true, cooldown: &policy}, now)
 }
 
 // RejectCandidateAndAdvance is FailCandidateAndAdvance plus a permanent record
@@ -182,14 +209,24 @@ func (s *Store) FailCandidateAndAdvance(ctx context.Context, candidateID, jobID 
 // recorded against a candidate whose failure write rolled back would blacklist
 // a peer that never actually failed.
 func (s *Store) RejectCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error) {
-	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, true, now)
+	return s.failCandidateAndAdvance(ctx, candidateID, jobID, reason, from, to, rejectionRule{record: true}, now)
 }
 
-func (s *Store) failCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, reject bool, now time.Time) (bool, error) {
+// rejectionRule says what a terminal candidate write leaves in the job's
+// rejection history. Its zero value records nothing, which is what the success
+// and plain-failure paths want; record with a nil cooldown is permanent, and a
+// non-nil cooldown expires. The three cases live in one value so "permanent,
+// but with an expiry" and "timed, but with no time" cannot be written down.
+type rejectionRule struct {
+	record   bool
+	cooldown *CooldownPolicy
+}
+
+func (s *Store) failCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, rule rejectionRule, now time.Time) (bool, error) {
 	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
 		`UPDATE candidates SET state = $1, fail_reason = $2, updated_at = $3 WHERE id = $4 AND state = $5`,
 		[]any{string(core.CandidateFailed), reason, now, candidateID, string(core.CandidateActive)},
-		from, to, reason, reject, now)
+		from, to, reason, rule, now)
 }
 
 // SucceedCandidateAndAdvance is FailCandidateAndAdvance's success twin: it marks
@@ -199,15 +236,15 @@ func (s *Store) SucceedCandidateAndAdvance(ctx context.Context, candidateID, job
 	return s.terminalCandidateAndAdvance(ctx, candidateID, jobID,
 		`UPDATE candidates SET state = $1, updated_at = $2 WHERE id = $3 AND state = $4`,
 		[]any{string(core.CandidateSucceeded), now, candidateID, string(core.CandidateActive)},
-		from, to, "", false, now)
+		from, to, "", rejectionRule{}, now)
 }
 
 // terminalCandidateAndAdvance runs candSQL (the candidate terminal-state write,
 // guarded on state='ACTIVE') and the job's conditional from->to advance in one
-// transaction. Either write affecting zero rows rolls back both. reject asks for
+// transaction. Either write affecting zero rows rolls back both. rule asks for
 // a candidate_rejections row (with reason) alongside them, in the same tx - only
-// the failure path wants one.
-func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, candSQL string, candArgs []any, from, to core.AlbumJobState, reason string, reject bool, now time.Time) (bool, error) {
+// the failure paths want one.
+func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, candSQL string, candArgs []any, from, to core.AlbumJobState, reason string, rule rejectionRule, now time.Time) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -250,8 +287,8 @@ func (s *Store) terminalCandidateAndAdvance(ctx context.Context, candidateID, jo
 		return false, nil
 	}
 
-	if reject {
-		if err := recordRejectionTx(ctx, tx, candidateID, jobID, reason, now); err != nil {
+	if rule.record {
+		if err := recordRejectionTx(ctx, tx, candidateID, jobID, reason, rule.cooldown, now); err != nil {
 			return false, err
 		}
 	}

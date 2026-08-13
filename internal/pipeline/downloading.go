@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
+	"github.com/hyzr-dev/slusk/internal/store"
 )
 
 // MetricsSink receives reconciliation metrics. A nil sink is a no-op, so
@@ -71,6 +72,10 @@ type DownloadingStore interface {
 	// SELECTING in one tx (DOWNLOADING→SELECTING on per-candidate failure), so a
 	// job is never left in DOWNLOADING with no ACTIVE candidate.
 	FailCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, now time.Time) (bool, error)
+	// CooldownCandidateAndAdvance is FailCandidateAndAdvance plus a rejection
+	// row that expires (issue #507), so the next search cycle does not hand the
+	// job straight back to the peer whose download just failed.
+	CooldownCandidateAndAdvance(ctx context.Context, candidateID, jobID int64, reason string, from, to core.AlbumJobState, policy store.CooldownPolicy, now time.Time) (bool, error)
 	// AdvanceJobStateFrom conditionally transitions a job (DOWNLOADING→IMPORTING
 	// on success; the candidate stays ACTIVE for the Importing module).
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
@@ -103,6 +108,29 @@ type DownloadingStore interface {
 	DownloadFoldersForJob(ctx context.Context, jobID int64) ([]string, error)
 	MarkDownloadFolderCleaned(ctx context.Context, jobID int64, leaf string, now time.Time) error
 }
+
+// candidateCooldown is how long a peer whose download failed is skipped by the
+// job's next search cycles, doubling per failure of the same (username, release
+// directory) pair (issue #507).
+//
+// The base is deliberately hours, not minutes. A cooldown only does anything if
+// it outlives the gap between the failure and the *next* cycle's selection, and
+// that gap is set by how long a full cycle takes: MaxCandidates candidates times
+// TransferDeadline apiece. The production case in #507 ran 5h27m between one
+// peer's failure and its re-selection, so an 8h first rung is the smallest one
+// that reliably bites; anything on a minute scale expires unused.
+//
+// Constants rather than configuration on purpose. The value that actually works
+// is not known yet - it wants a fleet's worth of evidence, not a guess promoted
+// to an API - and a pipeline.* key is not a local change: it would have to land
+// in config.go, write.go, config.example.toml, the observ settings types and two
+// files under web/src before anyone could set it. Promote it once the numbers
+// say what to promote it to.
+//
+// The cap is its own constant rather than pipeline.BackoffCap: that key bounds
+// how long a *job* waits between search cycles, and reusing it here would tie
+// two unrelated clocks together for no reason beyond both being backoffs.
+var candidateCooldown = store.CooldownPolicy{Base: 8 * time.Hour, Cap: 72 * time.Hour}
 
 // DownloadingParams configures a Downloading.
 type DownloadingParams struct {
@@ -697,9 +725,12 @@ func (d *Downloading) resolveDownloadingJob(ctx context.Context, job core.AlbumJ
 		// Fail the candidate and return the job to SELECTING atomically: the two
 		// writes commit together or not at all, so the job can never be stranded
 		// in DOWNLOADING with no ACTIVE candidate (which would permanently consume
-		// a MaxActive slot). Per-candidate failure is free: no cooldown, no retries
-		// bump - the next cached candidate is tried immediately on the next tick.
-		if _, err := d.p.Store.FailCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed", core.StateDownloading, core.StateSelecting, now); err != nil {
+		// a MaxActive slot). Moving on is still free within this search cycle -
+		// no retries bump, and the next cached candidate is tried on the very next
+		// tick. The cooldown binds across cycles, not here: it stops the *next*
+		// search from re-selecting this peer immediately (issue #507).
+		if _, err := d.p.Store.CooldownCandidateAndAdvance(ctx, cand.ID, job.ID, "transfer failed",
+			core.StateDownloading, core.StateSelecting, candidateCooldown, now); err != nil {
 			return false, err
 		}
 		return true, nil

@@ -1422,3 +1422,52 @@ func TestDownloadingFirstTickResolvesStaleBacklog(t *testing.T) {
 		}
 	}
 }
+
+// TestDownloadingFailureCoolsDownThePeer is issue #507's wiring check: the
+// failure path must reach CooldownCandidateAndAdvance, not the plain
+// FailCandidateAndAdvance it used before, or the next search cycle hands the job
+// straight back to the peer whose download just failed.
+//
+// The neighbouring TestDownloadingFailureReturnsJobToSelectingWithoutRetryBump
+// asserts there is no *job-level* cooldown (not_before) here, and that still
+// holds — these are two different clocks. Moving on to the next cached candidate
+// stays immediate; what the peer earns is a bar on being re-cached by later
+// search cycles.
+func TestDownloadingFailureCoolsDownThePeer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	peers := &fakeSearcher{}
+	p, st := newDownloadingParams(t, &fakeNetwork{}, peers)
+	jobID, candID := seedActiveCandidate(t, st, 1, "aleqboom",
+		[]core.CandidateFile{{Filename: `Paladin Ascension\01.flac`, Size: 10}}, now)
+	seedTransfer(t, st, candID, "aleqboom", `Paladin Ascension\01.flac`,
+		txfOpts{state: core.TransferErrored, deadline: now.Add(time.Hour), stampAt: now})
+
+	if err := NewDownloading(p).resolve(ctx, now); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Inside the cooldown the peer is barred, which is what the next search cycle
+	// consults.
+	barred, err := st.RejectedCandidates(ctx, jobID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(barred) != 1 {
+		t.Fatalf("a failed download must bar the peer from the next search, got %+v", barred)
+	}
+	if barred[0].Username != "aleqboom" {
+		t.Errorf("barred peer = %q, want aleqboom", barred[0].Username)
+	}
+
+	// And it is a cooldown, not a life sentence: a single dropped transfer says
+	// nothing about the files, so an album with one seeder must become reachable
+	// again on its own.
+	after, err := st.RejectedCandidates(ctx, jobID, now.Add(candidateCooldown.Cap+time.Hour))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("the bar must expire on its own, got %+v", after)
+	}
+}

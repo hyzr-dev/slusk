@@ -1,0 +1,42 @@
+-- Issue #507: a candidate that failed its *download* is re-selected by the same
+-- job on the very next search cycle.
+--
+-- Migration 0016 gave a job a memory that outlives ResetJobToWanted's wipe of
+-- `candidates`, but only content faults write to it (RejectCandidateAndAdvance).
+-- The split is deliberate and stays: a peer that went offline mid-transfer says
+-- nothing about its files, and a permanent row there would let one timeout make
+-- an album with a single seeder unfetchable for the rest of the job's life.
+--
+-- What was missing is the state between "permanent" and "nothing at all". These
+-- two columns add it, so the same table can carry both kinds of rejection:
+--
+--   retry_after NULL     -> permanent. Exactly the 0016 behaviour, which is why
+--                           no existing row needs migrating and why the column
+--                           is nullable rather than NOT NULL DEFAULT now().
+--   retry_after set      -> a cooldown. Discovery skips the pair until then and
+--                           re-considers it afterwards, so the history heals on
+--                           its own.
+--
+-- Keying the permanence on the timestamp itself, rather than adding an
+-- is_permanent flag beside it, makes "permanent with a retry time" and "timed
+-- with no time" both unrepresentable.
+--
+-- attempts counts how many times this pair has failed, and exists because the
+-- cooldown escalates. It cannot be derived: the writer's ON CONFLICT upsert
+-- collapses repeat failures onto one row (that collapsing is what 0016's
+-- primary key is for), so without a counter the second failure would be
+-- indistinguishable from the first and every cooldown would be the first rung
+-- forever. DEFAULT 1 makes an inserted row self-consistent - a row exists
+-- because something failed once.
+--
+-- Rows written before this migration get attempts = 1 and retry_after = NULL,
+-- which is correct on both counts: they are content faults, they are permanent,
+-- and their escalation ladder is never consulted.
+ALTER TABLE candidate_rejections
+    ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS attempts    INT NOT NULL DEFAULT 1;
+
+-- No index. Discovery reads one job's rejections by the primary key's leading
+-- column and filters the handful of rows it gets back in the same query; the
+-- row count per job is bounded by MaxCandidates x MaxRetries, so an index on
+-- retry_after would cost writes to serve a scan of a few rows.
