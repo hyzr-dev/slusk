@@ -870,11 +870,24 @@ func (s *Store) ForceSearchJob(ctx context.Context, jobID int64, now time.Time) 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM candidates WHERE album_job_id = $1`, jobID); err != nil {
 		return false, fmt.Errorf("force search job: delete candidates: %w", err)
 	}
-	// The rejection history deliberately survives a force search, unlike the
-	// retry paths: this button is the nudge a user reaches for when a job looks
-	// stuck, which is the very symptom issue #317 produces. Clearing here would
-	// send the next search straight back to re-downloading the files that have
-	// been failing import - the bug, one click away.
+	// The *permanent* rejection history deliberately survives a force search,
+	// unlike the retry paths: this button is the nudge a user reaches for when a
+	// job looks stuck, which is the very symptom issue #317 produces. Clearing it
+	// would send the next search straight back to re-downloading the files that
+	// have been failing import - the bug, one click away.
+	//
+	// Cooldowns (retry_after set, issue #507) are the opposite case and are
+	// cleared. A cooldown means "this peer's download did not finish, try again
+	// later", and "later" is precisely what the user is overriding by pressing
+	// the button; leaving it would make a force search silently do nothing on a
+	// job whose every candidate is cooling down. Nothing about the two rules is
+	// in tension: #317's reason to keep history is that the files are known bad,
+	// and a cooldown carries no such claim.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM candidate_rejections WHERE album_job_id = $1 AND retry_after IS NOT NULL`,
+		jobID); err != nil {
+		return false, fmt.Errorf("force search job: clear candidate cooldowns: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("force search job: commit: %w", err)
 	}

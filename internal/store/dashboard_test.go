@@ -1269,7 +1269,7 @@ func TestRetryRefusedJobRevivesJob(t *testing.T) {
 		t.Fatalf("RejectCandidateAndAdvance: %v", err)
 	}
 
-	rejections, err := s.RejectedCandidates(ctx, jobID)
+	rejections, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil || len(rejections) != 1 {
 		t.Fatalf("test setup: expected 1 rejection before retry, got %d (%v)", len(rejections), err)
 	}
@@ -1313,7 +1313,7 @@ func TestRetryRefusedJobRevivesJob(t *testing.T) {
 		t.Errorf("import_submitted_at = %v, want cleared", cands[0].ImportSubmittedAt)
 	}
 
-	rejections, err = s.RejectedCandidates(ctx, jobID)
+	rejections, err = s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -1375,7 +1375,7 @@ func TestRetryRefusedJobKeepsOtherRejections(t *testing.T) {
 		t.Fatalf("RetryRefusedJob: ok=%v err=%v", ok, err)
 	}
 
-	rejections, err := s.RejectedCandidates(ctx, job.ID)
+	rejections, err := s.RejectedCandidates(ctx, job.ID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}

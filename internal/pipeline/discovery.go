@@ -35,10 +35,11 @@ type DiscoveryStore interface {
 	// still caches the candidates) for a job cancelled underneath this tick.
 	InsertCandidates(ctx context.Context, jobID int64, cands []store.NewCandidate, now time.Time) error
 	// RejectedCandidates lists the (username, release directory) pairs this
-	// job has already tried and failed, across every earlier search cycle.
-	// Consulted before caching, since the search itself is deterministic
-	// enough to hand back the same failing peers every cycle (issue #317).
-	RejectedCandidates(ctx context.Context, jobID int64) ([]store.CandidateRejection, error)
+	// job may not try right now, across every earlier search cycle: permanent
+	// rejections plus cooldowns still in force at now (issue #507). Consulted
+	// before caching, since the search itself is deterministic enough to hand
+	// back the same failing peers every cycle (issue #317).
+	RejectedCandidates(ctx context.Context, jobID int64, now time.Time) ([]store.CandidateRejection, error)
 	AdvanceJobStateFrom(ctx context.Context, jobID int64, from, to core.AlbumJobState, now time.Time) (bool, error)
 	// ReliabilityFor batch-looks-up known peer reliability history for a set
 	// of usernames against one artist, for use in Ranker.Rank.
@@ -404,7 +405,7 @@ func (d *Discovery) searchJob(ctx context.Context, job core.AlbumJob, now time.T
 	// survives the wipe (issue #317); without consulting it here, a job whose
 	// search is consistently wrong pays MaxRetries × MaxCandidates full
 	// downloads of the same bad files before it finally fails.
-	rejections, err := d.p.Store.RejectedCandidates(ctx, job.ID)
+	rejections, err := d.p.Store.RejectedCandidates(ctx, job.ID, now)
 	if err != nil {
 		return false, false, err
 	}

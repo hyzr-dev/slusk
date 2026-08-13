@@ -10,6 +10,10 @@
 // A rejection is identified by (album_job_id, username, release_dir) - the same
 // key matcher.Rank groups search results on - and lives exactly as long as the
 // job (ON DELETE CASCADE; see migration 0016).
+//
+// Since issue #507 a rejection is either permanent (retry_after NULL - the
+// candidate's own content failed) or a cooldown (retry_after set - the download
+// failed, which says nothing about the files). See migration 0021.
 package store
 
 import (
@@ -31,15 +35,26 @@ type CandidateRejection struct {
 	CreatedAt  time.Time
 }
 
-// RejectedCandidates returns every candidate this job has already failed on.
+// RejectedCandidates returns every candidate this job is currently barred from
+// re-trying: permanent rejections, plus cooldowns that have not yet elapsed.
 // Discovery calls it once per search cycle; the result is normally a handful of
 // rows (bounded by MaxCandidates × MaxRetries). Deliberately unordered - the
 // only consumer collapses it into a set, and any ORDER BY here would cost a
 // sort the primary key cannot serve.
-func (s *Store) RejectedCandidates(ctx context.Context, jobID int64) ([]CandidateRejection, error) {
+//
+// now is the caller's tick time rather than now() in SQL, matching every other
+// time-dependent read in the pipeline: a module's whole tick must agree on what
+// "now" is, or a job can be filtered against one instant and written against
+// another. It also keeps this testable without sleeping.
+//
+// An elapsed cooldown is filtered out but NOT deleted: the row's attempts count
+// is what makes the next failure of the same pair back off further than the
+// last, so forgetting it here would flatten the ladder to its first rung
+// forever. The rows die with the job (ON DELETE CASCADE).
+func (s *Store) RejectedCandidates(ctx context.Context, jobID int64, now time.Time) ([]CandidateRejection, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT username, release_dir, reason, created_at FROM candidate_rejections
-		 WHERE album_job_id = $1`, jobID)
+		 WHERE album_job_id = $1 AND (retry_after IS NULL OR retry_after > $2)`, jobID, now)
 	if err != nil {
 		return nil, fmt.Errorf("rejected candidates: %w", err)
 	}
@@ -108,10 +123,17 @@ func (s *Store) CountRejectionsByReason(ctx context.Context, jobID int64, reason
 // writes over a piece of bookkeeping - deterministically, on every retry, which
 // would wedge the job.
 //
-// ON CONFLICT keeps the newest reason and timestamp. The same pair can fail
-// twice - a job whose rejections were cleared by an explicit retry, or (before
+// ON CONFLICT keeps the newest reason and timestamp and advances attempts. The
+// same pair can fail twice - a job whose rejections were cleared by an explicit
+// retry, a cooldown that elapsed and let the pair be tried again, or (before
 // this table existed) a cycle that already re-cached it.
-func recordRejectionTx(ctx context.Context, tx *sql.Tx, candidateID, jobID int64, reason string, now time.Time) error {
+//
+// cooldown nil records a permanent rejection (retry_after NULL); non-nil
+// escalates from the row's attempts count. A permanent rejection always wins:
+// re-failing a cooled-down pair on content clears retry_after, because the
+// evidence changed from "this download did not finish" to "these files are
+// wrong", and only the latter is worth remembering forever.
+func recordRejectionTx(ctx context.Context, tx *sql.Tx, candidateID, jobID int64, reason string, cooldown *CooldownPolicy, now time.Time) error {
 	var username string
 	var firstFile sql.NullString
 	if err := tx.QueryRowContext(ctx,
@@ -124,13 +146,67 @@ func recordRejectionTx(ctx context.Context, tx *sql.Tx, candidateID, jobID int64
 	}
 	dir := matcher.ReleaseDir(firstFile.String)
 
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO candidate_rejections (album_job_id, username, release_dir, reason, created_at)
-		 VALUES ($1, $2, $3, $4, $5)
+	// retry_after is written in a second statement rather than computed in SQL
+	// so the escalation ladder stays one Go function (see cooldownFor), read by
+	// tests directly. attempts has to come back first: it is the ladder's only
+	// input and the upsert is what advances it.
+	var attempts int
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO candidate_rejections (album_job_id, username, release_dir, reason, created_at, attempts)
+		 VALUES ($1, $2, $3, $4, $5, 1)
 		 ON CONFLICT (album_job_id, username, release_dir)
-		 DO UPDATE SET reason = EXCLUDED.reason, created_at = EXCLUDED.created_at`,
-		jobID, username, dir, reason, now); err != nil {
+		 DO UPDATE SET reason = EXCLUDED.reason, created_at = EXCLUDED.created_at,
+		               attempts = candidate_rejections.attempts + 1
+		 RETURNING attempts`,
+		jobID, username, dir, reason, now).Scan(&attempts); err != nil {
 		return fmt.Errorf("record rejection: %w", err)
 	}
+
+	var retryAfter any // nil -> SQL NULL -> permanent
+	if cooldown != nil {
+		retryAfter = now.Add(cooldownFor(attempts, cooldown.Base, cooldown.Cap))
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE candidate_rejections SET retry_after = $1
+		 WHERE album_job_id = $2 AND username = $3 AND release_dir = $4`,
+		retryAfter, jobID, username, dir); err != nil {
+		return fmt.Errorf("record rejection: set retry_after: %w", err)
+	}
 	return nil
+}
+
+// CooldownPolicy is the escalation ladder a timed rejection backs off along.
+// Base is the first failure's delay before doubling; Cap bounds the growth.
+type CooldownPolicy struct {
+	Base time.Duration
+	Cap  time.Duration
+}
+
+// cooldownFor returns base * 2^(attempts-1), capped at max: the first failure
+// waits base, the second twice that, and so on. attempts is the post-increment
+// failure count, so attempts <= 1 yields base rather than half of it.
+//
+// This mirrors pipeline.nextBackoff, which cannot be called here - internal/
+// pipeline imports internal/store, so the dependency only runs one way. The
+// duplication is four lines and deliberate; the alternative is hoisting the
+// arithmetic into internal/core for two callers. Same trade-off the SQL copy of
+// ReliabilityHistoryScore already makes (see matcher/reliability_history.go).
+//
+// The exponent is clamped for the same reason nextBackoff clamps it: callers
+// pass a stored counter, and 1<<attempts must not overflow an int no matter how
+// large that counter grows.
+func cooldownFor(attempts int, base, max time.Duration) time.Duration {
+	const maxExponent = 32
+	exp := attempts - 1
+	if exp < 0 {
+		exp = 0
+	}
+	if exp > maxExponent {
+		exp = maxExponent
+	}
+	d := base * time.Duration(1<<exp)
+	if d > max || d < 0 { // d<0 guards against overflow wrap-around
+		return max
+	}
+	return d
 }

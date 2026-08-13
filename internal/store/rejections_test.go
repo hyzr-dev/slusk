@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestRejectCandidateAndAdvanceRecordsRejection(t *testing.T) {
 		t.Fatalf("RejectCandidateAndAdvance: %v", err)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestSucceedCandidateAndAdvanceRecordsNoRejection(t *testing.T) {
 		t.Fatalf("SucceedCandidateAndAdvance: %v", err)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestRejectCandidateAndAdvanceRollbackRecordsNoRejection(t *testing.T) {
 	if transitioned {
 		t.Fatal("expected transitioned=false when the job already left its from-state")
 	}
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestResetJobToWantedKeepsRejections(t *testing.T) {
 	if cands, err := s.CandidatesForJob(ctx, jobID); err != nil || len(cands) != 0 {
 		t.Fatalf("expected candidates deleted, got %d (%v)", len(cands), err)
 	}
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -171,7 +172,7 @@ func TestRetryFailedJobClearsRejections(t *testing.T) {
 		t.Fatalf("RetryFailedJob: %v ok=%v", err, ok)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestFailCandidateAndAdvanceRecordsNoRejection(t *testing.T) {
 		t.Fatalf("FailCandidateAndAdvance: %v", err)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestForceSearchJobKeepsRejections(t *testing.T) {
 		t.Fatalf("ForceSearchJob: %v ok=%v", err, ok)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestUpsertWantedJobReEnterClearsRejections(t *testing.T) {
 		t.Fatalf("UpsertWantedJob: %v", err)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -311,7 +312,7 @@ func TestSyncWantedJobsReEnterClearsRejections(t *testing.T) {
 		t.Fatalf("SyncWantedJobs: %v", err)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -343,7 +344,7 @@ func TestSyncWantedJobsReviveFailedClearsRejections(t *testing.T) {
 		t.Fatalf("SyncWantedJobs: %v revived=%d", err, revived)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestBulkRetryJobsClearsRejections(t *testing.T) {
 		t.Fatalf("BulkRetryJobs: %v result=%+v", err, res)
 	}
 
-	got, err := s.RejectedCandidates(ctx, jobID)
+	got, err := s.RejectedCandidates(ctx, jobID, now)
 	if err != nil {
 		t.Fatalf("RejectedCandidates: %v", err)
 	}
@@ -434,5 +435,263 @@ func TestCountRejectionsByReason(t *testing.T) {
 		[]core.CandidateFile{{Filename: `music\Another Album\01.flac`, Size: 1}}, now)
 	if n, err := s.CountRejectionsByReason(ctx, otherJob, string(core.ReasonIncompleteDownload)); err != nil || n != 0 {
 		t.Errorf("other job's count = %d (%v), want 0", n, err)
+	}
+}
+
+// testPolicy is the ladder the cooldown tests assert against: deliberately not
+// pipeline's production constants, so tuning those never silently rewrites what
+// these tests claim.
+var testPolicy = CooldownPolicy{Base: time.Hour, Cap: 6 * time.Hour}
+
+// helperReactivate adds one more candidate to a job already past its first
+// attempt and activates it, so a test can fail the *same* (username, release
+// directory) pair twice and observe the escalation. The job must be in
+// SELECTING, which is where every candidate-failure path leaves it.
+//
+// prevCandID's transfers are terminalized first. That is not test bookkeeping:
+// idx_transfers_live_remote_owner makes (username, filename) unique across live
+// transfers, so re-activating the same pair while the previous attempt's rows
+// are still PENDING fails the insert and ActivateCandidateWithTransfers returns
+// activated=false. Downloading terminalizes the siblings before failing the
+// candidate for exactly this reason (see its anyFailed branch), so doing it here
+// keeps the test on the real ordering rather than around it.
+func helperReactivate(t *testing.T, s *Store, jobID, prevCandID int64, username string, files []core.CandidateFile, now time.Time) int64 {
+	t.Helper()
+	ctx := context.Background()
+	prev, err := s.TransfersForCandidate(ctx, prevCandID)
+	if err != nil {
+		t.Fatalf("TransfersForCandidate: %v", err)
+	}
+	for _, tr := range prev {
+		if err := s.UpdateTransferProgress(ctx, tr.ID, core.TransferCancelled, 0, 0, now); err != nil {
+			t.Fatalf("UpdateTransferProgress: %v", err)
+		}
+	}
+	if err := s.InsertCandidates(ctx, jobID, []NewCandidate{{Username: username, Score: 1.0, Files: files}}, now); err != nil {
+		t.Fatalf("InsertCandidates: %v", err)
+	}
+	cand, found, err := s.NextNewCandidate(ctx, jobID)
+	if err != nil || !found {
+		t.Fatalf("NextNewCandidate: %v found=%v", err, found)
+	}
+	ok, _, err := s.ActivateCandidateWithTransfers(ctx, cand.ID, jobID, 100, now.Add(time.Hour), now)
+	if err != nil || !ok {
+		t.Fatalf("ActivateCandidateWithTransfers: %v ok=%v", err, ok)
+	}
+	return cand.ID
+}
+
+// readRetryAfter returns the stored cooldown expiry for a job's single
+// rejection row, and whether it is set at all (NULL = permanent).
+func readRetryAfter(t *testing.T, s *Store, jobID int64) (time.Time, bool) {
+	t.Helper()
+	var ts sql.NullTime
+	if err := s.db.QueryRow(
+		`SELECT retry_after FROM candidate_rejections WHERE album_job_id = $1`, jobID).Scan(&ts); err != nil {
+		t.Fatalf("read retry_after: %v", err)
+	}
+	return ts.Time, ts.Valid
+}
+
+// TestCooldownCandidateAndAdvanceHidesThenRestores is the whole point of issue
+// #507: a failed download bars the peer from the next search cycle, and stops
+// barring it once the cooldown elapses. Before this, a transfer failure wrote
+// nothing at all and the very next search re-selected the same peer.
+func TestCooldownCandidateAndAdvanceHidesThenRestores(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	files := []core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}
+	jobID, candID := helperActivateFiles(t, s, 940, "aleqboom", files, now)
+
+	if _, err := s.CooldownCandidateAndAdvance(ctx, candID, jobID, "transfer failed",
+		core.StateDownloading, core.StateSelecting, testPolicy, now); err != nil {
+		t.Fatalf("CooldownCandidateAndAdvance: %v", err)
+	}
+
+	// Still inside the cooldown: Discovery must not re-cache this peer.
+	got, err := s.RejectedCandidates(ctx, jobID, now.Add(59*time.Minute))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected the peer barred during its cooldown, got %+v", got)
+	}
+	if got[0].Username != "aleqboom" || got[0].ReleaseDir != "music/Artist - Album" {
+		t.Errorf("rejection = %+v, want aleqboom / music/Artist - Album", got[0])
+	}
+
+	// Past it: the bar lifts on its own. A peer that dropped one transfer must
+	// not be locked out for the job's life - that is what separates a cooldown
+	// from RejectCandidateAndAdvance.
+	got, err = s.RejectedCandidates(ctx, jobID, now.Add(61*time.Minute))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected the cooldown to have lifted, got %+v", got)
+	}
+}
+
+// TestCooldownEscalatesPerFailure: the same peer failing twice waits longer the
+// second time. The row is upserted onto one primary key, so without the
+// attempts counter every failure would look like the first and the ladder would
+// be flat forever.
+func TestCooldownEscalatesPerFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	files := []core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}
+	jobID, candID := helperActivateFiles(t, s, 941, "aleqboom", files, now)
+
+	if _, err := s.CooldownCandidateAndAdvance(ctx, candID, jobID, "transfer failed",
+		core.StateDownloading, core.StateSelecting, testPolicy, now); err != nil {
+		t.Fatalf("first cooldown: %v", err)
+	}
+	first, ok := readRetryAfter(t, s, jobID)
+	if !ok {
+		t.Fatal("first failure left retry_after NULL, which means permanent")
+	}
+	if want := now.Add(testPolicy.Base); !first.Equal(want) {
+		t.Errorf("first cooldown expires %v, want %v", first, want)
+	}
+
+	second := now.Add(2 * time.Hour)
+	candID2 := helperReactivate(t, s, jobID, candID, "aleqboom", files, second)
+	if _, err := s.CooldownCandidateAndAdvance(ctx, candID2, jobID, "transfer failed",
+		core.StateDownloading, core.StateSelecting, testPolicy, second); err != nil {
+		t.Fatalf("second cooldown: %v", err)
+	}
+	got, ok := readRetryAfter(t, s, jobID)
+	if !ok {
+		t.Fatal("second failure left retry_after NULL")
+	}
+	if want := second.Add(2 * testPolicy.Base); !got.Equal(want) {
+		t.Errorf("second cooldown expires %v, want %v (doubled)", got, want)
+	}
+}
+
+// TestContentFailureAfterCooldownBecomesPermanent: a peer that first dropped a
+// transfer and later turned out to be serving the wrong files is remembered
+// forever. The evidence changed from "the download did not finish" to "the
+// files are wrong", and only the latter survives a cooldown.
+func TestContentFailureAfterCooldownBecomesPermanent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	files := []core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}
+	jobID, candID := helperActivateFiles(t, s, 942, "aleqboom", files, now)
+
+	if _, err := s.CooldownCandidateAndAdvance(ctx, candID, jobID, "transfer failed",
+		core.StateDownloading, core.StateSelecting, testPolicy, now); err != nil {
+		t.Fatalf("CooldownCandidateAndAdvance: %v", err)
+	}
+	later := now.Add(2 * time.Hour)
+	candID2 := helperReactivate(t, s, jobID, candID, "aleqboom", files, later)
+	if _, err := s.RejectCandidateAndAdvance(ctx, candID2, jobID, "import rejected",
+		core.StateDownloading, core.StateSelecting, later); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+
+	if _, ok := readRetryAfter(t, s, jobID); ok {
+		t.Error("a content failure must clear retry_after, leaving the rejection permanent")
+	}
+	// Far past any cooldown the ladder could produce.
+	got, err := s.RejectedCandidates(ctx, jobID, later.Add(30*24*time.Hour))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected the permanent rejection to survive, got %+v", got)
+	}
+}
+
+// TestPermanentRejectionIgnoresNow: a content fault recorded before #507 (and
+// every one recorded since) has retry_after NULL and must never expire. This is
+// the regression the nullable column exists to make impossible.
+func TestPermanentRejectionIgnoresNow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	jobID, candID := helperActivateFiles(t, s, 943, "alice",
+		[]core.CandidateFile{{Filename: `music\Artist - Album\01.flac`, Size: 1}}, now)
+
+	if _, err := s.RejectCandidateAndAdvance(ctx, candID, jobID, "import rejected",
+		core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+	got, err := s.RejectedCandidates(ctx, jobID, now.Add(365*24*time.Hour))
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("a permanent rejection expired, got %+v", got)
+	}
+}
+
+// TestCooldownForLadder pins the escalation arithmetic itself, including the
+// clamp: attempts comes from a stored counter, so an absurd value must saturate
+// at the cap rather than overflow the shift.
+func TestCooldownForLadder(t *testing.T) {
+	base, max := time.Hour, 6*time.Hour
+	for _, tc := range []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, time.Hour}, // defensive: pre-increment value never reaches here
+		{1, time.Hour}, // first failure waits base, not half of it
+		{2, 2 * time.Hour},
+		{3, 4 * time.Hour},
+		{4, 6 * time.Hour},  // 8h would exceed the cap
+		{99, 6 * time.Hour}, // saturates without overflowing
+	} {
+		if got := cooldownFor(tc.attempts, base, max); got != tc.want {
+			t.Errorf("cooldownFor(%d) = %v, want %v", tc.attempts, got, tc.want)
+		}
+	}
+}
+
+// TestForceSearchJobClearsCooldownsKeepsPermanent is the other half of
+// TestForceSearchJobKeepsRejections, and the two must be read together: the
+// button keeps what is known bad and drops what is merely waiting.
+//
+// Without the cooldown half, pressing Re-run pipeline on a job whose every
+// candidate is cooling down would visibly do nothing - a search that returns the
+// same peers and filters all of them - which is the same "stuck job" symptom the
+// button exists to break.
+func TestForceSearchJobClearsCooldownsKeepsPermanent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	badFiles := []core.CandidateFile{{Filename: `music\Bad Rip\01.flac`, Size: 1}}
+	jobID, candID := helperActivateFiles(t, s, 944, "wrongfiles", badFiles, now)
+
+	// One permanent rejection (content fault)...
+	if _, err := s.RejectCandidateAndAdvance(ctx, candID, jobID, "import rejected",
+		core.StateDownloading, core.StateSelecting, now); err != nil {
+		t.Fatalf("RejectCandidateAndAdvance: %v", err)
+	}
+	// ...and one cooldown, from a different peer on the same job.
+	slowFiles := []core.CandidateFile{{Filename: `music\Slow Peer\01.flac`, Size: 1}}
+	candID2 := helperReactivate(t, s, jobID, candID, "slowpeer", slowFiles, now)
+	if _, err := s.CooldownCandidateAndAdvance(ctx, candID2, jobID, "transfer failed",
+		core.StateDownloading, core.StateSelecting, testPolicy, now); err != nil {
+		t.Fatalf("CooldownCandidateAndAdvance: %v", err)
+	}
+
+	ok, err := s.ForceSearchJob(ctx, jobID, now)
+	if err != nil || !ok {
+		t.Fatalf("ForceSearchJob: %v ok=%v", err, ok)
+	}
+
+	got, err := s.RejectedCandidates(ctx, jobID, now)
+	if err != nil {
+		t.Fatalf("RejectedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected only the permanent rejection to survive, got %+v", got)
+	}
+	if got[0].Username != "wrongfiles" {
+		t.Errorf("survivor = %q, want wrongfiles (the content fault)", got[0].Username)
 	}
 }
