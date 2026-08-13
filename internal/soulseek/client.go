@@ -75,6 +75,10 @@ const (
 	// defaultShareMetaCacheTimeout bounds a single ShareMetaCache Load/Save
 	// call (issue #197).
 	defaultShareMetaCacheTimeout = 60 * time.Second
+	// defaultShareIndexTimeout bounds a single ShareIndexStore Load/Save call
+	// (issue #497). Generous because a save carries every indexed file, up to
+	// the million the wire format allows.
+	defaultShareIndexTimeout = 60 * time.Second
 	// defaultUploadMinThroughput is the minimum sustained upload throughput,
 	// in bytes/second, an upload slot's peer must maintain (see #108).
 	defaultUploadMinThroughput = 1024
@@ -158,6 +162,15 @@ type Config struct {
 	// Left nil, every mp3/flac is read on every scan, matching the client's
 	// behavior before this cache existed.
 	ShareMetaCache ShareMetaCache
+
+	// ShareIndexStore, when non-nil, persists the share index so a restart
+	// reuses the last scan instead of walking every shared folder again (issue
+	// #497). Left nil, the filesystem is walked on every start, matching the
+	// client's behavior before the index was persisted.
+	//
+	// Note what this changes for a user: with a store wired in, adding music
+	// and restarting no longer publishes it. Only a rescan does.
+	ShareIndexStore ShareIndexStore
 
 	// AllowPrivatePeerAddresses permits dialing server-supplied peer
 	// addresses in RFC 1918 / ULA private ranges (threat T12: the central
@@ -257,6 +270,10 @@ type Config struct {
 	// a stalled store cannot hang a share scan indefinitely. Default 60s;
 	// test seam.
 	shareMetaCacheTimeout time.Duration
+	// shareIndexTimeout bounds a single ShareIndexStore Load/Save call, so a
+	// stalled store can neither hang startup nor hold the share-scan slot
+	// indefinitely. Default 60s; test seam.
+	shareIndexTimeout time.Duration
 	// shareScanHook, when non-nil, is invoked at the start of every share
 	// scan (see scanShares) instead of nothing, letting tests block or fail
 	// the scan deterministically without touching the filesystem. Always nil
@@ -493,6 +510,9 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.shareMetaCacheTimeout <= 0 {
 		cfg.shareMetaCacheTimeout = defaultShareMetaCacheTimeout
+	}
+	if cfg.shareIndexTimeout <= 0 {
+		cfg.shareIndexTimeout = defaultShareIndexTimeout
 	}
 	if cfg.UploadSlots <= 0 {
 		cfg.UploadSlots = 2

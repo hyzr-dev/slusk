@@ -130,7 +130,15 @@ type indexedFile struct {
 	local        string
 	root         string
 	wire         peer.File
-	info         os.FileInfo
+	// modTime is the file's mtime as the index recorded it. It is set on every
+	// entry, scanned or loaded, and is what openIndexedFile compares against
+	// before serving bytes.
+	modTime time.Time
+	// info is the os.FileInfo the walk produced, and is nil on an entry
+	// restored from a persisted index (issue #497) - that path never touched
+	// the filesystem, so there is nothing to have statted. openIndexedFile
+	// treats it as an extra check when present rather than a required one.
+	info os.FileInfo
 }
 
 type shareTrigram uint32
@@ -208,6 +216,11 @@ func (c *Client) scanAndPublishLocked(ctx context.Context) (ShareStats, error) {
 	}
 	c.shareFailure.Store(nil)
 	c.shares.Store(snapshot)
+	// Inside the share-scan slot, deliberately: two saves running outside it
+	// could race over which one is the stored "latest scan", and the tables'
+	// invariant is that they hold exactly one. A save failure is swallowed -
+	// see saveShareIndex.
+	c.saveShareIndex(ctx, snapshot)
 
 	if c.logger != nil {
 		c.logger.Info("shares scanned",
@@ -391,12 +404,16 @@ func (c *Client) announceCurrentShares(loginTime bool) error {
 	return nil
 }
 
-// runInitialShareScan builds and publishes the initial share index in the
-// background, so Run can connect to and log in with the server without
-// waiting on a scan of the local filesystem (a boot-time disk blip or
-// not-yet-ready mount can otherwise take arbitrarily long). Until this
-// completes, the client answers browse/search requests with the empty
-// snapshot New installs. Retries with the same exponential backoff
+// runInitialShareScan publishes the initial share index in the background, so
+// Run can connect to and log in with the server without waiting on the local
+// filesystem (a boot-time disk blip or not-yet-ready mount can otherwise take
+// arbitrarily long). Until this completes, the client answers browse/search
+// requests with the empty snapshot New installs.
+//
+// It prefers the index the last scan stored (issue #497) and only walks the
+// filesystem when that index is missing, was scanned from a different set of
+// shared folders, or cannot be loaded - each logged with its reason. Retries
+// with the same exponential backoff
 // retryStartup uses for as long as failures are transient - an I/O error, a
 // mount that has not come up yet - since those do resolve on their own and a
 // genuinely bad config is caught by config.Validate first.
@@ -413,6 +430,25 @@ func (c *Client) announceCurrentShares(loginTime bool) error {
 // per-attempt check, since scanAndPublish/scanShares already thread ctx
 // through the filesystem walk.
 func (c *Client) runInitialShareScan(ctx context.Context) {
+	// The stored index (issue #497) comes first: reusing the last scan is the
+	// whole point, and every path that declines to use it logs why before
+	// falling through to the walk below. An ErrShareTooLarge from the rebuild
+	// is as permanent as one from a scan and ends startup sharing here.
+	loaded, err := c.loadAndPublishShareIndex(ctx)
+	if err != nil {
+		c.logger.Error("the stored share index cannot be published; sharing is disabled until the configuration changes", "err", err)
+		return
+	}
+	if loaded {
+		// Identical to the post-scan announcement below, and for the same
+		// reasons: the server has to be told the published counts, and a failed
+		// send is picked up by the next login rather than forcing a scan.
+		if announceErr := c.announceShares(); announceErr != nil {
+			c.logger.Debug("share stats will be announced on next server login", "err", announceErr)
+		}
+		return
+	}
+
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return
@@ -606,6 +642,7 @@ func (c *Client) scanShares(ctx context.Context) (*shareSnapshot, error) {
 				local:        path,
 				root:         root,
 				wire:         wire,
+				modTime:      info.ModTime(),
 				info:         info,
 			}
 			s.files[virtual] = indexed
