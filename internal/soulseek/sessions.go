@@ -23,7 +23,17 @@ const (
 	maxPeerInitFrameSize              uint32 = 4 << 10
 	maxPeerUsernameSize                      = int(peer.MaxPeerInitUsernameSize)
 	maxDistributedFrameSize           uint32 = 16 << 10
-	maxOrdinaryPeerFrameSize          uint32 = 16 << 20
+	// Derived, not repeated: the browse serializer bounds its own frame by the
+	// same constant, so a browse response can never be built that TrySend
+	// would then refuse. Because browse is by far the largest thing we send,
+	// this is in practice the ceiling on how much a user can share (#409).
+	//
+	// The guarantee covers browse only. FolderContentsResponse serializes
+	// with no frame bound at all (#501), so a single enormous folder can
+	// still produce a response this budget rejects, which the sharing hooks
+	// log as peer backpressure (#499). It also bounds reads, not just
+	// writes - see the constant's own doc comment before raising it.
+	maxOrdinaryPeerFrameSize uint32 = peer.MaxOrdinaryFrameSize
 	// An ordinary P session may queue one maximum-sized frame or many small
 	// control/search/download frames up to the same aggregate bound. Keeping
 	// this independent of the channel depth prevents repeated browse requests

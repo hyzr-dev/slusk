@@ -13,8 +13,45 @@ import (
 
 const CodeSharedFileListResponse Code = 5
 
+// MaxOrdinaryFrameSize is the largest frame an ordinary peer ('P') connection
+// will carry, excluding the 4-byte size prefix. It bounds traffic in *both*
+// directions, and the two directions carry different risk:
+//
+//   - Outbound, the session layer derives its write budget from this, so a
+//     serializer here that bounds itself by the same constant cannot build a
+//     frame the sender will then refuse.
+//   - Inbound, it is the read limit for every ordinary peer frame and the
+//     per-session queue budget. Raising it therefore also raises how many
+//     bytes an unauthenticated remote peer can make this process buffer, on
+//     every peer message type at once - not just browse.
+//
+// Weigh the second bullet before raising it to publish a larger share.
+const MaxOrdinaryFrameSize = 16 << 20
+
 const (
-	maxSharedFileListFrameSize        = 16 << 20 // declared size, excluding its 4-byte prefix
+	// maxSharedFileListSerializedSize bounds only what we encode ourselves. It
+	// is not a protection - an oversized outgoing browse list is a risk to our
+	// peers, never to us - it is a backstop against pathological path lengths,
+	// which are the one shape that can slip past both the file count and the
+	// compressed frame. Neither Nicotine+ nor Soulseek.NET bounds its own
+	// outgoing list at all; see docs/research for the survey behind issue #409.
+	maxSharedFileListSerializedSize = 256 << 20
+	// maxSharedFileListDecompressedSize bounds a *peer's* list on the decode
+	// path, where a decompression bomb is a real risk to this process. It is
+	// deliberately far stricter than the outbound limit above.
+	//
+	// The value is untested against real peers: slusk never sends a
+	// SharedFileListRequest, so Deserialize has no production caller and this
+	// cap has never actually run. Nicotine+ allows 2 GiB for the same message,
+	// so 16 MiB would reject shares it reads without trouble - and, since the
+	// outbound limit above is deliberately far larger, that now includes
+	// slusk's own output: a share past roughly 170k files encodes to a frame
+	// this decoder would refuse. Nothing reads it back today, but a second
+	// slusk is not a peer we could browse.
+	//
+	// Revisit the number when browsing a peer becomes a feature - not before,
+	// because until then a larger bound only buys a larger allocation for an
+	// attacker to aim at.
 	maxSharedFileListDecompressedSize = 16 << 20
 	maxSharedFileListDirectories      = 100_000
 	maxSharedFileListFiles            = 1_000_000
@@ -81,13 +118,16 @@ func (s *SharedFileListResponse) Serialize(message *SharedFileListResponse) ([]b
 	}
 
 	buf := new(bytes.Buffer)
-	frameWriter := newSharedFileListLimitWriter(buf, maxSharedFileListFrameSize, "frame")
+	// Bounded by the shared constant directly rather than a local alias: this
+	// value has to equal the session layer's write budget, and a second name
+	// for it is a second thing to edit (issue #409).
+	frameWriter := newSharedFileListLimitWriter(buf, MaxOrdinaryFrameSize, "frame")
 	if err := internal.WriteUint32(frameWriter, uint32(CodeSharedFileListResponse)); err != nil {
 		return nil, err
 	}
 
 	zw := zlib.NewWriter(frameWriter)
-	payloadWriter := newSharedFileListLimitWriter(zw, maxSharedFileListDecompressedSize, "decompressed payload")
+	payloadWriter := newSharedFileListLimitWriter(zw, maxSharedFileListSerializedSize, "serialized payload")
 	if err := s.walkWrite(message.Directories, payloadWriter); err != nil {
 		_ = zw.Close()
 		return nil, err
