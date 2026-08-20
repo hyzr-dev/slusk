@@ -33,6 +33,12 @@ type Weights struct {
 // ReliabilityHistoryScore); a username absent from rel is treated as having
 // no history. now is passed in explicitly (rather than read internally) so
 // the decay math stays deterministic and testable.
+//
+// "Best first" has two levels, not one (issue #508): a candidate whose peer
+// falls below LastResortThreshold sorts behind every candidate that does not,
+// whatever its score, and carries RankedCandidate.LastResort. That is an
+// ordering and never a filter - the caller still receives such a candidate,
+// and must still be able to pick it when the album has no other.
 type Scorer interface {
 	Rank(results []core.SearchResult, rel map[string]core.PeerReliability, now time.Time) []core.RankedCandidate
 }
@@ -183,9 +189,25 @@ func (x *weighted) Rank(results []core.SearchResult, rel map[string]core.PeerRel
 		score += x.w.FileCount * float64(len(files))
 		score += x.w.Reliability * ReliabilityScore(files[0]) // per-user, same across files
 		score += x.w.KnownUser * ReliabilityHistoryScore(rel[k.user], now)
-		candidates = append(candidates, core.RankedCandidate{Username: k.user, Files: files, Score: score})
+		candidates = append(candidates, core.RankedCandidate{
+			Username:   k.user,
+			Files:      files,
+			Score:      score,
+			LastResort: IsLastResortPeer(rel[k.user], now),
+		})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		// The penalty tier outranks every other comparison (issue #508).
+		// Scoring is additive, so no weight can ever express "last of all":
+		// the KnownUser term spans at most 1.0 point while format and file
+		// count together span 2.0, which is why a ruined peer advertising a
+		// complete FLAC set still beat an untried peer with a partial MP3
+		// one. Demoting as a separate sort key rather than as a bigger
+		// subtraction keeps the penalty from being outvoted at any scale, and
+		// leaves the scoring within each tier exactly as it was.
+		if candidates[i].LastResort != candidates[j].LastResort {
+			return !candidates[i].LastResort
+		}
 		if candidates[i].Score != candidates[j].Score {
 			return candidates[i].Score > candidates[j].Score
 		}

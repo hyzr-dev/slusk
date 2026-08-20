@@ -89,8 +89,15 @@ type Candidate struct {
 	State             CandidateState
 	FailReason        string
 	ImportSubmittedAt *time.Time // set by Importing after ExecuteManualImport; gates verify vs confirm phase
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// LastResort records that the ranker placed this candidate in the penalty
+	// tier when it was cached (issue #508) - its peer had failed enough
+	// recently that it sorts behind every other candidate, and it was picked
+	// only because nothing better was on offer. Frozen at selection time, so
+	// the job detail view can explain a choice the current peer history may no
+	// longer justify.
+	LastResort bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Transfer is one slskd file download. SlskdID is empty until slskd accepts the

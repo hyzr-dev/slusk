@@ -26,6 +26,11 @@ type NewCandidate struct {
 	Username string
 	Score    float64
 	Files    []core.CandidateFile
+	// LastResort records that the ranker put this candidate in the penalty
+	// tier (issue #508). Persisted as written, never recomputed on read: it
+	// answers what was true when the candidate was picked, and current peer
+	// history can since have decayed or worsened.
+	LastResort bool
 }
 
 // InsertCandidates caches a job's ranked search results as NEW candidates
@@ -63,9 +68,9 @@ func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCa
 			return fmt.Errorf("marshal candidate files: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO candidates (album_job_id, username, score, files, state, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			jobID, c.Username, c.Score, files, string(core.CandidateNew), now, now); err != nil {
+			`INSERT INTO candidates (album_job_id, username, score, files, state, last_resort, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			jobID, c.Username, c.Score, files, string(core.CandidateNew), c.LastResort, now, now); err != nil {
 			return fmt.Errorf("insert candidate: %w", err)
 		}
 	}
@@ -79,13 +84,13 @@ func (s *Store) InsertCandidates(ctx context.Context, jobID int64, cands []NewCa
 	return tx.Commit()
 }
 
-const candidateSelect = `SELECT id, album_job_id, username, score, files, state, fail_reason, import_submitted_at, created_at, updated_at FROM candidates`
+const candidateSelect = `SELECT id, album_job_id, username, score, files, state, fail_reason, import_submitted_at, last_resort, created_at, updated_at FROM candidates`
 
 func scanCandidate(r rowScanner) (core.Candidate, error) {
 	var c core.Candidate
 	var state string
 	var files []byte
-	if err := r.Scan(&c.ID, &c.AlbumJobID, &c.Username, &c.Score, &files, &state, &c.FailReason, &c.ImportSubmittedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := r.Scan(&c.ID, &c.AlbumJobID, &c.Username, &c.Score, &files, &state, &c.FailReason, &c.ImportSubmittedAt, &c.LastResort, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return core.Candidate{}, err
 	}
 	c.State = core.CandidateState(state)

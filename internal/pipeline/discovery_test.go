@@ -1430,3 +1430,100 @@ func TestDiscoveryStillCachesCandidateFromSamePeerInAnotherDirectory(t *testing.
 		t.Errorf("expected the non-rejected directory to survive, got %q", got)
 	}
 }
+
+// ruinPeerHistory records enough fresh failures against a peer to put it below
+// matcher.LastResortThreshold. matcher.ReliabilityCountCap bounds the decayed
+// count, so recording more than the cap changes nothing - the loop runs to it
+// exactly. artistID 0 keeps the history global, which is the shape of the
+// peers this tier targets: they fail across many different albums.
+func ruinPeerHistory(t *testing.T, st *store.Store, username string, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	for range int(matcher.ReliabilityCountCap) {
+		if err := st.RecordAttemptOutcome(ctx, 0, username, false, now.Add(-time.Hour)); err != nil {
+			t.Fatalf("RecordAttemptOutcome: %v", err)
+		}
+	}
+}
+
+func TestDiscoveryEnqueuesASoleLastResortCandidate(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+
+	// The tier is an ordering, not a filter, and this is the case that proves
+	// it: an album whose only seeder is a ruined peer must still be fetchable.
+	// Discovery truncates the ranked list at MaxCandidates, so a demotion that
+	// pushed the candidate past the cut would silently make such an album
+	// unobtainable - the exact failure #317 rejected the filter approach over.
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "ruined", Filename: "ruined/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "ruined", Filename: "ruined/Artist - Album/02.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+	ruinPeerHistory(t, st, "ruined", now)
+
+	if err := NewDiscovery(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	got, err := st.RunnableJobsInState(ctx, core.StateSelecting, now, 10)
+	if err != nil {
+		t.Fatalf("RunnableJobsInState: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != job.ID {
+		t.Fatalf("expected job %d to advance to SELECTING, got %+v", job.ID, got)
+	}
+
+	cand, ok, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("NextNewCandidate: %v", err)
+	}
+	if !ok {
+		t.Fatal("sole last-resort candidate was not cached; the tier is acting as a filter")
+	}
+	if cand.Username != "ruined" {
+		t.Errorf("cached candidate = %q, want \"ruined\"", cand.Username)
+	}
+	if !cand.LastResort {
+		t.Error("cached candidate LastResort = false, want true (the flag must persist to explain the choice)")
+	}
+}
+
+func TestDiscoveryCachesLastResortFalseForAnUntriedPeer(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+
+	// The companion to the test above: without it, a flag that was hardcoded
+	// true would pass every assertion made about it.
+	wanted := map[int64]core.WantedRelease{1: {ID: 1, Title: "Album", ArtistName: "Artist"}}
+	music := &fakeMusic{wanted: []core.WantedRelease{wanted[1]}, albumReleases: []core.AlbumRelease{{ID: 1, TrackCount: 2, Monitored: true}}}
+	searcher := &fakeSearcher{results: []core.SearchResult{
+		{Username: "untried", Filename: "untried/Artist - Album/01.flac", Size: 10, BitRate: 900},
+		{Username: "untried", Filename: "untried/Artist - Album/02.flac", Size: 10, BitRate: 900},
+	}}
+	p, st := newDiscoveryParams(t, music, searcher, wanted)
+
+	job, err := st.UpsertWantedJob(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("UpsertWantedJob: %v", err)
+	}
+
+	if err := NewDiscovery(p).Tick(ctx, now); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	cand, ok, err := st.NextNewCandidate(ctx, job.ID)
+	if err != nil || !ok {
+		t.Fatalf("NextNewCandidate: found=%v (%v)", ok, err)
+	}
+	if cand.LastResort {
+		t.Error("untried peer cached with LastResort = true, want false")
+	}
+}

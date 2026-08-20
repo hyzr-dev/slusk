@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -157,4 +158,75 @@ func TestRankKnownUserHistoryDoesNotBeatFreshFlacOverMP3(t *testing.T) {
 func trackFile(user string, n int, ext string) string {
 	dir := "music\\" + user + "\\Album"
 	return dir + "\\" + string(rune('0'+n/10)) + string(rune('0'+n%10)) + " Track." + ext
+}
+
+func TestLastResortThresholdIsAboveTheStructuralFloor(t *testing.T) {
+	// For a peer with no artist-scope history - the case that matters, since
+	// the failures this tier targets are spread thinly across hundreds of
+	// albums - only the global scope contributes, at half weight. The count
+	// cap of 20 bounds that at -0.5*20 = -10, which over the sigmoid scale of
+	// 5 is -2. Any threshold at or below sigmoid(-2) can never fire for such
+	// a peer, making the tier dead code for exactly the population it exists
+	// to catch. (A peer that also has artist-scope fails can reach sigmoid(-6),
+	// so this is the conservative floor, which is the one worth guarding.)
+	floor := 1.0 / (1.0 + math.Exp(2.0))
+	if LastResortThreshold <= floor {
+		t.Errorf("LastResortThreshold = %v, want > the structural floor %v", LastResortThreshold, floor)
+	}
+}
+
+func TestIsLastResortPeerFalseWithoutHistory(t *testing.T) {
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	// An unknown peer scores the 0.5 neutral, well above the threshold: never
+	// having been tried is not evidence of being bad.
+	if IsLastResortPeer(core.PeerReliability{}, now) {
+		t.Error("peer with no history = last resort, want false")
+	}
+}
+
+func TestIsLastResortPeerFalseForAHealthyPeer(t *testing.T) {
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	rel := core.PeerReliability{
+		Global: core.ReliabilityCounters{SuccessCount: 20, LastSuccessAt: timePtr(now.Add(-time.Hour))},
+	}
+	if IsLastResortPeer(rel, now) {
+		t.Error("peer with a clean record = last resort, want false")
+	}
+}
+
+func TestIsLastResortPeerTrueForARuinedRecord(t *testing.T) {
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	// The shape of the peer issue #508 was written about, which scores ~0.21.
+	// Note what does the work: the 31-vs-657 raw ratio does NOT, because
+	// ReliabilityCountCap collapses both to 20. What separates them is
+	// recency - the successes are a decay constant old and have faded to
+	// ~37%, the fails are from an hour ago and have not faded at all.
+	rel := core.PeerReliability{
+		Global: core.ReliabilityCounters{
+			SuccessCount:  31,
+			LastSuccessAt: timePtr(now.Add(-ReliabilityDecayTau)),
+			FailCount:     657,
+			LastFailAt:    timePtr(now.Add(-time.Hour)),
+		},
+	}
+	if !IsLastResortPeer(rel, now) {
+		t.Errorf("peer scoring %v = not last resort, want true", ReliabilityHistoryScore(rel, now))
+	}
+}
+
+func TestIsLastResortPeerFalseOnceAnOldRecordHasDecayed(t *testing.T) {
+	// Same ruined record, but a year stale. Decay is what lets a peer heal,
+	// and the tier must inherit that rather than becoming a permanent brand.
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	rel := core.PeerReliability{
+		Global: core.ReliabilityCounters{
+			SuccessCount:  31,
+			LastSuccessAt: timePtr(now.Add(-365 * 24 * time.Hour)),
+			FailCount:     657,
+			LastFailAt:    timePtr(now.Add(-365 * 24 * time.Hour)),
+		},
+	}
+	if IsLastResortPeer(rel, now) {
+		t.Error("peer whose ruined record has fully decayed = last resort, want false")
+	}
 }

@@ -253,6 +253,13 @@ export interface AttemptDetail {
   createdAt: string;
   updatedAt: string;
   transfers: TransferDetail[];
+  // True when the matcher ranked this candidate into the last-resort tier at
+  // selection time (issue #508) — this peer's download history was bad
+  // enough to sort behind every other candidate, and it was picked only
+  // because nothing better was available. Recorded at selection time, not
+  // recomputed from the peer's current history: a peer that has since
+  // recovered still shows the marker for this attempt.
+  lastResort: boolean;
 }
 
 /**

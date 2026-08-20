@@ -84,3 +84,40 @@ func ReliabilityHistoryScore(rel core.PeerReliability, now time.Time) float64 {
 	net := decayedNet(rel.Artist, now) + ReliabilityGlobalInfluence*decayedNet(rel.Global, now)
 	return 1.0 / (1.0 + math.Exp(-net/ReliabilitySigmoidScale))
 }
+
+// LastResortThreshold is the ReliabilityHistoryScore at or below which a peer
+// is ranked behind every other candidate (issue #508). It is a compile-time
+// constant rather than a config key on purpose: config rejects unknown keys
+// and has no silent defaults, so a new required key would stop every existing
+// deployment on its next start.
+//
+// It cannot usefully go much lower. The peers this exists to catch fail across
+// many different albums, so they rarely have artist-scope history and are
+// judged on the global scope alone - which contributes at
+// ReliabilityGlobalInfluence with its decayed count capped by
+// ReliabilityCountCap, bounding net at -0.5*20 = -10. Over
+// ReliabilitySigmoidScale that is -2, and sigmoid(-2) is about 0.119: a
+// threshold at or below that can never fire for such a peer. (A peer with
+// artist-scope fails too can reach sigmoid(-6) ~ 0.0025, but relying on that
+// would mean the tier only ever caught repeat offenders on one artist.)
+//
+// 0.25 is the lowest round value above the 0.21 scored by the peer this was
+// written about, and on the production data it selected 321 of 8369 known
+// peers - 3.8%. Worth knowing when reading that peer's 31-successes-against-
+// 657-fails record: the raw ratio is not what condemns it, since the count cap
+// collapses both sides to 20. Recency is - its successes are stale and its
+// fails are fresh, and decayedNet ages the two independently.
+const LastResortThreshold = 0.25
+
+// IsLastResortPeer reports whether a peer's history is bad enough that it
+// should be ranked behind every other candidate, however good the files it
+// advertises. It is a cut on ReliabilityHistoryScore, so it inherits that
+// function's decay: a peer whose ruined record ages out heals back into the
+// normal tier on its own, and a peer nobody has tried scores the 0.5 neutral
+// and is never last resort.
+//
+// This is an ordering signal, never a filter - the caller must still be able
+// to pick a last-resort peer when it is the only one an album has.
+func IsLastResortPeer(rel core.PeerReliability, now time.Time) bool {
+	return ReliabilityHistoryScore(rel, now) <= LastResortThreshold
+}
