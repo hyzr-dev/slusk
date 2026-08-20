@@ -351,3 +351,56 @@ func TestLiveTransferIndexMatch(t *testing.T) {
 		t.Error("expected no match for unknown transfer")
 	}
 }
+
+// The last-resort flag (issue #508) is served from the persisted candidate row
+// as-is. This asserts both values, because a field hardcoded to either one
+// would satisfy a test that only ever checked the other.
+func TestJobDetailServesPersistedLastResortFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		lastResort bool
+		want       string
+	}{
+		{"picked out of the penalty tier", true, "true"},
+		{"ranked normally", false, "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := testServerDeps(prometheus.NewRegistry())
+			deps.JobDetail = func(ctx context.Context, jobID int64) (core.JobDetail, bool, error) {
+				return core.JobDetail{
+					Job: core.AlbumJob{ID: jobID, Title: "Rounds", ArtistName: "Four Tet", State: core.StateDownloading},
+					Attempts: []core.AttemptDetail{{
+						Attempt: core.Candidate{ID: 1, Username: "peer_one", State: core.CandidateActive, LastResort: tc.lastResort},
+					}},
+				}, true, nil
+			}
+			deps.JobView = jobViewWithID(7)
+			h := NewServer(deps)
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/7/detail", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status code = %d, body = %s", rec.Code, rec.Body.String())
+			}
+
+			var raw struct {
+				Attempts []map[string]json.RawMessage `json:"attempts"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(raw.Attempts) != 1 {
+				t.Fatalf("expected 1 attempt, got %d", len(raw.Attempts))
+			}
+			// Read the key rather than a typed field: the frontend indexes it
+			// by this exact name, so a rename must fail here.
+			got, ok := raw.Attempts[0]["lastResort"]
+			if !ok {
+				t.Fatalf("attempt has no \"lastResort\" key, got %v", raw.Attempts[0])
+			}
+			if string(got) != tc.want {
+				t.Errorf("lastResort = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

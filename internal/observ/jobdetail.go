@@ -51,13 +51,20 @@ type transferDetailDTO struct {
 
 // attemptDetailDTO is one candidate attempt with its per-file transfers.
 type attemptDetailDTO struct {
-	ID         int64               `json:"id"`
-	Username   string              `json:"username"`
-	FileCount  int                 `json:"fileCount"`
-	State      string              `json:"state"`
-	FailReason string              `json:"failReason"`
-	CreatedAt  string              `json:"createdAt"`
-	UpdatedAt  string              `json:"updatedAt"`
+	ID         int64  `json:"id"`
+	Username   string `json:"username"`
+	FileCount  int    `json:"fileCount"`
+	State      string `json:"state"`
+	FailReason string `json:"failReason"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
+	// LastResort is the flag frozen onto the candidate row when it was
+	// cached (issue #508): this peer's history was bad enough to sort it
+	// behind every other candidate, and it was picked because nothing better
+	// was on offer. Served as persisted rather than recomputed from the
+	// peer's current record, so the panel explains the decision that was
+	// actually made.
+	LastResort bool                `json:"lastResort"`
 	Transfers  []transferDetailDTO `json:"transfers"`
 }
 
@@ -120,6 +127,7 @@ func toJobDetailDTO(view core.JobView, d core.JobDetail, live liveTransferIndex,
 			FileCount:  len(ad.Transfers),
 			State:      string(ad.Attempt.State),
 			FailReason: ad.Attempt.FailReason,
+			LastResort: ad.Attempt.LastResort,
 			CreatedAt:  ad.Attempt.CreatedAt.Format(timeFormat),
 			UpdatedAt:  ad.Attempt.UpdatedAt.Format(timeFormat),
 			Transfers:  make([]transferDetailDTO, len(ad.Transfers)),

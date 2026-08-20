@@ -376,6 +376,13 @@ export const t = {
     // retry count — both were inline template strings before this reskin.
     fileCount: (n: number) => `${n} files`,
     transferRetries: (n: number) => `${n} retries`,
+    // Marker on an attempt whose candidate was ranked into the last-resort
+    // tier at selection time (issue #508, attemptDetailDTO.lastResort) —
+    // every other peer had failed recently and this one was picked anyway
+    // because nothing better was available. Not a failure state (it renders
+    // in the quiet tone, not --bad): the download can still succeed.
+    lastResort: 'last resort',
+    lastResortTitle: 'every other peer for this album had failed recently',
     verifying: 'verifying',
     showDetails: 'Show details',
     hideDetails: 'Hide details',

@@ -68,6 +68,7 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
           { filename: '01.flac', state: 'IN_PROGRESS', bytesDone: 400, bytesTotal: 1000, retries: 0, lastProgressAt: '' },
           { filename: '02.flac', state: 'QUEUED', bytesDone: 0, bytesTotal: 800, retries: 0, lastProgressAt: '' },
         ],
+        lastResort: false,
       },
     ],
     ...overrides,

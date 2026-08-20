@@ -9,6 +9,7 @@ import SectionHeader from '../components/tui/SectionHeader';
 import Tag from '../components/tui/Tag';
 import Ticks, { type TickTone } from '../components/tui/Ticks';
 import buttonStyles from '../components/tui/Button.module.css';
+import tagStyles from '../components/tui/Tag.module.css';
 import table from '../components/Table.module.css';
 import {
   basename,
@@ -175,6 +176,14 @@ export default function JobDetail() {
               <div className={styles.attemptHead}>
                 <strong className={styles.attemptUser}>{a.username}</strong>
                 <span>{candidateStateLabel(a.state)}</span>
+                {a.lastResort && (
+                  <span
+                    className={`${tagStyles.tag} ${tagStyles.quiet}`}
+                    title={t.jobs.lastResortTitle}
+                  >
+                    {t.jobs.lastResort}
+                  </span>
+                )}
                 {a.failReason && <span className={styles.attemptFail}>{a.failReason}</span>}
                 <span className={styles.attemptMeta}>
                   {formatDateTime(a.createdAt)} — {t.jobs.fileCount(a.fileCount)}

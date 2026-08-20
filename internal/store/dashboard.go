@@ -989,6 +989,12 @@ const PeersPageSizeMax int64 = 50
 // exponent, and so is load-bearing here in a way it is not in Go: float8 exp()
 // raises an error on overflow in Postgres where Go's math.Exp quietly returns
 // +Inf and 1/+Inf collapses to 0.
+//
+// matcher.LastResortThreshold is deliberately absent here (issue #508). The
+// tier is a cut on this very number, so ordering by score already gathers
+// every last-resort peer at one end of the Peers list; re-expressing the
+// threshold would add a third place for the constant to drift without
+// changing what the list shows.
 func peerScoreSQL(nowParam string) string {
 	decayed := func(count, at string) string {
 		return fmt.Sprintf(`CASE WHEN ku.%[1]s > 0 AND ku.%[2]s IS NOT NULL

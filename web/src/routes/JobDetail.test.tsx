@@ -339,6 +339,7 @@ describe('transfer live progress', () => {
           createdAt: '2026-01-01T00:00:00Z',
           updatedAt: '2026-01-01T00:00:00Z',
           transfers,
+          lastResort: false,
         },
       ],
     );
@@ -418,6 +419,50 @@ describe('transfer live progress', () => {
   });
 });
 
+describe('last-resort marker', () => {
+  function stubFetchIndefinitely() {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+  }
+
+  function detailWithAttempt(lastResort: boolean): JobDetailDTO {
+    return makeDetail({}, [
+      {
+        id: 100,
+        username: 'peer-one',
+        fileCount: 1,
+        state: 'ACTIVE',
+        failReason: '',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        transfers: [],
+        lastResort,
+      },
+    ]);
+  }
+
+  it('shows the marker when the attempt was ranked into the last-resort tier', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), detailWithAttempt(true));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.getByText(t.jobs.lastResort)).toBeInTheDocument();
+  });
+
+  it('omits the marker for an ordinary attempt', () => {
+    stubFetchIndefinitely();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.jobDetail(1), detailWithAttempt(false));
+    client.setQueryData(queryKeys.jobEvents(1), [] as JobEvent[]);
+
+    renderJobDetail('/jobs/1', client);
+
+    expect(screen.queryByText(t.jobs.lastResort)).not.toBeInTheDocument();
+  });
+});
+
 describe('placeholder-data guard', () => {
   // Small harness so navigating between job ids re-renders the *same*
   // JobDetail instance (as App.tsx's route does), which is what allows
@@ -451,6 +496,7 @@ describe('placeholder-data guard', () => {
         createdAt: '2026-01-01T00:00:00Z',
         updatedAt: '2026-01-01T00:00:00Z',
         transfers: [],
+        lastResort: false,
       },
     ]);
 
@@ -532,6 +578,7 @@ describe('file ordering', () => {
             transfer('music\\02 Freddie Freeloader.flac'),
             transfer('music\\01 So What.flac'),
           ],
+          lastResort: false,
         },
       ]),
     );

@@ -579,7 +579,12 @@ func newCandidateFrom(cand core.RankedCandidate) store.NewCandidate {
 	for i, f := range cand.Files {
 		files[i] = core.CandidateFile{Filename: f.Filename, Size: f.Size}
 	}
-	return store.NewCandidate{Username: cand.Username, Score: cand.Score, Files: files}
+	return store.NewCandidate{
+		Username:   cand.Username,
+		Score:      cand.Score,
+		Files:      files,
+		LastResort: cand.LastResort,
+	}
 }
 
 // trackBand computes the valid track-count band across an album's releases:

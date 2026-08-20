@@ -126,6 +126,12 @@ type RankedCandidate struct {
 	Username string
 	Files    []SearchResult
 	Score    float64
+	// LastResort marks a candidate whose peer history was bad enough at
+	// ranking time to sort it behind every candidate whose was not, whatever
+	// its Score (issue #508, see matcher.IsLastResortPeer). It is an ordering
+	// signal, never a filter: a last-resort candidate that is the only one an
+	// album has is still selected.
+	LastResort bool
 }
 
 // WantedRelease is one wanted/missing album from Lidarr, mapped to a
