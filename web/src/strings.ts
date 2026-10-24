@@ -5,6 +5,8 @@ const CHAT_OFFLINE = 'OFFLINE';
 const CHAT_STATUS_ONLINE = 'online';
 const CHAT_STATUS_OFFLINE = 'offline';
 
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 export const t = {
   app: {
     name: 'slusk',
@@ -362,7 +364,7 @@ export const t = {
     forceSearchFailed: 'Could not re-run the pipeline. The job may already be active.',
     deleteFailed: 'Could not delete the job. It may currently be importing.',
     sleepingUntil: (time: string) => `Sleeping until ${time}`,
-    candidates: (tried: number, max: number) => `${tried} of ${max} candidates tried`,
+    candidates: (tried: number, max: number) => `${tried} of ${plural(max, 'candidate', 'candidates')} tried`,
     nextAttempt: (time: string) => `Next attempt: ${time}`,
     retries: (n: number) => `${n} retries`,
     queuePosition: (n: number) => `queue #${n}`,
@@ -374,7 +376,7 @@ export const t = {
     albumMbid: (mbid: string) => `MusicBrainz release group: ${mbid}`,
     // The attempt header's file count (job detail page) and a transfer's own
     // retry count — both were inline template strings before this reskin.
-    fileCount: (n: number) => `${n} files`,
+    fileCount: (n: number) => plural(n, 'file', 'files'),
     transferRetries: (n: number) => `${n} retries`,
     // Marker on an attempt whose candidate was ranked into the last-resort
     // tier at selection time (issue #508, attemptDetailDTO.lastResort) —
@@ -739,7 +741,7 @@ export const t = {
       `The filesystem was last read at ${indexedAt}. New files stay invisible to peers until you rescan.`,
     statNever: 'Never',
     panelTitle: 'SHARED FOLDERS',
-    summary: (folders: number, files: number, size: string) => `${folders} folders · ${files} files · ${size}`,
+    summary: (folders: number, files: number, size: string) => `${plural(folders, 'folder', 'folders')} · ${plural(files, 'file', 'files')} · ${size}`,
     // Report-level (SharesReport.indexedAt), not per-folder — see the
     // STALE_INDEX_MS comment in Shares.tsx for why this lives in the header
     // summary rather than as a folder-grid column.
@@ -823,7 +825,7 @@ export const t = {
     // `${count}${suffix}` — see Search.tsx — rather than one template
     // string, since streaming/complete/truncated are independent flags,
     // not a fixed set of combinations.
-    resultsCount: (n: number) => `${n} results`,
+    resultsCount: (n: number) => plural(n, 'result', 'results'),
     streamingSuffix: 'streaming in…',
     completeSuffix: 'search complete',
     // Distinct from completeSuffix: the session was evicted server-side
@@ -966,7 +968,7 @@ export const t = {
       editionPickerLabel: 'Edition',
       editionUnknownTracks: 'tracks unknown',
       verdictIncomplete: (have: number, want: number) => `INCOMPLETE — ${have} of ${want} tracks present`,
-      verdictComplete: (n: number) => `COMPLETE — ${n} tracks matches this edition`,
+      verdictComplete: (n: number) => `COMPLETE — ${plural(n, 'track matches', 'tracks match')} this edition`,
       verdictMore: (have: number, want: number) =>
         `${have} TRACKS FOUND — more than this edition (${want} tracks); likely a different edition, or more than one release in the folder`,
       // Two distinct strings rather than one shared across both cases (issue
@@ -1127,7 +1129,7 @@ export const t = {
     secretSet: 'configured',
     secretUnset: 'not set',
     foldersCount: (n: number) => `${n} configured`,
-    indexCount: (n: number) => `${n} files`,
+    indexCount: (n: number) => plural(n, 'file', 'files'),
     sharesNoTest:
       'There is no connection test for shares. The state is derived from whether the index has found any files.',
   },
