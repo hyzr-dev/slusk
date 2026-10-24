@@ -4,6 +4,8 @@
 # variable FACTORY_TAG (image tag; empty means latest) and a runner with label "factory".
 # Optional: variable FACTORY_OBSERVE_URL (a variable, not a secret) and secret
 # FACTORY_OBSERVE_TOKEN stream each run to the observe server; both empty means nothing is sent.
+# Optional: variable FACTORY_IMAGE picks the agent image (e.g. software-factory-agent-dotnet for
+# .NET repos); empty means the standard image. A repo variable wins over the user's.
 # See the software-factory README, "Trigger".
 name: Factory
 
@@ -34,27 +36,30 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
           FACTORY_OBSERVE_TOKEN: ${{ secrets.FACTORY_OBSERVE_TOKEN }}
-          # Not listed in compose.ci.yaml, so it never reaches the agent.
+          # Not listed in compose.ci.yaml, so it never reaches the runner or the agent.
           REGISTRY_TOKEN: ${{ secrets.FACTORY_REGISTRY_TOKEN }}
           FACTORY_TAG: ${{ vars.FACTORY_TAG }}
-          # Repo-specific settings for the agent go here, for example:
+          # Empty means the standard agent image. The runner checks the name; the agent never sees it.
+          FACTORY_IMAGE: ${{ vars.FACTORY_IMAGE }}
+          # Repo-specific settings go here; only PUPPETEER_SKIP_DOWNLOAD also reaches the agent:
           # PUPPETEER_SKIP_DOWNLOAD: "1"
         run: |
           set -eu
           printf '%s' "$REGISTRY_TOKEN" | docker login gitea.shcizo.se -u shcizo --password-stdin
-          image="gitea.shcizo.se/shcizo/software-factory-agent:${FACTORY_TAG:-latest}"
+          image="gitea.shcizo.se/shcizo/software-factory-runner:${FACTORY_TAG:-latest}"
           docker pull -q "$image"
           d="$(mktemp -d)"
           docker run --rm --entrypoint cat "$image" /opt/factory/compose.yaml > "$d/compose.yaml"
           docker run --rm --entrypoint cat "$image" /opt/factory/compose.ci.yaml > "$d/compose.ci.yaml"
           compose() { docker compose -f "$d/compose.yaml" -f "$d/compose.ci.yaml" "$@"; }
-          # Pull the proxy too, so a new release replaces an old :latest.
+          # Pull the agent (the chosen variant) and proxy too, so a new release replaces an old :latest.
           compose pull -q
-          # A cancelled earlier job leaves its agent running; stop it on purpose. Safe only
-          # because the factory runner runs one job at a time (deploy/runner-config.yaml).
-          compose down
-          trap 'compose down; rm -rf "$d"' EXIT
-          compose run --rm -T agent "$COMMAND" "$REPO" "$ISSUE"
+          # A cancelled earlier job leaves its containers and volumes; remove them on purpose
+          # (-v drops the work, task and claude volumes). Safe only because the factory runner
+          # runs one job at a time (deploy/runner-config.yaml).
+          compose down -v
+          trap 'compose down -v; rm -rf "$d"' EXIT
+          compose run --rm -T runner "$COMMAND" "$REPO" "$ISSUE"
 
       # factory run reports its own failures on the issue. This covers what fails before or
       # around it (login, pull, compose, a missing runner image). It only comments: changing
