@@ -1,0 +1,70 @@
+# Starts software-factory jobs for this repo. Copy to .gitea/workflows/factory.yml.
+# Needs user-level Actions secrets FACTORY_GITEA_TOKEN, FACTORY_CLAUDE_TOKEN and
+# FACTORY_REGISTRY_TOKEN (shcizo's read:package token, only used to pull the images), the
+# variable FACTORY_TAG (image tag; empty means latest) and a runner with label "factory".
+# Optional: variable FACTORY_OBSERVE_URL (a variable, not a secret) and secret
+# FACTORY_OBSERVE_TOKEN stream each run to the observe server; both empty means nothing is sent.
+# See the software-factory README, "Trigger".
+name: Factory
+
+on:
+  issues:
+    types: [labeled, closed]
+
+jobs:
+  factory:
+    # closed → factory release; a label change that leaves ready-for-ai on the issue →
+    # factory run (which checks the label again itself). Gitea's payload calls a label
+    # change "label_updated", not "labeled", so the action name is not compared.
+    if: github.event.action == 'closed' || contains(github.event.issue.labels.*.name, 'ready-for-ai')
+    runs-on: factory
+    container: docker:29-cli
+    env:
+      COMMAND: ${{ github.event.action == 'closed' && 'release' || 'run' }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number }}
+      GITEA_URL: ${{ github.server_url }}
+      GITEA_TOKEN: ${{ secrets.FACTORY_GITEA_TOKEN }}
+      # Gitea's run page is /actions/runs/<run id> (checked against an existing run's html_url).
+      FACTORY_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      FACTORY_OBSERVE_URL: ${{ vars.FACTORY_OBSERVE_URL }}
+    steps:
+      - name: factory ${{ github.event.action == 'closed' && 'release' || 'run' }}
+        shell: sh
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
+          FACTORY_OBSERVE_TOKEN: ${{ secrets.FACTORY_OBSERVE_TOKEN }}
+          # Not listed in compose.ci.yaml, so it never reaches the agent.
+          REGISTRY_TOKEN: ${{ secrets.FACTORY_REGISTRY_TOKEN }}
+          FACTORY_TAG: ${{ vars.FACTORY_TAG }}
+          # Repo-specific settings for the agent go here, for example:
+          # PUPPETEER_SKIP_DOWNLOAD: "1"
+        run: |
+          set -eu
+          printf '%s' "$REGISTRY_TOKEN" | docker login gitea.shcizo.se -u shcizo --password-stdin
+          image="gitea.shcizo.se/shcizo/software-factory-agent:${FACTORY_TAG:-latest}"
+          docker pull -q "$image"
+          d="$(mktemp -d)"
+          docker run --rm --entrypoint cat "$image" /opt/factory/compose.yaml > "$d/compose.yaml"
+          docker run --rm --entrypoint cat "$image" /opt/factory/compose.ci.yaml > "$d/compose.ci.yaml"
+          compose() { docker compose -f "$d/compose.yaml" -f "$d/compose.ci.yaml" "$@"; }
+          # Pull the proxy too, so a new release replaces an old :latest.
+          compose pull -q
+          # A cancelled earlier job leaves its agent running; stop it on purpose. Safe only
+          # because the factory runner runs one job at a time (deploy/runner-config.yaml).
+          compose down
+          trap 'compose down; rm -rf "$d"' EXIT
+          compose run --rm -T agent "$COMMAND" "$REPO" "$ISSUE"
+
+      # factory run reports its own failures on the issue. This covers what fails before or
+      # around it (login, pull, compose, a missing runner image). It only comments: changing
+      # labels here would be a new label event and start this workflow again.
+      - name: report failure on the issue
+        if: failure()
+        shell: sh
+        run: |
+          wget -q -O /dev/null \
+            --header "Authorization: token $GITEA_TOKEN" \
+            --header "Content-Type: application/json" \
+            --post-data "{\"body\":\"The factory job ($COMMAND) failed before the agent could report. Log: $FACTORY_LOG_URL. Re-run the job there once the cause is fixed.\"}" \
+            "$GITEA_URL/api/v1/repos/$REPO/issues/$ISSUE/comments"
