@@ -157,3 +157,15 @@ describe('parkedExplanation', () => {
     expect(t.jobs.parkedActionsManual).toContain(t.jobs.retry);
   });
 });
+
+describe('count pluralisation', () => {
+  it('uses the singular for exactly one', () => {
+    expect(t.shares.summary(1, 1, '3.8 TB')).toBe('1 folder · 1 file · 3.8 TB');
+    expect(t.search.identify.verdictComplete(1)).toBe('COMPLETE — 1 track matches this edition');
+  });
+
+  it('uses the plural otherwise, zero included', () => {
+    expect(t.shares.summary(2, 0, '0 B')).toBe('2 folders · 0 files · 0 B');
+    expect(t.search.identify.verdictComplete(10)).toBe('COMPLETE — 10 tracks match this edition');
+  });
+});
