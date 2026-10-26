@@ -1,6 +1,9 @@
-# Starts software-factory jobs for this repo. Copy to .gitea/workflows/factory.yml.
+# Starts software-factory jobs for this repo: run and release from issue events, resolve from a
+# submitted review on a factory pull request, review from a factory pull request being opened
+# or pushed to. Copy to .gitea/workflows/factory.yml.
 # Needs user-level Actions secrets FACTORY_GITEA_TOKEN, FACTORY_CLAUDE_TOKEN and
-# FACTORY_REGISTRY_TOKEN (shcizo's read:package token, only used to pull the images), the
+# FACTORY_REGISTRY_TOKEN (shcizo's read:package token, only used to pull the images),
+# FACTORY_REVIEW_TOKEN (factory-reviewer's token, only the runner gets it), the
 # variable FACTORY_TAG (image tag; empty means latest) and a runner with label "factory".
 # Optional: variable FACTORY_OBSERVE_URL (a variable, not a secret) and secret
 # FACTORY_OBSERVE_TOKEN stream each run to the observe server; both empty means nothing is sent.
@@ -12,30 +15,47 @@ name: Factory
 on:
   issues:
     types: [labeled, closed]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [opened, synchronize]
 
 jobs:
   factory:
     # closed → factory release; a label change that leaves ready-for-ai on the issue →
     # factory run (which checks the label again itself). Gitea's payload calls a label
     # change "label_updated", not "labeled", so the action name is not compared.
-    if: github.event.action == 'closed' || contains(github.event.issue.labels.*.name, 'ready-for-ai')
+    # A submitted review whose type ends in "rejected" (a Request changes review) →
+    # factory resolve, which checks the review state, author and pull request itself.
+    # A pull request by factory-bot from an ai/ branch, opened or pushed to → factory review,
+    # which checks the pull request, its head commit and the earlier reviews itself.
+    if: >-
+      (github.event_name == 'issues' &&
+      (github.event.action == 'closed' || contains(github.event.issue.labels.*.name, 'ready-for-ai'))) ||
+      (github.event_name == 'pull_request_review' && endsWith(github.event.review.type, 'rejected')) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'factory-bot' &&
+      startsWith(github.event.pull_request.head.ref, 'ai/'))
     runs-on: factory
     container: docker:29-cli
     env:
-      COMMAND: ${{ github.event.action == 'closed' && 'release' || 'run' }}
+      COMMAND: ${{ github.event_name == 'pull_request_review' && 'resolve' || github.event_name == 'pull_request' && 'review' || github.event.action == 'closed' && 'release' || 'run' }}
       REPO: ${{ github.repository }}
-      ISSUE: ${{ github.event.issue.number }}
+      # The issue number, or the pull request number for resolve and review (the failure step
+      # comments on it).
+      ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
       GITEA_URL: ${{ github.server_url }}
       GITEA_TOKEN: ${{ secrets.FACTORY_GITEA_TOKEN }}
       # Gitea's run page is /actions/runs/<run id> (checked against an existing run's html_url).
       FACTORY_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       FACTORY_OBSERVE_URL: ${{ vars.FACTORY_OBSERVE_URL }}
     steps:
-      - name: factory ${{ github.event.action == 'closed' && 'release' || 'run' }}
+      - name: factory ${{ github.event_name == 'pull_request_review' && 'resolve' || github.event_name == 'pull_request' && 'review' || github.event.action == 'closed' && 'release' || 'run' }}
         shell: sh
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.FACTORY_CLAUDE_TOKEN }}
           FACTORY_OBSERVE_TOKEN: ${{ secrets.FACTORY_OBSERVE_TOKEN }}
+          # Reaches the runner only (compose.ci.yaml), never the agent.
+          FACTORY_REVIEW_TOKEN: ${{ secrets.FACTORY_REVIEW_TOKEN }}
           # Not listed in compose.ci.yaml, so it never reaches the runner or the agent.
           REGISTRY_TOKEN: ${{ secrets.FACTORY_REGISTRY_TOKEN }}
           FACTORY_TAG: ${{ vars.FACTORY_TAG }}
@@ -61,10 +81,10 @@ jobs:
           trap 'compose down -v; rm -rf "$d"' EXIT
           compose run --rm -T runner "$COMMAND" "$REPO" "$ISSUE"
 
-      # factory run reports its own failures on the issue. This covers what fails before or
+      # factory run reports its own failures on the issue (resolve and review: on the pull request). This covers what fails before or
       # around it (login, pull, compose, a missing runner image). It only comments: changing
       # labels here would be a new label event and start this workflow again.
-      - name: report failure on the issue
+      - name: report failure on the issue or pull request
         if: failure()
         shell: sh
         run: |
