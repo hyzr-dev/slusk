@@ -2,8 +2,11 @@
 # submitted review on a factory pull request, review from a factory pull request being opened
 # or pushed to. Copy to .gitea/workflows/factory.yml.
 # Needs user-level Actions secrets FACTORY_GITEA_TOKEN, FACTORY_CLAUDE_TOKEN and
-# FACTORY_REGISTRY_TOKEN (shcizo's read:package token, only used to pull the images),
-# FACTORY_REVIEW_TOKEN (factory-reviewer's token, only the runner gets it), the
+# FACTORY_REGISTRY_TOKEN (a read:package token for the registry, only used to pull the images),
+# FACTORY_REVIEW_TOKEN (the reviewer bot's token, only the runner gets it), the variables
+# FACTORY_BOT_USER, FACTORY_REVIEWER_USER, FACTORY_TRUSTED_USERS (comma-separated),
+# FACTORY_REGISTRY (registry host and path, like registry.example.com/owner) and
+# FACTORY_REGISTRY_USER (the user the registry token belongs to), the
 # variable FACTORY_TAG (image tag; empty means latest) and a runner with label "factory".
 # Optional: variable FACTORY_OBSERVE_URL (a variable, not a secret) and secret
 # FACTORY_OBSERVE_TOKEN stream each run to the observe server; both empty means nothing is sent.
@@ -27,13 +30,13 @@ jobs:
     # change "label_updated", not "labeled", so the action name is not compared.
     # A submitted review whose type ends in "rejected" (a Request changes review) →
     # factory resolve, which checks the review state, author and pull request itself.
-    # A pull request by factory-bot from an ai/ branch, opened or pushed to → factory review,
+    # A pull request by the bot user (vars.FACTORY_BOT_USER) from an ai/ branch, opened or pushed to → factory review,
     # which checks the pull request, its head commit and the earlier reviews itself.
     if: >-
       (github.event_name == 'issues' &&
       (github.event.action == 'closed' || contains(github.event.issue.labels.*.name, 'ready-for-ai'))) ||
       (github.event_name == 'pull_request_review' && endsWith(github.event.review.type, 'rejected')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'factory-bot' &&
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login == vars.FACTORY_BOT_USER &&
       startsWith(github.event.pull_request.head.ref, 'ai/'))
     runs-on: factory
     container: docker:29-cli
@@ -48,6 +51,11 @@ jobs:
       # Gitea's run page is /actions/runs/<run id> (checked against an existing run's html_url).
       FACTORY_LOG_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       FACTORY_OBSERVE_URL: ${{ vars.FACTORY_OBSERVE_URL }}
+      FACTORY_BOT_USER: ${{ vars.FACTORY_BOT_USER }}
+      FACTORY_REVIEWER_USER: ${{ vars.FACTORY_REVIEWER_USER }}
+      FACTORY_TRUSTED_USERS: ${{ vars.FACTORY_TRUSTED_USERS }}
+      FACTORY_REGISTRY: ${{ vars.FACTORY_REGISTRY }}
+      FACTORY_REGISTRY_USER: ${{ vars.FACTORY_REGISTRY_USER }}
     steps:
       - name: factory ${{ github.event_name == 'pull_request_review' && 'resolve' || github.event_name == 'pull_request' && 'review' || github.event.action == 'closed' && 'release' || 'run' }}
         shell: sh
@@ -65,8 +73,8 @@ jobs:
           # PUPPETEER_SKIP_DOWNLOAD: "1"
         run: |
           set -eu
-          printf '%s' "$REGISTRY_TOKEN" | docker login gitea.shcizo.se -u shcizo --password-stdin
-          image="gitea.shcizo.se/shcizo/software-factory-runner:${FACTORY_TAG:-latest}"
+          printf '%s' "$REGISTRY_TOKEN" | docker login "${FACTORY_REGISTRY%%/*}" -u "$FACTORY_REGISTRY_USER" --password-stdin
+          image="$FACTORY_REGISTRY/software-factory-runner:${FACTORY_TAG:-latest}"
           docker pull -q "$image"
           d="$(mktemp -d)"
           docker run --rm --entrypoint cat "$image" /opt/factory/compose.yaml > "$d/compose.yaml"
