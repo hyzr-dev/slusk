@@ -809,12 +809,10 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	// Seed an empty-search streak on the now-FAILED job (issue #334): a
 	// manual retry must wipe it, or a job revived by the dashboard's Retry
 	// button would carry a stale streak straight into the token-drop
-	// rewrite instead of starting clean (see rewrite.go). SetJobBackoff
-	// above already zeroes empty_searches, so this has to happen after it
-	// to actually exercise RetryFailedJob's own reset.
-	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 7, now.Add(time.Hour), now); err != nil {
-		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
-	}
+	// rewrite instead of starting clean (see rewrite.go). Seeded with raw SQL:
+	// SetJobEmptySearchBackoff is guarded on WANTED and would no-op on this
+	// FAILED job, leaving the later assertion vacuous.
+	seedCycleColumn(t, s, job.ID, "empty_searches", 7)
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryFailedJob(ctx, job.ID, later)
@@ -977,9 +975,7 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	}
 	// Seed an empty-search streak (issue #334): RetryManualJob's clean-slate
 	// reset must wipe it too.
-	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 5, now, now); err != nil {
-		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
-	}
+	seedCycleColumn(t, s, job.ID, "empty_searches", 5)
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryManualJob(ctx, job.ID, later)
@@ -1483,11 +1479,8 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	}
 	// Seed an empty-search streak on the now-FAILED job (issue #334):
 	// force-search must wipe it too, same reasoning as
-	// TestRetryFailedJobRevivesFailedJob. SetJobBackoff above already
-	// zeroes empty_searches, so this has to happen after it.
-	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 9, now.Add(time.Hour), now); err != nil {
-		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
-	}
+	// TestRetryFailedJobRevivesFailedJob (raw SQL for the same reason).
+	seedCycleColumn(t, s, job.ID, "empty_searches", 9)
 
 	later := now.Add(time.Minute)
 	ok, err := s.ForceSearchJob(ctx, job.ID, later)

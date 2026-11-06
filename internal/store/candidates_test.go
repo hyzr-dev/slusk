@@ -947,9 +947,7 @@ func TestResetJobToWantedDeletesCandidates(t *testing.T) {
 
 	// A leftover empty-search streak must not survive the reset - the job now
 	// has a fresh candidate cache to work through.
-	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 6, now, now); err != nil {
-		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
-	}
+	seedCycleColumn(t, s, job.ID, "empty_searches", 6)
 
 	notBefore := now.Add(time.Hour)
 	if err := s.ResetJobToWanted(ctx, job.ID, core.StateSelecting, 3, &notBefore, now); err != nil {
@@ -1039,9 +1037,7 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	if err := s.SetJobBackoff(ctx, job.ID, 4, now.Add(time.Hour), now); err != nil {
-		t.Fatalf("SetJobBackoff: %v", err)
-	}
+	seedCycleColumn(t, s, job.ID, "retries", 4)
 	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
@@ -1057,13 +1053,12 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	}
 	// Seed an empty-search streak (issue #334) on the now-CANCELLED job:
 	// UpsertWantedJob's CANCELLED-reentry clean-slate reset must wipe it too.
-	// The ordering used to matter because InsertCandidates zeroed the counters
-	// unconditionally; since issue #294 guarded that reset on WANTED it bounces
-	// here (the job is SELECTING), so the retries=4 seeded above also survives
-	// into the re-entry and is genuinely reset by the code under test.
-	if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 3, now.Add(time.Hour), now); err != nil {
-		t.Fatalf("SetJobEmptySearchBackoff: %v", err)
-	}
+	// Both counters are seeded with raw SQL: SetJobBackoff and
+	// SetJobEmptySearchBackoff are guarded on WANTED, so on this SELECTING /
+	// CANCELLED job they would no-op and the assertions below would pass
+	// vacuously. InsertCandidates' reset is likewise guarded on WANTED, so it
+	// bounces on the SELECTING job and never touches the retries seeded here.
+	seedCycleColumn(t, s, job.ID, "empty_searches", 3)
 
 	// Album back on the wanted list: UpsertWantedJob must re-enter it.
 	reentered, err := s.UpsertWantedJob(ctx, 700, now.Add(time.Minute))

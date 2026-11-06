@@ -98,10 +98,16 @@ func (s *Store) RunnableJobsInState(ctx context.Context, state core.AlbumJobStat
 // unchanged. This is only reached once a search returned raw results (see
 // discovery.go), so empty_searches resets to 0 - the network answered, the
 // job just has no surviving candidate this cycle.
+//
+// The UPDATE is guarded on state = WANTED (per the single-writer invariant
+// every transition UPDATE must be conditional): only Discovery reaches here,
+// with the job read in WANTED. A job WantedSync or a user cancelled in the
+// meantime must not get updated_at renewed or not_before re-armed, so a
+// bounce writes nothing and returns nil.
 func (s *Store) SetJobBackoff(ctx context.Context, jobID int64, retries int, notBefore time.Time, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET retries = $1, empty_searches = 0, not_before = $2, updated_at = $3 WHERE id = $4`,
-		retries, notBefore, now, jobID)
+		`UPDATE album_jobs SET retries = $1, empty_searches = 0, not_before = $2, updated_at = $3 WHERE id = $4 AND state = $5`,
+		retries, notBefore, now, jobID, string(core.StateWanted))
 	if err != nil {
 		return fmt.Errorf("set job backoff: %w", err)
 	}
@@ -112,11 +118,13 @@ func (s *Store) SetJobBackoff(ctx context.Context, jobID int64, retries int, not
 // returned no raw results at all: it bumps empty_searches and hides the job
 // until notBefore, but deliberately leaves retries and state untouched -
 // unlike SetJobBackoff this never counts toward max_retries and never fails
-// the job (see discovery.go's searchJob). Modelled on SetJobBackoff.
+// the job (see discovery.go's searchJob). Modelled on SetJobBackoff,
+// including its state = WANTED guard: a job that left WANTED underneath
+// Discovery is left untouched and nil is returned.
 func (s *Store) SetJobEmptySearchBackoff(ctx context.Context, jobID int64, emptySearches int, notBefore time.Time, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE album_jobs SET empty_searches = $1, not_before = $2, updated_at = $3 WHERE id = $4`,
-		emptySearches, notBefore, now, jobID)
+		`UPDATE album_jobs SET empty_searches = $1, not_before = $2, updated_at = $3 WHERE id = $4 AND state = $5`,
+		emptySearches, notBefore, now, jobID, string(core.StateWanted))
 	if err != nil {
 		return fmt.Errorf("set job empty search backoff: %w", err)
 	}

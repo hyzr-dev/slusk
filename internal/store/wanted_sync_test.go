@@ -101,9 +101,7 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	}
 	// Seed an empty-search streak (issue #334): the CANCELLED-reentry branch
 	// below is a clean-slate reset and must wipe it too.
-	if err := s.SetJobEmptySearchBackoff(ctx, reentered.ID, 4, created, created); err != nil {
-		t.Fatal(err)
-	}
+	seedCycleColumn(t, s, reentered.ID, "empty_searches", 4)
 
 	oldFailed, _ := s.UpsertWantedJob(ctx, 6, created)
 	failedCandidate := seedWantedSyncChild(t, s, oldFailed.ID, created, "failed-child")
@@ -113,9 +111,7 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	// Same for the FAILED-revive branch - this is SyncWantedJobs' own
 	// inlined revive, the production path RetryFailedJob and
 	// ReviveFailedJobs are not (ReviveFailedJobs has no caller).
-	if err := s.SetJobEmptySearchBackoff(ctx, oldFailed.ID, 6, created, created); err != nil {
-		t.Fatal(err)
-	}
+	seedCycleColumn(t, s, oldFailed.ID, "empty_searches", 6)
 	boundaryFailed, _ := s.UpsertWantedJob(ctx, 7, created)
 	if err := s.MarkJobFailed(ctx, boundaryFailed.ID, cutoff); err != nil {
 		t.Fatal(err)

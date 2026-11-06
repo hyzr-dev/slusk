@@ -653,3 +653,27 @@ func TestLoadMigrationsRejectsMalformedFilename(t *testing.T) {
 		t.Fatal("expected error for malformed migration filename, got nil")
 	}
 }
+
+// seedCycleColumn writes one of album_jobs' search-cycle counters (retries or
+// empty_searches) with raw SQL, whatever state the job is in, and reads it
+// back. SetJobBackoff and SetJobEmptySearchBackoff are guarded on WANTED, so on
+// a job seeded as SELECTING, FAILED or CANCELLED they silently no-op - and a
+// reset test that then asserts the counter is 0 would pass vacuously. The
+// read-back fails the test if the seed did not take.
+func seedCycleColumn(t *testing.T, s *Store, jobID int64, column string, value int) {
+	t.Helper()
+	if column != "retries" && column != "empty_searches" {
+		t.Fatalf("seedCycleColumn: unsupported column %q", column)
+	}
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET `+column+` = $1 WHERE id = $2`, value, jobID); err != nil {
+		t.Fatalf("seed %s: %v", column, err)
+	}
+	var got int
+	if err := s.db.QueryRowContext(ctx, `SELECT `+column+` FROM album_jobs WHERE id = $1`, jobID).Scan(&got); err != nil {
+		t.Fatalf("read back %s: %v", column, err)
+	}
+	if got != value {
+		t.Fatalf("seed %s = %d, want %d: the seed did not take", column, got, value)
+	}
+}

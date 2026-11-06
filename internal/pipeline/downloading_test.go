@@ -1140,9 +1140,7 @@ func TestDownloadingFailureReturnsJobToSelectingWithoutRetryBump(t *testing.T) {
 	// pipeline must not). The seeded not_before is in the past so the job is still
 	// runnable in SELECTING.
 	seededNotBefore := now.Add(-time.Hour)
-	if err := st.SetJobBackoff(ctx, jobID, 2, seededNotBefore, now); err != nil {
-		t.Fatalf("SetJobBackoff: %v", err)
-	}
+	seedJobCycle(t, st, jobID, 2, seededNotBefore)
 	seedTransfer(t, st, candID, "bob", `A\01.flac`, txfOpts{state: core.TransferErrored, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)

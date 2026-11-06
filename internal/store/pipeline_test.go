@@ -744,3 +744,91 @@ func transferForParkFixture(t *testing.T, s *Store, candidateID int64) core.Tran
 	}
 	return transfers[0]
 }
+
+// TestSetJobBackoffLeavesNonWantedJobUntouched: the UPDATE is guarded on
+// state = WANTED (single-writer invariant), so a job that left WANTED between
+// Discovery's read and the write keeps its updated_at, not_before and retries,
+// and the bounce is not an error.
+func TestSetJobBackoffLeavesNonWantedJobUntouched(t *testing.T) {
+	for _, state := range []core.AlbumJobState{core.StateDone, core.StateFailed, core.StateCancelled} {
+		t.Run(string(state), func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			job, err := s.UpsertWantedJob(ctx, 710, now)
+			if err != nil {
+				t.Fatalf("UpsertWantedJob: %v", err)
+			}
+			notBefore := now.Add(time.Hour)
+			if err := s.SetJobBackoff(ctx, job.ID, 3, notBefore, now); err != nil {
+				t.Fatalf("SetJobBackoff (seed): %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, state, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
+
+			if err := s.SetJobBackoff(ctx, job.ID, 4, now.Add(5*time.Hour), now.Add(2*time.Hour)); err != nil {
+				t.Fatalf("SetJobBackoff on %s job = %v, want nil", state, err)
+			}
+			assertCycleUntouched(t, s, job.ID, state, now, notBefore, 3, 0)
+		})
+	}
+}
+
+// TestSetJobEmptySearchBackoffLeavesNonWantedJobUntouched is the
+// SetJobBackoff test above for the empty-search path.
+func TestSetJobEmptySearchBackoffLeavesNonWantedJobUntouched(t *testing.T) {
+	for _, state := range []core.AlbumJobState{core.StateDone, core.StateFailed, core.StateCancelled} {
+		t.Run(string(state), func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			job, err := s.UpsertWantedJob(ctx, 711, now)
+			if err != nil {
+				t.Fatalf("UpsertWantedJob: %v", err)
+			}
+			notBefore := now.Add(time.Hour)
+			if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 2, notBefore, now); err != nil {
+				t.Fatalf("SetJobEmptySearchBackoff (seed): %v", err)
+			}
+			if err := s.AdvanceJobState(ctx, job.ID, state, now); err != nil {
+				t.Fatalf("AdvanceJobState: %v", err)
+			}
+
+			if err := s.SetJobEmptySearchBackoff(ctx, job.ID, 9, now.Add(5*time.Hour), now.Add(2*time.Hour)); err != nil {
+				t.Fatalf("SetJobEmptySearchBackoff on %s job = %v, want nil", state, err)
+			}
+			assertCycleUntouched(t, s, job.ID, state, now, notBefore, 0, 2)
+		})
+	}
+}
+
+func assertCycleUntouched(t *testing.T, s *Store, jobID int64, state core.AlbumJobState, updatedAt, notBefore time.Time, retries, emptySearches int) {
+	t.Helper()
+	var gotState string
+	var gotRetries, gotEmpty int
+	var gotUpdated time.Time
+	var gotNotBefore *time.Time
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT state, retries, empty_searches, updated_at, not_before FROM album_jobs WHERE id = $1`,
+		jobID).Scan(&gotState, &gotRetries, &gotEmpty, &gotUpdated, &gotNotBefore); err != nil {
+		t.Fatalf("read job: %v", err)
+	}
+	if core.AlbumJobState(gotState) != state {
+		t.Errorf("state = %q, want %q", gotState, state)
+	}
+	if !gotUpdated.Equal(updatedAt) {
+		t.Errorf("updated_at = %v, want it untouched at %v", gotUpdated, updatedAt)
+	}
+	if gotNotBefore == nil || !gotNotBefore.Equal(notBefore) {
+		t.Errorf("not_before = %v, want it untouched at %v", gotNotBefore, notBefore)
+	}
+	if gotRetries != retries {
+		t.Errorf("retries = %d, want %d (untouched)", gotRetries, retries)
+	}
+	if gotEmpty != emptySearches {
+		t.Errorf("empty_searches = %d, want %d (untouched)", gotEmpty, emptySearches)
+	}
+}

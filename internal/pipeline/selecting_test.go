@@ -679,11 +679,8 @@ func TestSelectingExpiresStaleCache(t *testing.T) {
 	}
 	// Bump retries directly to a nonzero value so the test can assert TTL
 	// expiry leaves it UNCHANGED (as opposed to exhaustion, which increments
-	// it) - SetJobBackoff is the only store method that sets retries without
-	// also touching the candidate cache.
-	if err := st.SetJobBackoff(ctx, job.ID, 2, cachedAt, cachedAt); err != nil {
-		t.Fatalf("SetJobBackoff: %v", err)
-	}
+	// it) - seeded with raw SQL because SetJobBackoff is guarded on WANTED.
+	seedJobCycle(t, st, job.ID, 2, cachedAt)
 
 	sel := NewSelecting(p)
 	if err := sel.Tick(ctx, now); err != nil {
