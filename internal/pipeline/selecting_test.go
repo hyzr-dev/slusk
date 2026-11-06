@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -34,6 +35,12 @@ func (d *barrierAfterTransferSnapshot) TransfersForCandidate(ctx context.Context
 func newSelectingParams(t *testing.T, searcher *fakeSearcher) (SelectingParams, *store.Store) {
 	t.Helper()
 	st := newBackedStore(t)
+	return newSelectingParamsOn(st, searcher), st
+}
+
+// newSelectingParamsOn builds the same params over an already-open store, for
+// tests that need its DSN too (see newBackedStoreDSN).
+func newSelectingParamsOn(st *store.Store, searcher *fakeSearcher) SelectingParams {
 	return SelectingParams{
 		Store:              st,
 		Peers:              searcher,
@@ -47,7 +54,7 @@ func newSelectingParams(t *testing.T, searcher *fakeSearcher) (SelectingParams, 
 		TransferDeadline:   time.Hour,
 		Interval:           30 * time.Second,
 		Logger:             slog.New(slog.NewTextHandler(testDiscard{}, nil)),
-	}, st
+	}
 }
 
 func TestSelectingActivatesBestCandidateAndEnqueues(t *testing.T) {
@@ -662,7 +669,8 @@ func TestSelectingExpiresStaleCache(t *testing.T) {
 	cachedAt := now.Add(-25 * time.Hour)
 
 	searcher := &fakeSearcher{}
-	p, st := newSelectingParams(t, searcher)
+	st, dsn := newBackedStoreDSN(t)
+	p := newSelectingParamsOn(st, searcher)
 	p.CandidateTTL = 24 * time.Hour
 
 	job, err := st.UpsertWantedJob(ctx, 40, cachedAt)
@@ -680,7 +688,8 @@ func TestSelectingExpiresStaleCache(t *testing.T) {
 	// Bump retries directly to a nonzero value so the test can assert TTL
 	// expiry leaves it UNCHANGED (as opposed to exhaustion, which increments
 	// it) - seeded with raw SQL because SetJobBackoff is guarded on WANTED.
-	seedJobCycle(t, st, job.ID, 2, cachedAt)
+	retries := 2
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{Retries: &retries, NotBefore: &cachedAt})
 
 	sel := NewSelecting(p)
 	if err := sel.Tick(ctx, now); err != nil {

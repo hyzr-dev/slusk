@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 	"reflect"
 	"strings"
 	"testing"
@@ -785,7 +786,7 @@ func TestPeerHistoryReportsUnknownPeer(t *testing.T) {
 // button: a FAILED job with retries/failed_at set and leftover
 // candidates/transfers must come back to WANTED with a clean slate.
 func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
@@ -812,7 +813,7 @@ func TestRetryFailedJobRevivesFailedJob(t *testing.T) {
 	// rewrite instead of starting clean (see rewrite.go). Seeded with raw SQL:
 	// SetJobEmptySearchBackoff is guarded on WANTED and would no-op on this
 	// FAILED job, leaving the later assertion vacuous.
-	seedCycleColumn(t, s, job.ID, "empty_searches", 7)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{EmptySearches: intPtr(7), NotBefore: timePtr(now.Add(time.Hour))})
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryFailedJob(ctx, job.ID, later)
@@ -954,7 +955,7 @@ func TestRetryFailedJobUnknownID(t *testing.T) {
 // stale FAILED/CANCELLED transfers are cleared, and the job lands in
 // SELECTING (not WANTED) so Selecting picks it straight back up.
 func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
@@ -975,7 +976,7 @@ func TestRetryManualJobRevivesCandidateToNew(t *testing.T) {
 	}
 	// Seed an empty-search streak (issue #334): RetryManualJob's clean-slate
 	// reset must wipe it too.
-	seedCycleColumn(t, s, job.ID, "empty_searches", 5)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{EmptySearches: intPtr(5), NotBefore: timePtr(now.Add(time.Hour))})
 
 	later := now.Add(time.Minute)
 	ok, err := s.RetryManualJob(ctx, job.ID, later)
@@ -1456,7 +1457,7 @@ func TestRetryJobsNoopForNotImportedJob(t *testing.T) {
 // button: a FAILED job with backoff, failed_at, and stale candidates/transfers
 // is reset to a clean WANTED slate.
 func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
@@ -1480,7 +1481,7 @@ func TestForceSearchJobResetsAndReturnsToWanted(t *testing.T) {
 	// Seed an empty-search streak on the now-FAILED job (issue #334):
 	// force-search must wipe it too, same reasoning as
 	// TestRetryFailedJobRevivesFailedJob (raw SQL for the same reason).
-	seedCycleColumn(t, s, job.ID, "empty_searches", 9)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{EmptySearches: intPtr(9), NotBefore: timePtr(now.Add(time.Hour))})
 
 	later := now.Add(time.Minute)
 	ok, err := s.ForceSearchJob(ctx, job.ID, later)

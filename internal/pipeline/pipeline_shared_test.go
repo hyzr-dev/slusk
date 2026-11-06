@@ -2,16 +2,13 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/hyzr-dev/slusk/internal/core"
 	"github.com/hyzr-dev/slusk/internal/store"
 	"github.com/hyzr-dev/slusk/internal/store/storetest"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // TestMain starts one embedded Postgres instance for this package's
@@ -27,14 +24,21 @@ func TestMain(m *testing.M) {
 // interfaces pipeline modules consume.
 func newBackedStore(t *testing.T) *store.Store {
 	t.Helper()
+	st, _ := newBackedStoreDSN(t)
+	return st
+}
+
+// newBackedStoreDSN is newBackedStore for tests that also need the database's
+// DSN, to seed columns through storetest.SeedJobCycle.
+func newBackedStoreDSN(t *testing.T) (*store.Store, string) {
+	t.Helper()
 	dsn := storetest.DSN(t)
 	st, err := store.Open(dsn)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	backedDSNs.Store(st, dsn)
 	t.Cleanup(func() { st.Close() })
-	return st
+	return st, dsn
 }
 
 // fakeMusic is a MusicSource fake. WantedSync only ever uses WantedMissing;
@@ -250,35 +254,4 @@ func (f *fakeSearcher) Cancel(ctx context.Context, username, id string) error {
 func (f *fakeSearcher) DeleteDownloadFolder(ctx context.Context, name string) error {
 	f.deletedFolders = append(f.deletedFolders, name)
 	return nil
-}
-
-// backedDSNs maps each store from newBackedStore to its database, so
-// seedJobCycle can reach the columns the store's guarded writers refuse to
-// touch for a job outside WANTED.
-var backedDSNs sync.Map
-
-// seedJobCycle writes a job's search-cycle columns with raw SQL, whatever
-// state the job is in. SetJobBackoff is guarded on WANTED, so it silently
-// no-ops on the SELECTING/DOWNLOADING jobs these tests seed; a raw write
-// does not depend on that guard, and the read-back fails the test if the seed
-// did not take.
-func seedJobCycle(t *testing.T, st *store.Store, jobID int64, retries int, notBefore time.Time) {
-	t.Helper()
-	dsn, ok := backedDSNs.Load(st)
-	if !ok {
-		t.Fatal("seedJobCycle: store was not opened by newBackedStore")
-	}
-	db, err := sql.Open("pgx", dsn.(string))
-	if err != nil {
-		t.Fatalf("seedJobCycle: open: %v", err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(`UPDATE album_jobs SET retries = $1, not_before = $2 WHERE id = $3`,
-		retries, notBefore, jobID); err != nil {
-		t.Fatalf("seedJobCycle: %v", err)
-	}
-	var got int
-	if err := db.QueryRow(`SELECT retries FROM album_jobs WHERE id = $1`, jobID).Scan(&got); err != nil || got != retries {
-		t.Fatalf("seedJobCycle: retries = %d (%v), want %d", got, err, retries)
-	}
 }

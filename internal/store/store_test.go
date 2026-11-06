@@ -22,12 +22,21 @@ func TestMain(m *testing.M) {
 // newTestStore opens a store against a fresh per-test database, closed automatically.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(storetest.DSN(t))
+	s, _ := newTestStoreDSN(t)
+	return s
+}
+
+// newTestStoreDSN is newTestStore for tests that also need the database's DSN,
+// to seed columns through storetest.SeedJobCycle.
+func newTestStoreDSN(t *testing.T) (*Store, string) {
+	t.Helper()
+	dsn := storetest.DSN(t)
+	s, err := Open(dsn)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s
+	return s, dsn
 }
 
 func TestOpenContextHonorsCancelledStartup(t *testing.T) {
@@ -651,29 +660,5 @@ func TestLoadMigrationsRejectsMalformedFilename(t *testing.T) {
 	}
 	if _, _, err := loadMigrations(fsys, "migrations"); err == nil {
 		t.Fatal("expected error for malformed migration filename, got nil")
-	}
-}
-
-// seedCycleColumn writes one of album_jobs' search-cycle counters (retries or
-// empty_searches) with raw SQL, whatever state the job is in, and reads it
-// back. SetJobBackoff and SetJobEmptySearchBackoff are guarded on WANTED, so on
-// a job seeded as SELECTING, FAILED or CANCELLED they silently no-op - and a
-// reset test that then asserts the counter is 0 would pass vacuously. The
-// read-back fails the test if the seed did not take.
-func seedCycleColumn(t *testing.T, s *Store, jobID int64, column string, value int) {
-	t.Helper()
-	if column != "retries" && column != "empty_searches" {
-		t.Fatalf("seedCycleColumn: unsupported column %q", column)
-	}
-	ctx := context.Background()
-	if _, err := s.db.ExecContext(ctx, `UPDATE album_jobs SET `+column+` = $1 WHERE id = $2`, value, jobID); err != nil {
-		t.Fatalf("seed %s: %v", column, err)
-	}
-	var got int
-	if err := s.db.QueryRowContext(ctx, `SELECT `+column+` FROM album_jobs WHERE id = $1`, jobID).Scan(&got); err != nil {
-		t.Fatalf("read back %s: %v", column, err)
-	}
-	if got != value {
-		t.Fatalf("seed %s = %d, want %d: the seed did not take", column, got, value)
 	}
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 	"sync"
 	"testing"
 	"time"
@@ -916,7 +917,7 @@ func jobStateForStore(t *testing.T, s *Store, jobID int64) core.AlbumJobState {
 }
 
 func TestResetJobToWantedDeletesCandidates(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
@@ -947,7 +948,7 @@ func TestResetJobToWantedDeletesCandidates(t *testing.T) {
 
 	// A leftover empty-search streak must not survive the reset - the job now
 	// has a fresh candidate cache to work through.
-	seedCycleColumn(t, s, job.ID, "empty_searches", 6)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{EmptySearches: intPtr(6)})
 
 	notBefore := now.Add(time.Hour)
 	if err := s.ResetJobToWanted(ctx, job.ID, core.StateSelecting, 3, &notBefore, now); err != nil {
@@ -1026,7 +1027,7 @@ func TestResetJobToWantedBouncesWhenCancelled(t *testing.T) {
 // reappears on the wanted list must re-enter WANTED with a clean slate
 // (retries=0, not_before/failed_at cleared, candidates+transfers wiped).
 func TestUpsertWantedJobReentersCancelled(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
@@ -1037,7 +1038,7 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	if err := s.AdvanceJobState(ctx, job.ID, core.StateSelecting, now); err != nil {
 		t.Fatalf("AdvanceJobState: %v", err)
 	}
-	seedCycleColumn(t, s, job.ID, "retries", 4)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{Retries: intPtr(4), NotBefore: timePtr(now.Add(time.Hour))})
 	if err := s.InsertCandidates(ctx, job.ID, []NewCandidate{{Username: "alice", Score: 1.0, Files: []core.CandidateFile{{Filename: "a.flac", Size: 1}}}}, now); err != nil {
 		t.Fatalf("InsertCandidates: %v", err)
 	}
@@ -1058,7 +1059,7 @@ func TestUpsertWantedJobReentersCancelled(t *testing.T) {
 	// CANCELLED job they would no-op and the assertions below would pass
 	// vacuously. InsertCandidates' reset is likewise guarded on WANTED, so it
 	// bounces on the SELECTING job and never touches the retries seeded here.
-	seedCycleColumn(t, s, job.ID, "empty_searches", 3)
+	storetest.SeedJobCycle(t, dsn, job.ID, storetest.JobCycle{EmptySearches: intPtr(3), NotBefore: timePtr(now.Add(time.Hour))})
 
 	// Album back on the wanted list: UpsertWantedJob must re-enter it.
 	reentered, err := s.UpsertWantedJob(ctx, 700, now.Add(time.Minute))

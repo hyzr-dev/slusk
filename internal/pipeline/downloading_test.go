@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,12 @@ import (
 func newDownloadingParams(t *testing.T, net *fakeNetwork, searcher *fakeSearcher) (DownloadingParams, *store.Store) {
 	t.Helper()
 	st := newBackedStore(t)
+	return newDownloadingParamsOn(st, net, searcher), st
+}
+
+// newDownloadingParamsOn builds the same params over an already-open store, for
+// tests that need its DSN too (see newBackedStoreDSN).
+func newDownloadingParamsOn(st *store.Store, net *fakeNetwork, searcher *fakeSearcher) DownloadingParams {
 	return DownloadingParams{
 		Store:              st,
 		Network:            net,
@@ -33,7 +40,7 @@ func newDownloadingParams(t *testing.T, net *fakeNetwork, searcher *fakeSearcher
 		TransferDeadline:   time.Hour,
 		Interval:           30 * time.Second,
 		Logger:             slog.New(slog.NewTextHandler(testDiscard{}, nil)),
-	}, st
+	}
 }
 
 // seedActiveCandidate creates a WANTED job, caches one candidate for it, and
@@ -1131,7 +1138,8 @@ func TestDownloadingFailureReturnsJobToSelectingWithoutRetryBump(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	peers := &fakeSearcher{}
-	p, st := newDownloadingParams(t, &fakeNetwork{}, peers)
+	st, dsn := newBackedStoreDSN(t)
+	p := newDownloadingParamsOn(st, &fakeNetwork{}, peers)
 	jobID, candID := seedActiveCandidate(t, st, 1, "bob",
 		[]core.CandidateFile{{Filename: `A\01.flac`, Size: 10}}, now)
 	// Seed a nonzero retries and an (already-elapsed) not_before so the test can
@@ -1140,7 +1148,8 @@ func TestDownloadingFailureReturnsJobToSelectingWithoutRetryBump(t *testing.T) {
 	// pipeline must not). The seeded not_before is in the past so the job is still
 	// runnable in SELECTING.
 	seededNotBefore := now.Add(-time.Hour)
-	seedJobCycle(t, st, jobID, 2, seededNotBefore)
+	retries := 2
+	storetest.SeedJobCycle(t, dsn, jobID, storetest.JobCycle{Retries: &retries, NotBefore: &seededNotBefore})
 	seedTransfer(t, st, candID, "bob", `A\01.flac`, txfOpts{state: core.TransferErrored, deadline: now.Add(time.Hour), stampAt: now})
 
 	d := NewDownloading(p)

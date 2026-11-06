@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"github.com/hyzr-dev/slusk/internal/store/storetest"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestSyncWantedJobsLargeSnapshotAndDuplicateLastWins(t *testing.T) {
 }
 
 func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
-	s := newTestStore(t)
+	s, dsn := newTestStoreDSN(t)
 	ctx := context.Background()
 	created := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	now := created.Add(2 * time.Hour)
@@ -101,7 +102,7 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	}
 	// Seed an empty-search streak (issue #334): the CANCELLED-reentry branch
 	// below is a clean-slate reset and must wipe it too.
-	seedCycleColumn(t, s, reentered.ID, "empty_searches", 4)
+	storetest.SeedJobCycle(t, dsn, reentered.ID, storetest.JobCycle{EmptySearches: intPtr(4)})
 
 	oldFailed, _ := s.UpsertWantedJob(ctx, 6, created)
 	failedCandidate := seedWantedSyncChild(t, s, oldFailed.ID, created, "failed-child")
@@ -111,7 +112,7 @@ func TestSyncWantedJobsMetadataCancellationRevivalAndCleanup(t *testing.T) {
 	// Same for the FAILED-revive branch - this is SyncWantedJobs' own
 	// inlined revive, the production path RetryFailedJob and
 	// ReviveFailedJobs are not (ReviveFailedJobs has no caller).
-	seedCycleColumn(t, s, oldFailed.ID, "empty_searches", 6)
+	storetest.SeedJobCycle(t, dsn, oldFailed.ID, storetest.JobCycle{EmptySearches: intPtr(6)})
 	boundaryFailed, _ := s.UpsertWantedJob(ctx, 7, created)
 	if err := s.MarkJobFailed(ctx, boundaryFailed.ID, cutoff); err != nil {
 		t.Fatal(err)
